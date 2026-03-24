@@ -153,17 +153,29 @@ Options:
 
 ## Known behavior — IrfanView and color-calibrated monitors
 
-This is not a bug in the script, but it is worth documenting because it produces confusing results.
+This is not a bug in the script, but it is worth documenting because it produces
+confusing results.
 
-JXL lossless files embed the ICC color profile as a blob. Most software handles this correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and jxl_to_jpeg.py all display correct colors.
+JXL lossless files embed the ICC color profile as a blob. Most software handles this
+correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
+display correct colors.
 
-IrfanView's behavior with lossless JXL appears to depend on the system display profile installed on the machine. In my testing, it worked correctly on an uncalibrated monitor. After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears to be double color management — IrfanView applying both the embedded ICC and the system display profile simultaneously.
+IrfanView's behavior with lossless JXL appears to depend on the system display profile
+installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
+After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
+for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
+to be double color management — IrfanView applying both the embedded ICC and the system
+display profile simultaneously.
 
-Lossy JXL (d > 0) uses native JXL color primaries instead of an ICC blob and is not affected by this issue.
+Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
+affected by this issue.
 
-The files themselves are correct. Any conformant JXL decoder will display the colors accurately. The issue is specific to IrfanView on calibrated systems.
+**The files themselves are correct.** Any conformant JXL decoder will display the colors
+accurately. The issue is specific to IrfanView on calibrated systems.
 
-If lossless JXL colors look wrong in IrfanView, use lossy at d=0.1 (imperceptible difference, ~34MB for 45MP), or open the files in any of the viewers listed above. Files also convert correctly to JPEG using jxl_to_jpeg.py.
+If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
+difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
+Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
 
 ---
 
