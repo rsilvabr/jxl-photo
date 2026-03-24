@@ -34,7 +34,7 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
-Getting there required finding and fixing **six undocumented bugs** that only appear together in this specific combination of software (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_explained.md`](docs/bugs_explained.md).
+Getting there required finding and fixing **six undocumented bugs** that only appear together in this specific combination of software (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
 ---
 
@@ -190,19 +190,35 @@ Getting IrfanView to show EXIF in a JXL converted from a Capture One TIFF requir
 5. **Brackets in folder names break exiftool** — `[FINAL]` is treated as a wildcard
 6. **Windows doubles TIFF count** — `rglob("*.tif")` and `rglob("*.TIF")` return the same files
 
-→ [Full bug writeup with code](docs/bugs_explained.md)
+→ [Full bug writeup with code](docs/bugs_fixes_explained.md)
 
 ---
 
-## IrfanView and color-calibrated monitors
+## Known behavior — IrfanView and color-calibrated monitors
 
-JXL lossless files embed the ICC profile as a blob. Most software handles this correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all display correct colors.
+This is not a bug in the script, but it is worth documenting because it produces
+confusing results.
 
-IrfanView's behavior with lossless JXL appears to depend on the system display profile. In my testing, it worked correctly on an uncalibrated monitor. After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors for lossless JXL while continuing to show correct colors for lossy JXL. The likely cause is double color management — IrfanView applying both the embedded ICC and the system display profile simultaneously.
+JXL lossless files embed the ICC color profile as a blob. Most software handles this
+correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
+display correct colors.
 
-Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not affected by this issue.
+IrfanView's behavior with lossless JXL appears to depend on the system display profile
+installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
+After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
+for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
+to be double color management — IrfanView applying both the embedded ICC and the system
+display profile simultaneously.
 
-If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible difference, ~34MB for 45MP), or use any of the other viewers listed above. Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
+Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
+affected by this issue.
+
+**The files themselves are correct.** Any conformant JXL decoder will display the colors
+accurately. The issue is specific to IrfanView on calibrated systems.
+
+If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
+difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
+Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
 
 ---
 
