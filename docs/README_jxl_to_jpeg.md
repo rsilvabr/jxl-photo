@@ -154,11 +154,11 @@ OUTPUT_ICC = r"C:\icc\AdobeRGB1998.icc"
 
 ## Performance
 
-| Storage | Workers |
-|---------|---------|
-| HDD | 2–4 |
-| SATA SSD | 8–12 |
-| NVMe | 16–24 |
+| Setting | Recommendation |
+|---------|----------------|
+| Workers | Value between CPU core count and thread count |
+| `USE_RAM_FOR_PNG` | `True` — saves ~200MB disk I/O per file |
+| Staging folder | Set to a separate disk from the TIFFs — avoids simultaneous read/write, much faster on HDDs |
 
 With `USE_RAM = True`, no intermediate PNG is written to disk — djxl pipes directly
 to ImageMagick's stdin. The `--staging` option lets you write output to a fast SSD
