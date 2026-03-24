@@ -226,6 +226,6 @@ Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
 
 - Capture One Windows (ProPhoto RGB, AdobeRGB, sRGB — 16-bit, session exports)
 - NX Studio exports (16-bit, uncompressed)
-- Nikon D810 (36MP), Nikon Zf (24MP), Nikon Z7 (45MP), Nikon D200, Fujifilm S5 Pro
+- Nikon D810 (36MP), Nikon Zf (24MP), Nikon Z7 (45MP), Nikon D200 (10MP), Fujifilm S5 Pro (6~12MP)
 - cjxl v0.11.2, ExifTool 13.52, Python 3.12, Windows 11
 - Paths with Japanese characters and `[brackets]`
