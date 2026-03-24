@@ -46,7 +46,7 @@ TEMP_DIR = None
 # None → usa pasta temp do sistema (normalmente C:\Users\...\AppData\Local\Temp)
 # Ex:  → "E:\\temp_jxl"
 
-TEMP2_DIR = r"E:\staging"
+TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
 # None → disabled: JXLs are written directly to their final destination.
 # If set: JXLs are written here during conversion, then moved in bulk to the final
@@ -120,7 +120,6 @@ EXPORT_TIFF_SUBFOLDER = ""
 # If empty (""), all TIFFs inside EXPORT_MARKER are processed (first subfolder is dropped).
 # OBS: Empty value can cause filename collisions if different subfolders contain files
 # with the same name (e.g. AdobeRGB/photo.tif and TIFF16/photo.tif).
-# Recommended: set explicitly, e.g. "TIFF16"
 
 
 # ─────────────────────────────────────────────
