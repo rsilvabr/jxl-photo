@@ -72,6 +72,18 @@ CJXL_EFFORT = 7
 # Controls file size, NOT quality. 7 is the sweet spot for camera photos.
 # Effort 8-10 is much slower and can produce larger files for high-ISO images.
 
+CJXL_MODULAR = False
+# False (default) — lossy uses VarDCT encoder + XYB colorspace.
+#   This is the standard lossy mode: DCT-based, like JPEG but much more advanced.
+#   Compresses photo content very efficiently. File sizes as shown in the table above.
+#
+# True — forces Modular encoder for lossy (--modular=1).
+#   Modular is entropy-coded (similar to FLIF/PNG). It is the only encoder used
+#   for lossless, but is significantly less efficient for lossy photo content.
+#   Good for UI/screenshots, text, pixel art and rasterized vector graphics.
+#   Use only if you need non-XYB encoding for compatibility reasons.
+#   Note: lossless (d=0) always uses Modular regardless of this setting.
+
 TEMP2_DIR = r"E:\staging"
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
 # Files are moved to their final destination after each folder group completes.
@@ -122,7 +134,7 @@ EXPORT_JXL_FOLDER = "16B_JXL"  # output folder created inside the anchor
 | `2` | Creates `JXL_16bits/` next to each TIFF folder | `.../JXL_16bits/photo.jxl` |
 | `3` | Renames folder replacing `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `4` | `_EXPORT` anchor — all TIFFs in hierarchy | `.../session/_EXPORT/16B_JXL/photo.jxl` |
-| `5` ⭐ | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `5` | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
 
 **Mode 5 example** with `EXPORT_TIFF_SUBFOLDER = "TIFF16"`:
 ```
@@ -151,34 +163,6 @@ Options:
 
 ---
 
-## Known behavior — IrfanView and color-calibrated monitors
-
-This is not a bug in the script, but it is worth documenting because it produces
-confusing results.
-
-JXL lossless files embed the ICC color profile as a blob. Most software handles this
-correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
-display correct colors.
-
-IrfanView's behavior with lossless JXL appears to depend on the system display profile
-installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
-After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
-for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
-to be double color management — IrfanView applying both the embedded ICC and the system
-display profile simultaneously.
-
-Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
-affected by this issue.
-
-**The files themselves are correct.** Any conformant JXL decoder will display the colors
-accurately. The issue is specific to IrfanView on calibrated systems.
-
-If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
-difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
-Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
-
----
-
 ## Performance
 
 With `USE_RAM_FOR_PNG = True` (default), disk I/O per file = read TIFF + write JXL.
@@ -203,4 +187,100 @@ HH:MM:SS | INFO | [n/total] OK | photo.tif → F:\...\photo.jxl
 Final summary:
 ```
 Done: 90 OK | 0 overwrites | 0 skipped | 0 errors
+```
+
+---
+
+## Known behavior — XnView MP color profile display for lossy JXL
+
+XnView MP shows `Color Profile: sRGB` in the properties panel for lossy JXL files,
+even when the actual colorspace is ProPhoto RGB or AdobeRGB.
+
+**This is not a conversion to sRGB.** It is a display error in XnView MP's metadata panel.
+
+Lossy JXL encodes colorspace information as compact numeric primaries (CICP-style),
+not as an embedded ICC blob. XnView reads the ICC blob field, finds nothing, and
+falls back to showing "sRGB" as a default label.
+
+The actual colorspace is correctly preserved and correctly rendered — as confirmed
+by `jxlinfo` (see below) and by every other viewer (GIMP, Darktable, browsers, etc.).
+
+To verify the real colorspace of any lossy JXL, use `jxlinfo` and check the
+white_point and primary coordinates.
+
+→ [How JXL color management works, how to verify your files, and a full primary coordinates reference table](docs/jxl_color_internals.md)
+
+---
+
+## Known behavior — IrfanView and color-calibrated monitors
+
+JXL lossless files embed the ICC color profile as a blob. Most software handles this
+correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
+display correct colors.
+
+IrfanView's behavior with lossless JXL appears to depend on the system display profile
+installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
+After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
+for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
+to be double color management — IrfanView applying both the embedded ICC and the system
+display profile simultaneously.
+
+Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
+affected by this issue.
+
+**The files themselves are correct.** Any conformant JXL decoder will display the colors
+accurately. The issue is specific to IrfanView on calibrated systems.
+
+If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
+difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
+Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
+
+---
+
+## Appendix: How to verify output with jxlinfo
+
+`jxlinfo` (included with the libjxl release) reports what the decoder actually sees —
+colorspace primaries, bit depth, lossless vs lossy, and container structure.
+
+```powershell
+jxlinfo photo.jxl
+```
+
+**Example output for a ProPhoto RGB lossy file:**
+```
+JPEG XL file format container (ISO/IEC 18181-2)
+Uncompressed Exif metadata: 892 bytes
+Uncompressed xml  metadata: 4453 bytes
+JPEG XL image, 1200x801, lossy, 16-bit RGB
+Color space: RGB, Custom,
+  white_point(x=0.345705, y=0.358540),
+  Custom primaries:
+    red(x=0.734698, y=0.265302),
+    green(x=0.159600, y=0.840399),
+    blue(x=0.036597, y=0.000106)
+  gamma(0.555315) transfer function,
+  rendering intent: Perceptual
+```
+
+**How to read the colorspace fields:**
+
+| Field | ProPhoto value | sRGB value |
+|-------|---------------|------------|
+| white_point x,y | 0.3457, 0.3585 (D50) | 0.3127, 0.3290 (D65) |
+| red primary x | ~0.7347 | 0.6400 |
+| green primary x | ~0.1596 | 0.3000 |
+| blue primary x | ~0.0366 | 0.1500 |
+| gamma | 0.5556 (= 1/1.8) | 0.4545 (= 1/2.2) |
+
+The white point and primaries are the definitive source of truth for the colorspace —
+not the ICC profile description shown by viewers.
+
+**Checking for EXIF and box structure:**
+
+```powershell
+# Show internal JXL box order (useful for debugging EXIF visibility)
+exiftool -v3 photo.jxl
+
+# Show all readable EXIF fields
+exiftool photo.jxl
 ```

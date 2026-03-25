@@ -49,7 +49,8 @@ Every ICC profile has a 128-byte header. One field is the "D50 illuminant" — a
 reference point that all ICC profiles must share so color management software can compare
 and convert between them.
 
-The standard value for D50, in bytes 68–79 of the ICC header, is:
+The ICC specification requires that bytes 68–79 of every conformant profile contain
+the D50 reference value:
 ```
 0000f6d6 00010000 0000d32d
 ```
@@ -64,6 +65,12 @@ generation. The visual impact on color is imperceptible. However, cjxl and exift
 validate ICC profiles strictly and reject this. Most other software (Photoshop, IrfanView,
 browsers) is tolerant and ignores it.
 
+**Important:** this illuminant field is a fixed PCS (Profile Connection Space) reference
+required by the ICC spec for all profiles, regardless of the colorspace's native white
+point. AdobeRGB (native D65), sRGB (native D65), and ProPhoto (native D50) all must
+have D50 in this field. It is distinct from the colorspace's white point. See
+`jxl_color_internals.md` section 6 for a full explanation.
+
 **Fix:**
 Patch bytes 68–79 before using the ICC:
 ```python
@@ -73,7 +80,7 @@ This only corrects the reference field. The color matrices, primaries, and all o
 color data in the profile are untouched. Color accuracy is unaffected.
 
 This fix is safe for any ICC profile: if the bytes are already correct, writing the
-same value has no effect.
+same value has no effect. It applies equally to ProPhoto, AdobeRGB, and sRGB exports.
 
 ---
 
@@ -120,8 +127,8 @@ With `d>0`, cjxl outputs a raw codestream without an ISOBMFF container by defaul
 exiftool needs the container to know where to inject the Exif box.
 
 **What happened — part B:**
-Lossy JXL splits the image data across multiple boxes named `jxlp` instead of a single
-`jxlc`. The original reorder function used a Python dict:
+Lossy JXL (VarDCT) splits the image data across multiple boxes named `jxlp` instead
+of a single `jxlc`. The original reorder function used a Python dict:
 ```python
 box_map = {name: (header, payload) for name, header, payload in boxes}
 ```
@@ -220,10 +227,37 @@ but in the wrong place" and "the EXIF was never written".
 
 ---
 
-## Known behavior — IrfanView and color-calibrated monitors
+## Known behavior — XnView MP showing "sRGB" for lossy JXL
 
-This is not a bug in the script, but it is worth documenting because it produces
-confusing results.
+XnView MP displays `Color Profile: sRGB` in the properties panel for lossy JXL files,
+even when the actual colorspace is ProPhoto RGB, AdobeRGB, or any other space.
+
+**This is not a conversion to sRGB.** It is a display error in XnView's metadata panel.
+
+**Why it happens:**
+Lossy JXL uses the XYB colorspace internally and signals the original colorspace via
+compact numeric primaries (CICP-style) rather than an embedded ICC blob. XnView reads
+the ICC blob field, finds nothing, and shows "sRGB" as a fallback label.
+
+The actual colorspace primaries are stored correctly in the codestream. To verify:
+```powershell
+jxlinfo photo.jxl
+```
+Check `white_point` and the red/green/blue primary coordinates. ProPhoto has D50
+white point (x≈0.3457) and a distinctive red primary (x≈0.7347). sRGB has D65
+(x≈0.3127) and a red primary of x=0.6400. They are unmistakable.
+
+Colors render correctly in all conformant viewers (GIMP, Darktable, browsers, etc.).
+The XnView properties panel label is the only thing that is wrong.
+
+See `jxl_color_internals.md` sections 3 and 8 for full details and a primary
+coordinates reference table.
+
+→ [How JXL color management works, how to verify your files, and a full primary coordinates reference table](jxl_color_internals.md)
+
+---
+
+## Known behavior — IrfanView and color-calibrated monitors
 
 JXL lossless files embed the ICC color profile as a blob. Most software handles this
 correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
