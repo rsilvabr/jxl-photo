@@ -34,7 +34,7 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
-Getting there required finding and fixing **six undocumented bugs** that only appear together in this specific combination of software (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
+Getting there required finding and fixing **six bugs** that only appear together in this specific combination of software (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
 ---
 
@@ -102,6 +102,13 @@ tiff_to_jxl.py      TIFF → JXL  (archive, stays 16-bit, lossless or lossy)
 jxl_to_jpeg.py      JXL → JPEG  (when needed for print or delivery)
                                   ICC profile conversion applied here
 ```
+
+After conversion, depending on usage I may do the following:
+
+(1) Keep both tiff and jpeg XL files, but only keep the JPEG XL files in backups to reduce storage needs (easy to skip tiff files by using freefilesync to copy the working disk to the backup disk, and using filters to skip the TIFF export folders. 
+
+(2) Delete all tiffs and keep only the JPEG XL files. I have made a script to delete all TIFF files recursively and will be updating here soon. 
+
 
 ---
 
