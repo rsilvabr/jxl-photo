@@ -30,11 +30,25 @@ CJXL_EFFORT = 7
 # 7 is the sweet spot for camera photos — effort 8-10 is much slower and can
 # increase file size for high-ISO or texture-heavy images.
 
-CJXL_DISTANCE = 1
+CJXL_DISTANCE = 0.1
 # 0   = mathematically lossless (pixel-perfect)
 # 0.1 = near-lossless (~25MB for 36MP), imperceptible difference
 # 0.5 = high quality lossy — recommended starting point (libjxl authors)
 # 1.0 = "visually lossless" per libjxl documentation
+
+CJXL_MODULAR = False
+# False (default) — lossy uses VarDCT encoder + XYB colorspace.
+#   This is the standard lossy mode: DCT-based, like JPEG but much more advanced.
+#   Compresses photo content very efficiently. File sizes as shown in the table above.
+#
+# True — forces Modular encoder for lossy (--modular=1).
+#   Modular is entropy-coded (similar to FLIF/PNG). It is the only encoder used
+#   for lossless, but is significantly less efficient for lossy photo content.
+#   Good for UI/screenshots, text, pixel art and rasterized vector graphics.
+#   Use only if you need non-XYB encoding for compatibility reasons.
+#
+# Note: lossless (d=0) always uses Modular regardless of this setting.
+#       CJXL_MODULAR only affects lossy (d > 0).
 
 USE_RAM_FOR_PNG = False
 # True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
@@ -379,10 +393,15 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             # breaks color display in IrfanView.
             container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
 
+            # --modular=1 forces the Modular encoder for lossy output.
+            # Only applied when CJXL_MODULAR=True and d>0 (lossless always uses Modular).
+            # Modular lossy produces 2-3x larger files than VarDCT for photos.
+            modular_flag = ["--modular=1"] if (CJXL_MODULAR and CJXL_DISTANCE > 0) else []
+
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, icc_bytes)
                 del img
-                cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag
+                cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
                 r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True)
                 del png_input
             else:
@@ -391,7 +410,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag
+                cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
                 r = subprocess.run(cjxl_cmd, capture_output=True)
 
             if r.returncode != 0:
@@ -549,9 +568,10 @@ def main():
         OVERWRITE = True
 
     log_file = setup_logger()
+    _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     logger.info(
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
-        f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else 'lossy'}) | "
+        f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
         f"Overwrite: {'sync (smart)' if args.sync else OVERWRITE} | Workers: {args.workers}"
     )
