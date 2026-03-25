@@ -106,9 +106,7 @@ jxl_to_jpeg.py      JXL → JPEG  (when needed for print or delivery)
 After conversion, depending on usage I may do the following:
 
 (1) Keep both tiff and jpeg XL files, but only keep the JPEG XL files in backups to reduce storage needs (easy to skip tiff files by using freefilesync to copy the working disk to the backup disk, and using filters to skip the TIFF export folders. 
-
-(2) Delete all tiffs and keep only the JPEG XL files. I have made a script to delete all TIFF files recursively and will be updating here soon. 
-
+(2) Delete all tiffs and keep only the JPEG XL files. I have a separate script to delete TIFFs recursively — will add soon.
 
 ---
 
@@ -207,7 +205,7 @@ This is not a bug in the script, but it is worth documenting because it produces
 confusing results.
 
 JXL lossless files embed the ICC color profile as a blob. Most software handles this
-correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
+correctly — GIMP, XnView MP, Darktable, Waterfox, and `jxl_to_jpeg.py` all
 display correct colors.
 
 IrfanView's behavior with lossless JXL appears to depend on the system display profile
