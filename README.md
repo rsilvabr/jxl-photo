@@ -104,10 +104,11 @@ jxl_to_jpeg.py      JXL → JPEG  (when needed for print or delivery)
                                   ICC profile conversion applied here
 ```
 
-After conversion, depending on usage I may do the following:
+## After conversion
+Depending on your needs, two common approaches:
 
-(1) Keep both tiff and jpeg XL files, but only keep the JPEG XL files in backups to reduce storage needs (easy to skip tiff files by using freefilesync to copy the working disk to the backup disk, and using filters to skip the TIFF export folders. 
-(2) Delete all tiffs and keep only the JPEG XL files. I have a separate script to delete TIFFs recursively — will add soon.
+1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space. Tools like FreeFileSync support folder filters that make this easy.
+2. Delete TIFFs, keep only JXL — a separate script for this can be found here: [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports)
 
 ---
 
