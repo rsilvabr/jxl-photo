@@ -41,6 +41,7 @@ Getting there required finding and fixing **six bugs** that only appear together
 ## Disclaimer
 
 These tools were made for my personal workflow (with the help of Claude). Use at your own risk — I am not responsible for any issues you may encounter.
+If you choose to use it and find any errors/bugs, please let me know.
 
 ---
 
