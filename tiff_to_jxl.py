@@ -35,15 +35,14 @@ CJXL_DISTANCE = 1
 # 0.1 = near-lossless (~25MB for 36MP), imperceptible difference
 # 0.5 = high quality lossy — recommended starting point (libjxl authors)
 # 1.0 = "visually lossless" per libjxl documentation
-# ⚠️  Do not use lossy for images you still intend to edit.
 
 USE_RAM_FOR_PNG = False
 # True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
 TEMP_DIR = None
-# Pasta para arquivos temporários (EXIF bin e PNG se USE_RAM_FOR_PNG=False).
-# None → usa pasta temp do sistema (normalmente C:\Users\...\AppData\Local\Temp)
+# Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
+# None → use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
 # Ex:  → "E:\\temp_jxl"
 
 TEMP2_DIR = None
@@ -197,24 +196,23 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         project_root  = export_dir.parent               # .../03_D810
 
         if tiff_path.is_relative_to(export_dir):
-            # TIFF está dentro do _EXPORT — dropa a subpasta imediata (ex: AdobeRGB/)
-            # preserva hierarquia mais profunda
+            # TIFF is inside _EXPORT — drop the immediate subfolder (e.g. color space name),
+            # preserve deeper hierarchy
             rel_parts = tiff_path.relative_to(export_dir).parts  # (AdobeRGB, sub, foto.tif)
             if len(rel_parts) > 1:
                 rel = Path(*rel_parts[1:])   # dropa AdobeRGB → sub/foto.tif
             else:
-                rel = Path(rel_parts[0])     # direto na raiz do _EXPORT (sem subpasta)
+                rel = Path(rel_parts[0])     # directly in _EXPORT root (no subfolder)
         else:
-            # TIFF está fora do _EXPORT mas na mesma hierarquia — preserva caminho
-            # relativo à pasta pai do _EXPORT (project_root)
+            # TIFF is outside _EXPORT — preserve relative path from project root
             # ex: C1_TIFF_16BIT/bbb.tiff → 16B_JXL/C1_TIFF_16BIT/bbb.jxl
             rel = tiff_path.relative_to(project_root)
 
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
 
     elif mode == 5:
-        # Igual ao modo 4 para TIFFs dentro do _EXPORT, mas:
-        # se EXPORT_TIFF_SUBFOLDER definido, dropa especificamente essa subpasta
+        # Works similarly to MODE 4 for the files inside _EXPORT, but:
+        # Drop the specific configured subfolder, preserve everything below it
         parts = tiff_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
@@ -224,12 +222,12 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_TIFF_SUBFOLDER:
-            # Dropa a subpasta específica configurada, preserva o resto
+            # Drop the specific configured subfolder, preserve everything below it
             # ex: _EXPORT/AdobeRGB/sub/foto.tif → _EXPORT/16B_JXL/sub/foto.jxl
             anchor = export_dir / EXPORT_TIFF_SUBFOLDER
             rel = tiff_path.relative_to(anchor)
         else:
-            # Dropa a primeira subpasta após _EXPORT (qualquer que seja)
+            # Drop only the first subfolder after _EXPORT (whatever it is)
             # ex: _EXPORT/AdobeRGB/foto.tif → _EXPORT/16B_JXL/foto.jxl
             rel_parts = tiff_path.relative_to(export_dir).parts
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
@@ -326,7 +324,7 @@ def reorder_jxl_boxes(jxl_path):
         else:
             other_boxes.append((name, h, p))
 
-    # Ordem final: estrutura → metadados → codestream → resto
+    # Final order: structure → metadata → codestream → others
     out = b""
     for _, h, p in meta_order_boxes:  out += h + p
     for _, h, p in meta_extra_boxes:  out += h + p
