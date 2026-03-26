@@ -109,6 +109,7 @@ Depending on your needs, two common approaches:
 
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space. Tools like FreeFileSync support folder filters that make this easy.
 2. Delete TIFFs, keep only JXL — a separate script for this can be found here: [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports)
+3. The script has an programmable option to delete TIFFs after conversion. 
 
 ---
 
