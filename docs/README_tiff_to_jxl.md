@@ -284,7 +284,7 @@ by `jxlinfo` (see below) and by every other viewer (GIMP, Darktable, browsers, e
 To verify the real colorspace of any lossy JXL, use `jxlinfo` and check the
 white_point and primary coordinates.
 
-→ [How JXL color management works, how to verify your files, and a full primary coordinates reference table](docs/jxl_color_internals.md)
+→ [How JXL color management works, how to verify your files, and a full primary coordinates reference table](jxl_color_internals.md)
 
 ---
 
