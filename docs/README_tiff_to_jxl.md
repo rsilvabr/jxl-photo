@@ -1,5 +1,10 @@
 # tiff_to_jxl.py
 
+> **Note — mode numbering changed 2026-03-26.**
+> Modes 0–5 were renumbered to 0–8 to accommodate two new single-file modes (0 and 1).
+> If you have saved commands or scripts using `--mode`, update them accordingly.
+> Old → new: `0→2`, `1→3`, `2→5`, `3→4`, `4→6`, `5→7`, `6→8`.
+
 Batch TIFF 16-bit → JPEG XL converter. Supports lossless (`d=0`) and lossy (`d>0`),
 preserves full EXIF visible in IrfanView, and keeps any embedded ICC color profile intact.
 
@@ -42,17 +47,31 @@ exiftool -ver       # 13.xx
 ## Quick start
 
 ```powershell
-# Flat folder (mode 0)
-py tiff_to_jxl.py "F:\input" "F:\output"
+# ── The easy way — mode 0, no flags needed ──────────────────────
+# Single file, in-place
+py tiff_to_jxl.py "F:\Photos\photo.tif"
 
-# Capture One _EXPORT workflow (mode 5) — most common
-py tiff_to_jxl.py "F:\2024" --mode 5
+# Single file → specific output folder
+py tiff_to_jxl.py "F:\Photos\photo.tif" "F:\output"
+
+# Whole folder, in-place (flat — subfolders not touched)
+py tiff_to_jxl.py "F:\Photos"
+
+# Whole folder → specific output folder (flat)
+py tiff_to_jxl.py "F:\Photos" "F:\output"
+
+# ── Other modes ──────────────────────────────────────────────────
+# Capture One _EXPORT workflow (mode 7) — most common for C1 users
+py tiff_to_jxl.py "F:\2024" --mode 7
 
 # Sync — only reconvert TIFFs newer than existing JXL
-py tiff_to_jxl.py "F:\2024" --mode 5 --sync
+py tiff_to_jxl.py "F:\2024" --mode 7 --sync
 
 # 16 parallel workers
-py tiff_to_jxl.py "F:\2024" --mode 5 --workers 16
+py tiff_to_jxl.py "F:\2024" --mode 7 --workers 16
+
+# Mode 8 — in-place recursive: JXL next to each TIFF, all subfolders
+py tiff_to_jxl.py "F:\2024" --mode 8
 ```
 
 ---
@@ -64,6 +83,7 @@ Edit at the top of the script:
 ```python
 CJXL_DISTANCE = 0.0
 # 0   = lossless (pixel-perfect, ~173MB for 45MP)
+# 0.05 = near-lossless (~47MB, imperceptible difference)
 # 0.1 = near-lossless (~34MB, imperceptible difference)
 # 0.5 = high quality lossy (~13MB) — recommended starting point
 # 1.0 = "visually lossless" per libjxl documentation (~8MB)
@@ -81,7 +101,6 @@ CJXL_MODULAR = False
 #   Modular is entropy-coded (similar to FLIF/PNG). It is the only encoder used
 #   for lossless, but is significantly less efficient for lossy photo content.
 #   Good for UI/screenshots, text, pixel art and rasterized vector graphics.
-#   Use only if you need non-XYB encoding for compatibility reasons.
 #   Note: lossless (d=0) always uses Modular regardless of this setting.
 
 TEMP2_DIR = r"E:\staging"
@@ -94,12 +113,12 @@ EXPORT_TIFF_SUBFOLDER = "TIFF16"
 # Prevents accidentally converting AdobeRGB, sRGB, or WEB exports.
 # Set to "" to process all subfolders inside _EXPORT.
 
-ENCODE_TAG_MODE = "software"
+ENCODE_TAG_MODE = "xmp"
 # "software" → appends "| cjxl d=X e=Y" to the EXIF Software field
 # "xmp"      → writes as XMP-dc:Description
 # "off"      → no encoding tag
 
-OVERWRITE = False
+OVERWRITE = "smart"
 # False   → skip if JXL already exists (safe for resuming)
 # True    → always overwrite
 # "smart" → same as --sync: reconvert only if TIFF is newer than JXL
@@ -121,22 +140,42 @@ JXL_SUFFIX_REPLACE     = "JXL"
 # — Modes 4 and 5 —
 EXPORT_MARKER     = "_EXPORT"   # anchor folder name to look for in the path
 EXPORT_JXL_FOLDER = "16B_JXL"  # output folder created inside the anchor
+
+# — Mode 6 —
+DELETE_SOURCE = False
+# False → JXL and TIFF coexist in the same folder (safe default)
+# True  → delete source TIFF after confirmed successful encode (irreversible)
+
+# — Safety (mode 6 + DELETE_SOURCE only) —
+DELETE_CONFIRM = True
+# True  (default) → ask for confirmation before deleting any source TIFF.
+#   Lossless: type "yes".
+#   Lossy: type the current time in HHMM format shown on screen — this cannot
+#          be automated, forcing a conscious decision before deleting files that
+#          cannot be recovered from a lossy JXL.
+# False → skip confirmation (for automation). Not recommended for manual use.
+#
+# Leave this True. Disabling it means one misconfigured run can silently
+# delete originals with no warning.
 ```
 
 ---
 
 ## Output modes
 
-| Mode | Output location | Example |
-|------|----------------|---------|
-| `0` | Flat: input → output folder | `output/photo.jxl` |
-| `1` | Creates `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
-| `2` | Creates `JXL_16bits/` next to each TIFF folder | `.../JXL_16bits/photo.jxl` |
-| `3` | Renames folder replacing `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
-| `4` | `_EXPORT` anchor — all TIFFs in hierarchy | `.../session/_EXPORT/16B_JXL/photo.jxl` |
-| `5` | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| Mode | Input | Output location | Example |
+|------|-------|----------------|---------|
+| `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.jxl` / `output_dir/photo.jxl` |
+| `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
+| `2` | — | *Discontinued — use mode 0 with output_dir* | — |
+| `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
+| `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
+| `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
+| `6` | Directory | `_EXPORT` anchor — all TIFFs in hierarchy | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `7` | Directory | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `8` | Directory | In-place recursive — JXL next to each TIFF | `.../session/photo.jxl` |
 
-**Mode 5 example** with `EXPORT_TIFF_SUBFOLDER = "TIFF16"`:
+**Mode 7 example** with `EXPORT_TIFF_SUBFOLDER = "TIFF16"`:
 ```
 session/_EXPORT/TIFF16/photo.tif      →  session/_EXPORT/16B_JXL/photo.jxl  ✓
 session/_EXPORT/AdobeRGB/photo.tif    →  ignored
@@ -155,11 +194,19 @@ Arguments:
   output          Output folder (mode 0 only)
 
 Options:
-  --mode 0-5      Output folder mode (default: 0)
+  --mode 0-8      Output folder mode (default: 0)
   --workers N     Parallel threads (tested up to 32 on a Ryzen 9 5950X)
   --overwrite     Always overwrite existing JXLs
   --sync          Reconvert only TIFFs newer than their JXL
 ```
+
+---
+
+## Further reading
+
+For a deep dive into how JXL handles color management internally — XYB vs non-XYB, ICC blobs, CICP encoding, box structure, and how to verify your files with `jxlinfo` — see:
+
+→ [JXL Color Internals](docs/jxl_color_internals.md)
 
 ---
 
@@ -172,6 +219,35 @@ With `TEMP2_DIR` set to a separate SSD, JXLs are written to fast storage during 
 and moved in bulk at the end — eliminates random write contention on HDD collections.
 
 ---
+
+## Safety confirmation (mode 6 + DELETE_SOURCE)
+
+When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True` (both defaults for their
+respective concerns), the script asks for confirmation before deleting any source file.
+This happens once at startup, before any conversion begins.
+
+For **lossless** conversion, type `yes` to confirm.
+
+For **lossy** conversion, the script shows the current time and asks you to type it
+in `HHMM` format. The intention is to create "friction" and force a conscious decision — 
+you are about to delete TIFFs that cannot be recovered from a lossy JXL.
+
+```
+  ⚠  WARNING — DELETE_SOURCE is enabled
+     Converting LOSSY (distance=1.0) — source TIFFs cannot be
+     recovered from a lossy JXL. This deletion is IRREVERSIBLE.
+     Current time: 14:23  →  to confirm, type: 1423
+
+     > 1423
+     Confirmed.
+```
+
+If anything other than the exact token is entered, the script exits without converting
+or deleting anything.
+
+Set `DELETE_CONFIRM = False` only if running the script from an automation pipeline
+where interactive input is not possible. For any manual use, leave it `True` —
+it takes 3 seconds and is much safer.
 
 ## Logs
 

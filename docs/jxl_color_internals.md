@@ -57,7 +57,7 @@ Entropy-coded, conceptually similar to FLIF and PNG:
 - No DCT, no frequency decomposition
 - Pixel values predicted and residuals entropy-coded
 - Mandatory for lossless (d=0)
-- Can also be used for lossy, but is less efficient than VarDCT for photos
+- Can also be used for lossy, but is 2–3× less efficient than VarDCT for photos
 
 When you see "modular" in cjxl output or documentation, it refers to this encoder,
 not to the container structure (which is separate).
@@ -68,7 +68,16 @@ not to the container structure (which is separate).
 |--|--|--|
 | d=0 (lossless) | Not available | Always used |
 | d>0 (lossy photos) | Default — efficient | `--modular=1` — larger files |
-| Colorspace | XYB (absolute) | non-XYB (preserves ICC blob) |
+| Default colorspace | XYB | XYB |
+| With non-XYB | non-XYB (ICC blob) | non-XYB (ICC blob) |
+
+Encoder and colorspace are **fully independent**. `--modular=1` does not imply non-XYB.
+Both use XYB by default. Both can use non-XYB.
+
+**CLI limitation (cjxl v0.11.2):** There is no flag to force non-XYB for lossy output
+in the `cjxl` command-line tool. The `--colorspace` flag does not exist in this version.
+Non-XYB lossy is only accessible via the libjxl C API directly.
+Lossless (d=0) always uses non-XYB with an embedded ICC blob.
 
 ---
 
@@ -231,6 +240,11 @@ Common JXL primaries values and their meaning:
 ProPhoto RGB is not in any standard CICP table, so JXL stores it as "Custom" with
 explicit xy-chromaticity coordinates — which is what `jxlinfo` reports.
 
+Note: for lossy XYB output (the default for d>0), colorspace is always signaled via
+CICP/Custom primaries — no ICC blob is embedded. For lossless, an ICC blob is always
+embedded. Non-XYB lossy (ICC blob with lossy encoding) is theoretically possible via
+the libjxl API but the `cjxl` CLI (v0.11.2) does not expose a flag for it.
+
 ---
 
 ## 8. Diagnostic commands and what to look for
@@ -332,14 +346,14 @@ exiftool output.png
 
 ## 9. Summary — lossless vs lossy in this workflow
 
-| Property | Lossless (d=0) | Lossy (d>0) |
-|----------|---------------|------------|
+| Property | Lossless (d=0) | Lossy default (d>0) |
+|----------|---------------|---------------------|
 | Encoder | Modular | VarDCT |
-| Colorspace storage | non-XYB — ICC blob embedded | XYB — primaries as CICP/Custom |
-| ICC blob in file | Yes (e.g. Kodak ROMM) | No |
+| Colorspace | non-XYB | XYB |
+| ICC blob in file | Yes (e.g. Kodak ROMM) | No — CICP/Custom primaries |
 | Color profile in GIMP | "Embedded ICC: ProPhoto" | No embedded profile |
 | Color profile in XnView | "ProPhoto RGB / Kodak" | "sRGB" ← display label bug |
 | Colors render correctly | Yes | Yes |
 | Verify colorspace | exiftool shows ICC | jxlinfo shows primaries |
-| Recover Kodak ICC blob | Yes (pixel-perfect) | No (generic profile on decode) |
+| cjxl CLI flag for non-XYB lossy | N/A | ❌ Not available in v0.11.2 |
 | File size (45MP) | ~173 MB | ~8–47 MB depending on distance |
