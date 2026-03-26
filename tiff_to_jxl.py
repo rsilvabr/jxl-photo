@@ -67,7 +67,7 @@ TEMP2_DIR = None
 # from write I/O (SSD for new JXLs), reducing seek contention on HDDs.
 # Example: r"E:\\staging_jxl"
 
-OVERWRITE = True
+OVERWRITE = "smart"
 # False   → skip JXLs that already exist at the final destination. Safe for resuming.
 # True    → always overwrite existing JXLs.
 # "smart" → same as --sync flag: only reconvert if the TIFF is newer than the JXL.
@@ -83,6 +83,18 @@ ENCODE_TAG_MODE = "xmp"
 #              Visible in Windows Properties, but not in IrfanView
 # "off"      → does not add anything
 
+DELETE_SOURCE = False
+# [MODE 6 only] Whether to delete the source TIFF after successful encoding.
+# Only deletes if ALL of the following are true:
+#   - encode status is ok or overwrite (never deletes on error or skip)
+#   - the JXL file exists at its final destination (after staging move if applicable)
+#
+# False (default) → never delete source TIFFs. JXL and TIFF coexist in the same folder.
+# True            → delete source TIFF after confirmed successful encode.
+#
+# WARNING: irreversible. Only enable after testing on a small batch first.
+# Has no effect on modes 0–5.
+
 
 
 # ─────────────────────────────────────────────
@@ -93,6 +105,8 @@ ENCODE_TAG_MODE = "xmp"
 # || MODE 0 SETTINGS ||
 # No settings needed. Just use 
 # py convert_jxl.py <input> <output> [--mode 0] [--workers N] [--overwrite] [--sync]
+# or just py convert_jxl.py <input> , input can be file or directory. 
+
 
 # || MODE 1 SETTINGS ||
 CONVERTED_JXL_FOLDER = "converted_jxl"
@@ -100,43 +114,73 @@ CONVERTED_JXL_FOLDER = "converted_jxl"
 # Example: .../TIFF_FOLDER/converted_jxl/photo.jxl
 
 # || MODE 2 SETTINGS ||
-JXL_FOLDER_NAME = "JXL_16bits"
-# [MODE 2] Name of the output folder created in the parent of each TIFF folder.
-# Example: .../JXL_FOLDER_NAME/photo.jxl
+# No settings needed. Flat: input directory → output directory.
+# py tiff_to_jxl.py <input_dir> <output_dir> --mode 2
 
 # || MODE 3 SETTINGS ||
+JXL_FOLDER_NAME = "JXL_16bits"
+# [MODE 3] Subfolder created inside each TIFF folder for output.
+# Example: .../TIFF_FOLDER/JXL_16bits/photo.jxl
+
+# || MODE 4 SETTINGS ||
 TIFF_SUFFIX_TO_REPLACE = "TIFF"
 JXL_SUFFIX_REPLACE     = "JXL"
-# [MODE 3] Replaces TIFF_SUFFIX_TO_REPLACE with JXL_SUFFIX_REPLACE in the folder name.
+# [MODE 4] Replaces TIFF_SUFFIX_TO_REPLACE with JXL_SUFFIX_REPLACE in the folder name.
 # Case-insensitive (TIFF, tiff, Tiff all match).
 # Example: C1_Export_1_TIFF → C1_Export_1_JXL
 
-# || MODES 4 and 5 SETTINGS ||
+# || MODE 5 SETTINGS ||
+# Sibling folder next to each TIFF folder — no extra settings needed.
+# Example: .../JXL_FOLDER_NAME/photo.jxl  (uses JXL_FOLDER_NAME above)
+
+# || MODES 6 and 7 SETTINGS ||
 EXPORT_MARKER     = "_EXPORT"
 EXPORT_JXL_FOLDER = "16B_JXL"
-# [MODE 4/5] Uses EXPORT_MARKER as an anchor in the path.
+# [MODE 6/7] Uses EXPORT_MARKER as an anchor in the path.
 # All JXLs go into EXPORT_MARKER/EXPORT_JXL_FOLDER/.
-# Mode 4: processes TIFFs both inside and outside EXPORT_MARKER (same parent hierarchy).
-# Mode 5: only processes TIFFs inside EXPORT_MARKER (ignores TIFFs outside).
+# Mode 6: processes TIFFs both inside and outside EXPORT_MARKER (same parent hierarchy).
+# Mode 7: only processes TIFFs inside EXPORT_MARKER (ignores TIFFs outside).
 #
 # TIFFs inside EXPORT_MARKER: immediate subfolder (e.g. color space name) is dropped.
-# TIFFs outside EXPORT_MARKER (mode 4 only): relative path from EXPORT_MARKER's parent is preserved.
+# TIFFs outside EXPORT_MARKER (mode 6 only): relative path from EXPORT_MARKER's parent is preserved.
 #
-# Example (mode 5, EXPORT_TIFF_SUBFOLDER = "TIFF16"):
+# Example (mode 7, EXPORT_TIFF_SUBFOLDER = "TIFF16"):
 #   EXPORT_MARKER/TIFF16/photo.tif      →  EXPORT_MARKER/EXPORT_JXL_FOLDER/photo.jxl
 #   EXPORT_MARKER/AdobeRGB/photo.tif    →  ignored
 #   EXPORT_MARKER/sRGB/photo.tif        →  ignored
 
 EXPORT_TIFF_SUBFOLDER = ""
-# [MODE 5] If set, only TIFFs in this specific subfolder of EXPORT_MARKER are processed,
+# [MODE 7] If set, only TIFFs in this specific subfolder of EXPORT_MARKER are processed,
 # and this subfolder name is dropped from the output path.
 # If empty (""), all TIFFs inside EXPORT_MARKER are processed (first subfolder is dropped).
 # OBS: Empty value can cause filename collisions if different subfolders contain files
 # with the same name (e.g. AdobeRGB/photo.tif and TIFF16/photo.tif).
 
+# || MODE 8 SETTINGS ||
+# No extra settings. Mode 8 converts TIFFs recursively and outputs JXLs in the same
+# folder as each source TIFF. Controlled by DELETE_SOURCE above.
+# Example: .../session/photo.tif → .../session/photo.jxl
+
 
 # ─────────────────────────────────────────────
 # ─────────────────────────────────────────────
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SAFETY SETTINGS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DELETE_CONFIRM = True
+# Only relevant when DELETE_SOURCE = True (mode 6).
+# True  (default) → require interactive confirmation before deleting any source file.
+#   - Lossless conversion: type "yes" to confirm.
+#   - Lossy conversion: type the current time (HHMM) shown on screen. This cannot
+#     be automated and forces a conscious decision — you are about to delete TIFFs
+#     that cannot be recovered from a lossy JXL.
+# False → skip all confirmations. Useful if running the script from another program
+#         or automation pipeline. Leave True unless you have a specific reason.
+#
+# Recommendation: leave this True. It takes 3 seconds and prevents accidents.
+# If you disable it, you are one misconfigured run away from losing originals.
 
 
 SCRIPT_DIR = Path(__file__).parent
@@ -174,17 +218,66 @@ def next_count():
         _counter["done"] += 1
         return _counter["done"], _counter["total"]
 
+def confirm_deletion_tiff(is_lossy: bool) -> bool:
+    """Interactive confirmation before deleting source TIFFs (mode 6, DELETE_CONFIRM=True).
+    Lossless: type 'yes'. Lossy: type the current time (HHMM) shown on screen.
+    Returns True if confirmed, False if cancelled."""
+    from datetime import datetime as _dt
+    print()
+    print()
+    print()
+    if is_lossy:
+        print("  ⚠  WARNING — DELETE_SOURCE is enabled")
+        print(f"     Converting LOSSY (distance={CJXL_DISTANCE}) — source TIFFs cannot be")
+        print("     recovered from a lossy JXL. This deletion is IRREVERSIBLE.")
+        now   = _dt.now()
+        token = now.strftime("%H%M")
+        print(f"     Current time: {now.strftime('%H:%M')}  →  to confirm, type: {token}")
+        print()
+        try:
+            answer = input("     > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer == token:
+            print("     Confirmed. Source TIFFs will be deleted after successful encode.")
+            print()
+            return True
+        else:
+            print("     Cancelled. No files will be deleted.")
+            print()
+            return False
+    else:
+        print("  ⚠  WARNING — DELETE_SOURCE is enabled")
+        print("     Source TIFFs will be deleted after successful lossless encode.")
+        print("     Type 'yes' to confirm, anything else to cancel.")
+        print()
+        try:
+            answer = input("     > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer == "yes":
+            print("     Confirmed. Source TIFFs will be deleted after successful encode.")
+            print()
+            return True
+        else:
+            print("     Cancelled. No files will be deleted.")
+            print()
+            return False
+
 def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
-    if mode == 0:
+    # Mode 0: single file in-place — handled in main() before calling this
+    # Mode 1: single file → converted_jxl/ subfolder — handled in main() before calling this
+
+    if mode == 2:
+        # Flat directory: input_root/photo.jxl
         return input_root / tiff_path.with_suffix(".jxl").name
 
-    elif mode == 1:
+    elif mode == 3:
+        # Subfolder inside each TIFF folder
         return tiff_path.parent / CONVERTED_JXL_FOLDER / tiff_path.with_suffix(".jxl").name
 
-    elif mode == 2:
-        return tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
-
-    elif mode == 3:
+    elif mode == 4:
+        # Rename folder replacing TIFF suffix with JXL suffix
         old_name = tiff_path.parent.name
         new_name = None
         for variant in [TIFF_SUFFIX_TO_REPLACE, TIFF_SUFFIX_TO_REPLACE.lower(),
@@ -193,40 +286,38 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
                 new_name = old_name.replace(variant, JXL_SUFFIX_REPLACE)
                 break
         if new_name is None:
-            # Suffix not found in folder name — append JXL suffix instead
             new_name = old_name + "_" + JXL_SUFFIX_REPLACE
             logger.warning(f"'{TIFF_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
         return tiff_path.parent.parent / new_name / tiff_path.with_suffix(".jxl").name
 
-    elif mode == 4:
-        # Localiza _EXPORT no caminho
+    elif mode == 5:
+        # Sibling folder next to each TIFF folder
+        return tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
+
+    elif mode == 6:
+        # _EXPORT anchor — all TIFFs in hierarchy
         parts = tiff_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
             logger.warning(f"'{EXPORT_MARKER}' not found in {tiff_path}, using local folder")
             return tiff_path.parent / EXPORT_JXL_FOLDER / tiff_path.with_suffix(".jxl").name
 
-        export_dir    = Path(*parts[:export_idx + 1])   # .../03_D810/_EXPORT
-        project_root  = export_dir.parent               # .../03_D810
+        export_dir    = Path(*parts[:export_idx + 1])
+        project_root  = export_dir.parent
 
         if tiff_path.is_relative_to(export_dir):
-            # TIFF is inside _EXPORT — drop the immediate subfolder (e.g. color space name),
-            # preserve deeper hierarchy
-            rel_parts = tiff_path.relative_to(export_dir).parts  # (AdobeRGB, sub, foto.tif)
+            rel_parts = tiff_path.relative_to(export_dir).parts
             if len(rel_parts) > 1:
-                rel = Path(*rel_parts[1:])   # dropa AdobeRGB → sub/foto.tif
+                rel = Path(*rel_parts[1:])
             else:
-                rel = Path(rel_parts[0])     # directly in _EXPORT root (no subfolder)
+                rel = Path(rel_parts[0])
         else:
-            # TIFF is outside _EXPORT — preserve relative path from project root
-            # ex: C1_TIFF_16BIT/bbb.tiff → 16B_JXL/C1_TIFF_16BIT/bbb.jxl
             rel = tiff_path.relative_to(project_root)
 
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
 
-    elif mode == 5:
-        # Works similarly to MODE 4 for the files inside _EXPORT, but:
-        # Drop the specific configured subfolder, preserve everything below it
+    elif mode == 7:
+        # _EXPORT anchor — only TIFFs inside _EXPORT
         parts = tiff_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
@@ -236,17 +327,17 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_TIFF_SUBFOLDER:
-            # Drop the specific configured subfolder, preserve everything below it
-            # ex: _EXPORT/AdobeRGB/sub/foto.tif → _EXPORT/16B_JXL/sub/foto.jxl
             anchor = export_dir / EXPORT_TIFF_SUBFOLDER
             rel = tiff_path.relative_to(anchor)
         else:
-            # Drop only the first subfolder after _EXPORT (whatever it is)
-            # ex: _EXPORT/AdobeRGB/foto.tif → _EXPORT/16B_JXL/foto.jxl
             rel_parts = tiff_path.relative_to(export_dir).parts
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
 
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
+
+    elif mode == 8:
+        # In-place recursive: JXL goes to the same folder as the source TIFF.
+        return tiff_path.parent / tiff_path.with_suffix(".jxl").name
 
     raise ValueError(f"Modo inválido: {mode}")
 
@@ -359,14 +450,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
         if OVERWRITE == False:
             n, total = next_count()
             logger.info(f"[{n}/{total}] SKIP (exists) | {tiff_path.name}")
-            return (str(tiff_path), "skipped", str(final_path))
+            return (str(tiff_path), "skipped", str(final_path), None)
         elif OVERWRITE == "smart":
             tiff_mtime = tiff_path.stat().st_mtime
             jxl_mtime  = final_path.stat().st_mtime
             if tiff_mtime <= jxl_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
-                return (str(tiff_path), "skipped", str(final_path))
+                return (str(tiff_path), "skipped", str(final_path), None)
             logger.info(f"  → SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
     write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,14 +552,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             status = "overwrite" if overwritten else "ok"
             label  = "OVERWRITE" if overwritten else "OK"
             logger.info(f"[{n}/{total}] {label} | {tiff_path.name} → {final_path}")
-            return (str(tiff_path), status, str(final_path))
+            return (str(tiff_path), status, str(final_path), tiff_path)
 
         except Exception as e:
             n, total = next_count()
             logger.error(f"[{n}/{total}] ERROR | {tiff_path.name} | {e}")
-            return (str(tiff_path), "error", str(e))
+            return (str(tiff_path), "error", str(e), None)
 
-def process_group(group_pairs: list, workers: int):
+def process_group(group_pairs: list, workers: int, mode: int = 0):
     """
     Converts a group of (tiff, final_jxl) pairs in parallel.
     If TEMP2_DIR is set, writes to staging first then moves in bulk.
@@ -506,6 +597,26 @@ def process_group(group_pairs: list, workers: int):
         if moved:
             logger.info(f"  → Moved {moved} file(s) from staging to final destination")
 
+    # Delete source TIFFs after confirmed encode — only for mode 6, only after staging.
+    # Checks: encode succeeded + JXL exists at final destination.
+    if DELETE_SOURCE and mode == 8:
+        deleted = 0
+        src_map = {str(t): (t, f) for t, _, f in tasks}
+        for result in results:
+            status    = result[1]
+            src_tiff  = result[3]
+            if status not in ("ok", "overwrite") or src_tiff is None:
+                continue
+            _, final_jxl = src_map.get(result[0], (None, None))
+            if final_jxl is None or not final_jxl.exists():
+                logger.warning(f"  KEEP (JXL not found at destination) | {src_tiff.name}")
+                continue
+            src_tiff.unlink()
+            deleted += 1
+            logger.info(f"  DELETED source | {src_tiff.name}")
+        if deleted:
+            logger.info(f"  → Deleted {deleted} source TIFF(s)")
+
     return results
 
 def find_files_mode0(input_path: Path):
@@ -530,19 +641,16 @@ def find_tiffs_recursive(input_path: Path):
                 files.append(f)
     return files
 
-def find_tiffs_mode5(input_path: Path):
-    """Mode 5: only TIFFs inside folders containing EXPORT_MARKER in their path."""
+def find_tiffs_mode7(input_path: Path):
+    """Mode 7: only TIFFs inside folders containing EXPORT_MARKER in their path."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
     for t in all_tiffs:
-        parts_str = [p for p in t.parts]
-        
+        parts_str = list(t.parts)
         export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
         if export_idx is None:
             continue
-        
         if EXPORT_TIFF_SUBFOLDER:
-            
             if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1] == EXPORT_TIFF_SUBFOLDER:
                 filtered.append(t)
         else:
@@ -553,7 +661,7 @@ def main():
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit → JPEG XL converter")
     parser.add_argument("input",             type=Path, help="Input root folder")
     parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
-    parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5])
+    parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
     parser.add_argument("--workers",         type=int, default=min(os.cpu_count(), 16))
     parser.add_argument("--overwrite",       action="store_true",
                         help="Always overwrite existing JXLs")
@@ -569,20 +677,35 @@ def main():
 
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
+    _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
     logger.info(
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
         f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
-        f"Overwrite: {'sync (smart)' if args.sync else OVERWRITE} | Workers: {args.workers}"
+        f"Overwrite: {'sync (smart)' if args.sync else OVERWRITE} | {_delete_label} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
 
     # Collect input files
-    if args.mode == 0:
+    # Modes 0 and 1 accept a single file OR a directory
+    if args.mode in (0, 1) and args.input.is_file():
+        tiffs = [args.input]
+        output_root = args.input.parent
+    elif args.mode in (0, 1):
+        # Directory input: flat (non-recursive)
+        # Mode 0: output_root = output_dir if given, else same folder as each TIFF
         tiffs = find_files_mode0(args.input)
         output_root = args.output or args.input
-    elif args.mode == 5:
-        tiffs = find_tiffs_mode5(args.input)
+    elif args.mode == 2:
+        # DISCONTINUED — redirect to mode 0 behavior
+        logger.warning("Mode 2 is discontinued. Behaving as mode 0 (flat, output_dir if given).")
+        tiffs = find_files_mode0(args.input)
+        output_root = args.output or args.input
+    elif args.mode == 7:
+        tiffs = find_tiffs_mode7(args.input)
+        output_root = args.input
+    elif args.mode == 8:
+        tiffs = find_tiffs_recursive(args.input)
         output_root = args.input
     else:
         tiffs = find_tiffs_recursive(args.input)
@@ -594,8 +717,31 @@ def main():
     # Build (tiff, jxl_destination) pairs
     pairs = []
     for t in tiffs:
-        jxl = output_root / t.with_suffix(".jxl").name if args.mode == 0 else resolve_output(t, args.mode, args.input)
+        if args.mode == 0:
+            # File or directory: if output_root differs from source parent, use it
+            if output_root != args.input:
+                jxl = output_root / t.with_suffix(".jxl").name
+            else:
+                jxl = t.parent / t.with_suffix(".jxl").name
+        elif args.mode in (1, 2):
+            if args.input.is_file():
+                # Single file → converted_jxl/ subfolder
+                jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+            else:
+                jxl = output_root / t.with_suffix(".jxl").name
+        else:
+            jxl = resolve_output(t, args.mode, args.input)
         pairs.append((t, jxl))
+
+    if args.mode == 8 and DELETE_SOURCE:
+        logger.info("Mode 8 — in-place recursive | DELETE_SOURCE=True: source TIFFs will be deleted after successful encode")
+        if DELETE_CONFIRM:
+            is_lossy = CJXL_DISTANCE > 0
+            if not confirm_deletion_tiff(is_lossy):
+                logger.info("Deletion not confirmed — exiting.")
+                return
+    elif args.mode == 8:
+        logger.info("Mode 8 — in-place recursive | DELETE_SOURCE=False: TIFF and JXL will coexist")
 
     # Group by output folder (one bulk move per group)
     groups: dict[Path, list] = {}
@@ -610,9 +756,10 @@ def main():
         if len(groups) > 1:
             logger.info(f"── Group: {dest_folder} ({len(group_pairs)} file(s))")
 
-        results = process_group(group_pairs, args.workers)
+        results = process_group(group_pairs, args.workers, args.mode)
 
-        for _, status, _ in results:
+        for result in results:
+            status = result[1]
             if   status == "ok":        ok += 1
             elif status == "overwrite": ok += 1; overwritten += 1; synced += 1
             elif status == "skipped":   skipped += 1
