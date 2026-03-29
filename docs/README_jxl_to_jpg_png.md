@@ -4,11 +4,6 @@ Batch JXL → JPEG or PNG converter with ICC color profile conversion.
 Decodes JXL files (including 16-bit ProPhoto RGB or Adobe-RGB files) and converts to sRGB JPEG or any target color space via ICC profile, ready for web, print, or client delivery.
 
 ---
-## Disclaimer
-
-I am sharing tools that I made (with the help of Claude) to adapt JPEG XL to my Capture One workflow. Use at your own risk, I am not responsible for any problems you may find when using the tools provided. 
-
----
 
 ## Requirements
 
@@ -176,3 +171,27 @@ and move in bulk to the final destination.
 ```
 
 Disable with `--no-log`.
+
+---
+
+## Disclaimer
+
+These tools were made for my personal workflow (with the help of Claude). Use at your own risk — I am not responsible for any issues you may encounter.
+
+---
+
+## License
+
+MIT License — feel free to use, modify, and distribute.
+
+---
+
+## Acknowledgments
+
+- [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
+- [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
+- [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
+---
+
+### Development Assistance
+- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
