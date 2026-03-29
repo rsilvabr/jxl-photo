@@ -57,7 +57,7 @@ USE_RAM_FOR_PNG = False
 TEMP_DIR = None
 # Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
 # None → use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
-# Ex:  → "E:\\temp_jxl"
+# Ex:  → r"E:\\temp_jxl"
 
 TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
@@ -82,6 +82,18 @@ ENCODE_TAG_MODE = "xmp"
 #              Cleaner — does not touch the original Software field
 #              Visible in Windows Properties, but not in IrfanView
 # "off"      → does not add anything
+# NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
+# the encoding tag is written to XMP-xmp:CreatorTool instead of dc:Description
+# (since dc:Description is used for ICC embedding).
+
+EMBED_ICC_IN_JXL = True
+# Embeds the original ICC profile as metadata in the JXL file.
+# The ICC is NOT used by the JXL decoder (JXL uses native primaries),
+# but is preserved for round-trip conversion back to TIFF/JPEG.
+# This ensures the exact original ICC (with TRC curves, copyright, etc.)
+# is available when converting JXL → TIFF, even for lossy JXLs.
+# True  → embed ICC profile in JXL metadata (recommended, default)
+# False → do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 DELETE_SOURCE = False
 # [MODE 6 only] Whether to delete the source TIFF after successful encoding.
@@ -513,7 +525,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             # Build optional encoding tag line
             encode_tag_line = ""
             if ENCODE_TAG_MODE == "xmp":
-                encode_tag_line = f"-XMP-dc:Description=cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}\n"
+                # If embedding ICC, use CreatorTool instead of dc:Description
+                # (dc:Description is used for ICC base64 data)
+                if EMBED_ICC_IN_JXL:
+                    encode_tag_line = f"-XMP-xmp:CreatorTool=cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}\n"
+                else:
+                    encode_tag_line = f"-XMP-dc:Description=cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}\n"
             elif ENCODE_TAG_MODE == "software":
                 # Read original Software field from TIFF and append encoding params
                 r_sw = subprocess.run(
@@ -547,6 +564,54 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
 
             # 6. Reorder JXL boxes so Exif comes before the codestream
             reorder_jxl_boxes(write_path)
+            
+            # 7. Embed original ICC profile as metadata (for round-trip preservation)
+            if EMBED_ICC_IN_JXL:
+                try:
+                    icc_path = tmp_dir / f"{tiff_path.stem}.icc"
+                    icc_b64_path = tmp_dir / f"{tiff_path.stem}.icc.b64"
+                    # Extract ICC from source TIFF
+                    r_icc = subprocess.run(["exiftool", "-b", "-ICC_Profile", str(tiff_path), "-o", str(icc_path)],
+                                          capture_output=True, timeout=10)
+                    if icc_path.exists() and icc_path.stat().st_size > 0:
+                        # Convert ICC to base64 for XMP embedding
+                        import base64
+                        icc_data = icc_path.read_bytes()
+                        icc_b64 = base64.b64encode(icc_data).decode('ascii')
+                        
+                        # Build dc:description content - encoding params (visible in Windows)
+                        if ENCODE_TAG_MODE == "xmp":
+                            description_content = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+                        else:
+                            description_content = "TIFF to JXL conversion"
+                        
+                        # Create XMP with embedded ICC in CreatorTool (base64, less visible)
+                        # and encoding params in dc:description (visible in Windows properties)
+                        xmp_content = f"""<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/">
+   <dc:description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">{description_content}</rdf:li>
+    </rdf:Alt>
+   </dc:description>
+   <xmp:CreatorTool>ICC:{icc_b64}</xmp:CreatorTool>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+                        xmp_path = tmp_dir / f"{tiff_path.stem}.xmp"
+                        xmp_path.write_text(xmp_content, encoding='utf-8')
+                        
+                        # Embed XMP in JXL
+                        subprocess.run(["exiftool", "-overwrite_original", f"-XMP<={xmp_path}", str(write_path)],
+                                      capture_output=True, timeout=10)
+                        logger.debug(f"  -> ICC profile embedded in JXL XMP ({len(icc_data)} bytes)")
+                except Exception as e:
+                    logger.debug(f"  -> ICC embedding skipped: {e}")
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
