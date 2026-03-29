@@ -1,359 +1,343 @@
-# JXL Internals — Color Management and Encoding
+# JXL Color Internals
 
-Reference document explaining how JPEG XL handles colorspaces and encoding internally.
-Written based on hands-on experience converting ProPhoto RGB TIFFs from Capture One.
-
----
-
-## 1. File structure — ISOBMFF boxes
-
-A JXL file is a container, structured like a zip of named sections called **boxes**.
-Each box has a 4-character type code and a payload.
-
-A typical JXL produced by this script looks like:
-
-```
-JXL_   →  JXL signature (magic bytes)
-ftyp   →  file type declaration
-jxll   →  JXL level (2 = full)
-Exif   →  EXIF metadata (injected by exiftool)
-xml    →  XMP metadata
-jxlc   →  image codestream (lossless)
-  or
-jxlp   →  image codestream part 1  ┐
-jxlp   →  image codestream part 2  ├ (lossy VarDCT splits into multiple parts)
-jxlp   →  image codestream part N  ┘
-```
-
-The box order matters for some readers. IrfanView reads boxes linearly and stops at
-the first image box — so Exif must come before the codestream (see Bug 3 in
-`bugs_fixes_explained.md`).
-
-**Diagnostic command:**
-```powershell
-exiftool -v3 photo.jxl   # shows all boxes in order with byte offsets
-```
+Deep dive into how JPEG XL handles color management internally — XYB vs non-XYB,
+ICC blobs vs native primaries, CICP encoding, and how to verify your files.
 
 ---
 
-## 2. Two encoding modes: VarDCT and Modular
+## Table of Contents
 
-JXL has two completely independent encoders.
-
-### VarDCT (default for lossy)
-
-DCT-based encoding, conceptually similar to JPEG but much more advanced:
-- Variable block sizes (8×8 up to 256×256)
-- Adaptive quantization per block
-- Better prediction and entropy coding
-- Works in XYB colorspace (see section 4)
-
-This is what makes JXL lossy small and efficient for photos.
-All lossy conversions from this script use VarDCT unless `CJXL_MODULAR = True`.
-
-### Modular (always used for lossless)
-
-Entropy-coded, conceptually similar to FLIF and PNG:
-- No DCT, no frequency decomposition
-- Pixel values predicted and residuals entropy-coded
-- Mandatory for lossless (d=0)
-- Can also be used for lossy, but is 2–3× less efficient than VarDCT for photos
-
-When you see "modular" in cjxl output or documentation, it refers to this encoder,
-not to the container structure (which is separate).
-
-**Choosing:**
-
-| | VarDCT | Modular |
-|--|--|--|
-| d=0 (lossless) | Not available | Always used |
-| d>0 (lossy photos) | Default — efficient | `--modular=1` — larger files |
-| Default colorspace | XYB | XYB |
-| With non-XYB | non-XYB (ICC blob) | non-XYB (ICC blob) |
-
-Encoder and colorspace are **fully independent**. `--modular=1` does not imply non-XYB.
-Both use XYB by default. Both can use non-XYB.
-
-**CLI limitation (cjxl v0.11.2):** There is no flag to force non-XYB for lossy output
-in the `cjxl` command-line tool. The `--colorspace` flag does not exist in this version.
-Non-XYB lossy is only accessible via the libjxl C API directly.
-Lossless (d=0) always uses non-XYB with an embedded ICC blob.
+1. [How JXL Stores Colorspace Information](#how-jxl-stores-colorspace-information)
+2. [XYB Colorspace](#xyb-colorspace)
+3. [ICC Blob vs Native Primaries](#icc-blob-vs-native-primaries)
+4. [ICC Profile Preservation in This Workflow](#icc-profile-preservation)
+5. [Primary Coordinates Reference Table](#primary-coordinates-reference-table)
+6. [How to Verify Your Files](#how-to-verify-your-files)
+7. [Troubleshooting Color Issues](#troubleshooting-color-issues)
 
 ---
 
-## 3. Two colorspace modes: XYB and non-XYB
+## How JXL Stores Colorspace Information
 
-Independent of the encoder, JXL can store pixel data in two ways.
+JPEG XL uses two different methods depending on the encoding:
 
-### non-XYB
-
-- Pixel values stay in the original colorspace (ProPhoto, AdobeRGB, sRGB, etc.)
-- An ICC profile is embedded as a blob in the file
-- Required for lossless
-- Decoders need an external color management library (lcms2, skcms) to do
-  colorspace conversions
-
-This is what lossless JXL uses. GIMP reports "embedded ICC profile" because the
-raw ICC bytes are literally stored inside the file.
-
-### XYB
-
-- Pixel values are converted internally to the XYB colorspace before encoding
-- XYB is an absolute colorspace (covers the full visible spectrum)
-- No ICC blob is stored — colorspace is signaled via compact numeric primaries
-- Decoders can convert directly to sRGB, Display-P3, Rec.2100, etc. without
-  external color management libraries
-- Used by default for all lossy encoding
-
-The colorspace primaries stored in the header for XYB files are a **hint** — they
-tell the decoder "the original image was in this colorspace, use it as your target."
-The actual pixel data is in XYB (absolute), so no gamut information is lost.
-
-**This is why XnView shows "sRGB" for lossy files:**
-XnView looks for an ICC blob. Finds none. Falls back to showing "sRGB" as a label.
-The actual primaries (ProPhoto, AdobeRGB, etc.) are stored numerically, and XnView's
-properties panel doesn't read them. The colors render correctly — only the label is wrong.
-
----
-
-## 4. XYB colorspace explained
-
-XYB is based on human vision, not on display primaries.
-
-The human eye has three types of cone cells:
-- **L** — Long wavelength (~red)
-- **M** — Medium wavelength (~green)
-- **S** — Short wavelength (~blue)
-
-The brain doesn't process L, M, S directly. It creates opponent channels:
+### Method 1: Native Primaries (most common for lossy)
 
 ```
-Y  =  L + M          (luminance — the eye is most sensitive here)
-X  =  L - M          (red vs green)
-B  =  S              (blue vs yellow — the eye is least sensitive here)
-```
-
-JXL applies lossy quantization in this opponent space instead of RGB.
-Result: bits are spent where the eye is most sensitive, and saved where it isn't.
-This is why VarDCT + XYB produces much smaller files than equivalent quality in RGB.
-
-XYB is device-independent and absolute — it's not tied to any display's primaries.
-It fully covers the ProPhoto RGB gamut and beyond. Storing ProPhoto data in XYB
-does not clip or reduce the gamut; the XYB → ProPhoto conversion is reversible
-(modulo lossy quantization, which is the intended quality loss).
-
----
-
-## 5. ICC profiles
-
-### What an ICC profile is
-
-An ICC profile is a binary file (`.icc`) containing matrices and curves that describe
-how a colorspace maps to an absolute reference (the PCS — Profile Connection Space).
-It is the "rosetta stone" that lets two different colorspaces be compared and converted.
-
-### ICC blob
-
-"ICC blob" = the raw binary bytes of an ICC profile embedded inside another file.
-A lossless JXL contains the full ICC profile of the source colorspace embedded as-is.
-GIMP's "this file has an embedded color profile" message is referring to this blob.
-
-### The ICC header structure
-
-Every ICC profile starts with a 128-byte header containing fixed fields:
-- Bytes 0–3: profile size
-- Bytes 4–7: CMM type
-- Bytes 16–19: colorspace (e.g., `RGB `)
-- Bytes 20–23: PCS colorspace (always `XYZ `)
-- Bytes 68–79: **illuminant** (fixed D50 reference — see section 6)
-- Bytes 80+: tag table (primaries, TRC curves, etc.)
-
----
-
-## 6. White point vs illuminant — why they are different
-
-This is a common source of confusion. An ICC profile has two separate concepts:
-
-### Native white point
-
-The white point *of the colorspace itself* — the chromaticity of "pure white" in that
-space. Defined in the `wtpt` tag inside the profile.
-
-- **ProPhoto RGB**: D50 (x=0.3457, y=0.3585)
-- **AdobeRGB**: D65 (x=0.3127, y=0.3290)
-- **sRGB**: D65
-
-### Illuminant field (bytes 68–79 of the header)
-
-This is **not** the native white point. It is a fixed reference point for the PCS.
-
-The PCS (Profile Connection Space) is the intermediate space ICC uses for all conversions:
-```
-AdobeRGB → PCS → ProPhoto RGB
-```
-
-For this intermediate space to work, every profile must share the same reference
-point so the math is consistent. The ICC committee chose D50 for the PCS. Therefore,
-**every conformant ICC profile must have D50 in bytes 68–79, regardless of its native
-white point.**
-
-An AdobeRGB profile has D65 as its native white point but D50 in the illuminant field.
-The profile's color matrices already include the chromatic adaptation from D65 to D50
-internally — so the ICC machinery handles everything correctly.
-
-This is the field that Capture One writes incorrectly (0x2b instead of 0x2d — a 2-unit
-rounding error). The fix in this script patches only that field, leaving all color
-data untouched. See `bugs_fixes_explained.md` Bug 2 for details.
-
----
-
-## 7. CICP — Coding-Independent Code Points
-
-CICP is a standard (ITU-T H.273) that describes colorspaces as three small integers:
-
-```
-primaries | transfer_function | matrix_coefficients
-```
-
-For example:
-```
-1 | 1 | 0   →  BT.709 / sRGB primaries, sRGB transfer, identity matrix
-9 | 16 | 0  →  BT.2020 primaries, PQ transfer, identity matrix (HDR)
-```
-
-Instead of embedding hundreds of bytes of ICC data, you write three numbers. Any
-conformant decoder knows exactly what colorspace that means, no external library needed.
-
-JXL uses CICP-style encoding for its "Enum" colorspace signaling — lossy XYB files
-store the colorspace hint this way. The numeric primaries reported by `jxlinfo` come
-from this encoding.
-
-Common JXL primaries values and their meaning:
-
-| Primaries | Colorspace |
-|-----------|-----------|
-| 1 | sRGB / BT.709 |
-| 9 | BT.2020 (wide gamut) |
-| 11 | Display-P3 |
-| 12 | Custom (coordinates stored explicitly — ProPhoto, AdobeRGB) |
-
-ProPhoto RGB is not in any standard CICP table, so JXL stores it as "Custom" with
-explicit xy-chromaticity coordinates — which is what `jxlinfo` reports.
-
-Note: for lossy XYB output (the default for d>0), colorspace is always signaled via
-CICP/Custom primaries — no ICC blob is embedded. For lossless, an ICC blob is always
-embedded. Non-XYB lossy (ICC blob with lossy encoding) is theoretically possible via
-the libjxl API but the `cjxl` CLI (v0.11.2) does not expose a flag for it.
-
----
-
-## 8. Diagnostic commands and what to look for
-
-### jxlinfo — colorspace and encoding
-
-```powershell
-jxlinfo photo.jxl
-```
-
-Full output example (ProPhoto lossy):
-```
-JPEG XL file format container (ISO/IEC 18181-2)
-Uncompressed Exif metadata: 892 bytes
-Uncompressed xml  metadata: 4453 bytes
-JPEG XL image, 1200x801, lossy, 16-bit RGB
 Color space: RGB, Custom,
   white_point(x=0.345705, y=0.358540),
   Custom primaries:
     red(x=0.734698, y=0.265302),
     green(x=0.159600, y=0.840399),
     blue(x=0.036597, y=0.000106)
-  gamma(0.555315) transfer function,
-  rendering intent: Perceptual
+  gamma(0.555315) transfer function
 ```
 
-**Key fields to check:**
+**Pros:** Compact, efficient, mathematically precise
+**Cons:** Loses ICC-specific metadata (TRC curves, copyright, device calibration)
 
-| Field | What it means |
-|-------|--------------|
-| `lossy` / `lossless` | Encoding type |
-| `16-bit` | Bit depth preserved |
-| `white_point` | D50 = 0.3457/0.3585 → ProPhoto; D65 = 0.3127/0.3290 → sRGB/Adobe |
-| `red/green/blue primaries` | Exact gamut coordinates — compare tables below |
-| `gamma` | 0.5556 (=1/1.8) → ProPhoto; 0.4545 (=1/2.2) → sRGB/Adobe |
-| `xyb_encoded` | Present and true → pixel data is in XYB (lossy default) |
+### Method 2: ICC Blob (used by lossless or `--keep_icc`)
 
-**Primary coordinates reference:**
+```
+Color space: 940-byte ICC profile, CMM type: "KCMS"
+```
 
-| Colorspace | White point | Red x | Green x | Blue x | Gamma |
-|-----------|------------|-------|---------|--------|-------|
-| ProPhoto RGB | 0.3457 (D50) | 0.7347 | 0.1596 | 0.0366 | 0.5556 |
-| AdobeRGB | 0.3127 (D65) | 0.6400 | 0.2100 | 0.1500 | 0.4545 |
-| sRGB | 0.3127 (D65) | 0.6400 | 0.3000 | 0.1500 | 0.4545* |
-
-*sRGB uses a piecewise TRC, not a pure gamma — jxlinfo may report it as sRGB enum
-rather than a gamma value.
+**Pros:** Preserves exact original ICC with all metadata
+**Cons:** Larger, ICC blob must be stored separately from image data
 
 ---
 
-### exiftool -v3 — box structure and metadata
+## XYB Colorspace
+
+XYB is JXL's internal colorspace for lossy encoding. It's based on:
+- **X**: Luminance opponent (approximates human luminance perception)
+- **Y**: Luminance channel (like Y in YCbCr)
+- **B**: Blue-yellow opponent (chrominance)
+
+Key characteristics:
+- **LMS cone response modeled** — matches human visual system
+- **Perceptually uniform** — equal steps appear equally different
+- **Separates luminance from chrominance** — enables better compression
+
+When you encode with `cjxl` (lossy), your RGB data is:
+1. Converted to linear light (remove gamma)
+2. Converted to XYB colorspace
+3. Compressed using VarDCT
+4. On decode: XYB → linear RGB → gamma-corrected RGB
+
+The conversion is **mathematically reversible** with sufficient bit depth, but
+lossy quantization in XYB space introduces the compression artifacts.
+
+---
+
+## ICC Blob vs Native Primaries
+
+### The Problem: Lossy JXL Discards ICC Detail
+
+When encoding **lossy** JXL (`d>0`), `cjxl` converts your ICC profile to native primaries:
+
+```
+Input:  ProPhoto RGB ICC (940 bytes, with Kodak TRC curves)
+           ↓
+cjxl:    Extracts primaries (R,G,B,W coordinates)
+         Discards TRC curves and ICC metadata
+           ↓
+JXL:     "Custom primaries: red(x=0.7347,y=0.2653)..."
+```
+
+On decode with `djxl`:
+```
+JXL:     Native primaries
+           ↓
+djxl:    Creates generic ICC from primaries
+           ↓
+Output:  Generic RGB profile (628 bytes, auto-generated)
+         (different TRC, no Kodak copyright, etc.)
+```
+
+### The Solution: XMP-Embedded ICC
+
+This workflow solves the problem by embedding the original ICC as XMP metadata:
+
+```
+TIFF:   Original ICC (ProPhoto RGB)
+           ↓
+Encode: cjxl creates native primaries for image data
+        + Original ICC base64-encoded in XMP
+           ↓
+JXL:    "Custom primaries" + XMP(dc:Description="ICC:AAADrE...")
+           ↓
+Decode: djxl generates generic ICC from primaries
+        + Script extracts original ICC from XMP and replaces
+           ↓
+TIFF:   Original ICC restored (ProPhoto RGB, 940 bytes)
+```
+
+### Why TRC Curves Matter
+
+**TRC (Tone Reproduction Curves)** define how digital values map to luminance:
+
+```
+Without precise TRC:
+  Digital value 16384 → "approximately 25% luminance"
+
+With original ICC TRC:
+  Digital value 16384 → "exactly 24.7% luminance per Kodak spec"
+```
+
+For casual viewing: **no visible difference**.
+
+For professional editing:
+- Shadow recovery may have slightly different response
+- Color grading curves interact differently
+- Print profiles may have slight color shifts
+- Multi-conversion workflows accumulate drift
+
+---
+
+## ICC Profile Preservation
+
+### How It Works
+
+In `tiff_to_jxl.py`:
+
+```python
+# 1. Extract ICC from source TIFF
+icc_data = extract_icc_from_tiff(tiff_path)  # ~500-3000 bytes
+
+# 2. Base64 encode for text embedding
+icc_base64 = base64.b64encode(icc_data)  # ~700-4000 chars
+
+# 3. Create XMP with embedded ICC
+xmp = f"""<?xpacket...?>
+  <dc:description>
+    <rdf:Alt>
+      <rdf:li>ICC:{icc_base64}</rdf:li>
+    </rdf:Alt>
+  </dc:description>
+"""
+
+# 4. Embed encoding params separately (visible in Windows)
+xmp += f"""<xmp:CreatorTool>cjxl d={distance} e={effort}</xmp:CreatorTool>"""
+
+# 5. Inject XMP into JXL
+exiftool -XMP<=xmp_file.jxl
+```
+
+In `jxl_to_tiff.py`:
+
+```python
+# 1. Extract XMP from JXL
+xmp_data = exiftool("-XMP", jxl_path)
+
+# 2. Find and decode ICC
+match = re.search(r'ICC:([A-Za-z0-9+/=]+)', xmp_data)
+icc_data = base64.b64decode(match.group(1))
+
+# 3. Apply to output TIFF
+exiftool(f"-ICC_Profile<={icc_data}", tiff_path)
+
+# 4. Clean up XMP (remove base64, keep encoding params)
+if "ICC:" in creator_tool:
+    # Remove ICC: prefix, keep suffix
+    new_ct = creator_tool.replace("ICC:AAADrE...", "").strip(" |")
+    exiftool(f"-XMP-xmp:CreatorTool={new_ct}", tiff_path)
+```
+
+### Storage Locations
+
+| Location | Content | Visibility |
+|----------|---------|------------|
+| JXL codestream | Native primaries | Internal |
+| XMP dc:Description | Base64 ICC | Windows shows first 255 chars |
+| XMP CreatorTool | Encoding params | Windows Properties panel |
+
+The base64 data appears in Windows Explorer as:
+```
+Title: ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...
+```
+This is intentional — the encoding params are more useful to see at a glance.
+
+---
+
+## Primary Coordinates Reference Table
+
+Common colorspaces and their CIE 1931 xy chromaticity coordinates:
+
+| Colorspace | White Point | Red Primary | Green Primary | Blue Primary | Gamma |
+|------------|-------------|-------------|---------------|--------------|-------|
+| **sRGB** | D65 (0.3127, 0.3290) | (0.6400, 0.3300) | (0.3000, 0.6000) | (0.1500, 0.0600) | ~2.2 |
+| **Adobe RGB 1998** | D65 (0.3127, 0.3290) | (0.6400, 0.3300) | (0.2100, 0.7100) | (0.1500, 0.0600) | 2.2 |
+| **ProPhoto RGB** | D50 (0.3457, 0.3585) | (0.7347, 0.2653) | (0.1596, 0.8404) | (0.0366, 0.0001) | 1.8 |
+| **DCI-P3** | DCI (0.3140, 0.3510) | (0.6800, 0.3200) | (0.2650, 0.6900) | (0.1500, 0.0600) | 2.6 |
+| **Rec. 2020** | D65 (0.3127, 0.3290) | (0.7080, 0.2920) | (0.1700, 0.7970) | (0.1310, 0.0460) | Various |
+| **Display P3** | D65 (0.3127, 0.3290) | (0.6800, 0.3200) | (0.2650, 0.6900) | (0.1500, 0.0600) | ~2.2 |
+
+### Detecting Colorspace from Primaries
+
+To identify a colorspace from JXL primaries:
+
+```python
+def detect_colorspace(red_x, green_x, blue_x):
+    if abs(red_x - 0.7347) < 0.01:
+        return "ProPhoto RGB"
+    elif abs(red_x - 0.6400) < 0.01:
+        if abs(green_x - 0.2100) < 0.01:
+            return "Adobe RGB"
+        return "sRGB"
+    elif abs(red_x - 0.6800) < 0.01:
+        return "DCI-P3 / Display P3"
+    elif abs(red_x - 0.7080) < 0.01:
+        return "Rec. 2020"
+    return "Unknown / Custom"
+```
+
+---
+
+## How to Verify Your Files
+
+### Check JXL colorspace:
 
 ```powershell
-# Show all JXL boxes in order (critical for debugging EXIF visibility)
-exiftool -v3 photo.jxl
-
-# Read all EXIF fields
-exiftool photo.jxl
-
-# Read specific field
-exiftool -ColorSpace photo.jxl
-exiftool -ICC_Profile:all photo.jxl
-
-# Extract embedded ICC profile to file (lossless JXL only)
-exiftool -icc_profile -b photo.jxl > extracted.icc
+jxlinfo -v photo.jxl
 ```
 
-**Good box order** (EXIF visible in IrfanView):
-```
-JXL_ → ftyp → jxll → Exif → xml → jxlc/jxlp...
-```
+Look for:
+- `"ICC profile"` → Original ICC preserved
+- `"Custom primaries"` → Converted to native primaries
 
-**Bad box order** (EXIF injected after codestream — IrfanView won't see it):
-```
-ftyp → jxll → jxlc/jxlp... → Exif → xml
-```
-
----
-
-### Checking a round-trip (lossy JXL → TIFF back)
-
-When decoding a lossy XYB JXL back to TIFF with `djxl`, the output will have
-ProPhoto-equivalent primaries but **not** the original Kodak/ROMM ICC blob.
-The decoder generates a generic profile using the stored primaries.
-
-This is expected and correct — the color values are accurate. Only the ICC
-"identity" (manufacturer name, copyright string) differs from the original Capture One
-export. Visual color accuracy is unaffected.
+### Check ICC in JXL:
 
 ```powershell
-# Decode JXL back to PNG to inspect
-djxl photo.jxl output.png
+# Direct ICC (lossless)
+exiftool -ICC_Profile photo.jxl
 
-# Then check colorspace of the output
-exiftool output.png
+# XMP-embedded ICC (this workflow)
+exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+
+# Encoding params
+exiftool -XMP-xmp:CreatorTool photo.jxl
+```
+
+### Check ICC in TIFF:
+
+```powershell
+# Full ICC info
+exiftool -ICC_Profile:All photo.tif
+
+# Just the description
+exiftool -ProfileDescription photo.tif
+
+# Check for preview (multiple pages)
+tiffinfo photo.tif
+```
+
+### Compare original vs round-trip:
+
+```powershell
+# Original TIFF
+exiftool -ProfileDescription -ProfileCopyright original.tif
+
+# Round-trip TIFF
+exiftool -ProfileDescription -ProfileCopyright roundtrip.tif
+
+# Should match exactly if ICC preservation worked
 ```
 
 ---
 
-## 9. Summary — lossless vs lossy in this workflow
+## Troubleshooting Color Issues
 
-| Property | Lossless (d=0) | Lossy default (d>0) |
-|----------|---------------|---------------------|
-| Encoder | Modular | VarDCT |
-| Colorspace | non-XYB | XYB |
-| ICC blob in file | Yes (e.g. Kodak ROMM) | No — CICP/Custom primaries |
-| Color profile in GIMP | "Embedded ICC: ProPhoto" | No embedded profile |
-| Color profile in XnView | "ProPhoto RGB / Kodak" | "sRGB" ← display label bug |
-| Colors render correctly | Yes | Yes |
-| Verify colorspace | exiftool shows ICC | jxlinfo shows primaries |
-| cjxl CLI flag for non-XYB lossy | N/A | ❌ Not available in v0.11.2 |
-| File size (45MP) | ~173 MB | ~8–47 MB depending on distance |
+### Issue: Colors look different after round-trip
+
+**Check 1:** Was ICC embedded?
+```powershell
+exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+# Should show "ICC:AAAD..."
+```
+
+**Check 2:** Is ICC the same size?
+```powershell
+# Original
+exiftool -ICC_Profile -b original.tif | wc -c
+
+# Round-trip
+exiftool -ICC_Profile -b roundtrip.tif | wc -c
+
+# Should be identical (e.g., both 940 bytes)
+```
+
+**Check 3:** Profile description match?
+```powershell
+exiftool -ProfileDescription original.tif roundtrip.tif
+```
+
+### Issue: XnView MP shows wrong colorspace
+
+**Normal behavior.** XnView MP's properties panel shows "sRGB" for all lossy JXL
+files, regardless of actual colorspace. This is a display bug, not a conversion issue.
+
+Verify with `jxlinfo` or open in GIMP/Darktable.
+
+### Issue: IrfanView shows wrong colors (calibrated monitor)
+
+IrfanView has known issues with lossless JXL on color-calibrated systems.
+
+**Workarounds:**
+- Use lossy JXL at `d=0.1` (imperceptible difference)
+- Open in GIMP, Darktable, or browser instead
+- The file itself is correct; the issue is viewer-specific
+
+---
+
+## Further Reading
+
+- [libjxl documentation](https://github.com/libjxl/libjxl)
+- [ICC Specification](https://www.color.org/icc_specs2.xalter)
+- [CIE 1931 Color Space](https://en.wikipedia.org/wiki/CIE_1931_color_space)
+- [XYB Colorspace technical paper](https://arxiv.org/abs/1908.03557)
+
+---
+
+*This document is part of the JXL-TIFF-JPEG Converter project.*
+*For usage instructions, see [README_tiff_to_jxl.md](README_tiff_to_jxl.md) and [README_jxl_to_tiff.md](README_jxl_to_tiff.md).*

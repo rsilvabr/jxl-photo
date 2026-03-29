@@ -1,21 +1,19 @@
 # tiff_to_jxl.py
 
-> **Note — mode numbering changed 2026-03-26.**
-> Modes 0–5 were renumbered to 0–8 to accommodate two new single-file modes (0 and 1).
-> If you have saved commands or scripts using `--mode`, update them accordingly.
-> Old → new: `0→2`, `1→3`, `2→5`, `3→4`, `4→6`, `5→7`, `6→8`.
+Batch TIFF 16-bit → JPEG XL converter. Encodes TIFF files to JXL format with 
+configurable quality (lossless or lossy), preserves full EXIF/XMP metadata, 
+and **embeds the original ICC color profile as XMP metadata** for perfect 
+round-trip preservation.
 
-Batch TIFF 16-bit → JPEG XL converter. Supports lossless (`d=0`) and lossy (`d>0`),
-preserves full EXIF visible in IrfanView, and keeps any embedded ICC color profile intact.
+Works with any 16-bit TIFF — Capture One exports, NX Studio, Photoshop, or 
+standard uncompressed TIFFs from various sources.
 
-Works with any 16-bit TIFF — not limited to Capture One exports.
-Tested with Capture One, NX Studio, and standard uncompressed TIFFs from various sources.
-
----
-
-## Disclaimer
-
-These tools were made for my personal workflow (with the help of Claude). Use at your own risk — I am not responsible for any issues you may encounter.
+**Key feature:** ICC profile embedding. 
+```
+When paired with `jxl_to_tiff.py`, the exact original ICC profile is 
+preserved even for **lossy JXL files**, which would otherwise lose 
+the detailed ICC information (gamma curves, copyright, etc.).
+```
 
 ---
 
@@ -23,7 +21,7 @@ These tools were made for my personal workflow (with the help of Claude). Use at
 
 ```
 Python 3.12+
-pip install tifffile numpy
+pip install tifffile numpy pillow
 cjxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
 ```
@@ -81,83 +79,67 @@ py tiff_to_jxl.py "F:\2024" --mode 8
 Edit at the top of the script:
 
 ```python
-CJXL_DISTANCE = 0.0
-# 0   = lossless (pixel-perfect, ~173MB for 45MP)
-# 0.05 = near-lossless (~47MB, imperceptible difference)
+CJXL_DISTANCE = 0.1
+# 0   = mathematically lossless (pixel-perfect, ~173MB for 45MP)
+# 0.05 = near-lossless (~47MB, imperceptible difference) ⭐ RECOMMENDED for archive
 # 0.1 = near-lossless (~34MB, imperceptible difference)
-# 0.5 = high quality lossy (~13MB) — recommended starting point
+# 0.5 = high quality lossy (~13MB) — recommended starting point (libjxl authors)
 # 1.0 = "visually lossless" per libjxl documentation (~8MB)
 
 CJXL_EFFORT = 7
-# Controls file size, NOT quality. 7 is the sweet spot for camera photos.
+# Compression effort (1-10). Controls file size, NOT quality.
+# 7 is the sweet spot for camera photos.
 # Effort 8-10 is much slower and can produce larger files for high-ISO images.
 
-CJXL_MODULAR = False
-# False (default) — lossy uses VarDCT encoder + XYB colorspace.
-#   This is the standard lossy mode: DCT-based, like JPEG but much more advanced.
-#   Compresses photo content very efficiently. File sizes as shown in the table above.
-#
-# True — forces Modular encoder for lossy (--modular=1).
-#   Modular is entropy-coded (similar to FLIF/PNG). It is the only encoder used
-#   for lossless, but is significantly less efficient for lossy photo content.
-#   Good for UI/screenshots, text, pixel art and rasterized vector graphics.
-#   Note: lossless (d=0) always uses Modular regardless of this setting.
+EMBED_ICC_IN_JXL = True
+# Embeds the original ICC profile as metadata in the JXL file.
+# The ICC is NOT used by the JXL decoder (JXL uses native primaries),
+# but is preserved for round-trip conversion back to TIFF/JPEG.
+# This ensures the exact original ICC (with TRC curves, copyright, etc.)
+# is available when converting JXL → TIFF, even for lossy JXLs.
+# True  → embed ICC profile in JXL metadata (recommended, default)
+# False → do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
+
+ENCODE_TAG_MODE = "xmp"
+# Records encoding parameters in the JXL metadata.
+# "software" → appends to the EXIF Software field
+# "xmp"      → writes as XMP metadata (default)
+# "off"      → does not add anything
+# NOTE: When EMBED_ICC_IN_JXL is True, encoding params go to XMP:CreatorTool
+# (dc:Description is used for ICC embedding).
+
+USE_RAM_FOR_PNG = False
+# True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
+# False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
 TEMP2_DIR = r"E:\staging"
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
 # Files are moved to their final destination after each folder group completes.
 # Set to None to write directly to the final destination.
 
-EXPORT_TIFF_SUBFOLDER = "TIFF16"
-# Mode 5: process only TIFFs in this subfolder of _EXPORT.
-# Prevents accidentally converting AdobeRGB, sRGB, or WEB exports.
-# Set to "" to process all subfolders inside _EXPORT.
-
-ENCODE_TAG_MODE = "xmp"
-# "software" → appends "| cjxl d=X e=Y" to the EXIF Software field
-# "xmp"      → writes as XMP-dc:Description
-# "off"      → no encoding tag
-
 OVERWRITE = "smart"
 # False   → skip if JXL already exists (safe for resuming)
 # True    → always overwrite
 # "smart" → same as --sync: reconvert only if TIFF is newer than JXL
 
-# — Mode 1 only —
-CONVERTED_JXL_FOLDER = "converted_jxl"
-# Name of the subfolder created inside each TIFF folder.
-
-# — Mode 2 only —
-JXL_FOLDER_NAME = "JXL_16bits"
-# Name of the output folder created next to each TIFF folder.
-
-# — Mode 3 only —
-TIFF_SUFFIX_TO_REPLACE = "TIFF"
-JXL_SUFFIX_REPLACE     = "JXL"
-# Replaces TIFF_SUFFIX_TO_REPLACE with JXL_SUFFIX_REPLACE in the folder name.
-# Case-insensitive. If not found, appends JXL_SUFFIX_REPLACE and logs a warning.
-
-# — Modes 4 and 5 —
-EXPORT_MARKER     = "_EXPORT"   # anchor folder name to look for in the path
-EXPORT_JXL_FOLDER = "16B_JXL"  # output folder created inside the anchor
-
-# — Mode 6 —
 DELETE_SOURCE = False
-# False → JXL and TIFF coexist in the same folder (safe default)
-# True  → delete source TIFF after confirmed successful encode (irreversible)
+# [Mode 6/8 only] Whether to delete the source TIFF after successful encode.
+# WARNING: irreversible. Only enable after testing on a small batch first.
 
 # — Safety (mode 6 + DELETE_SOURCE only) —
 DELETE_CONFIRM = True
-# True  (default) → ask for confirmation before deleting any source TIFF.
-#   Lossless: type "yes".
-#   Lossy: type the current time in HHMM format shown on screen — this cannot
-#          be automated, forcing a conscious decision before deleting files that
-#          cannot be recovered from a lossy JXL.
-# False → skip confirmation (for automation). Not recommended for manual use.
-#
-# Leave this True. Disabling it means one misconfigured run can silently
-# delete originals with no warning.
+# True  → require interactive confirmation before deleting source files
+# False → skip confirmation (for automation only)
 ```
+
+#### Safety confirmation (mode 6 + DELETE_SOURCE)
+```
+When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
+- **Lossless:** type `yes` to confirm
+- **Lossy:** type the current time in `HHMM` format (forces conscious decision)
+```
+
+
 
 ---
 
@@ -167,20 +149,13 @@ DELETE_CONFIRM = True
 |------|-------|----------------|---------|
 | `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.jxl` / `output_dir/photo.jxl` |
 | `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
-| `2` | — | *Discontinued — use mode 0 with output_dir* | — |
+| `2` | Directory | Flat → output_dir | `output_dir/photo.jxl` |
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
 | `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
 | `6` | Directory | `_EXPORT` anchor — all TIFFs in hierarchy | `.../session/_EXPORT/16B_JXL/photo.jxl` |
 | `7` | Directory | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
 | `8` | Directory | In-place recursive — JXL next to each TIFF | `.../session/photo.jxl` |
-
-**Mode 7 example** with `EXPORT_TIFF_SUBFOLDER = "TIFF16"`:
-```
-session/_EXPORT/TIFF16/photo.tif      →  session/_EXPORT/16B_JXL/photo.jxl  ✓
-session/_EXPORT/AdobeRGB/photo.tif    →  ignored
-session/_EXPORT/sRGB/photo.tif        →  ignored
-```
 
 ---
 
@@ -190,7 +165,7 @@ session/_EXPORT/sRGB/photo.tif        →  ignored
 py tiff_to_jxl.py <input> [output] [options]
 
 Arguments:
-  input           Input root folder
+  input           Input root folder or file
   output          Output folder (mode 0 only)
 
 Options:
@@ -202,52 +177,81 @@ Options:
 
 ---
 
-## Further reading
+## ICC Profile Preservation
 
-For a deep dive into how JXL handles color management internally — XYB vs non-XYB, ICC blobs, CICP encoding, box structure, and how to verify your files with `jxlinfo` — see:
+### Why This Matters
 
-→ [JXL Color Internals](docs/jxl_color_internals.md)
+When converting TIFF → **lossy JXL** (`d>0`), the JXL encoder:
+1. Converts the ICC color profile to **native primaries** (for efficient encoding)
+2. The original ICC detail (TRC curves, copyright, etc.) is **not stored** in the JXL codestream
+
+Without ICC embedding:
+```
+TIFF (ProPhoto ICC) → JXL (lossy, primaries only) → TIFF (generic ICC from primaries)
+```
+
+With ICC embedding (`EMBED_ICC_IN_JXL = True`, default):
+```
+TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original ProPhoto ICC restored)
+```
+
+### How It Works
+
+1. **Extract ICC** from source TIFF using exiftool
+2. **Base64-encode** the ICC profile
+3. **Embed in XMP** metadata (`dc:Description` field with `ICC:` prefix)
+4. **Encoding params** (cjxl d=0.1 e=7) go to `XMP:CreatorTool` (visible in Windows)
+
+When converting back with `jxl_to_tiff.py`:
+1. Extract ICC from XMP metadata
+2. Apply to output TIFF
+3. Clean up XMP (remove base64 data, keep encoding params)
+
+### Technical Details
+
+The embedded ICC is stored as:
+```xml
+<dc:description>
+  <rdf:Alt>
+    <rdf:li xml:lang="x-default">ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</rdf:li>
+  </rdf:Alt>
+</dc:description>
+<xmp:CreatorTool>cjxl d=0.1 e=7 | TIFF to JXL with ICC preservation</xmp:CreatorTool>
+```
+
+The base64 string is not human-readable but preserves the **exact binary ICC data**.
+
+→ See [JXL Color Internals](jxl_color_internals.md) for more technical details.
+
+---
+
+## Relationship with jxl_to_tiff.py
+
+These scripts are designed to work as a pair:
+
+```powershell
+# Encode: TIFF → JXL (with ICC embedding)
+py tiff_to_jxl.py "photo.tif" --mode 0
+
+# Decode: JXL → TIFF (ICC restored)
+py jxl_to_tiff.py "photo.jxl" --mode 0
+```
+
+**For best results:**
+- Use `EMBED_ICC_IN_JXL = True` (default) in `tiff_to_jxl.py`
+- Both scripts detect and handle the embedded ICC automatically
 
 ---
 
 ## Performance
 
-With `USE_RAM_FOR_PNG = True` (default), disk I/O per file = read TIFF + write JXL.
-The PNG intermediate (~200MB) lives entirely in RAM.
+With `USE_RAM_FOR_PNG = True` (default), the PNG intermediate (~200MB) lives entirely 
+in RAM. Disk I/O per file = read TIFF + write JXL.
 
 With `TEMP2_DIR` set to a separate SSD, JXLs are written to fast storage during conversion
 and moved in bulk at the end — eliminates random write contention on HDD collections.
 
 ---
-
-## Safety confirmation (mode 6 + DELETE_SOURCE)
-
-When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True` (both defaults for their
-respective concerns), the script asks for confirmation before deleting any source file.
-This happens once at startup, before any conversion begins.
-
-For **lossless** conversion, type `yes` to confirm.
-
-For **lossy** conversion, the script shows the current time and asks you to type it
-in `HHMM` format. The intention is to create "friction" and force a conscious decision — 
-you are about to delete TIFFs that cannot be recovered from a lossy JXL.
-
-```
-  ⚠  WARNING — DELETE_SOURCE is enabled
-     Converting LOSSY (distance=1.0) — source TIFFs cannot be
-     recovered from a lossy JXL. This deletion is IRREVERSIBLE.
-     Current time: 14:23  →  to confirm, type: 1423
-
-     > 1423
-     Confirmed.
-```
-
-If anything other than the exact token is entered, the script exits without converting
-or deleting anything.
-
-Set `DELETE_CONFIRM = False` only if running the script from an automation pipeline
-where interactive input is not possible. For any manual use, leave it `True` —
-it takes 3 seconds and is much safer.
 
 ## Logs
 
@@ -255,20 +259,49 @@ it takes 3 seconds and is much safer.
 <script_folder>/Logs/tiff_to_jxl/YYYYMMDD_HHMMSS.log
 ```
 
-Opening line shows all active settings. Each converted file logs:
-```
-HH:MM:SS | INFO | [n/total] OK | photo.tif → F:\...\photo.jxl
-```
+Opening line shows all active settings including `EMBED_ICC_IN_JXL` status.
 
-Final summary:
-```
-Done: 90 OK | 0 overwrites | 0 skipped | 0 errors
-```
 
 ---
 
-## Known behavior — XnView MP color profile display for lossy JXL
+## How to verify output
 
+```powershell
+# Check JXL has embedded ICC
+exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+
+# Check encoding params
+exiftool -XMP-xmp:CreatorTool photo.jxl
+
+# Full JXL info
+jxlinfo -v photo.jxl
+```
+
+
+---
+
+## Known behaviors 
+
+### IrfanView and color-calibrated monitors
+```
+JXL lossless files embed the ICC color profile as a blob. Most software handles this
+correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
+display correct colors.
+
+IrfanView's behavior with lossless JXL appears to depend on the system display profile
+installed on the machine. The issue is specific to IrfanView on calibrated systems.
+
+**The files themselves are correct.** Any conformant JXL decoder will display the colors
+accurately. If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` 
+(imperceptible difference), or open the files in any of the other viewers listed above.
+
+*For detailed technical information about JXL color management, XYB vs non-XYB, 
+ICC blobs vs native primaries, and primary coordinates reference tables, 
+see [JXL Color Internals](jxl_color_internals.md).*
+```
+
+### XnView MP color profile display for lossy JXL
+```
 XnView MP shows `Color Profile: sRGB` in the properties panel for lossy JXL files,
 even when the actual colorspace is ProPhoto RGB or AdobeRGB.
 
@@ -279,84 +312,30 @@ not as an embedded ICC blob. XnView reads the ICC blob field, finds nothing, and
 falls back to showing "sRGB" as a default label.
 
 The actual colorspace is correctly preserved and correctly rendered — as confirmed
-by `jxlinfo` (see below) and by every other viewer (GIMP, Darktable, browsers, etc.).
+by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 
-To verify the real colorspace of any lossy JXL, use `jxlinfo` and check the
-white_point and primary coordinates.
+→ See [JXL Color Internals](jxl_color_internals.md) for full details.
+```
+---
 
-→ [How JXL color management works, how to verify your files, and a full primary coordinates reference table](jxl_color_internals.md)
+## Disclaimer
+
+These tools were made for my personal workflow (with the help of Claude). Use at your own risk — I am not responsible for any issues you may encounter.
 
 ---
 
-## Known behavior — IrfanView and color-calibrated monitors
+## License
 
-JXL lossless files embed the ICC color profile as a blob. Most software handles this
-correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
-display correct colors.
-
-IrfanView's behavior with lossless JXL appears to depend on the system display profile
-installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
-After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
-for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
-to be double color management — IrfanView applying both the embedded ICC and the system
-display profile simultaneously.
-
-Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
-affected by this issue.
-
-**The files themselves are correct.** Any conformant JXL decoder will display the colors
-accurately. The issue is specific to IrfanView on calibrated systems.
-
-If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
-difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
-Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
+MIT License — feel free to use, modify, and distribute.
 
 ---
 
-## Appendix: How to verify output with jxlinfo
+## Acknowledgments
 
-`jxlinfo` (included with the libjxl release) reports what the decoder actually sees —
-colorspace primaries, bit depth, lossless vs lossy, and container structure.
+- [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
+- [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
+- [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
+---
 
-```powershell
-jxlinfo photo.jxl
-```
-
-**Example output for a ProPhoto RGB lossy file:**
-```
-JPEG XL file format container (ISO/IEC 18181-2)
-Uncompressed Exif metadata: 892 bytes
-Uncompressed xml  metadata: 4453 bytes
-JPEG XL image, 1200x801, lossy, 16-bit RGB
-Color space: RGB, Custom,
-  white_point(x=0.345705, y=0.358540),
-  Custom primaries:
-    red(x=0.734698, y=0.265302),
-    green(x=0.159600, y=0.840399),
-    blue(x=0.036597, y=0.000106)
-  gamma(0.555315) transfer function,
-  rendering intent: Perceptual
-```
-
-**How to read the colorspace fields:**
-
-| Field | ProPhoto value | sRGB value |
-|-------|---------------|------------|
-| white_point x,y | 0.3457, 0.3585 (D50) | 0.3127, 0.3290 (D65) |
-| red primary x | ~0.7347 | 0.6400 |
-| green primary x | ~0.1596 | 0.3000 |
-| blue primary x | ~0.0366 | 0.1500 |
-| gamma | 0.5556 (= 1/1.8) | 0.4545 (= 1/2.2) |
-
-The white point and primaries are the definitive source of truth for the colorspace —
-not the ICC profile description shown by viewers.
-
-**Checking for EXIF and box structure:**
-
-```powershell
-# Show internal JXL box order (useful for debugging EXIF visibility)
-exiftool -v3 photo.jxl
-
-# Show all readable EXIF fields
-exiftool photo.jxl
-```
+### Development Assistance
+- [Kimi](https://www.moonshot.cn) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
