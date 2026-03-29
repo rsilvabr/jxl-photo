@@ -19,7 +19,10 @@ magick   →  https://imagemagick.org  (ImageMagick 7+)
 exiftool →  https://exiftool.org
 ```
 
-The PowerShell terminal version (`jxl_to_jpeg_terminal.ps1`) requires only djxl and magick.
+**Important:** ImageMagick (`magick` command) must be installed on your system (not via pip).
+Download from https://imagemagick.org and add to PATH.
+
+The PowerShell terminal version (`jxl_to_jpeg_terminal.ps1`) requires only djxl and magick (no Python).
 
 ---
 

@@ -338,4 +338,4 @@ MIT License — feel free to use, modify, and distribute.
 ---
 
 ### Development Assistance
-- [Kimi](https://www.moonshot.cn) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion

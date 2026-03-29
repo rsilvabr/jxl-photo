@@ -26,7 +26,7 @@ These tools were made for my personal workflow (with the help of Claude). Use at
 
 ```
 Python 3.12+
-pip install tifffile numpy
+pip install tifffile numpy pillow
 djxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
 ```
@@ -412,4 +412,4 @@ MIT License — feel free to use, modify, and distribute.
 ---
 
 ### Development Assistance
-- [Kimi](https://www.moonshot.cn) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
