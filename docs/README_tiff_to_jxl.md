@@ -108,6 +108,11 @@ ENCODE_TAG_MODE = "xmp"
 # NOTE: When EMBED_ICC_IN_JXL is True, encoding params go to XMP:CreatorTool
 # (dc:Description is used for ICC embedding).
 
+CLEANUP_XMP_ICC_MARKER = False
+# Remove legacy ICC markers from XMP if present.
+# True  → clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
+# False → keeps existing ICC markers (default)
+
 USE_RAM_FOR_PNG = False
 # True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
@@ -123,16 +128,16 @@ OVERWRITE = "smart"
 # "smart" → same as --sync: reconvert only if TIFF is newer than JXL
 
 DELETE_SOURCE = False
-# [Mode 6/8 only] Whether to delete the source TIFF after successful encode.
+# [Mode 8 only] Whether to delete the source TIFF after successful encode.
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
-# — Safety (mode 6 + DELETE_SOURCE only) —
+# — Safety (mode 8 + DELETE_SOURCE only) —
 DELETE_CONFIRM = True
 # True  → require interactive confirmation before deleting source files
 # False → skip confirmation (for automation only)
 ```
 
-#### Safety confirmation (mode 6 + DELETE_SOURCE)
+#### Safety confirmation (mode 8 + DELETE_SOURCE)
 ```
 When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 - **Lossless:** type `yes` to confirm
@@ -181,23 +186,29 @@ Options:
 
 ### Why This Matters
 
-When converting TIFF → **lossy JXL** (`d>0`), the JXL encoder:
+When converting TIFF → **lossy JXL** (`d>0`), the `cjxl` encoder by default:
 1. Converts the ICC color profile to **native primaries** (for efficient encoding)
-2. The original ICC detail (TRC curves, copyright, etc.) is **not stored** in the JXL codestream
+2. The original ICC detail (TRC curves, copyright, etc.) is **discarded** in favor of compact primaries
 
-Without ICC embedding:
+The JXL format itself supports full ICC in lossy mode, but the reference encoder 
+optimizes for size unless explicitly configured otherwise.
+
+#### Without ICC embedding:
 ```
 TIFF (ProPhoto ICC) → JXL (lossy, primaries only) → TIFF (generic ICC from primaries)
 ```
 
-With ICC embedding (`EMBED_ICC_IN_JXL = True`, default):
+#### With ICC embedding (`EMBED_ICC_IN_JXL = True`, default):
 ```
 TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original ProPhoto ICC restored)
 ```
+**OBS: If all you need is small file sizes, disable this funcition: it leads to bigger files.**
+
+---
 
 ### How It Works
 
-1. **Extract ICC** from source TIFF using exiftool
+1. **Extract ICC** from source TIFF using exiftool (original ICC for XMP, patched for PNG)
 2. **Base64-encode** the ICC profile
 3. **Embed in XMP** metadata (`dc:Description` field with `ICC:` prefix)
 4. **Encoding params** (cjxl d=0.1 e=7) go to `XMP:CreatorTool` (visible in Windows)
@@ -206,6 +217,8 @@ When converting back with `jxl_to_tiff.py`:
 1. Extract ICC from XMP metadata
 2. Apply to output TIFF
 3. Clean up XMP (remove base64 data, keep encoding params)
+
+---
 
 ### Technical Details
 
@@ -220,6 +233,19 @@ The embedded ICC is stored as:
 ```
 
 The base64 string is not human-readable but preserves the **exact binary ICC data**.
+
+---
+
+### Important: ICC Extraction Strategy
+
+The script uses **two separate ICC extractions**:
+
+1. **ICC for PNG (cjxl encoding)**: Patched D50 illuminant for Capture One compatibility
+2. **ICC for XMP (preservation)**: Original unmodified ICC for perfect round-trip
+
+This ensures:
+- cjxl receives a compatible ICC for encoding
+- The exact original ICC is preserved for restoration
 
 → See [JXL Color Internals](jxl_color_internals.md) for more technical details.
 
@@ -240,6 +266,27 @@ py jxl_to_tiff.py "photo.jxl" --mode 0
 **For best results:**
 - Use `EMBED_ICC_IN_JXL = True` (default) in `tiff_to_jxl.py`
 - Both scripts detect and handle the embedded ICC automatically
+
+---
+
+## XMP Preservation (Fixed in this version)
+
+### The XMP Overwrite Bug (Fixed)
+
+Previous versions had a bug where XMP metadata was overwritten:
+1. First, EXIF/XMP was copied from TIFF
+2. Then, a second pass overwrote ALL XMP with just the ICC data
+
+**Result**: Original ratings, keywords, and descriptions were lost!
+
+### The Fix
+
+This version uses **targeted XMP updates**:
+- `-xmp-dc:Description=` for encoding params (concatenated with existing)
+- `-xmp-xmp:CreatorTool=` for ICC data
+- All other XMP tags preserved via `-tagsfromfile`
+
+**Result**: Original metadata + encoding info + ICC all coexist!
 
 ---
 
@@ -320,8 +367,12 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 
 ## Disclaimer
 
-These tools were made for my personal workflow (with the help of Claude). Use at your own risk — I am not responsible for any issues you may encounter.
+These tools were made for my personal workflow. 
+Use at your own risk — I am not responsible for any issues you may encounter.
 
+However, If you find any bugs, fell free to report to me - I will gladly try my best to improve this project.
+
+Always test with a small batch before processing important archives.
 ---
 
 ## License
