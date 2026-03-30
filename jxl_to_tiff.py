@@ -1,29 +1,43 @@
 #!/usr/bin/env python3
 """
-jxl_to_tiff.py — Batch JPEG XL → TIFF 16-bit converter
+jxl_to_tiff.py — Batch JPEG XL → TIFF 16-bit converter with ICC preservation
+
+Converts JXL files back to editable TIFF format while preserving all metadata 
+(EXIF, XMP) and ICC color profiles. Three decode modes:
+
+  Roundtrip (default with ICC)  - djxl auto + original ICC attachment
+                                  Best for files converted with tiff_to_jxl.py
+  Basic (default no ICC)        - djxl auto only, no color management
+                                  For consumer JXLs without embedded ICC
+  Matrix (--matrix)             - linear decode + LittleCMS transformation
+                                  For special color space conversion needs
 
 Usage:
-  py jxl_to_tiff.py <input> [output] --mode 0-5 [--workers N] [--overwrite] [--sync]
+    python jxl_to_tiff.py input.jxl
+    python jxl_to_tiff.py input_dir/ --workers 8
+    python jxl_to_tiff.py photo.jxl --matrix
 
 Requirements:
-  pip install tifffile numpy
-  cjxl / djxl  →  https://github.com/libjxl/libjxl/releases
-  exiftool     →  https://exiftool.org
+    pip install tifffile numpy Pillow
+    djxl (libjxl) → https://github.com/libjxl/libjxl/releases
+    exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import argparse
 import numpy as np
 from PIL import Image
+try:
+    from PIL import ImageCms
+except ImportError:
+    ImageCms = None
 import tifffile
-import json
-
 
 # ─────────────────────────────────────────────
-# USER SETTINGS - GENERAL
+# USER SETTINGS
 # ─────────────────────────────────────────────
 
 DJXL_OUTPUT_DEPTH = 16
@@ -50,7 +64,7 @@ JPEG_PREVIEW_SIZE = 1024
 
 TEMP_DIR = None
 # Temporary directory for intermediate files.
-# None → use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
+# None → use system temp (usually C:\\Users\\...\\AppData\\Local\\Temp on Windows)
 # Ex:  → "E:\\temp_jxl"
 
 TEMP2_DIR = None
@@ -78,76 +92,6 @@ DELETE_SOURCE = False
 #
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
-
-# ─────────────────────────────────────────────
-# USER SETTINGS - MODES CONFIGURATION
-# ─────────────────────────────────────────────
-
-# || MODE 0 SETTINGS ||
-# No settings needed. Just use 
-# py jxl_to_tiff.py <input> <output> [--mode 0] [--workers N] [--overwrite] [--sync]
-# or just py jxl_to_tiff.py <input> , input can be file or directory.
-
-
-# || MODE 1 SETTINGS ||
-CONVERTED_TIFF_FOLDER = "converted_tiff"
-# [MODE 1] Name of the subfolder created inside each JXL folder.
-# Example: .../JXL_FOLDER/converted_tiff/photo.tif
-
-# || MODE 2 SETTINGS ||
-# No settings needed. Flat: input directory → output directory.
-# py jxl_to_tiff.py <input_dir> <output_dir> --mode 2
-
-# || MODE 3 SETTINGS ||
-TIFF_FOLDER_NAME = "TIFF_16bits"
-# [MODE 3] Subfolder created inside each JXL folder for output.
-# Example: .../JXL_FOLDER/TIFF_16bits/photo.tif
-
-# || MODE 4 SETTINGS ||
-JXL_SUFFIX_TO_REPLACE = "JXL"
-TIFF_SUFFIX_REPLACE     = "TIFF"
-# [MODE 4] Replaces JXL_SUFFIX_TO_REPLACE with TIFF_SUFFIX_REPLACE in the folder name.
-# Case-insensitive (JXL, jxl, Jxl all match).
-# Example: C1_Export_1_JXL → C1_Export_1_TIFF
-
-# || MODE 5 SETTINGS ||
-# Sibling folder next to each JXL folder — no extra settings needed.
-# Example: .../TIFF_FOLDER_NAME/photo.tif  (uses TIFF_FOLDER_NAME above)
-
-# || MODES 6 and 7 SETTINGS ||
-EXPORT_MARKER     = "_EXPORT"
-EXPORT_TIFF_FOLDER = "16B_TIFF"
-# [MODE 6/7] Uses EXPORT_MARKER as an anchor in the path.
-# All TIFFs go into EXPORT_MARKER/EXPORT_TIFF_FOLDER/.
-# Mode 6: processes JXLs both inside and outside EXPORT_MARKER (same parent hierarchy).
-# Mode 7: only processes JXLs inside EXPORT_MARKER (ignores JXLs outside).
-#
-# JXLs inside EXPORT_MARKER: immediate subfolder (e.g. color space name) is dropped.
-# JXLs outside EXPORT_MARKER (mode 6 only): relative path from EXPORT_MARKER's parent is preserved.
-#
-# Example (mode 7):
-#   EXPORT_MARKER/JXL/photo.jxl      →  EXPORT_MARKER/EXPORT_TIFF_FOLDER/photo.tif
-
-EXPORT_JXL_SUBFOLDER = ""
-# [MODE 7] If set, only JXLs in this specific subfolder of EXPORT_MARKER are processed,
-# and this subfolder name is dropped from the output path.
-# If empty (""), all JXLs inside EXPORT_MARKER are processed (first subfolder is dropped).
-# OBS: Empty value can cause filename collisions if different subfolders contain files
-# with the same name.
-
-# || MODE 8 SETTINGS ||
-# No extra settings. Mode 8 converts JXLs recursively and outputs TIFFs in the same
-# folder as each source JXL. Controlled by DELETE_SOURCE above.
-# Example: .../session/photo.jxl → .../session/photo.tif
-
-
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SAFETY SETTINGS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 DELETE_CONFIRM = True
 # Only relevant when DELETE_SOURCE = True.
 # True  (default) → require interactive confirmation before deleting any source file.
@@ -155,77 +99,36 @@ DELETE_CONFIRM = True
 #   a conscious decision — you are about to delete JXLs that cannot be recovered if
 #   the TIFF decode had any issues.
 # False → skip all confirmations. Useful if running the script from another program.
-# Recommendation: leave this True. It takes 3 seconds and prevents accidents.
+
+# ICC Color Management
+CLEANUP_XMP_ICC_MARKER = True
+# Remove ICC:base64 marker from XMP CreatorTool after extraction.
+# True  → cleans up CreatorTool, keeping only human-readable text (default)
+# False → leaves CreatorTool unchanged
+
+USE_MATRIX_MODE = False
+# When True, use Matrix decode mode (linear + LittleCMS color transform).
+# This mode decodes to Rec.2020 linear then transforms to the target ICC profile.
+# Useful for color space conversions or when precise transformation is needed.
+# Default (False) uses Roundtrip mode for ICC files, Basic mode for others.
+# Roundtrip mode is faster and visually identical for normal use.
+
+FORCE_BASIC_MODE = False
+# Force Basic mode for all files, ignoring ICC preservation.
 
 
+# Mode configurations
+EXPORT_MARKER = "_EXPORT"
+EXPORT_TIFF_FOLDER = "16B_TIFF"
+EXPORT_JXL_SUBFOLDER = ""
 
-
-def extract_icc_from_jxl_metadata(jxl_path, tmp_dir):
-    """
-    Extract ICC profile directly from JXL metadata (embedded by tiff_to_jxl.py).
-    First tries XMP CreatorTool (base64 encoded ICC), then falls back to direct ICC extraction.
-    Returns path to extracted ICC file or None.
-    """
-    try:
-        # Method 1: Try to extract ICC from XMP CreatorTool (base64 encoded)
-        r = subprocess.run(["exiftool", "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
-                          capture_output=True, text=True, timeout=10)
-        if r.returncode == 0 and r.stdout:
-            import re
-            # Look for ICC: prefix followed by base64 data
-            match = re.search(r'ICC:([A-Za-z0-9+/=]+)', r.stdout)
-            if match:
-                import base64
-                icc_data = base64.b64decode(match.group(1))
-                if len(icc_data) > 500:  # Valid ICC size
-                    icc_path = tmp_dir / "extracted_xmp.icc"
-                    icc_path.write_bytes(icc_data)
-                    return icc_path
-        
-        # Method 2: Try direct ICC extraction (for lossless JXLs that preserved ICC)
-        icc_path = tmp_dir / "extracted.icc"
-        r = subprocess.run(["exiftool", "-b", "-ICC_Profile", str(jxl_path), "-o", str(icc_path)],
-                          capture_output=True, timeout=10)
-        if icc_path.exists() and icc_path.stat().st_size > 500:
-            return icc_path
-            
-        return None
-    except Exception:
-        return None
-
-def extract_icc_from_jxl_via_png(jxl_path, tmp_dir):
-    """
-    Extract ICC profile from JXL by converting to PNG using djxl.
-    djxl embeds the ICC in the PNG, which we can then extract.
-    Returns path to extracted ICC file or None.
-    """
-    try:
-        png_path = tmp_dir / "temp_icc_extract.png"
-        icc_path = tmp_dir / "extracted_png.icc"
-        
-        # Convert JXL to PNG using djxl (ICC is embedded in PNG)
-        r = subprocess.run(["djxl", str(jxl_path), str(png_path)],
-                          capture_output=True, timeout=60)
-        if r.returncode != 0 or not png_path.exists():
-            return None
-        
-        # Extract ICC from PNG
-        r = subprocess.run(["exiftool", "-b", "-ICC_Profile", str(png_path), "-o", str(icc_path)],
-                          capture_output=True, timeout=10)
-        
-        # Clean up PNG
-        png_path.unlink(missing_ok=True)
-        
-        if icc_path.exists() and icc_path.stat().st_size > 0:
-            return icc_path
-        return None
-    except Exception:
-        return None
-
+# ─────────────────────────────────────────────
+# SETUP AND LOGGING
+# ─────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
-logger     = None
+LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
+logger = None
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 
@@ -233,16 +136,13 @@ def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file  = LOG_DIR / f"{timestamp}.log"
+    log_file = LOG_DIR / f"{timestamp}.log"
 
     logger = logging.getLogger("jxl_decode")
     logger.setLevel(logging.DEBUG)
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
     fh.setFormatter(fmt)
@@ -258,18 +158,16 @@ def next_count():
         _counter["done"] += 1
         return _counter["done"], _counter["total"]
 
-def confirm_deletion_jxl() -> bool:
+def confirm_deletion_jxl():
     """Interactive confirmation before deleting source JXLs (DELETE_CONFIRM=True).
     Type the current time (HHMM) shown on screen.
     Returns True if confirmed, False if cancelled."""
     from datetime import datetime as _dt
-    print()
-    print()
-    print()
+    print("\n\n")
     print("  ⚠  WARNING — DELETE_SOURCE is enabled")
     print("     Source JXLs will be deleted after successful decode.")
     print("     This deletion is IRREVERSIBLE.")
-    now   = _dt.now()
+    now = _dt.now()
     token = now.strftime("%H%M")
     print(f"     Current time: {now.strftime('%H:%M')}  →  to confirm, type: {token}")
     print()
@@ -278,385 +176,702 @@ def confirm_deletion_jxl() -> bool:
     except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer == token:
-        print("     Confirmed. Source JXLs will be deleted after successful decode.")
-        print()
+        print("     Confirmed. Source JXLs will be deleted after successful decode.\n")
         return True
     else:
-        print("     Cancelled. No files will be deleted.")
-        print()
+        print("     Cancelled. No files will be deleted.\n")
         return False
 
-def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
-    # Mode 0: single file in-place — handled in main() before calling this
-    # Mode 1: single file → converted_tiff/ subfolder — handled in main() before calling this
+# ═══════════════════════════════════════════════════════════════════════════════
+# ICC EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    if mode == 2:
-        # Flat directory: input_root/photo.tif
-        return input_root / jxl_path.with_suffix(".tif").name
+def extract_icc_from_xmp(jxl_path):
+    """Extract ICC profile from XMP CreatorTool (base64 encoded by tiff_to_jxl).
+    Returns ICC bytes or None.
+    """
+    try:
+        r = subprocess.run(
+            ["exiftool", "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0 and r.stdout:
+            # Look for ICC: prefix followed by base64 data (flexible regex)
+            # Allows for line breaks, different lengths
+            match = re.search(r'ICC:([A-Za-z0-9+/=\s]{100,})', r.stdout)
+            if match:
+                # Remove whitespace (line breaks in XML)
+                b64_data = re.sub(r'\s', '', match.group(1))
+                data = base64.b64decode(b64_data)
+                if len(data) > 128:  # Minimum valid ICC size
+                    return data
+    except Exception as e:
+        logger.debug(f"XMP ICC extraction failed: {e}")
+    return None
 
-    elif mode == 3:
-        # Subfolder inside each JXL folder
-        return jxl_path.parent / CONVERTED_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+def extract_icc_native(jxl_path, tmp_dir):
+    """Extract ICC profile directly from JXL (for lossless files).
+    Returns ICC bytes or None.
+    """
+    try:
+        icc_path = tmp_dir / "native.icc"
+        r = subprocess.run(
+            ["exiftool", "-b", "-ICC_Profile", str(jxl_path), "-o", str(icc_path)],
+            capture_output=True, timeout=10
+        )
+        if icc_path.exists() and icc_path.stat().st_size > 128:
+            return icc_path.read_bytes()
+    except Exception as e:
+        logger.debug(f"Native ICC extraction failed: {e}")
+    return None
 
-    elif mode == 4:
-        # Rename folder replacing JXL suffix with TIFF suffix
-        old_name = jxl_path.parent.name
-        new_name = None
-        for variant in [JXL_SUFFIX_TO_REPLACE, JXL_SUFFIX_TO_REPLACE.lower(),
-                        JXL_SUFFIX_TO_REPLACE.title()]:
-            if variant in old_name:
-                new_name = old_name.replace(variant, TIFF_SUFFIX_REPLACE)
+def get_source_icc(jxl_path, tmp_dir):
+    """Get ICC profile from JXL, trying XMP first then native.
+    Returns (icc_bytes, source) tuple or (None, None).
+    """
+    icc = extract_icc_from_xmp(jxl_path)
+    if icc:
+        return icc, "xmp"
+    icc = extract_icc_native(jxl_path, tmp_dir)
+    if icc:
+        return icc, "native"
+    return None, None
+
+def load_target_icc(path):
+    """Load target ICC profile from file.
+    Returns ICC bytes or None.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        logger.error(f"Target ICC not found: {path}")
+        return None
+    try:
+        return p.read_bytes()
+    except Exception as e:
+        logger.error(f"Failed to load target ICC: {e}")
+        return None
+
+def analyze_icc_profile(icc_data):
+    """Analyze ICC profile data to identify color space.
+    Returns: 'prophoto', 'adobe', 'srgb', '2020', 'p3', or 'unknown'
+    """
+    if len(icc_data) < 128:
+        return 'unknown'
+
+    try:
+        # Read profile description from ICC header+tag area
+        data_str = icc_data[:512].decode('ascii', errors='ignore').lower()
+
+        if 'prophoto' in data_str or 'kodak' in data_str or 'romm' in data_str:
+            return 'prophoto'
+        elif 'adobe' in data_str and 'rgb' in data_str:
+            return 'adobe'
+        elif 'srgb' in data_str:
+            return 'srgb'
+        elif '2020' in data_str or 'bt2020' in data_str or 'rec.2020' in data_str:
+            return '2020'
+        elif 'p3' in data_str or 'display p3' in data_str or 'dci-p3' in data_str:
+            return 'p3'
+    except:
+        pass
+
+    return 'unknown'
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DECODE STRATEGY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def select_decode_strategy(has_original_icc=False):
+    """Select decode strategy based on ICC presence and mode flags.
+
+    Returns: (mode, reason)
+    mode: 'roundtrip', 'basic', or 'matrix'
+    """
+    # Matrix mode override (for special color conversion needs)
+    if USE_MATRIX_MODE:
+        return 'matrix', "Matrix mode (linear + LittleCMS transform)"
+
+    # Force basic mode (ignore ICC)
+    if FORCE_BASIC_MODE:
+        return 'basic', "Basic mode forced (no ICC handling)"
+
+    # Default logic: ICC present -> Roundtrip, no ICC -> Basic
+    if has_original_icc:
+        return 'roundtrip', "Roundtrip mode (ICC from XMP + djxl auto)"
+    else:
+        return 'basic', "Basic mode (djxl auto, no ICC)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DECODING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def decode_auto(jxl_path, output_ppm):
+    """Decode JXL using djxl auto mode (optimized for display).
+    Raises RuntimeError on failure.
+    """
+    cmd = ["djxl", str(jxl_path), str(output_ppm), "--output_format=ppm"]
+    r = subprocess.run(cmd, capture_output=True, timeout=120)
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode(errors='replace')[:200]
+        raise RuntimeError(f"djxl auto failed: {err}")
+    return True
+
+def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
+    """Decode JXL to Rec.2020 linear color space.
+    Also extracts ICC profile generated by djxl for verification.
+    Raises RuntimeError on failure.
+    """
+    cmd = [
+        "djxl", str(jxl_path), str(output_ppm),
+        "--color_space=RGB_D65_202_Per_Lin",
+        f"--icc_out={icc_out_path}",
+        "--output_format=ppm"
+    ]
+    r = subprocess.run(cmd, capture_output=True, timeout=120)
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode(errors='replace')[:200]
+        raise RuntimeError(f"djxl Rec.2020 failed: {err}")
+    return True
+
+def read_ppm_to_numpy(ppm_path):
+    """Read PPM file and convert to numpy array.
+    Supports P6 (RGB) format with 8-bit or 16-bit depth.
+    Returns uint16 numpy array.
+    """
+    with open(ppm_path, 'rb') as f:
+        magic = f.readline().strip()
+        if magic not in (b'P6', b'P5'):
+            raise ValueError(f"Unsupported PPM format: {magic}")
+
+        # Skip comments
+        while True:
+            line = f.readline()
+            if not line.startswith(b'#'):
                 break
-        if new_name is None:
-            new_name = old_name + "_" + TIFF_SUFFIX_REPLACE
-            logger.warning(f"'{JXL_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
-        return jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name
 
-    elif mode == 5:
-        # Sibling folder next to each JXL folder
-        return jxl_path.parent.parent / TIFF_FOLDER_NAME / jxl_path.with_suffix(".tif").name
+        # Parse dimensions
+        dimensions = line.strip()
+        while dimensions.startswith(b'#'):
+            dimensions = f.readline().strip()
+        width, height = map(int, dimensions.split())
 
-    elif mode == 6:
-        # _EXPORT anchor — all JXLs in hierarchy
-        parts = jxl_path.parts
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
-        if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {jxl_path}, using local folder")
-            return jxl_path.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+        # Parse max value
+        maxval_line = f.readline().strip()
+        while maxval_line.startswith(b'#'):
+            maxval_line = f.readline().strip()
+        maxval = int(maxval_line)
 
-        export_dir    = Path(*parts[:export_idx + 1])
-        project_root  = export_dir.parent
-
-        if jxl_path.is_relative_to(export_dir):
-            rel_parts = jxl_path.relative_to(export_dir).parts
-            if len(rel_parts) > 1:
-                rel = Path(*rel_parts[1:])
+        # Read pixel data
+        if magic == b'P6':
+            if maxval <= 255:
+                # 8-bit data
+                pixel_data = np.frombuffer(f.read(), dtype=np.uint8)
+                img = pixel_data.reshape((height, width, 3))
+                # Scale to 16-bit: multiply by 257 (maps 0-255 to 0-65535)
+                img = img.astype(np.uint16) * 257
             else:
-                rel = Path(rel_parts[0])
+                # 16-bit big-endian data
+                pixel_data = np.frombuffer(f.read(), dtype=np.dtype('>u2')).astype(np.uint16)
+                img = pixel_data.reshape((height, width, 3))
+            return img
         else:
-            rel = jxl_path.relative_to(project_root)
+            raise ValueError("Only RGB P6 PPM supported")
 
-        return export_dir / EXPORT_TIFF_FOLDER / rel.with_suffix(".tif")
+# ═══════════════════════════════════════════════════════════════════════════════
+# COLOR TRANSFORMATION (MATRIX MODE ONLY)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    elif mode == 7:
-        # _EXPORT anchor — only JXLs inside _EXPORT
+def extract_trc_from_icc(icc_bytes):
+    """
+    Extract TRC (Tone Response Curve) from ICC profile.
+    Returns: ('gamma', value) or ('lut', [array of values]) or None if failed
+    """
+    if len(icc_bytes) < 128:
+        return None
+
+    try:
+        # Tag table starts at offset 128
+        tag_count = struct.unpack_from('>I', icc_bytes, 128)[0]
+
+        # Look for rTRC, gTRC, bTRC (red, green, blue TRC)
+        # Assume they are equal (RGB shares same curve in most profiles)
+        trc_tags = {
+            'rTRC': 0x72545243,
+            'gTRC': 0x67545243, 
+            'bTRC': 0x62545243,
+            'kTRC': 0x6B545243  # grayscale
+        }
+
+        curves = {}
+
+        for i in range(tag_count):
+            offset = 128 + 4 + (i * 12)
+            if offset + 12 > len(icc_bytes):
+                break
+
+            sig, idx, size = struct.unpack_from('>4sII', icc_bytes, offset)
+            sig_int = struct.unpack('>I', sig)[0]
+
+            for name, val in trc_tags.items():
+                if sig_int == val:
+                    data_offset = idx
+                    if data_offset + 8 > len(icc_bytes):
+                        continue
+
+                    curve_type = icc_bytes[data_offset:data_offset+4]
+
+                    if curve_type == b'para':
+                        # Parametric curve
+                        func_type = struct.unpack_from('>H', icc_bytes, data_offset+8)[0]
+
+                        if func_type == 0:  # Y = X^gamma
+                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+12)[0]
+                            curves[name] = ('gamma', gamma)
+                        elif func_type == 1:  # Y = (aX + b)^gamma
+                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+16)[0]
+                            curves[name] = ('gamma', gamma)
+                        elif func_type == 2:  # Segmented (ProPhoto uses type 2)
+                            # For ProPhoto it's a segmented curve, but we approximate with main gamma
+                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+16)[0]
+                            curves[name] = ('gamma', gamma)
+
+                    elif curve_type == b'curv':
+                        count = struct.unpack_from('>I', icc_bytes, data_offset+8)[0]
+                        if count == 0:
+                            curves[name] = ('gamma', 1.0)  # Linear
+                        elif count == 1:
+                            gamma_fixed = struct.unpack_from('>H', icc_bytes, data_offset+12)[0]
+                            gamma = gamma_fixed / 256.0
+                            curves[name] = ('gamma', gamma)
+                        else:
+                            # LUT with multiple points
+                            lut = []
+                            for j in range(min(count, 4096)):  # Limit for performance
+                                if data_offset + 12 + j*2 + 2 > len(icc_bytes):
+                                    break
+                                val = struct.unpack_from('>H', icc_bytes, data_offset+12 + j*2)[0]
+                                lut.append(val / 65535.0)
+                            curves[name] = ('lut', lut)
+
+        # Return curve from first channel found (assume RGB shared)
+        for ch in ['rTRC', 'gTRC', 'bTRC', 'kTRC']:
+            if ch in curves:
+                return curves[ch]
+
+    except Exception as e:
+        logger.debug(f"TRC extraction failed: {e}")
+
+    return None
+
+def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
+    """
+    Apply ICC transformation: convert from source ICC to target ICC.
+    Uses LittleCMS for matrix conversion, manual TRC application as fallback.
+    """
+    if not target_icc:
+        logger.warning("No target ICC provided, skipping color transform")
+        return img_array
+
+    try:
+        # Extract TRC from target ICC
+        trc = extract_trc_from_icc(target_icc)
+        if not trc:
+            logger.warning("Could not extract TRC from target ICC, using fallback gamma 2.2")
+            trc = ('gamma', 2.2)
+
+        curve_type, curve_data = trc
+        logger.info(f"  -> Target TRC extracted: {curve_type}={curve_data if curve_type=='gamma' else 'LUT'}")
+
+        # Try LittleCMS for matrix conversion
+        lcms_success = False
+        result_float = None
+
+        if ImageCms and source_icc:
+            try:
+                tgt_path = tmp_dir / "target.icc"
+                src_path = tmp_dir / "source.icc"
+                tgt_path.write_bytes(target_icc)
+                src_path.write_bytes(source_icc)
+
+                src_profile = ImageCms.ImageCmsProfile(str(src_path))
+                tgt_profile = ImageCms.ImageCmsProfile(str(tgt_path))
+
+                transform = ImageCms.buildTransform(
+                    src_profile, tgt_profile, "RGB", "RGB",
+                    renderingIntent=0  # Perceptual
+                )
+
+                # Workaround: LittleCMS often fails with 16-bit directly
+                # Convert to 8-bit temporary, transform, back to float
+                temp_8bit = (img_array.astype(np.float32) / 257.0).astype(np.uint8)
+                pil_img = Image.fromarray(temp_8bit, mode='RGB')
+
+                result = ImageCms.applyTransform(pil_img, transform)
+
+                # Back to float 0-1 range
+                result_float = np.array(result).astype(np.float32) / 255.0
+                lcms_success = True
+
+                logger.debug("  -> LittleCMS: matrix + curve applied")
+
+            except Exception as e:
+                logger.warning(f"LittleCMS failed: {e}")
+
+        # Apply manual TRC only if LittleCMS failed
+        if lcms_success and result_float is not None:
+            # LittleCMS already did everything (matrix + curve), just convert to 16-bit
+            logger.debug("  -> Using LittleCMS result (no manual curve)")
+            result_array = (result_float * 65535.0).astype(np.uint16)
+        else:
+            # Fallback: apply TRC curve manually (assumes same primaries or already converted)
+            logger.debug("  -> Applying TRC manually as fallback")
+            pixels = img_array.astype(np.float32) / 65535.0
+
+            if curve_type == 'gamma':
+                gamma = curve_data
+                if gamma > 0 and abs(gamma - 1.0) > 0.001:
+                    pixels = np.power(pixels, 1.0 / gamma)
+                    logger.debug(f"  -> Applied gamma {gamma} TRC")
+            elif curve_type == 'lut':
+                lut = np.array(curve_data)
+                for c in range(3):
+                    channel = pixels[:,:,c]
+                    indices = (channel * (len(lut)-1)).astype(np.int32)
+                    indices = np.clip(indices, 0, len(lut)-2)
+                    frac = (channel * (len(lut)-1)) - indices
+                    pixels[:,:,c] = lut[indices] + frac * (lut[indices+1] - lut[indices])
+                logger.debug(f"  -> Applied LUT TRC")
+
+            result_array = (pixels * 65535.0).astype(np.uint16)
+
+        return result_array
+
+    except Exception as e:
+        logger.error(f"ICC transform failed completely: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return img_array
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIFF OUTPUT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def write_tiff(img_array, path, icc_data, compression="zip"):
+    """Write numpy array to TIFF file with optional ICC profile."""
+    comp_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib"}
+    comp = comp_map.get(compression, "zlib")
+
+    # metadata=None prevents tifffile from writing array shape to ImageDescription
+    if icc_data:
+        tifffile.imwrite(str(path), img_array, compression=comp, iccprofile=icc_data, metadata=None)
+    else:
+        tifffile.imwrite(str(path), img_array, compression=comp, metadata=None)
+
+def copy_metadata(jxl_path, tiff_path, tmp_dir):
+    """Copy metadata from JXL to TIFF using exiftool."""
+    try:
+        # Copy EXIF using tagsfromfile
+        subprocess.run(
+            ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+             "-exif:all", str(tiff_path)],
+            capture_output=True, timeout=10
+        )
+
+        # Copy XMP and IPTC
+        subprocess.run(
+            ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+             "-xmp:all", "-iptc:all", str(tiff_path)],
+            capture_output=True, timeout=10
+        )
+    except Exception as e:
+        logger.debug(f"Metadata copy warning: {e}")
+
+def cleanup_xmp_icc(tiff_path):
+    """Remove ICC:base64 marker from XMP CreatorTool after extraction."""
+    if not CLEANUP_XMP_ICC_MARKER:
+        return
+    try:
+        r = subprocess.run(
+            ["exiftool", "-XMP-xmp:CreatorTool", str(tiff_path)],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
+            # Extract just the human-readable part before " | " if present
+            content = r.stdout.strip()
+            # Remove ICC:base64 data
+            clean = re.sub(r'ICC:[A-Za-z0-9+/=]+', '', content).strip()
+            clean = re.sub(r'\s*\|\s*$', '', clean)  # Remove trailing " | "
+            if not clean:
+                clean = "jxl_to_tiff"
+
+            subprocess.run(
+                ["exiftool", "-overwrite_original",
+                 f"-XMP-xmp:CreatorTool={clean}", str(tiff_path)],
+                capture_output=True, timeout=10
+            )
+            logger.debug(f"  -> Cleaned up XMP CreatorTool (removed embedded ICC)")
+    except Exception as e:
+        logger.debug(f"XMP cleanup skipped: {e}")
+
+def add_jpeg_preview(tiff_path, tmp_dir):
+    """Add JPEG preview as second page of TIFF."""
+    if not ADD_JPEG_PREVIEW:
+        return
+    try:
+        with Image.open(tiff_path) as img:
+            w, h = img.size
+            max_dim = JPEG_PREVIEW_SIZE
+
+            if w > h:
+                new_w, new_h = max_dim, int(h * max_dim / w)
+            else:
+                new_h, new_w = max_dim, int(w * max_dim / h)
+
+            preview = img.resize((new_w, new_h), Image.LANCZOS)
+            preview_arr = np.array(preview)
+            tifffile.imwrite(str(tiff_path), preview_arr, compression='jpeg', append=True)
+            logger.info(f"  -> Added JPEG preview ({new_w}x{new_h})")
+    except Exception as e:
+        logger.debug(f"Preview failed: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATH RESOLUTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def resolve_output(jxl_path, mode, input_root):
+    """Resolve output path based on mode."""
+    if mode == 0:
+        return input_root / jxl_path.with_suffix(".tif").name
+    elif mode == 8:
+        return jxl_path.parent / jxl_path.with_suffix(".tif").name
+    elif mode == 1:
+        return jxl_path.parent / "converted_tiff" / jxl_path.with_suffix(".tif").name
+    elif mode == 2:
+        return input_root / jxl_path.with_suffix(".tif").name
+    elif mode == 3:
+        return jxl_path.parent / "converted_tiff" / jxl_path.with_suffix(".tif").name
+    elif mode == 4:
+        # Rename folder: JXL → TIFF
+        old_name = jxl_path.parent.name
+        new_name = old_name.replace("JXL", "TIFF").replace("jxl", "tiff")
+        return jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name
+    elif mode == 5:
+        return jxl_path.parent.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+    elif mode == 6:
+        # _EXPORT anchor
         parts = jxl_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {jxl_path}, using local folder")
             return jxl_path.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
-
         export_dir = Path(*parts[:export_idx + 1])
-
+        rel_parts = jxl_path.relative_to(export_dir).parts
+        rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
+        return export_dir / EXPORT_TIFF_FOLDER / rel.with_suffix(".tif")
+    elif mode == 7:
+        # _EXPORT anchor (only inside)
+        parts = jxl_path.parts
+        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        if export_idx is None:
+            return jxl_path.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+        export_dir = Path(*parts[:export_idx + 1])
         if EXPORT_JXL_SUBFOLDER:
             anchor = export_dir / EXPORT_JXL_SUBFOLDER
             rel = jxl_path.relative_to(anchor)
         else:
             rel_parts = jxl_path.relative_to(export_dir).parts
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
-
         return export_dir / EXPORT_TIFF_FOLDER / rel.with_suffix(".tif")
+    else:
+        raise ValueError(f"Mode {mode} not implemented")
 
-    elif mode == 8:
-        # In-place recursive: TIFF goes to the same folder as the source JXL.
-        return jxl_path.parent / jxl_path.with_suffix(".tif").name
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN CONVERSION
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    raise ValueError(f"Modo inválido: {mode}")
-
-def convert_one(jxl_path: Path, write_path: Path, final_path: Path):
-    """
-    Converts a single JXL to TIFF.
-    write_path: where the TIFF is initially written (staging or final destination)
-    final_path: the final destination path (for overwrite checking and logging)
-    """
+def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
+    """Convert a single JXL to TIFF with smart color management."""
     overwritten = final_path.exists()
 
-    if overwritten:
-        if OVERWRITE == False:
+    if overwritten and OVERWRITE == False:
+        n, total = next_count()
+        return str(jxl_path), "skipped", str(final_path)
+
+    if overwritten and OVERWRITE == "smart":
+        if jxl_path.stat().st_mtime <= final_path.stat().st_mtime:
             n, total = next_count()
-            logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
-            return (str(jxl_path), "skipped", str(final_path), None)
-        elif OVERWRITE == "smart":
-            jxl_mtime = jxl_path.stat().st_mtime
-            tiff_mtime  = final_path.stat().st_mtime
-            if jxl_mtime <= tiff_mtime:
-                n, total = next_count()
-                logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {jxl_path.name}")
-                return (str(jxl_path), "skipped", str(final_path), None)
-            logger.info(f"  → SYNC: JXL newer than TIFF, reconverting | {jxl_path.name}")
+            return str(jxl_path), "skipped", str(final_path)
 
     write_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="tiff_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
         try:
-            # 1. Decode JXL to PPM using djxl
-            # PPM supports 16-bit, unlike PNG which djxl always outputs as 8-bit
-            ppm_path = tmp_dir / f"{jxl_path.stem}.ppm"
-            
-            # Use PPM format for 16-bit support
-            djxl_cmd = ["djxl", str(jxl_path), str(ppm_path), "--output_format", "ppm"]
-            r = subprocess.run(djxl_cmd, capture_output=True)
-            
-            if r.returncode != 0:
-                raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+            ppm_path = tmp_dir / "decoded.ppm"
+            djxl_icc_path = tmp_dir / "djxl.icc"
 
-            if not ppm_path.exists():
-                raise RuntimeError("djxl did not produce output PPM")
+            # Extract ICC first to decide strategy
+            original_icc, icc_source = get_source_icc(jxl_path, tmp_dir)
 
-            # 2. Read PPM and convert to TIFF using tifffile
-            # PPM is raw pixel data, easy to read directly
-            with open(ppm_path, 'rb') as f:
-                # Read PPM header
-                magic = f.readline().strip()
-                if magic not in (b'P6', b'P5'):
-                    raise RuntimeError(f"Unsupported PPM format: {magic}")
-                
-                # Skip comments
-                while True:
-                    line = f.readline()
-                    if line.startswith(b'#'):
-                        continue
-                    break
-                
-                # Parse dimensions (width height)
-                dimensions = line.strip() if not line.startswith(b'#') else f.readline().strip()
-                while dimensions.startswith(b'#'):
-                    dimensions = f.readline().strip()
-                width, height = map(int, dimensions.split())
-                
-                # Parse max value (bit depth indicator)
-                maxval_line = f.readline().strip()
-                while maxval_line.startswith(b'#'):
-                    maxval_line = f.readline().strip()
-                maxval = int(maxval_line)
-                
-                # Read raw pixel data
-                # PPM uses big-endian for 16-bit data
-                if maxval <= 255:
-                    pixel_data = np.frombuffer(f.read(), dtype=np.uint8)
+            # Analyze ICC to get hint for logging
+            original_icc_hint = None
+            if original_icc:
+                original_icc_hint = analyze_icc_profile(original_icc)
+                logger.info(f"  -> ICC extracted from {icc_source} ({original_icc_hint})")
+
+            # Select decode strategy based on ICC presence
+            mode, reason = select_decode_strategy(has_original_icc=original_icc is not None)
+            logger.info(f"  -> {reason}")
+
+            if mode == 'roundtrip':
+                # === ROUNDTRIP MODE (DEFAULT WITH ICC) ===
+                # Best for files converted with tiff_to_jxl.py
+                # djxl auto handles display optimization, we attach the original ICC
+                logger.info("  -> Using Roundtrip decode (djxl auto + original ICC)")
+
+                decode_auto(jxl_path, ppm_path)
+                pixels = read_ppm_to_numpy(ppm_path)
+
+                write_tiff(pixels, write_path, original_icc, TIFF_COMPRESSION)
+
+                copy_metadata(jxl_path, write_path, tmp_dir)
+                cleanup_xmp_icc(write_path)
+                add_jpeg_preview(write_path, tmp_dir)
+
+            elif mode == 'matrix':
+                # === MATRIX MODE (LINEAR + LITTLECMS) ===
+                # For color space conversion or when precise transformation needed
+                # Decodes to Rec.2020 linear, then transforms to target ICC
+                logger.info("  -> Using Matrix decode (linear + LittleCMS)")
+
+                decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
+                pixels = read_ppm_to_numpy(ppm_path)
+
+                djxl_icc = djxl_icc_path.read_bytes() if djxl_icc_path.exists() else None
+
+                if target_icc_path:
+                    # Convert to specific target ICC
+                    target_icc = load_target_icc(target_icc_path)
+                    final_pixels = apply_icc_transform(pixels, djxl_icc, target_icc, tmp_dir)
+                    final_icc = target_icc
+                elif original_icc:
+                    # Transform to original ICC profile
+                    final_pixels = apply_icc_transform(pixels, djxl_icc, original_icc, tmp_dir)
+                    final_icc = original_icc
                 else:
-                    # Read as big-endian uint16
-                    pixel_data = np.frombuffer(f.read(), dtype=np.dtype('>u2')).astype(np.uint16)
-                
-                # Reshape based on format
-                if magic == b'P6':  # RGB
-                    img_array = pixel_data.reshape((height, width, 3))
-                else:  # P5 - Grayscale
-                    img_array = pixel_data.reshape((height, width))
-                    img_array = np.expand_dims(img_array, axis=-1)  # Add channel dim
-            
-            # Handle bit depth if needed
-            if DJXL_OUTPUT_DEPTH == 16 and img_array.dtype != np.uint16:
-                img_array = img_array.astype(np.uint16) * 257
-            elif DJXL_OUTPUT_DEPTH == 8 and img_array.dtype != np.uint8:
-                img_array = (img_array / 257).astype(np.uint8)
-            
-            # 3. Save as TIFF
-            compression_map = {
-                "uncompressed": None,
-                "lzw": "lzw",
-                "zip": "zlib"
-            }
-            compression = compression_map.get(TIFF_COMPRESSION.lower(), "zlib")
-            
-            tifffile.imwrite(
-                str(write_path), 
-                img_array,
-                compression=compression,
-                metadata=None
-            )
-            
-            del img_array
+                    # No transform, keep Rec.2020
+                    final_pixels = pixels
+                    final_icc = djxl_icc
 
-            # 3. Copy metadata from JXL to TIFF using exiftool
-            # Note: JXL stores colorspace as native primaries, not ICC blob
-            # We copy all metadata from JXL and let exiftool handle what it can
-            
-            arg_inject = tmp_dir / "inject.args"
-            arg_lines = [
-                "-overwrite_original",
-                "-tagsfromfile", str(jxl_path),
-                "-all:all",
-                "--JXLSignature", "--JXLSize", "--JXLVersion",
-                "--FileType", "--FileTypeExtension", "--MIMEType",
-                "--ImageWidth", "--ImageHeight", "--BitDepth", "--ColorType",
-                "--Compression", "--PhotometricInterpretation",
-                "--StripOffsets", "--StripByteCounts", "--RowsPerStrip",
-                str(write_path)
-            ]
-            
-            arg_inject.write_text("\n".join(arg_lines), encoding="utf-8")
-            
-            r2 = subprocess.run(["exiftool", "-@", str(arg_inject)], 
-                               capture_output=True, text=True)
-            
-            if r2.returncode != 0:
-                err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
-                logger.warning(f"Metadata copy warning for {jxl_path.name}: {err_msg}")
-            
-            # 4. Copy XMP if present in JXL
-            xmp_path = tmp_dir / f"{jxl_path.stem}.xmp"
-            subprocess.run(["exiftool", "-b", "-XMP", str(jxl_path), "-o", str(xmp_path)],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if xmp_path.exists() and xmp_path.stat().st_size > 0:
-                subprocess.run(["exiftool", "-overwrite_original", "-tagsfromfile", str(xmp_path), 
-                               "-xmp:all", str(write_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # 5. Handle ICC Profile
-            # Try to extract ICC from JXL metadata first (embedded by tiff_to_jxl.py)
-            icc_path = extract_icc_from_jxl_metadata(jxl_path, tmp_dir)
-            icc_source = "metadata"
-            
-            if not icc_path:
-                # Fallback: extract ICC via PNG (djxl generates ICC from primaries)
-                icc_path = extract_icc_from_jxl_via_png(jxl_path, tmp_dir)
-                icc_source = "generated"
-            
-            if icc_path:
-                subprocess.run(["exiftool", "-overwrite_original",
-                               f"-ICC_Profile<={icc_path}",
-                               str(write_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                logger.info(f"  -> ICC profile extracted from {icc_source} ({icc_path.stat().st_size} bytes)")
-                
-                # Clean up XMP CreatorTool if it contains our ICC marker (base64 data)
-                # The CreatorTool is preserved with the encoding params, we just remove the ICC: prefix
-                r_ct = subprocess.run(["exiftool", "-XMP-xmp:CreatorTool", str(write_path)],
-                                     capture_output=True, text=True, timeout=5)
-                if r_ct.returncode == 0 and "ICC:" in r_ct.stdout:
-                    # Extract just the encoding params part before " | " if present
-                    import re
-                    match = re.search(r'ICC:[A-Za-z0-9+/=]+(.*)$', r_ct.stdout.strip())
-                    if match and match.group(1):
-                        # Keep the suffix (e.g., " | TIFF to JXL with ICC preservation")
-                        new_ct = match.group(1).lstrip(" |")
-                    else:
-                        new_ct = "JXL to TIFF converter"
-                    subprocess.run(["exiftool", "-overwrite_original", f"-XMP-xmp:CreatorTool={new_ct}", str(write_path)],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    logger.debug(f"  -> Cleaned up XMP CreatorTool (removed embedded ICC)")
-            else:
-                logger.debug(f"  -> No ICC profile could be extracted from JXL")
-            
-            # 6. Add JPEG preview/thumbnail
-            if ADD_JPEG_PREVIEW:
-                try:
-                    from PIL import Image
-                    # Open the main TIFF and create a preview
-                    img = Image.open(write_path)
-                    # Calculate new size maintaining aspect ratio
-                    width, height = img.size
-                    max_size = JPEG_PREVIEW_SIZE
-                    if width > height:
-                        new_width = max_size
-                        new_height = int(height * max_size / width)
-                    else:
-                        new_height = max_size
-                        new_width = int(width * max_size / height)
-                    
-                    # Resize for preview
-                    preview = img.resize((new_width, new_height), Image.LANCZOS)
-                    
-                    # Save as second page/subIFD
-                    # Use JPEG compression for the preview
-                    preview_path = tmp_dir / "preview.jpg"
-                    preview.save(preview_path, "JPEG", quality=85)
-                    
-                    # Add preview as second page using tifffile
-                    # Append to existing TIFF using imwrite with append=True
-                    preview_data = np.array(preview)
-                    tifffile.imwrite(str(write_path), preview_data, compression='jpeg', append=True)
-                    
-                    img.close()
-                    preview.close()
-                    logger.info(f"  -> Added JPEG preview ({new_width}x{new_height})")
-                except Exception as e:
-                    logger.debug(f"  -> JPEG preview skipped: {e}")
+                write_tiff(final_pixels, write_path, final_icc, TIFF_COMPRESSION)
+
+                copy_metadata(jxl_path, write_path, tmp_dir)
+                cleanup_xmp_icc(write_path)
+                add_jpeg_preview(write_path, tmp_dir)
+
+            else:  # mode == 'basic'
+                # === BASIC MODE (DEFAULT WITHOUT ICC) ===
+                # For consumer JXLs without embedded ICC
+                logger.info("  -> Using Basic decode (djxl auto, no ICC)")
+
+                decode_auto(jxl_path, ppm_path)
+                pixels = read_ppm_to_numpy(ppm_path)
+
+                write_tiff(pixels, write_path, None, TIFF_COMPRESSION)
+
+                # Minimal metadata copy
+                subprocess.run(
+                    ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+                     "-exif:all", str(write_path)],
+                    capture_output=True, timeout=10
+                )
+
+            # Clear ImageDescription that may have been added by tifffile
+            subprocess.run(
+                ["exiftool", "-overwrite_original", "-IFD1:ImageDescription=", 
+                 "-ImageDescription=", str(write_path)],
+                capture_output=True, timeout=10
+            )
 
             n, total = next_count()
-            status = "overwrite" if overwritten else "ok"
-            label  = "OVERWRITE" if overwritten else "OK"
-            logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path}")
-            return (str(jxl_path), status, str(final_path), jxl_path)
+            status = "OVERWRITE" if overwritten else "OK"
+            logger.info(f"[{n}/{total}] {status} | {jxl_path.name} ({reason})")
+            return str(jxl_path), "ok", str(final_path)
 
         except Exception as e:
             n, total = next_count()
             logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
-            return (str(jxl_path), "error", str(e), None)
+            return str(jxl_path), "error", str(e)
 
-def process_group(group_pairs: list, workers: int, mode: int = 0):
-    """
-    Converts a group of (jxl, final_tiff) pairs in parallel.
-    If TEMP2_DIR is set, writes to staging first then moves in bulk.
-    """
+def process_group(group_pairs, workers, mode, target_icc=None):
+    """Process a group of (jxl, tiff) pairs in parallel."""
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
 
     if use_staging:
         staging_dir.mkdir(parents=True, exist_ok=True)
 
-    
     tasks = []
     for jxl, final_tiff in group_pairs:
         if use_staging:
-            # Unique staging name to avoid collisions across different source folders
-            write_tiff = staging_dir / f"{jxl.parent.name}__{jxl.stem}.tif"
+            write_tiff_path = staging_dir / f"{jxl.parent.name}__{jxl.stem}.tif"
         else:
-            write_tiff = final_tiff
-        tasks.append((jxl, write_tiff, final_tiff))
+            write_tiff_path = final_tiff
+        tasks.append((jxl, write_tiff_path, final_tiff))
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, t, w, f): (t, w, f) for t, w, f in tasks}
+        futures = {ex.submit(convert_one, j, w, f, target_icc): (j, w, f) 
+                  for j, w, f in tasks}
         for fut in as_completed(futures):
             results.append(fut.result())
 
-    # Move from staging to final destination in bulk
+    # Move from staging
     if use_staging:
         moved = 0
-        for jxl, write_tiff, final_tiff in tasks:
+        for _, write_tiff, final_tiff in tasks:
             if write_tiff.exists():
                 final_tiff.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(write_tiff), str(final_tiff))
                 moved += 1
         if moved:
-            logger.info(f"  → Moved {moved} file(s) from staging to final destination")
+            logger.info(f"  -> Moved {moved} file(s) from staging to final")
 
-    # Delete source JXLs after confirmed decode — only for modes 6/8, only after staging.
+    # Delete source JXLs (mode 6/8 only)
     if DELETE_SOURCE and mode in (6, 8):
         deleted = 0
         src_map = {str(j): (j, f) for j, _, f in tasks}
         for result in results:
-            status    = result[1]
-            src_jxl   = result[3]
+            status = result[1]
+            src_jxl = src_map.get(result[0], (None, None))[0]
             if status not in ("ok", "overwrite") or src_jxl is None:
                 continue
-            _, final_tiff = src_map.get(result[0], (None, None))
+            final_tiff = src_map.get(result[0], (None, None))[1]
             if final_tiff is None or not final_tiff.exists():
-                logger.warning(f"  KEEP (TIFF not found at destination) | {src_jxl.name}")
                 continue
             src_jxl.unlink()
             deleted += 1
             logger.info(f"  DELETED source | {src_jxl.name}")
         if deleted:
-            logger.info(f"  → Deleted {deleted} source JXL(s)")
+            logger.info(f"  -> Deleted {deleted} source JXL(s)")
 
     return results
 
-def find_jxls_recursive(input_path: Path):
+def find_jxls_recursive(path):
     """Find all JXL files recursively."""
     seen = set()
     files = []
     for ext in ("*.jxl", "*.jiff"):
-        for f in input_path.rglob(ext):
+        for f in path.rglob(ext):
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
                 files.append(f)
     return files
 
-def find_jxls_mode7(input_path: Path):
-    """Mode 7: only JXLs inside folders containing EXPORT_MARKER in their path."""
+def find_jxls_mode7(input_path):
+    """Mode 7: only JXLs inside folders containing EXPORT_MARKER."""
     all_jxls = find_jxls_recursive(input_path)
     filtered = []
     for j in all_jxls:
@@ -671,134 +886,125 @@ def find_jxls_mode7(input_path: Path):
             filtered.append(j)
     return filtered
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARGUMENT PARSING AND MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def main():
-    parser = argparse.ArgumentParser(description="Batch JPEG XL → TIFF 16-bit converter")
-    parser.add_argument("input",             type=Path, help="Input root folder or file")
-    parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
-    parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
-    parser.add_argument("--workers",         type=int, default=min(os.cpu_count(), 16))
-    parser.add_argument("--overwrite",       action="store_true",
-                        help="Always overwrite existing TIFFs")
-    parser.add_argument("--sync",            action="store_true",
-                        help="Only reconvert JXLs newer than their existing TIFF")
-    parser.add_argument("--depth",           type=int, choices=[8, 16], default=None,
-                        help="Output bit depth (8 or 16). Overrides DJXL_OUTPUT_DEPTH setting.")
-    parser.add_argument("--compression",     type=str, choices=["uncompressed", "lzw", "zip"], default=None,
-                        help="TIFF compression: uncompressed, lzw, or zip (default: zip). Overrides TIFF_COMPRESSION setting.")
+    parser = argparse.ArgumentParser(
+        description="JPEG XL to TIFF converter with ICC preservation",
+        epilog="""
+Decode modes:
+  Roundtrip (default with ICC)  - djxl auto + original ICC attachment
+  Basic (default no ICC)        - djxl auto only, no color management  
+  Matrix (--matrix)             - linear decode + LittleCMS transform
+
+Examples:
+  %(prog)s photo.jxl                    # Auto mode based on ICC presence
+  %(prog)s photo.jxl --matrix           # Force Matrix mode
+  %(prog)s folder/ --workers 8          # Batch conversion
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("input", type=Path, help="Input JXL file or directory")
+    parser.add_argument("output", nargs="?", type=Path, default=None)
+    parser.add_argument("--mode", type=int, default=0, choices=range(9),
+                       help="Output path mode (0-8, see documentation)")
+    parser.add_argument("--workers", type=int, default=min(os.cpu_count(), 16),
+                       help="Number of parallel workers")
+    parser.add_argument("--overwrite", action="store_true",
+                       help="Overwrite existing files")
+    parser.add_argument("--sync", action="store_true",
+                       help="Only reconvert if JXL is newer than TIFF")
+
+    # Decode mode flags
+    parser.add_argument("--matrix", action="store_true", dest="use_matrix",
+                       help="Use Matrix decode mode (linear + LittleCMS transform)")
+    parser.add_argument("--basic", action="store_true", dest="force_basic",
+                       help="Force Basic mode (no ICC handling)")
+
+    # ICC options
+    parser.add_argument("--target-icc", type=Path, default=None,
+                       help="Convert to specific ICC profile (requires --matrix)")
+    parser.add_argument("--no-icc-cleanup", action="store_true", dest="no_icc_clean",
+                       help="Keep ICC:base64 marker in XMP CreatorTool")
+
+    # Output
+    parser.add_argument("--depth", type=int, choices=[8, 16], default=None,
+                       help="Output bit depth (8 or 16)")
+    parser.add_argument("--compression", choices=["zip", "lzw", "none"], default=None,
+                       help="TIFF compression method")
+
     args = parser.parse_args()
 
-    global OVERWRITE, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION
+    # Apply globals
+    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION
+
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
         OVERWRITE = True
-    
+
+    USE_MATRIX_MODE = args.use_matrix
+    FORCE_BASIC_MODE = args.force_basic
+
+    if args.no_icc_clean:
+        CLEANUP_XMP_ICC_MARKER = False
+
+    # Warning if Matrix mode requested but ImageCms unavailable
+    if USE_MATRIX_MODE and not ImageCms:
+        logger.warning("Matrix mode requested but ImageCms unavailable. "
+                       "Install with: pip install Pillow --upgrade")
+
     if args.depth:
         DJXL_OUTPUT_DEPTH = args.depth
-    
     if args.compression:
         TIFF_COMPRESSION = args.compression
 
     log_file = setup_logger()
-    _delete_label = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
-    logger.info(
-        f"Mode: {args.mode} | Output Depth: {DJXL_OUTPUT_DEPTH}-bit | Compression: {TIFF_COMPRESSION} | "
-        f"JPEG Preview: {'ON (' + str(JPEG_PREVIEW_SIZE) + 'px)' if ADD_JPEG_PREVIEW else 'OFF'} | "
-        f"Staging: {TEMP2_DIR or 'disabled'} | "
-        f"Overwrite: {'sync (smart)' if args.sync else OVERWRITE} | {_delete_label} | Workers: {args.workers}"
-    )
-    logger.info(f"Input: {args.input}")
+    logger.info(f"Config: matrix_mode={USE_MATRIX_MODE}, "
+                f"basic_mode={FORCE_BASIC_MODE}, "
+                f"target_icc={args.target_icc}")
 
-    # Collect input files
-    if args.mode in (0, 1) and args.input.is_file():
+    # Collect files
+    if args.input.is_file():
         jxls = [args.input]
-        # If output is specified and is a directory, use it; otherwise use input's parent
-        if args.output and args.output.is_dir():
-            output_root = args.output
-        else:
-            output_root = args.input.parent
-    elif args.mode in (0, 1):
-        # Directory input: flat (non-recursive)
-        jxls = list(args.input.glob("*.jxl"))
-        output_root = args.output or args.input
-    elif args.mode == 2:
-        # Flat output directory
-        jxls = find_jxls_recursive(args.input)
-        output_root = args.output or args.input
-    elif args.mode == 7:
-        jxls = find_jxls_mode7(args.input)
-        output_root = args.input
-    elif args.mode == 8:
-        jxls = find_jxls_recursive(args.input)
-        output_root = args.input
+        output_root = args.output or args.input.parent
     else:
-        jxls = find_jxls_recursive(args.input)
-        output_root = args.input
+        if args.mode == 7:
+            jxls = find_jxls_mode7(args.input)
+        else:
+            jxls = find_jxls_recursive(args.input)
+        output_root = args.output or args.input
 
     logger.info(f"Files found: {len(jxls)}")
     _counter["total"] = len(jxls)
 
-    # Build (jxl, tiff_destination) pairs
+    # Build pairs
     pairs = []
     for j in jxls:
         if args.mode == 0:
-            # If output is explicitly specified and looks like a file (has .tif/.tiff extension)
-            if args.output and args.output.suffix.lower() in ('.tif', '.tiff'):
-                tiff = args.output
-            # File or directory: if output_root differs from source parent, use it
-            elif output_root != args.input:
-                tiff = output_root / j.with_suffix(".tif").name
+            if args.output:
+                tiff = args.output / j.with_suffix(".tif").name
             else:
                 tiff = j.parent / j.with_suffix(".tif").name
-        elif args.mode in (1, 2):
-            if args.input.is_file():
-                # Single file → converted_tiff/ subfolder
-                tiff = j.parent / CONVERTED_TIFF_FOLDER / j.with_suffix(".tif").name
-            else:
-                tiff = output_root / j.with_suffix(".tif").name
+        elif args.mode == 8:
+            tiff = j.parent / j.with_suffix(".tif").name
         else:
             tiff = resolve_output(j, args.mode, args.input)
         pairs.append((j, tiff))
 
-    if args.mode in (6, 8) and DELETE_SOURCE:
-        logger.info(f"Mode {args.mode} — DELETE_SOURCE=True: source JXLs will be deleted after successful decode")
-        if DELETE_CONFIRM:
-            if not confirm_deletion_jxl():
-                logger.info("Deletion not confirmed — exiting.")
-                return
-    elif args.mode == 8:
-        logger.info("Mode 8 — in-place recursive | DELETE_SOURCE=False: JXL and TIFF will coexist")
-
-    # Group by output folder (one bulk move per group)
-    groups: dict[Path, list] = {}
+    # Process
+    groups = {}
     for j, t in pairs:
         groups.setdefault(t.parent, []).append((j, t))
 
-    logger.info(f"Output groups: {len(groups)}")
-
-    ok = err = skipped = overwritten = synced = 0
-
     for dest_folder, group_pairs in groups.items():
-        if len(groups) > 1:
-            logger.info(f"── Group: {dest_folder} ({len(group_pairs)} file(s))")
+        results = process_group(group_pairs, args.workers, args.mode, 
+                               target_icc=args.target_icc)
 
-        results = process_group(group_pairs, args.workers, args.mode)
-
-        for result in results:
-            status = result[1]
-            if   status == "ok":        ok += 1
-            elif status == "overwrite": ok += 1; overwritten += 1; synced += 1
-            elif status == "skipped":   skipped += 1
-            elif status == "error":     err += 1
-
-    logger.info(f"\n{'-'*50}")
-    if args.sync:
-        logger.info(f"SYNC done: {synced} reconverted | {skipped} up to date | {err} errors")
-        logger.info(f"  → Reconverted: JXLs newer than their existing TIFF")
-        logger.info(f"  → Up to date: TIFF is newer than or equal to JXL")
-    else:
-        logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
-    logger.info(f"Log: {log_file}")
+    logger.info("Done")
 
 if __name__ == "__main__":
     main()

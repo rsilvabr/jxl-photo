@@ -1,9 +1,11 @@
 # JXL-TIFF-JPEG-PNG Converter
 
-JPEG XL conversion tools with **full ICC color profile preservation** and full EXIF metadata correctly embedded and visible in IrfanView, XnView MP, and other applications.
-Designed for enthusiasts and photographers working with 16-bit TIFF files who desire to compact their photos keeping 16-bit tonal range. Tested with Capture One, Lightroom, NX Studio, Photoshop and Fuji Hyper Utility exported 16-bit TIFFs.
+JPEG XL conversion tools with **full ICC color profile preservation** and full EXIF metadata correctly embedded and visible in IrfanView, XnView MP, and other applications. Designed for enthusiasts and photographers working with 16-bit TIFF files who desire to compact their photos keeping 16-bit tonal range. Tested with Capture One, Lightroom, NX Studio, Photoshop and Fuji Hyper Utility exported 16-bit TIFFs.
+
+---
 
 # Why JPEG XL?
+
 Spectacular compression with no compromise on bit depth.
 
 - Lossless 16-bit files much smaller than TIFF and TIFF with ZIP/Deflate
@@ -25,30 +27,70 @@ I have tested with different settings and posted on reddit, [click here to check
 # Features
 
 ### 1. **ICC Profile Preservation** 
-The standout feature of this toolkit.
-Special care was taken when developing this to don't break ICC profiles, so photos using AdobeRGB, ProPhotoRGB or other special ICC profiles will be correct after conversion.
 
-When converting TIFF → JXL → TIFF, or JXL → JPG/PNG 
+Professional color management requires precise ICC profiles with full TRC (Tone Reproduction Curve) data, not just generic color primaries. While the JPEG XL format fully supports ICC profiles in both lossless and lossy modes, the reference encoder (`cjxl`) optimizes file size by converting detailed ICC profiles to compact "native primaries" representation when using lossy compression.
 
-- **Lossless JXL:** ICC preserved automatically in JXL container
-- **Lossy JXL:** Original ICC embedded as XMP metadata, then restored on decode
-- **Result:** Your exact original ICC profile (gamma curves, copyright, device calibration)
+This toolkit ensures **bit-exact ICC preservation** across all conversion paths:
 
-Why this matters: Lossy JXL normally converts ICC to "native primaries" — 
-which works for display but loses TRC detail important for professional editing.
+- **Lossless mode:** Leverages native JXL ICC container support (standard behavior)
+- **Lossy mode:** Embeds original ICC as base64-encoded XMP metadata before encoding, then restores it on decode — bypassing the encoder's optimization that would otherwise discard TRC curves and copyright metadata
+- **Round-trip safety:** TIFF → JXL → TIFF maintains identical ICC data, gamma curves, and device calibration metadata
 
-Encoding and decoding with this kit guarantees that metadata will be preserved. 
+**Why this matters:**  
+Native primaries are sufficient for display, but professionally calibrated workflows rely on precise TRC curves found only in full ICC profiles. This toolkit guarantees your color profiles survive compression intact, regardless of encoder optimization settings.
 
-### 2. **JPEG Preview Embedding**
+### 2. **Three Decode Modes for JXL → TIFF**
+
+**Roundtrip Mode** (default when ICC present): Uses `djxl auto` + original ICC attachment. Best for files from `tiff_to_jxl.py`. Visually perfect and fast.
+
+**Basic Mode** (default when no ICC): Uses `djxl auto` only. For consumer JXLs without embedded profiles.
+
+**Matrix Mode** (optional `--matrix`): Linear Rec.2020 decode + LittleCMS transform. For color space conversion or special workflows.
+
+### 3. **JPEG Preview Embedding**
 TIFF output includes a second page with JPEG-compressed preview for fast 
 thumbnail generation in Windows Explorer and other file managers.
 
-### 3. **Professional Workflow Support**
+### 4. **Professional Workflow Support**
 - 16-bit TIFF preservation
-- Full EXIF/XMP metadata preservation
+- Full EXIF/XMP metadata preservation (fixed in this version!)
 - Multiple folder structure modes (flat, recursive, Capture One or Lightroom EXPORT)
 - Parallel processing (tested up to 32 workers)
 - Sync mode (only reconvert changed files)
+
+---
+
+##  What's New in This Version
+
+### Decode Modes 
+- **Roundtrip** : `djxl auto` + original ICC — recommended for most use
+- **Basic** : `djxl auto` only — for web/mobile JXLs
+- **Matrix** : Linear + LittleCMS — for color space conversion
+
+
+
+### Bug Fixes
+
+#### XMP Preservation Fixed
+Previous versions had a critical bug where XMP metadata was **overwritten** instead of preserved:
+- **Old behavior**: First copy EXIF/XMP, then overwrite all XMP with ICC data
+- **Result**: Ratings, keywords, and original descriptions were lost!
+- **New behavior**: Targeted XMP updates using `-xmp-dc:Description=` and `-xmp-xmp:CreatorTool=`
+- **Result**: Original metadata + encoding info + ICC all coexist
+
+#### EXIF Extraction Fixed
+Previous versions used binary EXIF extraction which could corrupt data:
+- **Old method**: `exiftool -b -Exif -o exif.bin` then inject
+- **Problem**: Produced 27MB corrupted files instead of 880 bytes
+- **New method**: `exiftool -tagsfromfile source -exif:all destination`
+- **Result**: EXIF now correctly visible in IrfanView
+
+#### ICC Handling Improved
+- Separate ICC extraction: **patched for PNG encoding** (cjxl compatibility) vs **original for preservation** (perfect round-trip)
+- ICC from XMP now used with **Roundtrip Mode** (djxl auto + direct ICC apply) avoiding double gamma issues
+
+#### ImageDescription Cleanup
+Fixed `tifffile` adding `{"shape": [H,W,C]}` to ImageDescription (both IFD0 and IFD1/preview). Now cleaned automatically.
 
 ---
 
@@ -56,8 +98,8 @@ thumbnail generation in Windows Explorer and other file managers.
 
 | Script | Purpose | Key Feature |
 |--------|---------|-------------|
-| [`tiff_to_jxl.py`](tiff_to_jxl.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation |
-| [`jxl_to_tiff.py`](jxl_to_tiff.py) | JXL → TIFF decoder | Restores original ICC from XMP, adds JPEG preview |
+| [`tiff_to_jxl.py`](tiff_to_jxl.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation, concatenates description |
+| [`jxl_to_tiff.py`](jxl_to_tiff.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode (no double gamma), adds JPEG preview |
 | [`jxl_to_jpg_png.py`](jxl_to_jpg_png.py) | JXL → JPG/PNG encoder | Batch JXL → JPEG/PNG with ICC profile conversion |
 
 
@@ -66,6 +108,7 @@ thumbnail generation in Windows Explorer and other file managers.
 ##  Quick Start
 
 ### Typical workflow
+
 
 ```
 Capture One
@@ -96,8 +139,11 @@ py tiff_to_jxl.py "photo.tif" --mode 0 --workers 8
 ### JXL → TIFF
 
 ```powershell
-# Single file
+# Single file — auto mode (Roundtrip if has ICC, Basic if not)
 py jxl_to_tiff.py "photo.jxl"
+
+# Force Matrix mode for color space conversion
+py jxl_to_tiff.py "photo.jxl" --matrix --target-icc "C:\icc\sRGB.icc"
 
 # Folder
 py jxl_to_tiff.py "F:\Photos\2024" --mode 7
@@ -125,7 +171,7 @@ Depending on your needs, two common approaches:
 
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space. Tools like FreeFileSync support folder filters that make this easy.
 2. Delete TIFFs, keep only JXL — a separate script for this can be found here: [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports)
-3. The script has an configurable option to delete TIFFs after conversion. 
+3. Use the configurable option to delete TIFFs after conversion available in this script. 
 
 
 
@@ -161,14 +207,14 @@ $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 
 ##  ICC Preservation: How It Works
 
-### Without Preservation (standard JXL workflow)
+### Without This Toolkit (default cjxl behavior)
 
 ```
 TIFF (ProPhoto ICC with Kodak TRC curves)
-    ↓ cjxl lossy
-JXL (native primaries only - ICC detail lost!)
+    ↓ cjxl lossy (default settings)
+JXL (native primaries + minimal ICC - TRC detail optimized away)
     ↓ djxl
-TIFF (generic ICC generated from primaries)
+TIFF (generic ICC generated from primaries - sufficient for display only)
 ```
 
 **Problem:** Generic ICC works for viewing, but lacks:
@@ -182,7 +228,7 @@ TIFF (generic ICC generated from primaries)
 TIFF (ProPhoto ICC with Kodak TRC curves)
     ↓ tiff_to_jxl.py (EMBED_ICC_IN_JXL = True)
 JXL (native primaries + XMP with base64 ICC)
-    ↓ jxl_to_tiff.py
+    ↓ jxl_to_tiff.py (Roundtrip Mode)
 TIFF (original ProPhoto ICC restored!)
 ```
 
@@ -248,7 +294,29 @@ exiftool -ProfileDescription -ProfileCopyright roundtrip.tif
 
 # Check ICC is embedded in JXL
 exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+
+# Check EXIF is visible in IrfanView
+exiftool -Make -Model roundtrip.tif
 ```
+
+---
+
+## Known Limitations
+
+### eciRGB v2 and Special ICC Profiles
+
+The cjxl/dxjl converters were optimized for:
+- sRGB (gamma ~2.2)
+- Rec.2020 (standard gamma)
+- Linear spaces
+
+Profiles with special transfer curves like **eciRGB v2** (L* curve) may have slight color shifts during conversion because cjxl/djxl assumes standard gamma when encoding to XYB.
+
+**Recommendation**: For critical work with eciRGB v2 or similar profiles, either:
+- Keep originals in TIFF format, or
+- Convert to Rec.2020 before JXL encoding
+
+See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical details.
 
 ---
 
@@ -256,6 +324,8 @@ exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
 
 These tools were made for my personal workflow. 
 Use at your own risk — I am not responsible for any issues you may encounter.
+
+However, If you find any bugs, fell free to report to me - I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
 
@@ -267,6 +337,8 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Preserving 16-bit depth through the conversion pipeline
 - Embedding EXIF so it is visible in IrfanView and other applications
 - Correctly handling ICC profiles from Capture One exports (sRGB, AdobeRGB, ProPhoto RGB)
+- **Fixing XMP overwrite bug that destroyed original metadata**
+- **Fixing EXIF binary extraction that produced corrupted data**
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 

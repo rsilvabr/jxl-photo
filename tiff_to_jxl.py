@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-tiff_to_jxl.py — Batch TIFF 16-bit → JPEG XL converter
+tiff_to_jxl.py — Batch TIFF 16-bit → JPEG XL converter with proper XMP preservation
 
 Usage:
-  py tiff_to_jxl.py <input> [output] --mode 0-5 [--workers N] [--overwrite] [--sync]
+  py tiff_to_jxl.py <input> [output] --mode 0-8 [--workers N] [--overwrite] [--sync]
 
 Requirements:
   pip install tifffile numpy
@@ -11,7 +11,7 @@ Requirements:
   exiftool     →  https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil
+import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil, base64
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -83,8 +83,7 @@ ENCODE_TAG_MODE = "xmp"
 #              Visible in Windows Properties, but not in IrfanView
 # "off"      → does not add anything
 # NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
-# the encoding tag is written to XMP-xmp:CreatorTool instead of dc:Description
-# (since dc:Description is used for ICC embedding).
+# the encoding tag is concatenated to dc:Description, and ICC goes to CreatorTool.
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
@@ -92,11 +91,16 @@ EMBED_ICC_IN_JXL = True
 # but is preserved for round-trip conversion back to TIFF/JPEG.
 # This ensures the exact original ICC (with TRC curves, copyright, etc.)
 # is available when converting JXL → TIFF, even for lossy JXLs.
-# True  → embed ICC profile in JXL metadata (recommended, default)
+# True  → embed ICC profile in JXL XMP CreatorTool (recommended, default)
 # False → do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
+CLEANUP_XMP_ICC_MARKER = False
+# Remove legacy ICC markers from XMP if present.
+# True  → clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
+# False → keeps existing ICC markers (default)
+
 DELETE_SOURCE = False
-# [MODE 6 only] Whether to delete the source TIFF after successful encoding.
+# [MODE 8 only] Whether to delete the source TIFF after successful encoding.
 # Only deletes if ALL of the following are true:
 #   - encode status is ok or overwrite (never deletes on error or skip)
 #   - the JXL file exists at its final destination (after staging move if applicable)
@@ -105,7 +109,7 @@ DELETE_SOURCE = False
 # True            → delete source TIFF after confirmed successful encode.
 #
 # WARNING: irreversible. Only enable after testing on a small batch first.
-# Has no effect on modes 0–5.
+# Has no effect on modes 0–7.
 
 
 
@@ -182,7 +186,7 @@ EXPORT_TIFF_SUBFOLDER = ""
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DELETE_CONFIRM = True
-# Only relevant when DELETE_SOURCE = True (mode 6).
+# Only relevant when DELETE_SOURCE = True (mode 8).
 # True  (default) → require interactive confirmation before deleting any source file.
 #   - Lossless conversion: type "yes" to confirm.
 #   - Lossy conversion: type the current time (HHMM) shown on screen. This cannot
@@ -231,7 +235,7 @@ def next_count():
         return _counter["done"], _counter["total"]
 
 def confirm_deletion_tiff(is_lossy: bool) -> bool:
-    """Interactive confirmation before deleting source TIFFs (mode 6, DELETE_CONFIRM=True).
+    """Interactive confirmation before deleting source TIFFs (mode 8, DELETE_CONFIRM=True).
     Lossless: type 'yes'. Lossy: type the current time (HHMM) shown on screen.
     Returns True if confirmed, False if cancelled."""
     from datetime import datetime as _dt
@@ -377,6 +381,174 @@ def extract_icc_fixed(tiff_path):
         return bytes(icc)
     return None
 
+def extract_icc_original(tiff_path):
+    """Extracts original ICC profile WITHOUT patching.
+    Used for round-trip preservation (XMP CreatorTool).
+    Returns original ICC bytes or None."""
+    with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
+        arg_file = Path(tmp) / "icc_extract.args"
+        arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
+        r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
+    if r.returncode == 0 and len(r.stdout) > 128:
+        return bytes(r.stdout)  # Return original, unmodified ICC
+    return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOVAS FUNÇÕES PARA PRESERVAÇÃO DE XMP (CORREÇÃO DO BUG DE OVERWRITE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def extract_xmp_original(tiff_path, tmp_dir):
+    """Extract original XMP from TIFF as separate file for preservation.
+    Returns path to XMP file or None if no XMP exists."""
+    xmp_path = tmp_dir / f"{tiff_path.stem}_original.xmp"
+    # Correct order: -o output.xmp -b -XMP input.tif
+    r = subprocess.run(
+        ["exiftool", "-o", str(xmp_path), "-b", "-XMP", str(tiff_path)],
+        capture_output=True
+    )
+    if xmp_path.exists() and xmp_path.stat().st_size > 0:
+        return xmp_path
+    return None
+
+import re
+
+def read_existing_description(xmp_path):
+    """Read existing dc:description from XMP file if present.
+    Returns empty string if not found."""
+    if not xmp_path or not xmp_path.exists():
+        return ""
+    try:
+        r = subprocess.run(
+            ["exiftool", "-s", "-XMP-dc:Description", str(xmp_path)],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0 and r.stdout:
+            stdout = r.stdout.strip()
+            # Try multiple parsing strategies
+            # Strategy 1: Split by " : " (standard exiftool output)
+            if " : " in stdout:
+                parts = stdout.split(" : ", 1)
+                if len(parts) > 1:
+                    return parts[1].strip()
+            # Strategy 2: Use regex to find content after first colon
+            match = re.search(r'^[^:]+:(.+)$', stdout, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            # Strategy 3: If no colon, return whole string (might be just the value)
+            if stdout and not stdout.startswith("Warning"):
+                return stdout
+    except Exception as e:
+        logger.debug(f"Failed to read description: {e}")
+    return ""
+
+def read_existing_creator_tool(xmp_path):
+    """Read existing CreatorTool from XMP file if present.
+    Returns empty string if not found."""
+    if not xmp_path or not xmp_path.exists():
+        return ""
+    r = subprocess.run(
+        ["exiftool", "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
+        capture_output=True, text=True
+    )
+    if r.returncode == 0 and r.stdout:
+        stdout = r.stdout.strip()
+        if " : " in stdout:
+            return stdout.split(" : ", 1)[1].strip()
+        elif ":" in stdout:
+            return stdout.split(":", 1)[1].strip()
+    return ""
+
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original):
+    """Build exiftool arguments for metadata injection with proper XMP preservation.
+    
+    Strategy:
+    1. Inject EXIF binary if available
+    2. Copy all metadata from source TIFF (preserving original XMP)
+    3. Add/modify specific XMP tags without overwriting the whole package
+    
+    Returns path to arg file.
+    """
+    args_lines = ["-overwrite_original"]
+    
+    # 1. Inject raw EXIF binary blob if extracted
+    if exif_bin:
+        args_lines.append(f"-Exif<={exif_bin}")
+    
+    # 2. Copy tags from source file (preserves original XMP, EXIF, etc.)
+    args_lines.append("-tagsfromfile")
+    args_lines.append(str(tiff_path))
+    args_lines.append("-exif:all")
+    args_lines.append("-xmp:all")
+    args_lines.append("--Orientation")  # Strip orientation to prevent double-rotation issues
+    
+    # 3. Handle encoding parameters and ICC embedding in XMP
+    encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+    
+    # Read existing description from original XMP if available
+    existing_desc = ""
+    if xmp_original:
+        existing_desc = read_existing_description(xmp_original)
+    
+    # Build final dc:Description (concatenate if original exists)
+    if ENCODE_TAG_MODE == "xmp":
+        if existing_desc and existing_desc != encoding_desc:
+            # Concatenate: original | encoding_params
+            final_description = f"{existing_desc} | {encoding_desc}"
+        elif existing_desc:
+            final_description = existing_desc
+        else:
+            final_description = encoding_desc
+            
+        # Set dc:Description with concatenated content
+        args_lines.append(f"-xmp-dc:Description={final_description}")
+        
+    elif ENCODE_TAG_MODE == "software":
+        # For software mode, we don't modify dc:Description
+        # Instead, we update the EXIF Software field
+        sw_arg = tmp_dir / "sw_read.args"
+        sw_arg.write_text(f"-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+        r_sw = subprocess.run(["exiftool", "-@", str(sw_arg)], capture_output=True, text=True)
+        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
+        new_sw = f"{original_sw} | {encoding_desc}"
+        args_lines.append(f"-Software={new_sw}")
+    
+    # 4. Embed ICC in XMP CreatorTool if enabled (for round-trip preservation)
+    # This operates independently of ENCODE_TAG_MODE
+    if EMBED_ICC_IN_JXL and icc_bytes:
+        icc_b64 = base64.b64encode(icc_bytes).decode('ascii')
+        
+        # Read existing CreatorTool to concatenate if present
+        existing_creator = ""
+        if xmp_original:
+            existing_creator = read_existing_creator_tool(xmp_original)
+        
+        # Build CreatorTool content: existing | ICC:base64 or just ICC:base64
+        if existing_creator:
+            creator_tool = f"{existing_creator} | ICC:{icc_b64}"
+        else:
+            creator_tool = f"ICC:{icc_b64}"
+            
+        args_lines.append(f"-xmp-xmp:CreatorTool={creator_tool}")
+    
+    # 5. Cleanup legacy ICC markers from XMP if requested
+    if CLEANUP_XMP_ICC_MARKER:
+        # Remove common legacy ICC marker tags that might conflict
+        args_lines.append("-xmp-icc:all=")  # Clear any XMP ICC tags if present
+        args_lines.append("-xmp-photoshop:ICCProfile=")  # Clear Photoshop ICC refs if any
+    
+    # 6. Ensure byte order consistency
+    args_lines.append("-ExifByteOrder=Little-endian")
+    
+    # 7. Target file
+    args_lines.append(str(write_path))
+    
+    # Write args file
+    arg_file = tmp_dir / "inject.args"
+    arg_file.write_text("\n".join(args_lines), encoding="utf-8")
+    return arg_file
+
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def make_png_bytes(img, icc_bytes=None):
     """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
     h, w, c = img.shape
@@ -452,7 +624,7 @@ def reorder_jxl_boxes(jxl_path):
 
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
     """
-    Converts a single TIFF to JXL.
+    Converts a single TIFF to JXL with proper XMP preservation.
     write_path: where the JXL is initially written (staging or final destination)
     final_path: the final destination path (for overwrite checking and logging)
     """
@@ -480,16 +652,22 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             # 1. Extract raw EXIF binary
             exif_bin = extract_exif_raw(tiff_path, tmp_dir)
 
-            # 2. Extract and patch ICC profile
-            icc_bytes = extract_icc_fixed(tiff_path)
+            # 2. Extract ICC profiles:
+            #    - icc_bytes: patched for PNG iCCP (cjxl encoding)
+            #    - icc_original: unmodified for XMP CreatorTool (round-trip preservation)
+            icc_bytes = extract_icc_fixed(tiff_path)  # With D50 patch for cjxl
+            icc_original = extract_icc_original(tiff_path)  # Original for preservation
 
-            # 3. Read TIFF pixel data (series[0] = main image, ignores thumbnails)
+            # 3. Extract original XMP for preservation analysis (NEW)
+            xmp_original = extract_xmp_original(tiff_path, tmp_dir)
+
+            # 4. Read TIFF pixel data (series[0] = main image, ignores thumbnails)
             with tifffile.TiffFile(str(tiff_path)) as tif:
                 img = tif.series[0].asarray().astype(np.uint16)
             if img.ndim == 2:
                 img = img[:, :, np.newaxis]
 
-            # 4. Encode PNG and pass to cjxl
+            # 5. Encode PNG with ICC in iCCP chunk (for cjxl encoding)
             # --container=1 is required for lossy JXL (d>0): without it, cjxl outputs a raw
             # codestream and exiftool cannot inject EXIF. Do NOT use for lossless (d=0):
             # it changes how the ICC is stored (blob instead of native primaries) and
@@ -517,101 +695,24 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 r = subprocess.run(cjxl_cmd, capture_output=True)
 
             if r.returncode != 0:
-                raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
+                err = (r.stderr or b"").decode(errors='replace')[:200]
+                raise RuntimeError(f"cjxl: {err}")
 
-            # 5. Inject EXIF + XMP using exiftool -@ argument file (avoids bracket wildcard issues)
-            arg_inject = tmp_dir / "inject.args"
-
-            # Build optional encoding tag line
-            encode_tag_line = ""
-            if ENCODE_TAG_MODE == "xmp":
-                # If embedding ICC, use CreatorTool instead of dc:Description
-                # (dc:Description is used for ICC base64 data)
-                if EMBED_ICC_IN_JXL:
-                    encode_tag_line = f"-XMP-xmp:CreatorTool=cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}\n"
-                else:
-                    encode_tag_line = f"-XMP-dc:Description=cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}\n"
-            elif ENCODE_TAG_MODE == "software":
-                # Read original Software field from TIFF and append encoding params
-                r_sw = subprocess.run(
-                    ["exiftool", "-@", str(arg_inject.parent / "sw_read.args")],
-                    capture_output=True, text=True
-                )
-                
-                sw_arg = tmp_dir / "sw_read.args"
-                sw_arg.write_text(f"-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-                r_sw = subprocess.run(["exiftool", "-@", str(sw_arg)], capture_output=True, text=True)
-                original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout.strip() else "cjxl"
-                new_sw = f"{original_sw} | cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
-                encode_tag_line = f"-Software={new_sw}\n"
-
-            if exif_bin:
-                arg_inject.write_text(
-                    f"-overwrite_original\n-Exif<={exif_bin}\n-tagsfromfile\n{tiff_path}\n"
-                    f"-xmp:all\n--Orientation\n{encode_tag_line}{write_path}\n",
-                    encoding="utf-8"
-                )
-            else:
-                arg_inject.write_text(
-                    f"-overwrite_original\n-tagsfromfile\n{tiff_path}\n"
-                    f"-exif:all\n-xmp:all\n--Orientation\n-ExifByteOrder=Little-endian\n{encode_tag_line}{write_path}\n",
-                    encoding="utf-8"
-                )
-            r2 = subprocess.run(["exiftool", "-@", str(arg_inject)], capture_output=True, text=True)
+            # 6. Build and execute unified metadata injection (CORRECTED - replaces old steps 5+7)
+            # This preserves original XMP, adds encoding tags, and embeds ICC if configured
+            # Uses icc_original (unmodified) for round-trip preservation
+            inject_args = build_metadata_injection_args(
+                tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original
+            )
+            
+            r2 = subprocess.run(["exiftool", "-@", str(inject_args)], 
+                              capture_output=True, text=True)
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
 
-            # 6. Reorder JXL boxes so Exif comes before the codestream
+            # 7. Reorder JXL boxes so Exif comes before the codestream
             reorder_jxl_boxes(write_path)
-            
-            # 7. Embed original ICC profile as metadata (for round-trip preservation)
-            if EMBED_ICC_IN_JXL:
-                try:
-                    icc_path = tmp_dir / f"{tiff_path.stem}.icc"
-                    icc_b64_path = tmp_dir / f"{tiff_path.stem}.icc.b64"
-                    # Extract ICC from source TIFF
-                    r_icc = subprocess.run(["exiftool", "-b", "-ICC_Profile", str(tiff_path), "-o", str(icc_path)],
-                                          capture_output=True, timeout=10)
-                    if icc_path.exists() and icc_path.stat().st_size > 0:
-                        # Convert ICC to base64 for XMP embedding
-                        import base64
-                        icc_data = icc_path.read_bytes()
-                        icc_b64 = base64.b64encode(icc_data).decode('ascii')
-                        
-                        # Build dc:description content - encoding params (visible in Windows)
-                        if ENCODE_TAG_MODE == "xmp":
-                            description_content = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
-                        else:
-                            description_content = "TIFF to JXL conversion"
-                        
-                        # Create XMP with embedded ICC in CreatorTool (base64, less visible)
-                        # and encoding params in dc:description (visible in Windows properties)
-                        xmp_content = f"""<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 4.4.0">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:dc="http://purl.org/dc/elements/1.1/"
-    xmlns:xmp="http://ns.adobe.com/xap/1.0/">
-   <dc:description>
-    <rdf:Alt>
-     <rdf:li xml:lang="x-default">{description_content}</rdf:li>
-    </rdf:Alt>
-   </dc:description>
-   <xmp:CreatorTool>ICC:{icc_b64}</xmp:CreatorTool>
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>"""
-                        xmp_path = tmp_dir / f"{tiff_path.stem}.xmp"
-                        xmp_path.write_text(xmp_content, encoding='utf-8')
-                        
-                        # Embed XMP in JXL
-                        subprocess.run(["exiftool", "-overwrite_original", f"-XMP<={xmp_path}", str(write_path)],
-                                      capture_output=True, timeout=10)
-                        logger.debug(f"  -> ICC profile embedded in JXL XMP ({len(icc_data)} bytes)")
-                except Exception as e:
-                    logger.debug(f"  -> ICC embedding skipped: {e}")
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -662,7 +763,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
         if moved:
             logger.info(f"  → Moved {moved} file(s) from staging to final destination")
 
-    # Delete source TIFFs after confirmed encode — only for mode 6, only after staging.
+    # Delete source TIFFs after confirmed encode — only for mode 8, only after staging.
     # Checks: encode succeeded + JXL exists at final destination.
     if DELETE_SOURCE and mode == 8:
         deleted = 0
