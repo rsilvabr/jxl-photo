@@ -167,7 +167,7 @@ py jxl_to_jpeg_png.py "F:\2024" --format png --bit-depth 16
 
 
 ### After conversion
-Depending on your needs, two common approaches:
+Depending on your needs, three common approaches:
 
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space. Tools like FreeFileSync support folder filters that make this easy.
 2. Delete TIFFs, keep only JXL — a separate script for this can be found here: [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports)
