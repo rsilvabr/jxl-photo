@@ -1,4 +1,4 @@
-# jxl_to_jpeg.py / jxl_to_jpeg_terminal.ps1
+# jxl_to_jpg_png.py / jxl_to_jpg_png_terminal.ps1
 
 Batch JXL → JPEG or PNG converter with ICC color profile conversion.
 Decodes JXL files (including 16-bit ProPhoto RGB or Adobe-RGB files) and converts to sRGB JPEG or any target color space via ICC profile, ready for web, print, or client delivery.
@@ -8,7 +8,7 @@ Decodes JXL files (including 16-bit ProPhoto RGB or Adobe-RGB files) and convert
 ## Requirements
 
 ```
-Python 3.12+    (for jxl_to_jpeg.py)
+Python 3.12+    (for jxl_to_jpg_png.py)
 djxl     →  https://github.com/libjxl/libjxl/releases  (same package as cjxl)
 magick   →  https://imagemagick.org  (ImageMagick 7+)
 exiftool →  https://exiftool.org
@@ -17,7 +17,7 @@ exiftool →  https://exiftool.org
 **Important:** ImageMagick (`magick` command) must be installed on your system (not via pip).
 Download from https://imagemagick.org and add to PATH.
 
-The PowerShell terminal version (`jxl_to_jpeg_terminal.ps1`) requires only djxl and magick (no Python).
+The PowerShell terminal version (`jxl_to_jpg_png_terminal.ps1`) requires only djxl and magick (no Python).
 
 ---
 
@@ -25,29 +25,29 @@ The PowerShell terminal version (`jxl_to_jpeg_terminal.ps1`) requires only djxl 
 
 ```powershell
 # Basic: sRGB JPEG, quality 95, output in sibling folder
-py jxl_to_jpeg.py "F:\2024\session\_EXPORT\16B_JXL"
+py jxl_to_jpg_png.py "F:\2024\session\_EXPORT\16B_JXL"
 
 # Rename ProPhotoRGB → sRGB in output filenames
-py jxl_to_jpeg.py "F:\2024" --rename-from "ProPhotoRGB" --rename-to "sRGB"
+py jxl_to_jpg_png.py "F:\2024" --rename-from "ProPhotoRGB" --rename-to "sRGB"
 
 # Custom ICC profile (AdobeRGB, etc.)
-py jxl_to_jpeg.py "F:\2024" --icc-profile "C:\icc\AdobeRGB1998.icc"
+py jxl_to_jpg_png.py "F:\2024" --icc-profile "C:\icc\AdobeRGB1998.icc"
 
 # 16-bit PNG for print workflows
-py jxl_to_jpeg.py "F:\2024" --format png --bit-depth 16
+py jxl_to_jpg_png.py "F:\2024" --format png --bit-depth 16
 
 # Preview without converting
-py jxl_to_jpeg.py "F:\2024" --dry-run
+py jxl_to_jpg_png.py "F:\2024" --dry-run
 ```
 
 ### Terminal version (PowerShell)
 
-Drop `jxl_to_jpeg_terminal.ps1` into any folder containing JXLs, edit the settings at
+Drop `jxl_to_jpg_png_terminal.ps1` into any folder containing JXLs, edit the settings at
 the top, and run. Creates a `jpeg-srgb/` subfolder with the converted files.
 
 ```powershell
 # From inside the JXL folder:
-.\jxl_to_jpeg_terminal.ps1
+.\jxl_to_jpg_png_terminal.ps1
 ```
 
 Edit at the top of the script:
@@ -63,7 +63,7 @@ $RenameTo         = "sRGB"         # replacement string
 
 ## Key settings
 
-Edit at the top of `jxl_to_jpeg.py`:
+Edit at the top of `jxl_to_jpg_png.py`:
 
 ```python
 OUTPUT_FORMAT   = "jpeg"    # "jpeg" or "png"
@@ -110,7 +110,7 @@ USE_RAM = True
 ## CLI reference
 
 ```
-py jxl_to_jpeg.py <input> [options]
+py jxl_to_jpg_png.py <input> [options]
 
 Arguments:
   input                 Input root folder (searched recursively for JXLs)
@@ -167,7 +167,7 @@ and move in bulk to the final destination.
 ## Logs
 
 ```
-<script_folder>/Logs/jxl_to_jpeg/YYYYMMDD_HHMMSS.log
+<script_folder>/Logs/jxl_to_jpg_png/YYYYMMDD_HHMMSS.log
 ```
 
 Disable with `--no-log`.
