@@ -21,7 +21,7 @@ the detailed ICC information (gamma curves, copyright, etc.).
 
 ```
 Python 3.12+
-pip install tifffile numpy pillow
+pip install tifffile numpy
 cjxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
 ```
@@ -154,7 +154,7 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 |------|-------|----------------|---------|
 | `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.jxl` / `output_dir/photo.jxl` |
 | `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
-| `2` | Directory | Flat → output_dir | `output_dir/photo.jxl` |
+| `2` | Directory | **DISCONTINUED** — behaves as mode 0 | — |
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
 | `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
@@ -210,8 +210,8 @@ TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original Pro
 
 1. **Extract ICC** from source TIFF using exiftool (original ICC for XMP, patched for PNG)
 2. **Base64-encode** the ICC profile
-3. **Embed in XMP** metadata (`dc:Description` field with `ICC:` prefix)
-4. **Encoding params** (cjxl d=0.1 e=7) go to `XMP:CreatorTool` (visible in Windows)
+3. **Embed in XMP** metadata (`xmp:CreatorTool` field with `ICC:` prefix)
+4. **Encoding params** (cjxl d=0.1 e=7) go to `dc:description` (visible in Windows Properties)
 
 When converting back with `jxl_to_tiff.py`:
 1. Extract ICC from XMP metadata
@@ -224,12 +224,12 @@ When converting back with `jxl_to_tiff.py`:
 
 The embedded ICC is stored as:
 ```xml
+<xmp:CreatorTool>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</xmp:CreatorTool>
 <dc:description>
   <rdf:Alt>
-    <rdf:li xml:lang="x-default">ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</rdf:li>
+    <rdf:li xml:lang="x-default">cjxl d=0.1 e=7</rdf:li>
   </rdf:Alt>
 </dc:description>
-<xmp:CreatorTool>cjxl d=0.1 e=7 | TIFF to JXL with ICC preservation</xmp:CreatorTool>
 ```
 
 The base64 string is not human-readable but preserves the **exact binary ICC data**.
@@ -282,8 +282,8 @@ Previous versions had a bug where XMP metadata was overwritten:
 ### The Fix
 
 This version uses **targeted XMP updates**:
-- `-xmp-dc:Description=` for encoding params (concatenated with existing)
-- `-xmp-xmp:CreatorTool=` for ICC data
+- `-xmp-dc:Description=` for encoding params (concatenated with existing dc:description)
+- `-xmp-xmp:CreatorTool=` for ICC data (base64-encoded ICC profile)
 - All other XMP tags preserved via `-tagsfromfile`
 
 **Result**: Original metadata + encoding info + ICC all coexist!
