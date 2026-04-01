@@ -178,6 +178,10 @@ Options:
   --workers N     Parallel threads (tested up to 32 on a Ryzen 9 5950X)
   --overwrite     Always overwrite existing JXLs
   --sync          Reconvert only TIFFs newer than their JXL
+  --distance N    JXL distance (0=lossless, 0.1=near-lossless, default: from script)
+  --effort 1-10  Compression effort (default: from script setting)
+  --ram           Keep PNG intermediate in RAM (faster, more memory)
+  --no-ram        Write PNG intermediate to disk (slower, less memory)
 ```
 
 ---
@@ -389,4 +393,4 @@ MIT License — feel free to use, modify, and distribute.
 ---
 
 ### Development Assistance
-- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion

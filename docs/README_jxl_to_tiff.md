@@ -390,7 +390,7 @@ When using `tiff_to_jxl.py` with `EMBED_ICC_IN_JXL = True` (default):
 ```
 TIFF with ProPhoto ICC
      ↓ tiff_to_jxl.py (EMBED_ICC_IN_JXL = True)
-JXL: Native primaries + XMP(dc:Description="ICC:AAADrE...")
+JXL: Native primaries + XMP(xmp:CreatorTool="ICC:AAADrE...")
      ↓ jxl_to_tiff.py (Roundtrip Mode)
 TIFF: Original ProPhoto ICC restored (Kodak TRC, copyright, etc.)
 ```
@@ -502,4 +502,4 @@ MIT License — feel free to use, modify, and distribute.
 ---
 
 ### Development Assistance
-- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
