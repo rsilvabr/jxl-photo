@@ -32,7 +32,7 @@ import tifffile
 DJXL_OUTPUT_DEPTH = 16
 # Output bit depth for TIFF (8 or 16).
 # 16 is recommended for maximum quality preservation (especially for further editing).
-# 8 can be used for web/delivery to save space.
+# 8 can be used for web/delivery to save ~50% space.
 
 TIFF_COMPRESSION = "zip"
 # TIFF compression method. Options: "uncompressed", "lzw", "zip"
@@ -859,6 +859,8 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
+                if DJXL_OUTPUT_DEPTH == 8:
+                    pixels = (pixels >> 8).astype(np.uint8)
                 write_tiff(pixels, write_path, original_icc, TIFF_COMPRESSION)
                 copy_metadata(jxl_path, write_path, tmp_dir)
                 cleanup_xmp_icc(write_path)
@@ -888,6 +890,9 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                     final_pixels = pixels
                     final_icc = djxl_icc
 
+                if DJXL_OUTPUT_DEPTH == 8:
+                    final_pixels = (final_pixels >> 8).astype(np.uint8)
+
                 write_tiff(final_pixels, write_path, final_icc, TIFF_COMPRESSION)
                 copy_metadata(jxl_path, write_path, tmp_dir)
                 cleanup_xmp_icc(write_path)
@@ -900,6 +905,8 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
+                if DJXL_OUTPUT_DEPTH == 8:
+                    pixels = (pixels >> 8).astype(np.uint8)
                 write_tiff(pixels, write_path, None, TIFF_COMPRESSION)
 
                 # Minimal metadata copy
