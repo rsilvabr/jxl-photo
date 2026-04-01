@@ -833,13 +833,30 @@ def main():
                         help="Always overwrite existing JXLs")
     parser.add_argument("--sync",            action="store_true",
                         help="Only reconvert TIFFs newer than their existing JXL")
+    parser.add_argument("--distance",        type=float, default=None,
+                        help="JXL distance (0=lossless, 0.1=near-lossless, higher=more lossy)")
+    parser.add_argument("--effort",          type=int, default=None, choices=range(1,11),
+                        help="Compression effort 1-10 (default: 7)")
+    parser.add_argument("--ram",            action="store_true", default=None,
+                        help="Keep PNG intermediate in RAM (faster, more memory)")
+    parser.add_argument("--no-ram",         action="store_true", default=None,
+                        help="Write PNG intermediate to disk (slower, less memory)")
     args = parser.parse_args()
 
-    global OVERWRITE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
         OVERWRITE = True
+
+    if args.distance is not None:
+        CJXL_DISTANCE = args.distance
+    if args.effort is not None:
+        CJXL_EFFORT = args.effort
+    if args.ram is not None:
+        USE_RAM_FOR_PNG = args.ram
+    elif args.no_ram is not None:
+        USE_RAM_FOR_PNG = not args.no_ram
 
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
