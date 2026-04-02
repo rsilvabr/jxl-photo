@@ -257,6 +257,36 @@ it takes 3 seconds and is much safer.
 
 ---
 
+## ⚠️ Modes 6 and 7 — ONLY files inside `_EXPORT`
+
+**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+
+```
+E:\sessao\
+├── foto1.jxl          ← NOT processed (outside _EXPORT)
+├── foto2.jxl          ← NOT processed (outside _EXPORT)
+└── _EXPORT\
+    ├── folder1\
+    │   └── img.jxl    ← PROCESSED ✓
+    ├── folder2\
+    │   └── img.jxl    ← PROCESSED ✓
+    └── folder3\sub\
+        └── img.jxl    ← PROCESSED ✓
+```
+
+**Mode 6** — processes ALL JXLs under ALL `_EXPORT` folders.
+
+**Mode 7** — only JXLs inside a specific subfolder of `_EXPORT` (default: `_EXPORT/JXL` → output to `_EXPORT/16B_TIFF`).
+
+```
+Mode 7 example with default settings:
+session/_EXPORT/JXL/photo.jxl      → session/_EXPORT/16B_TIFF/photo.tif  ✓
+session/_EXPORT/AdobeRGB/photo.jxl → ignored
+session/_EXPORT/sRGB/photo.jxl     → ignored
+```
+
+---
+
 ## Output modes
 
 | Mode | Input | Output location | Example |
@@ -267,11 +297,9 @@ it takes 3 seconds and is much safer.
 | `3` | Directory | `converted_tiff/` inside each JXL folder | `.../JXL/converted_tiff/photo.tif` |
 | `4` | Directory | Rename folder `JXL` → `TIFF` | `.../Export_TIFF/photo.tif` |
 | `5` | Directory | Sibling folder `TIFF_16bits/` | `.../TIFF_16bits/photo.tif` |
-| `6` | Directory | `_EXPORT` anchor — all JXLs in hierarchy | `.../session/_EXPORT/16B_TIFF/photo.tif` |
-| `7` | Directory | `_EXPORT` anchor — only JXLs inside `_EXPORT` | `.../session/_EXPORT/16B_TIFF/photo.tif` |
+| `6` | Directory | ONLY JXLs INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/16B_TIFF/photo.tif` |
+| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/16B_TIFF/photo.tif` |
 | `8` | Directory | In-place recursive — TIFF next to each JXL | `.../session/photo.tif` |
-
-**Mode 7 example** with `EXPORT_JXL_SUBFOLDER = "JXL"`:
 ```
 session/_EXPORT/JXL/photo.jxl      →  session/_EXPORT/16B_TIFF/photo.tif  ✓
 session/_EXPORT/AdobeRGB/photo.jxl →  ignored

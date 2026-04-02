@@ -9,7 +9,7 @@ Auto-detect workflow:
   PNG input  -&gt; convert (to JXL, lossy or modular lossless)
 
 Usage:
-  python jxl_jpeg_transcoder.py photo.jpg                  # auto: transcode encode
+  python jxl_jpeg_transcoder.py photo.jpg                    # auto: transcode encode
   python jxl_jpeg_transcoder.py photo.jxl                  # auto: transcode decode (if brob present)
   python jxl_jpeg_transcoder.py photo.jxl --format png     # auto: convert to PNG (if no brob)
   python jxl_jpeg_transcoder.py --help
@@ -152,6 +152,11 @@ def setup_logger():
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
 
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
 
@@ -749,6 +754,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     pairs = []
     for f in files:
         out = resolve_output_transcode(f, args.mode, output_root, decode)
+        if out is None:
+            continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
 
     # Group by output folder
@@ -846,23 +853,22 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / f"{stem}.{ext}"
     elif mode in (6, 7):
-        # Export marker modes
+        # Export marker modes - only process files INSIDE _EXPORT
         parts = src_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {src_path}, using local folder")
-            return src_path.parent / exp_out / f"{stem}.{ext}"
+            return None  # Skip files outside _EXPORT
         export_dir = Path(*parts[:export_idx + 1])
         if mode == 6:
-            if src_path.is_relative_to(export_dir):
-                rel_parts = src_path.relative_to(export_dir).parts
-                rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
-            else:
-                rel = src_path.relative_to(Path(*parts[:export_idx]))
+            # Mode 6: any file inside _EXPORT
+            rel_parts = src_path.relative_to(export_dir).parts
+            rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         else:
-            # Mode 7: only process inside EXPORT_MARKER subfolder
+            # Mode 7: only files inside _EXPORT/EXPORT_JPEG_SUBFOLDER
             if EXPORT_JPEG_SUBFOLDER:
                 anchor = export_dir / EXPORT_JPEG_SUBFOLDER
+                if not src_path.is_relative_to(anchor):
+                    return None  # Not in the specific subfolder
                 rel = src_path.relative_to(anchor)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
@@ -1168,6 +1174,8 @@ def cmd_convert(args, from_jxl: bool = True):
                                          args.output_suffix, ext,
                                          args.rename_from, args.rename_to,
                                          output_root, decode=True)
+        if out is None:
+            continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
 
     if args.dry_run:

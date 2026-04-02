@@ -217,6 +217,11 @@ def setup_logger():
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
 
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
 
@@ -311,39 +316,33 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         return tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
 
     elif mode == 6:
-        # _EXPORT anchor — all TIFFs in hierarchy
+        # _EXPORT anchor — only TIFFs INSIDE _EXPORT (ignores everything outside)
         parts = tiff_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {tiff_path}, using local folder")
-            return tiff_path.parent / EXPORT_JXL_FOLDER / tiff_path.with_suffix(".jxl").name
+            return None  # Skip files outside _EXPORT
 
-        export_dir    = Path(*parts[:export_idx + 1])
-        project_root  = export_dir.parent
-
-        if tiff_path.is_relative_to(export_dir):
-            rel_parts = tiff_path.relative_to(export_dir).parts
-            if len(rel_parts) > 1:
-                rel = Path(*rel_parts[1:])
-            else:
-                rel = Path(rel_parts[0])
+        export_dir = Path(*parts[:export_idx + 1])
+        rel_parts = tiff_path.relative_to(export_dir).parts
+        if len(rel_parts) > 1:
+            rel = Path(*rel_parts[1:])
         else:
-            rel = tiff_path.relative_to(project_root)
-
+            rel = Path(rel_parts[0])
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
 
     elif mode == 7:
-        # _EXPORT anchor — only TIFFs inside _EXPORT
+        # _EXPORT anchor — only TIFFs inside _EXPORT/[subfolder]
         parts = tiff_path.parts
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {tiff_path}, using local folder")
-            return tiff_path.parent / EXPORT_JXL_FOLDER / tiff_path.with_suffix(".jxl").name
+            return None  # Skip files outside _EXPORT
 
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_TIFF_SUBFOLDER:
             anchor = export_dir / EXPORT_TIFF_SUBFOLDER
+            if not tiff_path.is_relative_to(anchor):
+                return None  # Not inside the specific subfolder
             rel = tiff_path.relative_to(anchor)
         else:
             rel_parts = tiff_path.relative_to(export_dir).parts
@@ -642,7 +641,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
                 return (str(tiff_path), "skipped", str(final_path), None)
-            logger.info(f"  -> SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
+            logger.info(f"  >SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
     write_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -807,8 +806,19 @@ def find_tiffs_recursive(input_path: Path):
                 files.append(f)
     return files
 
+def find_tiffs_mode6(input_path: Path):
+    """Mode 6: only TIFFs inside folders containing EXPORT_MARKER in their path (any subfolder)."""
+    all_tiffs = find_tiffs_recursive(input_path)
+    filtered = []
+    for t in all_tiffs:
+        parts_str = list(t.parts)
+        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        if export_idx is not None:
+            filtered.append(t)
+    return filtered
+
 def find_tiffs_mode7(input_path: Path):
-    """Mode 7: only TIFFs inside folders containing EXPORT_MARKER in their path."""
+    """Mode 7: only TIFFs inside _EXPORT/EXPORT_TIFF_SUBFOLDER specific subfolder."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
     for t in all_tiffs:
@@ -900,6 +910,9 @@ def main():
         # Mode 2: recursive, all files to output_root
         tiffs = find_tiffs_recursive(args.input)
         output_root = args.output or args.input
+    elif args.mode == 6:
+        tiffs = find_tiffs_mode6(args.input)
+        output_root = args.input
     elif args.mode == 7:
         tiffs = find_tiffs_mode7(args.input)
         output_root = args.input
@@ -930,12 +943,14 @@ def main():
                 jxl = output_root / t.with_suffix(".jxl").name
         else:
             jxl = resolve_output(t, args.mode, args.input)
+        if jxl is None:
+            continue  # Skip files that don't match mode criteria (e.g., outside _EXPORT)
         pairs.append((t, jxl))
 
     # Dry run
     if args.dry_run:
         for t, j in pairs:
-            logger.info(f" DRY | {t.name} -> {j}")
+            logger.info(f" DRY | {t.name} >{j}")
         logger.info(f"Dry run: {len(pairs)} file(s) would be converted.")
         return
 

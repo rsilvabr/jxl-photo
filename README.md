@@ -67,18 +67,18 @@ I have tested with different settings and posted on reddit, [click here to check
 The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided menu:
 
 ```
-╭───────────────────────────────────────────── JXL Tools Environment ──────────────────────────────────╮
-│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich                   │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭───────────────────────────────────────────────────── Main Menu ──────────────────────────────────────╮
-│  1  New workflow                                                                                     │
-│  2  Repeat last workflow (unknown)                                                                   │
-│  3  Check dependencies again                                                                         │
-│  4  Edit default settings                                                                            │
-│  5  Reset all settings                                                                               │
-│  6  Move settings file                                                                               │
-│  0  Exit                                                                                             │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────── JXL Tools Environment ────────────────────────────────────────────────╮
+│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
+│  1  New workflow                                                                                                   │
+│  2  Repeat last workflow (unknown)                                                                                 │
+│  3  Check dependencies again                                                                                       │
+│  4  Edit default settings                                                                                          │
+│  5  Reset all settings                                                                                             │
+│  6  Move settings file                                                                                             │
+│  0  Exit                                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 The wizard guides you through: Source format → Destination → Directory → Output mode → Parameters → Confirm.
@@ -176,7 +176,7 @@ Depending on your needs, three common approaches:
 
 | Document | Contents |
 |----------|----------|
-| [docs/README_jxl_photo.md](docs/README_jxl_photo.md) | Full documentation for the interactive wrapper |
+| [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
 | [docs/README_tiff_to_jxl.md](docs/README_tiff_to_jxl.md) | Full documentation for TIFF → JXL encoding |
 | [docs/README_jxl_to_tiff.md](docs/README_jxl_to_tiff.md) | Full documentation for JXL → TIFF decoding |
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
@@ -335,8 +335,8 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Preserving 16-bit depth through the conversion pipeline
 - Embedding EXIF so it is visible in IrfanView and other applications
 - Correctly handling ICC profiles from Capture One exports (sRGB, AdobeRGB, ProPhoto RGB)
-- Fixing XMP overwrite bug that destroyed original metadata
-- Fixing EXIF binary extraction that produced corrupted data
+- **Fixing XMP overwrite bug that destroyed original metadata**
+- **Fixing EXIF binary extraction that produced corrupted data**
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 

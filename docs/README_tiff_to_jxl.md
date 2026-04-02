@@ -150,6 +150,35 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 
 ---
 
+## ⚠️ Modes 6 and 7 — ONLY files inside `_EXPORT`
+
+**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+
+```
+E:\sessao\
+├── foto1.tif          ← NOT processed (outside _EXPORT)
+├── foto2.tif          ← NOT processed (outside _EXPORT)
+└── _EXPORT\
+    ├── folder1\
+    │   └── img.tif    ← PROCESSED ✓
+    ├── folder2\
+    │   └── img.tif    ← PROCESSED ✓
+    └── folder3\sub\
+        └── img.tif    ← PROCESSED ✓
+```
+
+**Mode 6** — processes ALL TIFFs under ALL `_EXPORT` folders.
+
+**Mode 7** — only TIFFs inside a specific subfolder of `_EXPORT` (default: `_EXPORT/16B_TIFF` → output to `_EXPORT/16B_JXL`).
+
+```
+Mode 7 example with default settings:
+session/_EXPORT/16B_TIFF/photo.tif → session/_EXPORT/16B_JXL/photo.jxl  ✓
+session/_EXPORT/AdobeRGB/photo.tif → ignored
+```
+
+---
+
 ## Output modes
 
 | Mode | Input | Output location | Example |
@@ -160,8 +189,8 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
 | `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
-| `6` | Directory | `_EXPORT` anchor — all TIFFs in hierarchy | `.../session/_EXPORT/16B_JXL/photo.jxl` |
-| `7` | Directory | `_EXPORT` anchor — only TIFFs inside `_EXPORT` | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `6` | Directory | ONLY TIFFs INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/16B_JXL/photo.jxl` |
 | `8` | Directory | In-place recursive — JXL next to each TIFF | `.../session/photo.jxl` |
 
 ---

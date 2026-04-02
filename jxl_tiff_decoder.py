@@ -152,6 +152,12 @@ def setup_logger():
     logger.setLevel(logging.DEBUG)
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
+    # Ensure stdout writes UTF-8 to prevent Mojibake on Windows console
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     ch = logging.StreamHandler(sys.stdout)
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
@@ -177,7 +183,7 @@ def confirm_deletion_jxl():
     print(" This deletion is IRREVERSIBLE.")
     now = _dt.now()
     token = now.strftime("%H%M")
-    print(f" Current time: {now.strftime('%H:%M')} -> to confirm, type: {token}")
+    print(f" Current time: {now.strftime('%H:%M')} >to confirm, type: {token}")
     print()
     try:
         answer = input(" > ").strip()
@@ -317,7 +323,7 @@ def select_decode_strategy(has_original_icc=False):
     if FORCE_BASIC_MODE:
         return 'basic', "Basic mode forced (no ICC handling)"
 
-    # Default logic: ICC present -> Roundtrip, no ICC -> Basic
+    # Default logic: ICC present >Roundtrip, no ICC >Basic
     if has_original_icc:
         return 'roundtrip', "Roundtrip mode (ICC from XMP + djxl auto)"
     else:
@@ -535,7 +541,7 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
             trc = ('gamma', 2.2)
 
         curve_type, curve_data = trc
-        logger.info(f" -> Target TRC extracted: {curve_type}={curve_data if curve_type=='gamma' else 'LUT'}")
+        logger.info(f" >Target TRC extracted: {curve_type}={curve_data if curve_type=='gamma' else 'LUT'}")
 
         # Try LittleCMS for matrix conversion
         lcms_success = False
@@ -567,7 +573,7 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
                 result_float = np.array(result).astype(np.float32) / 255.0
                 lcms_success = True
 
-                logger.debug(" -> LittleCMS: matrix + curve applied")
+                logger.debug(" >LittleCMS: matrix + curve applied")
 
             except Exception as e:
                 logger.warning(f"LittleCMS failed: {e}")
@@ -575,18 +581,18 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
         # Apply manual TRC only if LittleCMS failed
         if lcms_success and result_float is not None:
             # LittleCMS already did everything (matrix + curve), just convert to 16-bit
-            logger.debug(" -> Using LittleCMS result (no manual curve)")
+            logger.debug(" >Using LittleCMS result (no manual curve)")
             result_array = (result_float * 65535.0).astype(np.uint16)
         else:
             # Fallback: apply TRC curve manually (assumes same primaries or already converted)
-            logger.debug(" -> Applying TRC manually as fallback")
+            logger.debug(" >Applying TRC manually as fallback")
             pixels = img_array.astype(np.float32) / 65535.0
 
             if curve_type == 'gamma':
                 gamma = curve_data
                 if gamma > 0 and abs(gamma - 1.0) > 0.001:
                     pixels = np.power(pixels, 1.0 / gamma)
-                    logger.debug(f" -> Applied gamma {gamma} TRC")
+                    logger.debug(f" >Applied gamma {gamma} TRC")
             elif curve_type == 'lut':
                 lut = np.array(curve_data)
                 for c in range(3):
@@ -595,7 +601,7 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
                     indices = np.clip(indices, 0, len(lut)-2)
                     frac = (channel * (len(lut)-1)) - indices
                     pixels[:,:,c] = lut[indices] + frac * (lut[indices+1] - lut[indices])
-                logger.debug(f" -> Applied LUT TRC")
+                logger.debug(f" >Applied LUT TRC")
 
             result_array = (pixels * 65535.0).astype(np.uint16)
 
@@ -656,7 +662,7 @@ def cleanup_xmp_icc(tiff_path):
                  f"-XMP-xmp:CreatorTool={clean}", str(tiff_path)],
                 capture_output=True, timeout=10
             )
-            logger.debug(f" -> Cleaned up XMP CreatorTool")
+            logger.debug(f" >Cleaned up XMP CreatorTool")
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
@@ -704,7 +710,7 @@ def add_jpeg_preview(tiff_path, tmp_dir):
         preview_arr = np.array(preview)
 
         tifffile.imwrite(str(tiff_path), preview_arr, compression='jpeg', append=True)
-        logger.info(f" -> Added JPEG preview ({new_w}x{new_h})")
+        logger.info(f" >Added JPEG preview ({new_w}x{new_h})")
     except Exception as e:
         logger.debug(f"Preview failed: {e}")
 
@@ -752,38 +758,33 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         return jxl_path.parent.parent / TIFF_FOLDER_NAME / jxl_path.with_suffix(".tif").name
 
     elif mode == 6:
-        # Mode 6: EXPORT anchor - all JXLs in hierarchy
+        # Mode 6: EXPORT anchor - only JXLs INSIDE _EXPORT
         parts = list(jxl_path.parts)
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {jxl_path}, using local folder")
-            return jxl_path.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+            return None  # Skip files outside _EXPORT
 
         export_dir = Path(*parts[:export_idx + 1])
-
-        if jxl_path.is_relative_to(export_dir):
-            rel_parts = jxl_path.relative_to(export_dir).parts
-            if len(rel_parts) > 1:
-                rel = Path(*rel_parts[1:])
-            else:
-                rel = Path(rel_parts[0])
+        rel_parts = jxl_path.relative_to(export_dir).parts
+        if len(rel_parts) > 1:
+            rel = Path(*rel_parts[1:])
         else:
-            rel = jxl_path.relative_to(export_dir.parent)
-
+            rel = Path(rel_parts[0])
         return export_dir / EXPORT_TIFF_FOLDER / rel.with_suffix(".tif")
 
     elif mode == 7:
-        # Mode 7: EXPORT anchor - only JXLs inside EXPORT_MARKER
+        # Mode 7: EXPORT anchor - only JXLs inside _EXPORT/[subfolder]
         parts = list(jxl_path.parts)
         export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {jxl_path}, using local folder")
-            return jxl_path.parent / EXPORT_TIFF_FOLDER / jxl_path.with_suffix(".tif").name
+            return None  # Skip files outside _EXPORT
 
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_JXL_SUBFOLDER:
             anchor = export_dir / EXPORT_JXL_SUBFOLDER
+            if not jxl_path.is_relative_to(anchor):
+                return None  # Not inside the specific subfolder
             rel = jxl_path.relative_to(anchor)
         else:
             rel_parts = jxl_path.relative_to(export_dir).parts
@@ -826,7 +827,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {jxl_path.name}")
                 return str(jxl_path), "skipped", str(final_path)
-            logger.info(f" -> SYNC: JXL newer than TIFF, reconverting | {jxl_path.name}")
+            logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {jxl_path.name}")
 
     overwritten = already_exists
 
@@ -845,17 +846,17 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
             original_icc_hint = None
             if original_icc:
                 original_icc_hint = analyze_icc_profile(original_icc)
-                logger.info(f" -> ICC extracted from {icc_source} ({original_icc_hint})")
+                logger.info(f" >ICC extracted from {icc_source} ({original_icc_hint})")
 
             # Select decode strategy based on ICC presence
             mode, reason = select_decode_strategy(has_original_icc=original_icc is not None)
-            logger.info(f" -> {reason}")
+            logger.info(f" >{reason}")
 
             if mode == 'roundtrip':
                 # === ROUNDTRIP MODE (DEFAULT WITH ICC) ===
                 # Best for files converted with jxl_tiff_encoder.py
                 # djxl auto handles display optimization, we attach the original ICC
-                logger.info(" -> Using Roundtrip decode (djxl auto + original ICC)")
+                logger.info(" >Using Roundtrip decode (djxl auto + original ICC)")
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
@@ -870,7 +871,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 # === MATRIX MODE (LINEAR + LITTLECMS) ===
                 # For color space conversion or when precise transformation needed
                 # Decodes to Rec.2020 linear, then transforms to target ICC
-                logger.info(" -> Using Matrix decode (linear + LittleCMS)")
+                logger.info(" >Using Matrix decode (linear + LittleCMS)")
 
                 decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
                 pixels = read_ppm_to_numpy(ppm_path)
@@ -901,7 +902,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
             else:  # mode == 'basic'
                 # === BASIC MODE (DEFAULT WITHOUT ICC) ===
                 # For consumer JXLs without embedded ICC
-                logger.info(" -> Using Basic decode (djxl auto, no ICC)")
+                logger.info(" >Using Basic decode (djxl auto, no ICC)")
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
@@ -964,7 +965,7 @@ def process_group(group_pairs, workers, mode, target_icc=None):
                 shutil.move(str(write_tiff), str(final_tiff))
                 moved += 1
         if moved:
-            logger.info(f" -> Moved {moved} file(s) from staging to final")
+            logger.info(f" >Moved {moved} file(s) from staging to final")
 
     if DELETE_SOURCE and mode == 8:
         deleted = 0
@@ -981,7 +982,7 @@ def process_group(group_pairs, workers, mode, target_icc=None):
             deleted += 1
             logger.info(f" DELETED source | {src_jxl.name}")
         if deleted:
-            logger.info(f" -> Deleted {deleted} source JXL(s)")
+            logger.info(f" >Deleted {deleted} source JXL(s)")
 
     return results
 
@@ -1009,8 +1010,19 @@ def find_jxls_recursive(path):
                 files.append(f)
     return files
 
+def find_jxls_mode6(input_path):
+    """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
+    all_jxls = find_jxls_recursive(input_path)
+    filtered = []
+    for j in all_jxls:
+        parts_str = list(j.parts)
+        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        if export_idx is not None:
+            filtered.append(j)
+    return filtered
+
 def find_jxls_mode7(input_path):
-    """Mode 7: only JXLs inside folders containing EXPORT_MARKER"""
+    """Mode 7: only JXLs inside _EXPORT/EXPORT_JXL_SUBFOLDER."""
     all_jxls = find_jxls_recursive(input_path)
     filtered = []
     for j in all_jxls:
@@ -1147,6 +1159,8 @@ Examples:
     else:
         if args.mode in (0, 1):
             jxls = find_jxls_flat(args.input)      # flat — subfolders not touched
+        elif args.mode == 6:
+            jxls = find_jxls_mode6(args.input)
         elif args.mode == 7:
             jxls = find_jxls_mode7(args.input)
         else:
@@ -1164,12 +1178,14 @@ Examples:
     pairs = []
     for j in jxls:
         tiff = resolve_output(j, args.mode, output_root)
+        if tiff is None:
+            continue  # Skip files that don't match mode criteria
         pairs.append((j, tiff))
 
     # Dry run
     if args.dry_run:
         for j, t in pairs:
-            logger.info(f" DRY | {j.name} -> {t}")
+            logger.info(f" DRY | {j.name} >{t}")
         logger.info(f"Dry run: {len(pairs)} file(s) would be converted.")
         return
 

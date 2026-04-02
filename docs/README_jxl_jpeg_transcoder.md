@@ -176,6 +176,39 @@ The script analyzes the input file extension and content to determine the optima
 
 * * *
 
+## ⚠️ Modes 6 and 7 — ONLY files inside `_EXPORT`
+
+**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+
+```
+E:\sessao\
+├── foto1.jpg          ← NOT processed (outside _EXPORT)
+├── foto2.jpg          ← NOT processed (outside _EXPORT)
+└── _EXPORT\
+    ├── folder1\
+    │   └── img.jpg    ← PROCESSED ✓
+    ├── folder2\
+    │   └── img.jpg    ← PROCESSED ✓
+    └── folder3\sub\
+        └── img.jpg    ← PROCESSED ✓
+```
+
+**Mode 6** — processes ALL files under ALL `_EXPORT` folders found recursively.
+
+**Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT`.
+Default for encode (JPEG→JXL): `_EXPORT/JPEG_recovered`
+Default for decode (JXL→JPEG): `_EXPORT/JPEG_recovered`
+
+```
+Mode 7 example (encode):
+session/_EXPORT/JPEG_recovered/photo.jpg → session/_EXPORT/JXL_jpeg/photo.jxl  ✓
+session/_EXPORT/sRGB/photo.jpg          → ignored (doesn't match subfolder)
+
+Mode 7 example (decode):
+session/_EXPORT/JXL/photo.jxl      → session/_EXPORT/JPEG_recovered/photo.jpg  ✓
+session/_EXPORT/AdobeRGB/photo.jxl → ignored
+```
+
 ## Output modes
 
 Modes 0-8 mirror the original `jxl_jpg_lossless_transcoder.py` structure:
@@ -190,8 +223,8 @@ Modes 0-8 mirror the original `jxl_jpg_lossless_transcoder.py` structure:
 | `3` | Directory | `converted_jxl/` inside each folder | `.../JPEG/converted_jxl/photo.jxl` |
 | `4` | Directory | Sibling folder `JXL_jpeg/` | `.../JXL_jpeg/photo.jxl` |
 | `5` | Directory | Rename folder (JPEG→JXL) | `.../Export_JXL/photo.jxl` |
-| `6` | Directory | `_EXPORT` anchor — all files | `.../session/_EXPORT/JXL_jpeg/...` |
-| `7` | Directory | `_EXPORT` anchor — `_EXPORT` subfolder only | `.../session/_EXPORT/JXL_jpeg/...` |
+| `6` | Directory | ONLY files INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/JXL_jpeg/...` |
+| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/JXL_jpeg/...` |
 | `8` | Directory | In-place recursive | `.../session/photo.jxl` (next to each JPEG) |
 
 ### Decode modes (JXL → JPEG)
@@ -204,7 +237,7 @@ Modes 0-8 mirror the original `jxl_jpg_lossless_transcoder.py` structure:
 | `3` | Directory | `recovered_jpeg/` inside each folder | `.../JXL/recovered_jpeg/photo.jpg` |
 | `4` | Directory | Sibling folder `JPEG_recovered/` | `.../JPEG_recovered/photo.jpg` |
 | `5` | Directory | Rename folder (JXL→JPEG_recovered) | `.../Export_JPEG_recovered/photo.jpg` |
-| `6-7` | Directory | `_EXPORT` anchor workflows | `.../_EXPORT/JPEG_recovered/...` |
+| `6-7` | Directory | ONLY files INSIDE `_EXPORT` — ignores everything outside | `.../_EXPORT/JPEG_recovered/...` |
 | `8` | Directory | In-place recursive | `.../session/photo.jpg` (next to each JXL) |
 
 **Note:** Mode 8 with `--delete-source` is the "archive and replace" workflow — verify your setup with a small batch first. Remember: **lossy operations require HHMM confirmation**, while lossless only requires "yes".
