@@ -335,8 +335,8 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Preserving 16-bit depth through the conversion pipeline
 - Embedding EXIF so it is visible in IrfanView and other applications
 - Correctly handling ICC profiles from Capture One exports (sRGB, AdobeRGB, ProPhoto RGB)
-- **Fixing XMP overwrite bug that destroyed original metadata**
-- **Fixing EXIF binary extraction that produced corrupted data**
+- Fixing XMP overwrite bug that destroyed original metadata
+- Fixing EXIF binary extraction that produced corrupted data
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
