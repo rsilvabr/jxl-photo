@@ -1133,10 +1133,11 @@ Examples:
                 logger.info("Deletion not confirmed -- exiting.")
                 return
 
+    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else "no")
     logger.info(f"Mode: {args.mode} | Depth: {DJXL_OUTPUT_DEPTH} | "
                 f"Compression: {TIFF_COMPRESSION} | Workers: {args.workers}")
     logger.info(f"Matrix: {USE_MATRIX_MODE} | Basic: {FORCE_BASIC_MODE} | "
-                f"Overwrite: {OVERWRITE}")
+                f"Overwrite: {_overwrite_str}")
     logger.info(f"Input: {args.input}")
 
     # Collect files

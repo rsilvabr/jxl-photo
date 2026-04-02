@@ -105,6 +105,7 @@ ENCODE_TAG_MODE = "xmp"
 # "software" → appends to the EXIF Software field
 # "xmp"      → writes as XMP metadata (default)
 # "off"      → does not add anything
+# Can also be set via --encode-tag CLI argument (xmp/software/off)
 # NOTE: When EMBED_ICC_IN_JXL is True, encoding params go to XMP:CreatorTool
 # (dc:Description is used for ICC embedding).
 
@@ -121,6 +122,7 @@ TEMP2_DIR = r"E:\staging"
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
 # Files are moved to their final destination after each folder group completes.
 # Set to None to write directly to the final destination.
+# Can also be set via --staging CLI argument (overrides this variable).
 
 OVERWRITE = "smart"
 # False   → skip if JXL already exists (safe for resuming)
@@ -183,6 +185,8 @@ Options:
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after successful encode (mode 8 only)
+  --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
+  --encode-tag    Where to record encoding params: xmp (default), software, off
   --dry-run       Preview operations without converting
 ```
 
@@ -301,7 +305,7 @@ This version uses **targeted XMP updates**:
 With `USE_RAM_FOR_PNG = True` (default), the PNG intermediate (~200MB) lives entirely 
 in RAM. Disk I/O per file = read TIFF + write JXL.
 
-With `TEMP2_DIR` set to a separate SSD, JXLs are written to fast storage during conversion
+With `--staging` (or `TEMP2_DIR`) set to a separate SSD, JXLs are written to fast storage during conversion
 and moved in bulk at the end — eliminates random write contention on HDD collections.
 
 ---

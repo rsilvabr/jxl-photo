@@ -123,7 +123,7 @@ How output files are organized. Press `?` for detailed explanations with visual 
 | `7` | Marker _EXPORT (subfolder) | Only files inside specific `_EXPORT` subfolder |
 | `8` | DELETE originals ⚠️ | Same as mode 0 but deletes source files — IRREVERSIBLE |
 
-Items shown in **green** (like `_EXPORT`, `converted_jxl`) are configurable — change them in **option 4 (Edit default settings)** before running.
+Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
 
 ### Step 5 — Mode-specific configuration
 - Modes 6/7: Confirm or change the `_EXPORT` marker name
@@ -165,6 +165,92 @@ The config file is stored at:
 - **User Profile** — `~/.jxl_tools_config.json` (portable, follows the user)
 
 Use **option 6 (Move settings file)** to toggle between the two locations.
+
+* * *
+
+## What can be configured in the wizard vs scripts
+
+Some options are available directly in the wizard, others must be edited in the script files themselves.
+
+### ✅ Available in the wizard (Step 6 / 6A)
+
+| Option | Location | Notes |
+|--------|----------|-------|
+| Workers | Step 6 | All workflows |
+| Quality / Distance | Step 6 | Context-aware |
+| Effort | Step 6 | All workflows |
+| Staging directory | Step 6 | TIFF→JXL, JXL→TIFF |
+| Overwrite mode (0/1/2) | Step 6 | Always asked |
+| ICC conversion (sRGB) | Step 6 | JXL→JPEG/PNG |
+| TIFF compression | Step 6 | zip/lzw/none |
+| Bit depth | Step 6 | 8 or 16 for TIFF output |
+| Dry run | Step 6 | All workflows |
+| Strip metadata | 6A | TIFF→JXL |
+| Resize | 6A | TIFF→JXL |
+| Encode tag location | 6A | xmp / software / off |
+| ICC matrix mode | 6A | JXL→TIFF |
+| Target ICC profile | 6A | JXL→TIFF |
+| Skip ICC cleanup | 6A | JXL→TIFF |
+| Skip MD5 verification | 6A | JPEG↔JXL |
+| Skip validation | 6A | JPEG↔JXL (risky) |
+| Output suffix | 6A | JPEG↔JXL |
+| Expert flags | 6B | Custom CLI args |
+
+### ⚙️ Available in option 4 (Edit default settings)
+
+| Option | Notes |
+|--------|-------|
+| Staging directory | Persisted across sessions |
+| Default workers | Persisted |
+| Default quality | Persisted |
+| Default effort | Persisted |
+| Confirm deletes | Safety toggle |
+| Export marker | Default: `_EXPORT` |
+
+### 🔧 Must be edited directly in the scripts
+
+These are hardcoded global variables at the top of each script. To change them, open the script file and edit the variable at the top.
+
+#### jxl_tiff_encoder.py
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `CONVERTED_JXL_FOLDER` | `"converted_jxl"` | Mode 1 subfolder name |
+| `JXL_FOLDER_NAME` | `"JXL_16bits"` | Mode 3/5 sibling folder |
+| `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
+| `EXPORT_JXL_FOLDER` | `"16B_JXL"` | Mode 6/7 output folder |
+| `TIFF_SUFFIX_TO_REPLACE` | `"TIFF"` | Mode 4 suffix match |
+| `JXL_SUFFIX_REPLACE` | `"JXL"` | Mode 4 suffix replacement |
+| `EMBED_ICC_IN_JXL` | `True` | Embed ICC in JXL metadata |
+| `ENCODE_TAG_MODE` | `"xmp"` | Where to record d=/e= (now also via `--encode-tag`) |
+| `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
+| `DELETE_CONFIRM` | `True` | Require HHMMSS confirmation for mode 8 delete |
+
+#### jxl_tiff_decoder.py
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `CONVERTED_TIFF_FOLDER` | `"converted_tiff"` | Mode 1 subfolder name |
+| `TIFF_FOLDER_NAME` | `"TIFF_16bits"` | Mode 3/5 sibling folder |
+| `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
+| `EXPORT_TIFF_FOLDER` | `"16B_TIFF"` | Mode 6/7 output folder |
+| `JXL_SUFFIX_TO_REPLACE` | `"JXL"` | Mode 4 suffix match |
+| `TIFF_SUFFIX_REPLACE` | `"TIFF"` | Mode 4 suffix replacement |
+| `ADD_JPEG_PREVIEW` | `True` | Embed JPEG preview in output TIFF |
+| `JPEG_PREVIEW_SIZE` | `1024` | Max preview dimension |
+| `USE_MATRIX_MODE` | `False` | Force ICC matrix conversion |
+| `CLEANUP_XMP_ICC_MARKER` | `True` | Remove ICC base64 from XMP after extraction |
+
+#### jxl_jpeg_transcoder.py
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `CONVERTED_JXL_FOLDER` | `"converted_jxl"` | Mode 1 subfolder name |
+| `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
+| `EXPORT_JXL_FOLDER` | `"JXL_jpeg"` | Mode 6/7 output folder for JXL |
+| `EXPORT_JPEG_FOLDER` | `"JPEG_recovered"` | Mode 6/7 output folder for JPEG |
+| `JPEG_DEFAULT_QUALITY` | `95` | Default JPEG quality |
+| `PNG_DEFAULT_BIT_DEPTH` | `16` | Default PNG bit depth |
+| `STORE_MD5` | `True` | Store MD5 for losslessness verification |
+| `DELETE_CONFIRM` | `True` | Require confirmation for mode 8 delete |
+| `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy |
 
 * * *
 

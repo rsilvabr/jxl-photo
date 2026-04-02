@@ -642,7 +642,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
                 return (str(tiff_path), "skipped", str(final_path), None)
-            logger.info(f"  -&gt; SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
+            logger.info(f"  -> SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
     write_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -845,9 +845,13 @@ def main():
                         help="Delete source TIFFs after successful encode (mode 8 only)")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Show what would be converted without converting")
+    parser.add_argument("--staging",         type=str, default=None,
+                        help="Staging directory for output JXLs (reduces HDD seek contention)")
+    parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
+                        help="Where to record encoding params: xmp (default), software, or off")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -864,15 +868,21 @@ def main():
         USE_RAM_FOR_PNG = args.ram
     elif args.no_ram is not None:
         USE_RAM_FOR_PNG = not args.no_ram
+    if args.staging is not None:
+        TEMP2_DIR = args.staging
+    if args.encode_tag is not None:
+        ENCODE_TAG_MODE = args.encode_tag
 
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
+    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else "no")
+    _tag_label     = ENCODE_TAG_MODE  # xmp, software, or off
     logger.info(
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
         f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
-        f"Overwrite: {'sync (smart)' if args.sync else OVERWRITE} | {_delete_label} | Workers: {args.workers}"
+        f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | {_delete_label} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
 

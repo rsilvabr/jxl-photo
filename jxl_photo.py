@@ -60,6 +60,7 @@ class ToolConfig:
     last_staging: Optional[str] = None
     last_effort: Optional[int] = None
     last_quality: Optional[int] = None
+    last_distance: Optional[float] = None  # For TIFF->JXL distance
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -104,15 +105,17 @@ class ConfigManager:
         except IOError as e:
             print(f"Error: Failed to save config: {e}")
 
-    def save_last_session(self, input_dir: str, output_mode: str, 
+    def save_last_session(self, input_dir: str, output_mode: str,
                          workers: int, staging: Optional[str],
-                         effort: int = 7, quality: int = 95) -> None:
+                         effort: int = 7, quality: int = 95,
+                         distance: Optional[float] = None) -> None:
         self.config.last_input_dir = input_dir
         self.config.last_output_mode = output_mode
         self.config.last_workers = workers
         self.config.last_staging = staging
         self.config.last_effort = effort
         self.config.last_quality = quality
+        self.config.last_distance = distance
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -504,9 +507,12 @@ class InteractiveMenu:
         if origin == "jpeg" and status.get('cjxl'):
             options.append(("1", "JXL Lossless", "Reversible JPEG transcoding", "transcode_lossless"))
             options.append(("2", "JXL Lossy", "Re-encode for smaller size", "convert_lossy"))
+            # dest_format will be set below based on choice
         elif origin == "tiff" and status.get('cjxl'):
-            options.append(("1", "JXL d=0.1", "Near-lossless, preserves ICC", "jxl_tiff_encoder"))
-            options.append(("2", "JXL d=0", "Mathematically lossless", "jxl_tiff_encoder_lossless"))
+            options.append(("1", "d=0", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
+            options.append(("2", "d=0.1", "Near-lossless (recommended)", "jxl_tiff_encoder"))
+            options.append(("3", "d=1.0", "Visually lossless", "jxl_tiff_encoder"))
+            options.append(("4", "Custom", "Enter any value 0-15", "jxl_tiff_encoder"))
         elif origin == "jxl" and status.get('djxl'):
             options.append(("1", "JPEG", "Standard JPEG output", "jxl_to_jpeg_smart"))
             options.append(("2", "PNG", "PNG with transparency", "jxl_to_png"))
@@ -539,8 +545,31 @@ class InteractiveMenu:
                     break
 
         selected = next(o for o in options if o[0] == choice)
-        workflow['dest_format'] = selected[1].split()[0].lower()
         workflow['conversion_type'] = selected[3]
+
+        # Set dest_format and distance_choice based on origin and choice
+        if origin == "tiff":
+            if choice == "1":
+                workflow['distance_choice'] = "0"
+                workflow['dest_format'] = 'jxl'
+            elif choice == "2":
+                workflow['distance_choice'] = "0.1"
+                workflow['dest_format'] = 'jxl'
+            elif choice == "3":
+                workflow['distance_choice'] = "1.0"
+                workflow['dest_format'] = 'jxl'
+            else:
+                workflow['distance_choice'] = "custom"
+                workflow['dest_format'] = 'jxl'
+        elif origin == "jpeg":
+            workflow['dest_format'] = 'jxl'
+        elif origin == "jxl":
+            if choice == "1":
+                workflow['dest_format'] = 'jpeg'
+            elif choice == "2":
+                workflow['dest_format'] = 'png'
+            else:
+                workflow['dest_format'] = 'tiff'
         return True
 
     def _wizard_select_files(self, workflow: Dict) -> bool:
@@ -571,9 +600,10 @@ class InteractiveMenu:
         extensions = ext_map.get(origin, [])
         files = []
 
+        # Recursive scan - modes 2/6/7 process subfolders anyway
         for ext in extensions:
-            files.extend(path.glob(f"*{ext}"))
-            files.extend(path.glob(f"*{ext.upper()}"))
+            files.extend(path.rglob(f"*{ext}"))
+            files.extend(path.rglob(f"*{ext.upper()}"))
 
         seen = set()
         unique_files = []
@@ -586,10 +616,12 @@ class InteractiveMenu:
         workflow['selected_files'] = unique_files
 
         if not unique_files:
-            self._print_error(f"No {origin.upper()} files found")
-            return False
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]![/yellow] No {origin.upper()} files found (recursive search)")
+            else:
+                print(f"\nNo {origin.upper()} files found (recursive search)")
 
-        if RICH_AVAILABLE and console:
+        elif RICH_AVAILABLE and console:
             console.print(f"[green]✓[/green] {len(unique_files)} {origin.upper()} files found")
             for f in unique_files[:5]:
                 console.print(f"  • {f.name}")
@@ -915,8 +947,25 @@ class InteractiveMenu:
 
             # Quality/Distance/Effort - context aware
             if origin == 'tiff' and dest == 'jxl':
+                # Show destination summary from Step 2
+                dist_choice = workflow.get('distance_choice', '')
+                if dist_choice == "0":
+                    lossless_label = "Lossless (d=0)"
+                elif dist_choice == "custom":
+                    lossless_label = f"Custom (last d={workflow.get('quality', 0.1):.2f}) — change below"
+                else:
+                    lossless_label = f"Lossy (d={dist_choice})"
+                console.print(f"[dim]Destination:[/dim] {workflow['dest_format'].upper()} — {lossless_label}")
+
                 # For TIFF->JXL: Distance (0-15 float)
-                distance_default = 0.1 if 'lossy' not in conv_type else 1.0
+                distance_map = {"0": 0.0, "0.1": 0.1, "1.0": 1.0}
+                dist_choice = workflow.get('distance_choice', '')
+                if dist_choice in distance_map:
+                    distance_default = distance_map[dist_choice]
+                elif dist_choice == "custom":
+                    distance_default = workflow.get('quality', 0.1)  # Remember last custom value
+                else:
+                    distance_default = 0.1
                 distance_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(distance_default))
                 try:
                     workflow['quality'] = float(distance_str)
@@ -949,6 +998,7 @@ class InteractiveMenu:
             else:
                 workflow['staging'] = staging_input
 
+
             # ICC conversion when JXL->JPEG/PNG and ImageMagick available
             if origin == 'jxl' and dest in ['jpeg', 'png'] and status.get('magick'):
                 convert_icc = Confirm.ask("Convert to sRGB? (recommended for compatibility)", default=False)
@@ -960,14 +1010,19 @@ class InteractiveMenu:
                 compression = Prompt.ask("TIFF compression", choices=["zip", "lzw", "none"], default=workflow['compression'])
                 workflow['compression'] = compression
 
-            # Bit depth when TIFF is involved
-            if origin == 'tiff' or dest == 'tiff':
-                depth = IntPrompt.ask("Bit depth", choices=[8, 16], default=workflow['bit_depth'])
-                workflow['bit_depth'] = depth
+            # Bit depth when decoding to TIFF
+            if dest == 'tiff':
+                depth = IntPrompt.ask("Bit depth", choices=["8", "16"], default=workflow['bit_depth'])
+                workflow['bit_depth'] = int(depth) if depth else workflow['bit_depth']
 
             # Dry run (useful for all)
             dry_run = Confirm.ask("Dry run? (simulate without converting)", default=False)
             workflow['dry_run'] = dry_run
+
+            # Overwrite mode (asked here so user doesn't need to enter 6A)
+            console.print("Existing file handling: [0] skip | [1] overwrite all | [2] sync (reconvert if newer)")
+            ow = Prompt.ask("If exists", choices=["0", "1", "2"], default="2")
+            workflow['overwrite_mode'] = ow
 
         else:
             print("\n--- Step 6: Basic Parameters ---")
@@ -983,7 +1038,24 @@ class InteractiveMenu:
 
             # Quality/Distance/Effort
             if origin == 'tiff' and dest == 'jxl':
-                distance_default = 0.1 if 'lossy' not in conv_type else 1.0
+                # Show destination summary from Step 2
+                dist_choice = workflow.get('distance_choice', '')
+                if dist_choice == "0":
+                    lossless_label = "Lossless (d=0)"
+                elif dist_choice == "custom":
+                    lossless_label = f"Custom (last d={workflow.get('quality', 0.1):.2f}) — change below"
+                else:
+                    lossless_label = f"Lossy (d={dist_choice})"
+                print(f"[{workflow['dest_format'].upper()}] {lossless_label}")
+
+                distance_map = {"0": 0.0, "0.1": 0.1, "1.0": 1.0}
+                dist_choice = workflow.get('distance_choice', '')
+                if dist_choice in distance_map:
+                    distance_default = distance_map[dist_choice]
+                elif dist_choice == "custom":
+                    distance_default = workflow.get('quality', 0.1)  # Remember last custom value
+                else:
+                    distance_default = 0.1
                 distance_str = input(f"Distance (0.0-15.0) [{distance_default}]: ").strip()
                 try:
                     workflow['quality'] = float(distance_str) if distance_str else distance_default
@@ -1009,6 +1081,7 @@ class InteractiveMenu:
             elif staging_input:
                 workflow['staging'] = staging_input
 
+
             # ICC conversion
             if origin == 'jxl' and dest in ['jpeg', 'png'] and status.get('magick'):
                 icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
@@ -1022,7 +1095,7 @@ class InteractiveMenu:
                     workflow['compression'] = comp_input
 
             # Bit depth
-            if origin == 'tiff' or dest == 'tiff':
+            if dest == 'tiff':
                 depth_input = input(f"Bit depth (8/16) [{workflow['bit_depth']}]: ").strip()
                 if depth_input in ['8', '16']:
                     workflow['bit_depth'] = int(depth_input)
@@ -1030,6 +1103,10 @@ class InteractiveMenu:
             # Dry run
             dry_input = input("Dry run? [y/N]: ").strip().lower()
             workflow['dry_run'] = dry_input.startswith('y')
+
+            # Overwrite mode (asked here so user doesn't need to enter 6A)
+            ow_input = input("Existing file handling (0=skip, 1=overwrite all, 2=sync) [2]: ").strip() or "2"
+            workflow['overwrite_mode'] = ow_input
 
         # Now ask for advanced options
         return self._wizard_parameters_advanced(workflow, status)
@@ -1060,20 +1137,33 @@ class InteractiveMenu:
             if RICH_AVAILABLE and console:
                 strip_meta = Confirm.ask("Strip metadata?", default=False)
                 resize = Prompt.ask("Resize (e.g., 50%, 1920x1080, or empty)", default="")
-                overwrite = Confirm.ask("Overwrite existing files?", default=False)
+                encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"], default="xmp")
+                # Overwrite mode already asked in Step 6
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source TIFFs after conversion? (mode 8)", default=False)
             else:
                 strip_input = input("Strip metadata? [y/N]: ").strip().lower()
                 strip_meta = strip_input.startswith('y')
                 resize = input("Resize (e.g., 50%, 1920x1080): ").strip()
-                over_input = input("Overwrite existing? [y/N]: ").strip().lower()
-                overwrite = over_input.startswith('y')
+                encode_tag_input = input("Encode tag (xmp/software/off) [xmp]: ").strip().lower() or "xmp"
+                encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else "xmp"
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source TIFFs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
 
+            # Parse overwrite mode
+            if overwrite_mode == "1":
+                overwrite, sync = True, False
+            elif overwrite_mode == "2":
+                overwrite, sync = False, True
+            else:
+                overwrite, sync = False, False
+
             advanced_options['strip'] = strip_meta
             advanced_options['resize'] = resize if resize else None
+            advanced_options['encode_tag'] = encode_tag
             advanced_options['overwrite'] = overwrite
+            advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
 
         elif origin == 'jxl' and dest == 'tiff':
@@ -1083,6 +1173,7 @@ class InteractiveMenu:
                 use_basic = Confirm.ask("Use basic ICC mode?", default=False) if not use_matrix else False
                 target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "Adobe RGB", "ProPhoto", "custom"], default="")
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
                 matrix_input = input("Use ICC matrix conversion? [y/N]: ").strip().lower()
@@ -1094,13 +1185,24 @@ class InteractiveMenu:
                 target_icc = input("Target ICC (sRGB/Adobe RGB/ProPhoto/custom/empty): ").strip()
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
+
+            # Parse overwrite mode
+            if overwrite_mode == "1":
+                overwrite, sync = True, False
+            elif overwrite_mode == "2":
+                overwrite, sync = False, True
+            else:
+                overwrite, sync = False, False
 
             advanced_options['matrix'] = use_matrix
             advanced_options['basic'] = use_basic
             advanced_options['target_icc'] = target_icc if target_icc else None
             advanced_options['no_icc_cleanup'] = no_cleanup
+            advanced_options['overwrite'] = overwrite
+            advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
 
         else:
@@ -1108,6 +1210,7 @@ class InteractiveMenu:
             if RICH_AVAILABLE and console:
                 no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
                 no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source after conversion?", default=False)
                 output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
             else:
@@ -1115,12 +1218,23 @@ class InteractiveMenu:
                 no_md5 = md5_input.startswith('y')
                 verify_input = input("Skip validation? [y/N]: ").strip().lower()
                 no_verify = verify_input.startswith('y')
+                overwrite_mode = workflow.get('overwrite_mode', '2')
                 del_input = input("Delete source after? [y/N]: ").strip().lower()
                 delete_src = del_input.startswith('y')
                 output_suffix = input("Output suffix (e.g., _converted): ").strip()
 
+            # Parse overwrite mode
+            if overwrite_mode == "1":
+                overwrite, sync = True, False
+            elif overwrite_mode == "2":
+                overwrite, sync = False, True
+            else:
+                overwrite, sync = False, False
+
             advanced_options['no_md5'] = no_md5
             advanced_options['no_verify'] = no_verify
+            advanced_options['overwrite'] = overwrite
+            advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
@@ -1181,9 +1295,17 @@ class InteractiveMenu:
             table.add_column(style="bold")
             table.add_column()
             table.add_row("Source:", f"{origin.upper()} ({len(workflow['selected_files'])} files)")
-            table.add_row("Destination:", dest.upper())
+            table.add_row("Destination:", dest.upper() if dest else "?")
             table.add_row("Mode:", f"{workflow['mode']} - {mode_names.get(workflow['mode'])}")
             table.add_row("Directory:", workflow['input_dir'])
+            adv = workflow.get('advanced_options', {})
+            if adv.get('overwrite'):
+                ow_label = "overwrite all"
+            elif adv.get('sync'):
+                ow_label = "sync (reconvert if newer)"
+            else:
+                ow_label = "skip (no overwrite)"
+            table.add_row("If exists:", ow_label)
             table.add_row("Workers:", str(workflow['workers']))
 
             if origin == 'tiff' and dest == 'jxl':
@@ -1198,12 +1320,24 @@ class InteractiveMenu:
 
             console.print("\n[yellow]Type YES to confirm[/yellow]")
             confirm = Prompt.ask("Confirm")
-            return confirm.upper() == "YES"
+            if confirm.upper() != "YES":
+                console.print("[dim]Cancelling...[/dim]\n")
+                return False
+            return True
         else:
             print("\n--- Step 7: Summary ---")
+            adv = workflow.get('advanced_options', {})
+            if adv.get('overwrite'):
+                ow_label = "overwrite all"
+            elif adv.get('sync'):
+                ow_label = "sync (reconvert if newer)"
+            else:
+                ow_label = "skip (no overwrite)"
             print(f"Source: {origin.upper()} ({len(workflow['selected_files'])} files)")
-            print(f"Destination: {dest.upper()}")
+            print(f"Destination: {dest.upper() if dest else '?'}")
             print(f"Mode: {workflow['mode']} - {mode_names.get(workflow['mode'])}")
+            print(f"Directory: {workflow['input_dir']}")
+            print(f"If exists: {ow_label}")
 
             if origin == 'tiff' and dest == 'jxl':
                 print(f"Distance: {workflow['quality']}")
@@ -1215,7 +1349,10 @@ class InteractiveMenu:
                 print(f"Config: {', '.join(extra_info)}")
             print("\nType YES to confirm:")
             confirm = input("> ").strip()
-            return confirm.upper() == "YES"
+            if confirm.upper() != "YES":
+                print("Cancelling...\n")
+                return False
+            return True
 
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
@@ -1259,8 +1396,12 @@ class InteractiveMenu:
                 cmd.append('--overwrite')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+            if advanced.get('sync'):
+                cmd.append('--sync')
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
+            if advanced.get('encode_tag'):
+                cmd.extend(['--encode-tag', advanced['encode_tag']])
 
         elif origin == 'jxl' and dest == 'tiff':
             script = 'jxl_tiff_decoder.py'
@@ -1289,6 +1430,10 @@ class InteractiveMenu:
                 cmd.append('--no-icc-cleanup')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+            if advanced.get('overwrite'):
+                cmd.append('--overwrite')
+            if advanced.get('sync'):
+                cmd.append('--sync')
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
 
@@ -1315,7 +1460,7 @@ class InteractiveMenu:
             if workflow.get('icc_profile'):
                 cmd.extend(['--icc-profile', workflow['icc_profile']])
 
-            # Staging
+            # Staging for transcoder
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
 
@@ -1324,6 +1469,10 @@ class InteractiveMenu:
                 cmd.append('--no-md5')
             if advanced.get('no_verify'):
                 cmd.append('--no-verify')
+            if advanced.get('overwrite'):
+                cmd.append('--overwrite')
+            if advanced.get('sync'):
+                cmd.append('--sync')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
             if advanced.get('output_suffix'):
@@ -1354,13 +1503,10 @@ class InteractiveMenu:
                 # Fallback to simple split
                 cmd.extend(expert_flags.split())
 
-        # Sync mode (implied by the wrapper's smart behavior)
-        cmd.append('--sync')
-
         # Check if script exists
         if not Path(script).exists():
             self._print_error(f"Script not found: {script}")
-            self._print_error("Ensure scripts are in the same folder as jxl_tools.py")
+            self._print_error("Ensure scripts are in the same folder as jxl_photo.py")
             return False
 
         # Show command
@@ -1467,11 +1613,16 @@ def main():
 
                 # Determine what quality value to save
                 if origin == 'tiff' and dest == 'jxl':
-                    saved_quality = workflow['quality']  # Distance
+                    saved_quality = workflow.get('quality') or 0.1  # Distance
                 elif 'lossy' in workflow['conversion_type']:
-                    saved_quality = workflow['quality']  # JPEG quality
+                    saved_quality = workflow.get('quality') or 95  # JPEG quality
                 else:
-                    saved_quality = config.config.default_quality
+                    saved_quality = config.config.default_quality  # lossless transcoding - quality not used
+
+                # Determine distance for TIFF->JXL workflows
+                saved_distance = None
+                if origin == 'tiff' and dest == 'jxl':
+                    saved_distance = workflow.get('quality') or 0.1
 
                 config.save_last_session(
                     workflow['input_dir'],
@@ -1479,7 +1630,8 @@ def main():
                     workflow['workers'],
                     workflow['staging'],
                     workflow['effort'],
-                    saved_quality
+                    saved_quality,
+                    saved_distance
                 )
 
                 # Ask if execute now
@@ -1527,6 +1679,15 @@ def main():
             last_staging = last.last_staging or ""
             last_effort = last.last_effort or 7
             last_quality = last.last_quality or 95
+            last_distance = last.last_distance  # May be None for non-TIFF workflows
+
+            # Infer origin from saved mode string (approximate)
+            # Mode 0-8 mapping to origin is approximate; actual detection done below
+            inferred_origin = None
+            mode_num = int(last_mode or 0)
+            if mode_num in [0, 1, 2, 3, 4, 5, 8]:
+                # These modes work with any origin; we'll detect from folder below
+                pass
 
             if RICH_AVAILABLE and console:
                 settings = [
@@ -1535,6 +1696,7 @@ def main():
                     ["Workers", str(last_workers)],
                     ["Effort", str(last_effort)],
                     ["Quality", str(last_quality)],
+                    ["Distance", f"{last_distance}" if last_distance is not None else "(n/a)"],
                     ["Staging", last_staging or "(none)"],
                 ]
                 t = Table(box=BOX_SIMPLE, show_header=False, pad_edge=False)
@@ -1550,6 +1712,7 @@ def main():
                 print(f"  Workers:      {last_workers}")
                 print(f"  Effort:       {last_effort}")
                 print(f"  Quality:      {last_quality}")
+                print(f"  Distance:     {last_distance if last_distance is not None else '(n/a)'}")
                 print(f"  Staging:      {last_staging or '(none)'}")
                 print()
 
@@ -1570,16 +1733,30 @@ def main():
                     print(f"Folder not found: {new_folder}")
                 continue
 
-            # Infer origin_format from selected folder
+            # Infer origin_format from selected folder (recursive scan)
             origin = 'jpeg'
             for ext in ['.tiff', '.tif']:
-                if list(input_path.glob(f"*{ext}")):
+                if list(input_path.rglob(f"*{ext}")):
                     origin = 'tiff'
                     break
             for ext in ['.jxl']:
-                if list(input_path.glob(f"*{ext}")):
+                if list(input_path.rglob(f"*{ext}")):
                     origin = 'jxl'
                     break
+
+            # Ask for overwrite mode
+            if RICH_AVAILABLE and console:
+                console.print("Existing file handling: [0] skip | [1] overwrite all | [2] sync (reconvert if newer)")
+                ow_choice = Prompt.ask("If exists", choices=["0", "1", "2"], default="2")
+            else:
+                ow_choice = input("If exists (0=skip, 1=overwrite all, 2=sync) [2]: ").strip() or "2"
+
+            if ow_choice == "1":
+                overwrite, sync = True, False
+            elif ow_choice == "2":
+                overwrite, sync = False, True
+            else:
+                overwrite, sync = False, False
 
             # Confirm
             if RICH_AVAILABLE and console:
@@ -1592,13 +1769,18 @@ def main():
                 continue
 
             # Build workflow for execution
+            # For TIFF workflows, use last_distance as quality (distance parameter)
+            # For others, use last_quality
+            effective_quality = last_distance if (origin == 'tiff' and last_distance is not None) else (last_quality or 95)
+
             workflow = {
                 'input_dir': new_folder,
                 'mode': int(last_mode or 0),
                 'workers': last_workers or 4,
                 'staging': last_staging,
                 'effort': last_effort or 7,
-                'quality': last_quality or 95,
+                'quality': effective_quality,
+                'overwrite_mode': ow_choice,
             }
 
             if workflow['mode'] == 2:
@@ -1614,7 +1796,7 @@ def main():
             workflow['compression'] = 'zip'
             workflow['bit_depth'] = 16
             workflow['dry_run'] = False
-            workflow['advanced_options'] = {}
+            workflow['advanced_options'] = {'overwrite': overwrite, 'sync': sync}
             workflow['expert_flags'] = ''
 
             if origin == 'jpeg':
