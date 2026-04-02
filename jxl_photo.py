@@ -61,6 +61,7 @@ class ToolConfig:
     last_effort: Optional[int] = None
     last_quality: Optional[int] = None
     last_distance: Optional[float] = None  # For TIFF->JXL distance
+    last_origin_format: Optional[str] = None  # jpeg / tiff / jxl
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -108,7 +109,8 @@ class ConfigManager:
     def save_last_session(self, input_dir: str, output_mode: str,
                          workers: int, staging: Optional[str],
                          effort: int = 7, quality: int = 95,
-                         distance: Optional[float] = None) -> None:
+                         distance: Optional[float] = None,
+                         origin_format: Optional[str] = None) -> None:
         self.config.last_input_dir = input_dir
         self.config.last_output_mode = output_mode
         self.config.last_workers = workers
@@ -116,6 +118,7 @@ class ConfigManager:
         self.config.last_effort = effort
         self.config.last_quality = quality
         self.config.last_distance = distance
+        self.config.last_origin_format = origin_format
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -232,8 +235,9 @@ class DependencyChecker:
 
     def _test_tool_execution(self, path: str, args: List[str]) -> bool:
         try:
-            result = subprocess.run([path] + args, capture_output=True, 
-                                  text=True, timeout=10, shell=False)
+            result = subprocess.run([path] + args, capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  timeout=10, shell=False)
             return result.returncode == 0
         except:
             return False
@@ -591,46 +595,10 @@ class InteractiveMenu:
 
         workflow['input_dir'] = str(path)
 
-        ext_map = {
-            'jpeg': ['.jpg', '.jpeg', '.jpe'],
-            'tiff': ['.tif', '.tiff'],
-            'jxl': ['.jxl', '.jif']
-        }
-
-        extensions = ext_map.get(origin, [])
-        files = []
-
-        # Recursive scan - modes 2/6/7 process subfolders anyway
-        for ext in extensions:
-            files.extend(path.rglob(f"*{ext}"))
-            files.extend(path.rglob(f"*{ext.upper()}"))
-
-        seen = set()
-        unique_files = []
-        for f in files:
-            if f.resolve() not in seen:
-                seen.add(f.resolve())
-                unique_files.append(f)
-        unique_files.sort()
-
-        workflow['selected_files'] = unique_files
-
-        if not unique_files:
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]![/yellow] No {origin.upper()} files found (recursive search)")
-            else:
-                print(f"\nNo {origin.upper()} files found (recursive search)")
-
-        elif RICH_AVAILABLE and console:
-            console.print(f"[green]✓[/green] {len(unique_files)} {origin.upper()} files found")
-            for f in unique_files[:5]:
-                console.print(f"  • {f.name}")
-            if len(unique_files) > 5:
-                console.print(f"  ... and {len(unique_files) - 5} more")
-        else:
-            print(f"\n{len(unique_files)} {origin.upper()} files:")
-            for f in unique_files[:5]:
-                print(f"  - {f.name}")
+        # Skip recursive scan here — individual scripts do proper file discovery
+        # (especially for modes 6/7 which only scan inside _EXPORT folders)
+        # File count will be shown by the underlying script when it runs
+        workflow['selected_files'] = []
 
         return True
 
@@ -672,15 +640,15 @@ class InteractiveMenu:
              f"[cyan]F:/Photos/Raw/[/cyan] -> [cyan]F:/Photos/Raw_{dest.upper()}/[/cyan]"),
 
             ("6", f"Marker {export_marker} (full)",
-             f"Finds [green]{export_marker}[/green] folders anywhere in the directory tree.\n"
-             f"Recursively processes ALL {origin.upper()} files found under each {export_marker}.\n"
-             f"Output goes to [green]16B_TIFF[/green] (or configurable) inside the anchor.\n"
-             f"Best for Capture One sessions with nested subfolders."),
+             f"ONLY processes files INSIDE folders containing [green]{export_marker}[/green].\n"
+             f"Recursively finds ALL {export_marker} folders and processes everything under each.\n"
+             f"Ignores ALL files outside {export_marker} folders — nothing is processed from elsewhere.\n"
+             f"Best for Capture One sessions where exported files live under _EXPORT."),
 
             ("7", f"Marker {export_marker} (specific subfolder)",
-             f"Finds [green]{export_marker}[/green] folders, but only processes files from a specific\n"
-             f"subfolder (configured as [green]{export_marker}/JXL[/green] by default).\n"
-             f"Ignores other {origin.upper()} files inside {export_marker}.\n"
+             f"Like mode 6, but ONLY processes files inside a specific subfolder of {export_marker}.\n"
+             f"Default subfolder is [green]{export_marker}/JXL[/green] (configurable).\n"
+             f"Files in other subfolders within {export_marker} are ignored.\n"
              f"Use when you keep different color-space variants in separate subfolders."),
 
             ("8", "DELETE originals",
@@ -752,9 +720,9 @@ class InteractiveMenu:
             ("5", "Folder suffix",
              f"Appends [green]_{dest.upper()}[/green] to folder name"),
             ("6", f"Marker [green]{export_marker}[/green] (full)",
-             f"Recursively processes ALL files under [green]{export_marker}[/green]"),
-            ("7", f"Marker [green]{export_marker}[/green] (subfolder)",
-             f"Only files inside a specific [green]{export_marker}[/green] subfolder"),
+             f"ONLY files INSIDE [green]{export_marker}[/green] folders — ignores everything outside"),
+            ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
+             f"Like mode 6, but only a specific subfolder (e.g. [green]{export_marker}/JXL[/green])"),
             ("8", "DELETE originals ⚠️",
              "DELETES source files after conversion - IRREVERSIBLE")
         ]
@@ -780,7 +748,19 @@ class InteractiveMenu:
             for key, name, desc in modes:
                 warning = " ⚠️ WARNING!" if key == "8" else ""
                 print(f"[{key}] {name}{warning}")
-                print(f"    {desc}\n")
+                # Strip rich tags for plain text
+                clean = (desc.replace("[bold ", "")
+                         .replace("[/bold]", "")
+                         .replace("[green]", "")
+                         .replace("[/green]", "")
+                         .replace("[cyan]", "")
+                         .replace("[/cyan]", "")
+                         .replace("[red]", "")
+                         .replace("[/red]", "")
+                         .replace("[bold red]", "")
+                         .replace("[bold green]", "")
+                         .replace("[bold blue]", ""))
+                print(f"    {clean}\n")
             print("[?] See detailed mode explanation")
             print()
 
@@ -1128,6 +1108,17 @@ class InteractiveMenu:
             show_advanced = adv_input.startswith('y')
 
         if not show_advanced:
+            # Convert overwrite_mode from Step 6 into overwrite/sync flags
+            ow_mode = workflow.get('overwrite_mode', '2')
+            if ow_mode == "1":
+                advanced_options['overwrite'] = True
+                advanced_options['sync'] = False
+            elif ow_mode == "2":
+                advanced_options['overwrite'] = False
+                advanced_options['sync'] = True
+            else:
+                advanced_options['overwrite'] = False
+                advanced_options['sync'] = False
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -1294,7 +1285,7 @@ class InteractiveMenu:
             table = Table.grid(expand=True)
             table.add_column(style="bold")
             table.add_column()
-            table.add_row("Source:", f"{origin.upper()} ({len(workflow['selected_files'])} files)")
+            table.add_row("Source:", origin.upper())
             table.add_row("Destination:", dest.upper() if dest else "?")
             table.add_row("Mode:", f"{workflow['mode']} - {mode_names.get(workflow['mode'])}")
             table.add_row("Directory:", workflow['input_dir'])
@@ -1333,7 +1324,7 @@ class InteractiveMenu:
                 ow_label = "sync (reconvert if newer)"
             else:
                 ow_label = "skip (no overwrite)"
-            print(f"Source: {origin.upper()} ({len(workflow['selected_files'])} files)")
+            print(f"Source: {origin.upper()}")
             print(f"Destination: {dest.upper() if dest else '?'}")
             print(f"Mode: {workflow['mode']} - {mode_names.get(workflow['mode'])}")
             print(f"Directory: {workflow['input_dir']}")
@@ -1524,7 +1515,8 @@ class InteractiveMenu:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                encoding="utf-8",
+                errors="replace"
             )
 
             # Stream output in real-time
@@ -1631,7 +1623,8 @@ def main():
                     workflow['staging'],
                     workflow['effort'],
                     saved_quality,
-                    saved_distance
+                    saved_distance,
+                    workflow['origin_format']
                 )
 
                 # Ask if execute now
@@ -1680,18 +1673,12 @@ def main():
             last_effort = last.last_effort or 7
             last_quality = last.last_quality or 95
             last_distance = last.last_distance  # May be None for non-TIFF workflows
-
-            # Infer origin from saved mode string (approximate)
-            # Mode 0-8 mapping to origin is approximate; actual detection done below
-            inferred_origin = None
-            mode_num = int(last_mode or 0)
-            if mode_num in [0, 1, 2, 3, 4, 5, 8]:
-                # These modes work with any origin; we'll detect from folder below
-                pass
+            last_origin = last.last_origin_format or "tiff"
 
             if RICH_AVAILABLE and console:
                 settings = [
                     ["Input folder", last_dir],
+                    ["Source", last_origin.upper()],
                     ["Mode", last_mode],
                     ["Workers", str(last_workers)],
                     ["Effort", str(last_effort)],
@@ -1708,6 +1695,7 @@ def main():
             else:
                 print("\n=== Last Workflow Settings ===")
                 print(f"  Input folder: {last_dir}")
+                print(f"  Source:       {last_origin.upper()}")
                 print(f"  Mode:         {last_mode}")
                 print(f"  Workers:      {last_workers}")
                 print(f"  Effort:       {last_effort}")
@@ -1733,16 +1721,8 @@ def main():
                     print(f"Folder not found: {new_folder}")
                 continue
 
-            # Infer origin_format from selected folder (recursive scan)
-            origin = 'jpeg'
-            for ext in ['.tiff', '.tif']:
-                if list(input_path.rglob(f"*{ext}")):
-                    origin = 'tiff'
-                    break
-            for ext in ['.jxl']:
-                if list(input_path.rglob(f"*{ext}")):
-                    origin = 'jxl'
-                    break
+            # Use the saved origin format from last workflow
+            origin = last_origin
 
             # Ask for overwrite mode
             if RICH_AVAILABLE and console:
