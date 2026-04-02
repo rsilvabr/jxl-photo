@@ -1,4 +1,4 @@
-# Technical notes — tiff_to_jxl.py
+# Technical notes — jxl_tiff_encoder.py
 
 Converting 16-bit ProPhoto RGB TIFFs from Capture One to JPEG XL with full EXIF
 visible in IrfanView turned out to be surprisingly difficult. Every standard approach

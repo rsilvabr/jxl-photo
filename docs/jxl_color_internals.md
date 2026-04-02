@@ -139,7 +139,7 @@ For professional editing:
 
 ### How It Works
 
-In `tiff_to_jxl.py`:
+In `jxl_tiff_encoder.py`:
 
 ```python
 # 1. Extract ICC from source TIFF
@@ -164,7 +164,7 @@ xmp += f"""<xmp:CreatorTool>cjxl d={distance} e={effort}</xmp:CreatorTool>"""
 exiftool -XMP<=xmp_file.jxl
 ```
 
-In `jxl_to_tiff.py`:
+In `jxl_tiff_decoder.py`:
 
 ```python
 # 1. Extract XMP from JXL

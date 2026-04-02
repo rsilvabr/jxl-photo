@@ -1,6 +1,6 @@
-# JXL-TIFF-JPEG-PNG Converter
+# jxl_photo — JXL Workflow Manager
 
-JPEG XL conversion tools with **full ICC color profile preservation** and full EXIF metadata correctly embedded and visible in IrfanView, XnView MP, and other applications. Designed for enthusiasts and photographers working with 16-bit TIFF files who desire to compact their photos keeping 16-bit tonal range. Tested with Capture One, Lightroom, NX Studio, Photoshop and Fuji Hyper Utility exported 16-bit TIFFs.
+Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
 ---
 
@@ -24,73 +24,29 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
 
-# Features
+## Features
 
-### 1. **ICC Profile Preservation** 
+### 1. **TIFF → JXL Encoding**
+- 16-bit TIFF preservation (lossless or near-lossless JXL)
+- **ICC profile preservation** — exact original ICC restored on round-trip, even for lossy JXL
+- **EXIF/XMP metadata** — fully preserved and visible in IrfanView, XnView MP, and other applications
+- JPEG preview embedding in output TIFF (fast Explorer thumbnails)
 
-Professional color management requires precise ICC profiles with full TRC (Tone Reproduction Curve) data, not just generic color primaries. While the JPEG XL format fully supports ICC profiles in both lossless and lossy modes, the reference encoder (`cjxl`) optimizes file size by converting detailed ICC profiles to compact "native primaries" representation when using lossy compression.
+### 2. **JXL → TIFF Decoding**
+- Three decode modes: **Roundtrip** (ICC-restored), **Basic** (for consumer JXLs), **Matrix** (color space conversion)
+- JPEG preview embedding in output TIFF
+- Sync mode — reconvert only changed files
 
-This toolkit ensures **bit-exact ICC preservation** across all conversion paths:
-
-- **Lossless mode:** Leverages native JXL ICC container support (standard behavior)
-- **Lossy mode:** Embeds original ICC as base64-encoded XMP metadata before encoding, then restores it on decode — bypassing the encoder's optimization that would otherwise discard TRC curves and copyright metadata
-- **Round-trip safety:** TIFF → JXL → TIFF maintains identical ICC data, gamma curves, and device calibration metadata
-
-**Why this matters:**  
-Native primaries are sufficient for display, but professionally calibrated workflows rely on precise TRC curves found only in full ICC profiles. This toolkit guarantees your color profiles survive compression intact, regardless of encoder optimization settings.
-
-### 2. **Three Decode Modes for JXL → TIFF**
-
-**Roundtrip Mode** (default when ICC present): Uses `djxl auto` + original ICC attachment. Best for files from `tiff_to_jxl.py`. Visually perfect and fast.
-
-**Basic Mode** (default when no ICC): Uses `djxl auto` only. For consumer JXLs without embedded profiles.
-
-**Matrix Mode** (optional `--matrix`): Linear Rec.2020 decode + LittleCMS transform. For color space conversion or special workflows.
-
-### 3. **JPEG Preview Embedding**
-TIFF output includes a second page with JPEG-compressed preview for fast 
-thumbnail generation in Windows Explorer and other file managers.
+### 3. **JPEG ↔ JXL Transcoding**
+- JPEG → JXL lossless transcoding (pixel-perfect)
+- JXL → JPEG/PNG with ICC color space conversion (sRGB, AdobeRGB, ProPhoto RGB)
+- JPEG preview embedding
 
 ### 4. **Professional Workflow Support**
-- 16-bit TIFF preservation
-- Full EXIF/XMP metadata preservation (fixed in this version!)
-- Multiple folder structure modes (flat, recursive, Capture One or Lightroom EXPORT)
+- Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
 - Parallel processing (tested up to 32 workers)
-- Sync mode (only reconvert changed files)
-
----
-
-##  What's New in This Version
-
-### Decode Modes 
-- **Roundtrip** : `djxl auto` + original ICC — recommended for most use
-- **Basic** : `djxl auto` only — for web/mobile JXLs
-- **Matrix** : Linear + LittleCMS — for color space conversion
-
-
-
-### Bug Fixes
-
-#### XMP Preservation Fixed
-Previous versions had a critical bug where XMP metadata was **overwritten** instead of preserved:
-- **Old behavior**: First copy EXIF/XMP, then overwrite all XMP with ICC data
-- **Result**: Ratings, keywords, and original descriptions were lost!
-- **New behavior**: Targeted XMP updates using `-xmp-dc:Description=` and `-xmp-xmp:CreatorTool=`
-- **Result**: Original metadata + encoding info + ICC all coexist
-
-#### EXIF Extraction Fixed
-Previous versions used binary EXIF extraction which could corrupt data:
-- **Old method**: `exiftool -b -Exif -o exif.bin` then inject
-- **Problem**: Produced 27MB corrupted files instead of 880 bytes
-- **New method**: `exiftool -tagsfromfile source -exif:all destination`
-- **Result**: EXIF now correctly visible in IrfanView
-
-#### ICC Handling Improved
-- Separate ICC extraction: **patched for PNG encoding** (cjxl compatibility) vs **original for preservation** (perfect round-trip)
-- ICC from XMP now used with **Roundtrip Mode** (djxl auto + direct ICC apply) avoiding double gamma issues
-
-#### ImageDescription Cleanup
-Fixed `tifffile` adding `{"shape": [H,W,C]}` to ImageDescription (both IFD0 and IFD1/preview). Now cleaned automatically.
+- Sync mode (reconvert only changed files)
+- Staging SSD support for large collections
 
 ---
 
@@ -98,71 +54,110 @@ Fixed `tifffile` adding `{"shape": [H,W,C]}` to ImageDescription (both IFD0 and 
 
 | Script | Purpose | Key Feature |
 |--------|---------|-------------|
-| [`tiff_to_jxl.py`](tiff_to_jxl.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation, concatenates description |
-| [`jxl_to_tiff.py`](jxl_to_tiff.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode (no double gamma), adds JPEG preview |
-| [`jxl_to_jpg_png.py`](jxl_to_jpg_png.py) | JXL → JPG/PNG encoder | Batch JXL → JPEG/PNG with ICC profile conversion |
+| [`jxl_photo.py`](jxl_photo.py) | Interactive wizard | Guided workflow — best for most users |
+| [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation |
+| [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode, adds JPEG preview |
+| [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
 
 
 ---
 
-##  Quick Start
+##  Quick Start — Interactive Wrapper
 
-### Typical workflow
+The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided menu:
 
+```
+╭───────────────────────────────────────────── JXL Tools Environment ────────────────────────────────────────────────╮
+│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich                                 │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
+│  1  New workflow                                                                                                   │
+│  2  Repeat last workflow (unknown)                                                                                 │
+│  3  Check dependencies again                                                                                       │
+│  4  Edit default settings                                                                                          │
+│  5  Reset all settings                                                                                             │
+│  6  Move settings file                                                                                             │
+│  0  Exit                                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+The wizard guides you through: Source format → Destination → Directory → Output mode → Parameters → Confirm.
+
+**Example session:**
+```
+[1] New workflow
+  Step 1: Source Format   → TIFF
+  Step 2: Destination     → JXL d=0.1
+  Step 3: Directory       → F:\Photos\2024
+  Step 4: Mode            → 7 (Marker _EXPORT, subfolder)
+  Step 5: Confirmation    → OK
+  Step 6: Parameters      → Workers: 8, Distance: 0.1, Effort: 7
+  Step 7: Summary         → Review and type YES to confirm
+  → Executes the underlying script with all options
+```
+
+---
+
+##  Individual Scripts
+
+### Typical workflow (script commands)
 
 ```
 Capture One
     ↓ Export 16-bit TIFF (sRGB, AdobeRGB, ProPhoto RGB)
-tiff_to_jxl.py      TIFF → JXL  (archive, stays 16-bit, lossless or lossy)
+jxl_tiff_encoder.py      TIFF → JXL  (archive, stays 16-bit, lossless or lossy)
     ↓
     JXLs on disk — ~8–47MB each for lossy, ~173MB for lossless (45MP example)
     ↓
-jxl_to_jpeg_png.py      JXL → JPEG/PNG  (when needed for print or delivery)
-                                  ICC profile conversion applied here
-
-(With jxl_to_tiff used when TIFF is needed again.)
+jxl_tiff_decoder.py      JXL → TIFF  (when master TIFF is needed again)
+    ↓ OR
+jxl_jpeg_transcoder.py   JXL → JPEG/PNG  (when needed for print or delivery)
+                                   ICC profile conversion applied here
 ```
 
 ### TIFF → JXL
 
 ```powershell
 # Single file
-py tiff_to_jxl.py "photo.tif"
+py jxl_tiff_encoder.py "photo.tif"
 
 # Folder (Capture One _EXPORT workflow)
-py tiff_to_jxl.py "F:\Photos\2024" --mode 7
+py jxl_tiff_encoder.py "F:\Photos\2024" --mode 7
 
 # With settings
-py tiff_to_jxl.py "photo.tif" --mode 0 --workers 8
+py jxl_tiff_encoder.py "photo.tif" --mode 0 --workers 8
 ```
 
 ### JXL → TIFF
 
 ```powershell
 # Single file — auto mode (Roundtrip if has ICC, Basic if not)
-py jxl_to_tiff.py "photo.jxl"
+py jxl_tiff_decoder.py "photo.jxl"
 
 # Force Matrix mode for color space conversion
-py jxl_to_tiff.py "photo.jxl" --matrix --target-icc "C:\icc\sRGB.icc"
+py jxl_tiff_decoder.py "photo.jxl" --matrix --target-icc "C:\icc\sRGB.icc"
 
 # Folder
-py jxl_to_tiff.py "F:\Photos\2024" --mode 7
+py jxl_tiff_decoder.py "F:\Photos\2024" --mode 7
 
 # 8-bit output for web
-py jxl_to_tiff.py "photo.jxl" --depth 8
+py jxl_tiff_decoder.py "photo.jxl" --depth 8
 ```
 
-### JXL → JPG/PNG
+### JPEG ↔ JXL / JXL → PNG
 
 ```powershell
-# Convert JXL files with custom profile to sRGB JPEG in sibling folder
-py jxl_to_jpeg_png.py "F:\2024\session\_EXPORT\16B_JXL"
+# JPEG → JXL (lossless transcoding)
+py jxl_jpeg_transcoder.py "F:\Photos\2024"
 
-# Convert to a Custom ICC profile (AdobeRGB, etc.)
-py jxl_to_jpeg_png.py "F:\2024" --icc-profile "C:\icc\AdobeRGB1998.icc"
+# JXL → JPEG (auto: lossless recovery if jbrd present, else lossy)
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --mode 8
 
-# 16-bit PNG for print workflows
-py jxl_to_jpeg_png.py "F:\2024" --format png --bit-depth 16
+# JXL → PNG 16-bit (archival)
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --format png
+
+# JXL → sRGB JPEG (ICC conversion via ImageMagick)
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --to-srgb --quality 95
 ```
 
 
@@ -181,26 +176,29 @@ Depending on your needs, three common approaches:
 
 | Document | Contents |
 |----------|----------|
-| [docs/README_tiff_to_jxl.md](docs/README_tiff_to_jxl.md) | Full documentation for TIFF → JXL conversion |
-| [docs/README_jxl_to_tiff.md](docs/README_jxl_to_tiff.md) | Full documentation for JXL → TIFF conversion |
-| [docs/README_jxl_to_jpg_png.md](docs/README_jxl_to_jpg.md) | Full documentation for JXL → JPG/PNG conversion |
+| [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
+| [docs/README_tiff_to_jxl.md](docs/README_tiff_to_jxl.md) | Full documentation for TIFF → JXL encoding |
+| [docs/README_jxl_to_tiff.md](docs/README_jxl_to_tiff.md) | Full documentation for JXL → TIFF decoding |
+| [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+| [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
 
 ---
 
 ## Requirements
 
 ```
-Python 3.12+
-pip install tifffile numpy pillow
+Python 3.10+
+pip install tifffile numpy pillow rich
 cjxl / djxl → https://github.com/libjxl/libjxl/releases
 exiftool → https://exiftool.org
+ImageMagick → https://imagemagick.org  (for ICC color conversion)
 ```
 
 Quick setup (PowerShell):
 ```powershell
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool", "User")
+[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool;C:\Program Files\ImageMagick-7.1.1-Q16-HDRI", "User")
 ```
 
 ---
@@ -226,9 +224,9 @@ TIFF (generic ICC generated from primaries - sufficient for display only)
 
 ```
 TIFF (ProPhoto ICC with Kodak TRC curves)
-    ↓ tiff_to_jxl.py (EMBED_ICC_IN_JXL = True)
+    ↓ jxl_tiff_encoder.py (EMBED_ICC_IN_JXL = True)
 JXL (native primaries + XMP with base64 ICC)
-    ↓ jxl_to_tiff.py (Roundtrip Mode)
+    ↓ jxl_tiff_decoder.py (Roundtrip Mode)
 TIFF (original ProPhoto ICC restored!)
 ```
 
@@ -255,7 +253,7 @@ The ICC is base64-encoded and stored in XMP:
 ### Archival (Master Files)
 
 ```python
-# tiff_to_jxl.py
+# jxl_tiff_encoder.py
 CJXL_DISTANCE = 0.05      # Near-lossless, ~47MB for 45MP
 #OR#
 CJXL_DISTANCE = 0.1       # Also Near-lossless, ~34MB for 45MP
@@ -267,11 +265,11 @@ EMBED_ICC_IN_JXL = True   # Always preserve ICC!
 ### Web / Delivery
 
 ```python
-# tiff_to_jxl.py
+# jxl_tiff_encoder.py
 CJXL_DISTANCE = 1.0       # Visually lossless, ~8MB
 CJXL_EFFORT = 7
 
-# jxl_to_tiff.py  
+# jxl_tiff_decoder.py
 DJXL_OUTPUT_DEPTH = 8     # Smaller files
 TIFF_COMPRESSION = "zip"
 ADD_JPEG_PREVIEW = True   # Fast Explorer thumbnails
@@ -358,7 +356,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
----
-
-### Development Assistance
-- [Kimi](https://www.kimi.com) (Moonshot AI) and Claude (Anthropic) for code assistance and technical discussion
+- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion

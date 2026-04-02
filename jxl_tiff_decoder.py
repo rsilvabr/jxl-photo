@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-jxl_to_tiff.py — Batch JPEG XL → TIFF 16-bit converter with ICC preservation
+jxl_tiff_decoder.py — Batch JPEG XL → TIFF 16-bit converter with ICC preservation
 
 Usage:
- py jxl_to_tiff.py input/ [--mode 0-8] [--workers N] [--overwrite] [--sync]
- py jxl_to_tiff.py photo.jxl --mode 1
+ py jxl_tiff_decoder.py input/ [--mode 0-8] [--workers N] [--overwrite] [--sync]
+ py jxl_tiff_decoder.py photo.jxl --mode 1
 
 Requirements:
  pip install tifffile numpy Pillow
@@ -87,8 +87,8 @@ FORCE_BASIC_MODE = False
 
 # || MODE 0 SETTINGS ||
 # No settings needed. Single file or flat directory output.
-# py jxl_to_tiff.py input.jxl
-# py jxl_to_tiff.py input_dir/
+# py jxl_tiff_decoder.py input.jxl
+# py jxl_tiff_decoder.py input_dir/
 
 # || MODE 1 SETTINGS ||
 CONVERTED_TIFF_FOLDER = "converted_tiff"
@@ -97,7 +97,7 @@ CONVERTED_TIFF_FOLDER = "converted_tiff"
 
 # || MODE 2 SETTINGS ||
 # No settings needed. Flat output to specified directory.
-# py jxl_to_tiff.py input_dir/ output_dir/ --mode 2
+# py jxl_tiff_decoder.py input_dir/ output_dir/ --mode 2
 
 # || MODE 3 SETTINGS ||
 TIFF_FOLDER_NAME = "TIFF_16bits"
@@ -172,12 +172,12 @@ def confirm_deletion_jxl():
     """Interactive confirmation before deleting source JXLs"""
     from datetime import datetime as _dt
     print("\n\n")
-    print(" ⚠ WARNING — DELETE_SOURCE is enabled")
+    print(" [!] WARNING -- DELETE_SOURCE is enabled")
     print(" Source JXLs will be deleted after successful decode.")
     print(" This deletion is IRREVERSIBLE.")
     now = _dt.now()
     token = now.strftime("%H%M")
-    print(f" Current time: {now.strftime('%H:%M')} → to confirm, type: {token}")
+    print(f" Current time: {now.strftime('%H:%M')} -> to confirm, type: {token}")
     print()
     try:
         answer = input(" > ").strip()
@@ -196,7 +196,7 @@ def confirm_deletion_jxl():
 
 def extract_icc_from_xmp(jxl_path):
     """
-    Extract ICC profile from XMP CreatorTool (base64 encoded by tiff_to_jxl).
+    Extract ICC profile from XMP CreatorTool (base64 encoded by jxl_tiff_encoder).
     Returns ICC bytes or None.
     """
     try:
@@ -299,7 +299,7 @@ def select_decode_strategy(has_original_icc=False):
 
     Three modes available:
     - Roundtrip: Default when ICC present. djxl auto + original ICC attachment.
-                 Best for files converted with tiff_to_jxl.py
+                 Best for files converted with jxl_tiff_encoder.py
     - Basic: Default when no ICC. djxl auto only, no color management.
              For consumer JXLs without embedded ICC
     - Matrix: Linear decode + LittleCMS transformation.
@@ -650,7 +650,7 @@ def cleanup_xmp_icc(tiff_path):
             clean = re.sub(r'ICC:[A-Za-z0-9+/=]+', '', content).strip()
             clean = re.sub(r'\s*\|\s*$', '', clean)
             if not clean:
-                clean = "jxl_to_tiff"
+                clean = "jxl_tiff_decoder"
             subprocess.run(
                 ["exiftool", "-overwrite_original",
                  f"-XMP-xmp:CreatorTool={clean}", str(tiff_path)],
@@ -810,7 +810,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
     Automatically selects between three decode strategies:
     1. Roundtrip (default with ICC): djxl auto + original ICC attachment
-       Best for files converted with tiff_to_jxl.py
+       Best for files converted with jxl_tiff_encoder.py
     2. Matrix (linear + LittleCMS): For color space conversion needs
     3. Basic (djxl auto only): For consumer JXLs without embedded ICC
     """
@@ -853,7 +853,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
             if mode == 'roundtrip':
                 # === ROUNDTRIP MODE (DEFAULT WITH ICC) ===
-                # Best for files converted with tiff_to_jxl.py
+                # Best for files converted with jxl_tiff_encoder.py
                 # djxl auto handles display optimization, we attach the original ICC
                 logger.info(" -> Using Roundtrip decode (djxl auto + original ICC)")
 
@@ -1043,7 +1043,7 @@ Modes:
   1 = Subfolder (converted_tiff/)
   2 = Flat output directory
   3 = Subfolder (TIFF_16bits/)
-  4 = Rename folder (JXL→TIFF)
+  4 = Rename folder (JXL->TIFF)
   5 = Sibling folder
   6 = EXPORT marker full hierarchy
   7 = EXPORT marker only inside
@@ -1086,17 +1086,26 @@ Examples:
                       help="Output bit depth")
     parser.add_argument("--compression", choices=["zip", "lzw", "none"], default=None,
                       help="TIFF compression")
+    parser.add_argument("--staging", type=str, default=None,
+                      help="Staging directory for output files")
+    parser.add_argument("--delete-source", action="store_true",
+                      help="Delete source JXLs after successful decode (mode 8 only)")
+    parser.add_argument("--dry-run", action="store_true",
+                      help="Preview operations without converting")
 
     args = parser.parse_args()
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE
 
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
         OVERWRITE = True
+
+    if args.delete_source:
+        DELETE_SOURCE = True
 
     USE_MATRIX_MODE = args.use_matrix
     FORCE_BASIC_MODE = args.force_basic
@@ -1111,15 +1120,17 @@ Examples:
         DJXL_OUTPUT_DEPTH = args.depth
     if args.compression:
         TIFF_COMPRESSION = args.compression
+    if args.staging:
+        TEMP2_DIR = args.staging
 
     log_file = setup_logger()
 
     # Mode 8 confirmation
     if args.mode == 8 and DELETE_SOURCE:
-        logger.info("Mode 8 — DELETE_SOURCE=True: source JXLs will be deleted after successful decode")
+        logger.info("Mode 8 -- DELETE_SOURCE=True: source JXLs will be deleted after successful decode")
         if DELETE_CONFIRM:
             if not confirm_deletion_jxl():
-                logger.info("Deletion not confirmed — exiting.")
+                logger.info("Deletion not confirmed -- exiting.")
                 return
 
     logger.info(f"Mode: {args.mode} | Depth: {DJXL_OUTPUT_DEPTH} | "
@@ -1151,8 +1162,15 @@ Examples:
     # Build pairs
     pairs = []
     for j in jxls:
-        tiff = resolve_output(j, args.mode, args.input)
+        tiff = resolve_output(j, args.mode, output_root)
         pairs.append((j, tiff))
+
+    # Dry run
+    if args.dry_run:
+        for j, t in pairs:
+            logger.info(f" DRY | {j.name} -> {t}")
+        logger.info(f"Dry run: {len(pairs)} file(s) would be converted.")
+        return
 
     # Group by output folder
     groups = {}
@@ -1166,7 +1184,7 @@ Examples:
 
     for dest_folder, group_pairs in groups.items():
         if len(groups) > 1:
-            logger.info(f"── Group: {dest_folder} ({len(group_pairs)} file(s))")
+            logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
 
         results = process_group(group_pairs, args.workers, args.mode,
                                target_icc=args.target_icc)
@@ -1183,7 +1201,7 @@ Examples:
             elif status == "error":
                 err += 1
 
-    logger.info("\n" + "─"*50)
+    logger.info("\n" + "-"*50)
     if args.sync:
         logger.info(f"SYNC done: {ok} reconverted | {skipped} up to date | {err} errors")
     else:

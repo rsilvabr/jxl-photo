@@ -1,4 +1,4 @@
-# tiff_to_jxl.py
+# jxl_tiff_encoder.py
 
 Batch TIFF 16-bit → JPEG XL converter. Encodes TIFF files to JXL format with 
 configurable quality (lossless or lossy), preserves full EXIF/XMP metadata, 
@@ -10,7 +10,7 @@ standard uncompressed TIFFs from various sources.
 
 **Key feature:** ICC profile embedding. 
 ```
-When paired with `jxl_to_tiff.py`, the exact original ICC profile is 
+When paired with `jxl_tiff_decoder.py`, the exact original ICC profile is 
 preserved even for **lossy JXL files**, which would otherwise lose 
 the detailed ICC information (gamma curves, copyright, etc.).
 ```
@@ -47,29 +47,29 @@ exiftool -ver       # 13.xx
 ```powershell
 # ── The easy way — mode 0, no flags needed ──────────────────────
 # Single file, in-place
-py tiff_to_jxl.py "F:\Photos\photo.tif"
+py jxl_tiff_encoder.py "F:\Photos\photo.tif"
 
 # Single file → specific output folder
-py tiff_to_jxl.py "F:\Photos\photo.tif" "F:\output"
+py jxl_tiff_encoder.py "F:\Photos\photo.tif" "F:\output"
 
 # Whole folder, in-place (flat — subfolders not touched)
-py tiff_to_jxl.py "F:\Photos"
+py jxl_tiff_encoder.py "F:\Photos"
 
 # Whole folder → specific output folder (flat)
-py tiff_to_jxl.py "F:\Photos" "F:\output"
+py jxl_tiff_encoder.py "F:\Photos" "F:\output"
 
 # ── Other modes ──────────────────────────────────────────────────
 # Capture One _EXPORT workflow (mode 7) — most common for C1 users
-py tiff_to_jxl.py "F:\2024" --mode 7
+py jxl_tiff_encoder.py "F:\2024" --mode 7
 
 # Sync — only reconvert TIFFs newer than existing JXL
-py tiff_to_jxl.py "F:\2024" --mode 7 --sync
+py jxl_tiff_encoder.py "F:\2024" --mode 7 --sync
 
 # 16 parallel workers
-py tiff_to_jxl.py "F:\2024" --mode 7 --workers 16
+py jxl_tiff_encoder.py "F:\2024" --mode 7 --workers 16
 
 # Mode 8 — in-place recursive: JXL next to each TIFF, all subfolders
-py tiff_to_jxl.py "F:\2024" --mode 8
+py jxl_tiff_encoder.py "F:\2024" --mode 8
 ```
 
 ---
@@ -154,7 +154,7 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 |------|-------|----------------|---------|
 | `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.jxl` / `output_dir/photo.jxl` |
 | `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
-| `2` | Directory | **DISCONTINUED** — behaves as mode 0 | — |
+| `2` | Directory | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
 | `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
@@ -167,7 +167,7 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 ## CLI reference
 
 ```
-py tiff_to_jxl.py <input> [output] [options]
+py jxl_tiff_encoder.py <input> [output] [options]
 
 Arguments:
   input           Input root folder or file
@@ -182,6 +182,8 @@ Options:
   --effort 1-10  Compression effort (default: from script setting)
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
+  --delete-source Delete source TIFFs after successful encode (mode 8 only)
+  --dry-run       Preview operations without converting
 ```
 
 ---
@@ -217,7 +219,7 @@ TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original Pro
 3. **Embed in XMP** metadata (`xmp:CreatorTool` field with `ICC:` prefix)
 4. **Encoding params** (cjxl d=0.1 e=7) go to `dc:description` (visible in Windows Properties)
 
-When converting back with `jxl_to_tiff.py`:
+When converting back with `jxl_tiff_decoder.py`:
 1. Extract ICC from XMP metadata
 2. Apply to output TIFF
 3. Clean up XMP (remove base64 data, keep encoding params)
@@ -255,20 +257,20 @@ This ensures:
 
 ---
 
-## Relationship with jxl_to_tiff.py
+## Relationship with jxl_tiff_decoder.py
 
 These scripts are designed to work as a pair:
 
 ```powershell
 # Encode: TIFF → JXL (with ICC embedding)
-py tiff_to_jxl.py "photo.tif" --mode 0
+py jxl_tiff_encoder.py "photo.tif" --mode 0
 
 # Decode: JXL → TIFF (ICC restored)
-py jxl_to_tiff.py "photo.jxl" --mode 0
+py jxl_tiff_decoder.py "photo.jxl" --mode 0
 ```
 
 **For best results:**
-- Use `EMBED_ICC_IN_JXL = True` (default) in `tiff_to_jxl.py`
+- Use `EMBED_ICC_IN_JXL = True` (default) in `jxl_tiff_encoder.py`
 - Both scripts detect and handle the embedded ICC automatically
 
 ---
@@ -307,7 +309,7 @@ and moved in bulk at the end — eliminates random write contention on HDD colle
 ## Logs
 
 ```
-<script_folder>/Logs/tiff_to_jxl/YYYYMMDD_HHMMSS.log
+<script_folder>/Logs/jxl_tiff_encoder/YYYYMMDD_HHMMSS.log
 ```
 
 Opening line shows all active settings including `EMBED_ICC_IN_JXL` status.
@@ -390,7 +392,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
----
-
-### Development Assistance
-- [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
