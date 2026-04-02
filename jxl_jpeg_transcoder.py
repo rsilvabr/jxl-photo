@@ -9,7 +9,7 @@ Auto-detect workflow:
   PNG input  -&gt; convert (to JXL, lossy or modular lossless)
 
 Usage:
-  python jxl_jpeg_transcoder.py photo.jpg                    # auto: transcode encode
+  python jxl_jpeg_transcoder.py photo.jpg                  # auto: transcode encode
   python jxl_jpeg_transcoder.py photo.jxl                  # auto: transcode decode (if brob present)
   python jxl_jpeg_transcoder.py photo.jxl --format png     # auto: convert to PNG (if no brob)
   python jxl_jpeg_transcoder.py --help
