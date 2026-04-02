@@ -3,10 +3,10 @@
 jxl_jpeg_transcoder.py — Unified JPEG XL toolkit (Round-trip optimized)
 
 Auto-detect workflow:
-  JPEG input -&gt; transcode (lossless encode to JXL)
-  JXL input  -&gt; checks for jbrd box -&gt; transcode decode (lossless recovery) if present
+  JPEG input -> transcode (lossless encode to JXL)
+  JXL input  -> checks for jbrd box -> transcode decode (lossless recovery) if present
                otherwise convert (lossy to JPEG/PNG)
-  PNG input  -&gt; convert (to JXL, lossy or modular lossless)
+  PNG input  -> convert (to JXL, lossy or modular lossless)
 
 Usage:
   python jxl_jpeg_transcoder.py photo.jpg                    # auto: transcode encode
@@ -15,9 +15,9 @@ Usage:
   python jxl_jpeg_transcoder.py --help
 
 Requirements:
-  cjxl / djxl -&gt; https://github.com/libjxl/libjxl/releases
-  exiftool    -&gt; https://exiftool.org
-  magick      -&gt; https://imagemagick.org (optional, for ICC)
+  cjxl / djxl -> https://github.com/libjxl/libjxl/releases
+  exiftool    -> https://exiftool.org
+  magick      -> https://imagemagick.org (optional, for ICC)
 """
 
 import subprocess
@@ -231,7 +231,7 @@ def jxl_has_any_exif(jxl_path: Path) -> bool:
     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
         arg = Path(tmp) / "check.args"
         arg.write_text(f"-v3\n{jxl_path}\n", encoding="utf-8")
-        r = subprocess.run(["exiftool", "-@", str(arg)], capture_output=True, text=True)
+        r = subprocess.run(["exiftool", "-@", str(arg)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         return ("Tag 'Exif'" in r.stdout) or ("BrotliEXIF" in r.stdout)
 
 def reorder_jxl_boxes(jxl_path: Path):
@@ -290,7 +290,7 @@ def inject_exif_to_jxl_from_jpeg(jxl_path: Path, jpeg_path: Path, tmp_dir: Path)
     # Extract raw EXIF binary from JPEG
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"-b\n-Exif\n{jpeg_path}\n", encoding="utf-8")
-    r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True, text=True)
+    r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0 or len(r.stdout) <= 8:
         logger.debug(f"  No EXIF to inject from {jpeg_path.name}")
         return
@@ -578,7 +578,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {src_path.name} -&gt; {write_path.name}")
+        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), src_md5)
     except Exception as e:
         n, total = next_count()
@@ -624,7 +624,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                     logger.error(f"[{n}/{total}] MD5 FAIL | {jxl_path.name}")
                     return (str(jxl_path), "md5_fail", str(final_path))
         else:
-            logger.info(f"[{n}/{total}] OK | {jxl_path.name} -&gt; {write_path.name}")
+            logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
 
         return (str(jxl_path), "ok", str(final_path))
     except Exception as e:
@@ -675,7 +675,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 staging_db.unlink()
 
         if moved:
-            logger.info(f" -&gt; Moved {moved} file(s) from staging to destination")
+            logger.info(f" -> Moved {moved} file(s) from staging to destination")
 
     if DELETE_SOURCE and mode == 8:
         deleted = 0
@@ -696,7 +696,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             deleted += 1
             logger.info(f" DELETED source | {src_path.name}")
         if deleted:
-            logger.info(f" -&gt; Deleted {deleted} source file(s)")
+            logger.info(f" -> Deleted {deleted} source file(s)")
 
     return results
 
@@ -717,12 +717,12 @@ def cmd_transcode(args, auto_decode: bool = False):
     decode = args.decode or auto_decode
 
     log_file = setup_logger()
-    direction_str = "DECODE (JXL -&gt; JPEG)" if decode else "ENCODE (JPEG -&gt; JXL)"
+    direction_str = "DECODE (JXL -> JPEG)" if decode else "ENCODE (JPEG -> JXL)"
 
     op_type = "TRANSCODE lossless" if not decode else "TRANSCODE decode (lossless recovery)"
     # Determine mode string
     if smart_mode:
-        mode_str = "smart (source newer -&gt; reconvert)"
+        mode_str = "smart (source newer -> reconvert)"
     elif reconvert_explicit:
         mode_str = "reconvert=ON"
     else:
@@ -912,7 +912,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {src_path.name} -&gt; {write_path.name}")
+        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path))
     except Exception as e:
         n, total = next_count()
@@ -1014,7 +1014,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -&gt; {actual_out.name}")
+        logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {actual_out.name}")
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(actual_out))
 
     except Exception as e:
@@ -1060,7 +1060,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 shutil.move(str(write_out), str(final_out))
                 moved += 1
         if moved:
-            logger.info(f" -&gt; Moved {moved} file(s) from staging to destination")
+            logger.info(f" -> Moved {moved} file(s) from staging to destination")
 
     return results
 
@@ -1180,7 +1180,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
     if args.dry_run:
         for f, out in pairs:
-            logger.info(f" DRY | {f.name} -&gt; {out}")
+            logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be converted.")
         return
 
@@ -1224,7 +1224,7 @@ def cmd_convert(args, from_jxl: bool = True):
                 deleted += 1
                 logger.info(f" DELETED source | {src_path.name}")
             if deleted:
-                logger.info(f" -&gt; Deleted {deleted} source file(s)")
+                logger.info(f" -> Deleted {deleted} source file(s)")
 
         for _, status, _ in results:
             if status == "ok":
@@ -1251,9 +1251,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Auto-detection (no subcommand needed for single files):
-  photo.jpg       -&gt; transcode encode (lossless to JXL)
-  photo.jxl       -&gt; transcode decode if jbrd present, else convert
-  photo.png       -&gt; convert to JXL
+  photo.jpg       -> transcode encode (lossless to JXL)
+  photo.jxl       -> transcode decode if jbrd present, else convert
+  photo.png       -> convert to JXL
 
 Explicit subcommands (for directories or override):
   %(prog)s transcode <input> [options]   # lossless JPEG<->JXL

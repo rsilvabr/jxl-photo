@@ -25,7 +25,7 @@ try:
     from rich.prompt import Prompt, IntPrompt, Confirm
     from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
     RICH_AVAILABLE = True
-    console = Console()
+    console = Console(force_terminal=True)
 except ImportError:
     RICH_AVAILABLE = False
     console = None

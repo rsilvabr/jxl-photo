@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-jxl_tiff_encoder.py — Batch TIFF 16-bit -&gt; JPEG XL converter with proper XMP preservation
+jxl_tiff_encoder.py — Batch TIFF 16-bit -> JPEG XL converter with proper XMP preservation
 
 Usage:
   py jxl_tiff_encoder.py <input> [output] --mode 0-8 [--workers N] [--overwrite] [--sync]
 
 Requirements:
   pip install tifffile numpy
-  cjxl / djxl  -&gt;  https://github.com/libjxl/libjxl/releases
-  exiftool     -&gt;  https://exiftool.org
+  cjxl / djxl  ->  https://github.com/libjxl/libjxl/releases
+  exiftool     ->  https://exiftool.org
 """
 
 import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil, base64
@@ -51,37 +51,37 @@ CJXL_MODULAR = False
 #       CJXL_MODULAR only affects lossy (d > 0).
 
 USE_RAM_FOR_PNG = False
-# True  -&gt; PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
-# False -&gt; PNG is written to disk in TEMP_DIR (useful if RAM is limited)
+# True  -> PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
+# False -> PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
 TEMP_DIR = None
 # Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
-# None -&gt; use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
-# Ex:  -&gt; r"E:\\temp_jxl"
+# None -> use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
+# Ex:  -> r"E:\\temp_jxl"
 
 TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
-# None -&gt; disabled: JXLs are written directly to their final destination.
+# None -> disabled: JXLs are written directly to their final destination.
 # If set: JXLs are written here during conversion, then moved in bulk to the final
 # destination when each folder group finishes. Separates read I/O (HDD with TIFFs)
 # from write I/O (SSD for new JXLs), reducing seek contention on HDDs.
 # Example: r"E:\\staging_jxl"
 
 OVERWRITE = "smart"
-# False   -&gt; skip JXLs that already exist at the final destination. Safe for resuming.
-# True    -&gt; always overwrite existing JXLs.
-# "smart" -&gt; same as --sync flag: only reconvert if the TIFF is newer than the JXL.
+# False   -> skip JXLs that already exist at the final destination. Safe for resuming.
+# True    -> always overwrite existing JXLs.
+# "smart" -> same as --sync flag: only reconvert if the TIFF is newer than the JXL.
 #            Useful after re-editing and re-exporting from Capture One.
 # Never overwrites TIFFs or any other non-JXL format.
 
 ENCODE_TAG_MODE = "xmp"
 # Records encoding parameters (distance and effort) in the JXL metadata.
-# "software" -&gt; appends to the EXIF Software field (e.g. "Capture One | cjxl d=0.5 e=7")
+# "software" -> appends to the EXIF Software field (e.g. "Capture One | cjxl d=0.5 e=7")
 #              Visible in IrfanView, exiftool, and most viewers.
-# "xmp"      -&gt; writes as XMP-dc:Description custom field
+# "xmp"      -> writes as XMP-dc:Description custom field
 #              Cleaner — does not touch the original Software field
 #              Visible in Windows Properties, but not in IrfanView
-# "off"      -&gt; does not add anything
+# "off"      -> does not add anything
 # NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
 # the encoding tag is concatenated to dc:Description, and ICC goes to CreatorTool.
 
@@ -90,14 +90,14 @@ EMBED_ICC_IN_JXL = True
 # The ICC is NOT used by the JXL decoder (JXL uses native primaries),
 # but is preserved for round-trip conversion back to TIFF/JPEG.
 # This ensures the exact original ICC (with TRC curves, copyright, etc.)
-# is available when converting JXL -&gt; TIFF, even for lossy JXLs.
-# True  -&gt; embed ICC profile in JXL XMP CreatorTool (recommended, default)
-# False -&gt; do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
+# is available when converting JXL -> TIFF, even for lossy JXLs.
+# True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
+# False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 CLEANUP_XMP_ICC_MARKER = False
 # Remove legacy ICC markers from XMP if present.
-# True  -&gt; clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
-# False -&gt; keeps existing ICC markers (default)
+# True  -> clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
+# False -> keeps existing ICC markers (default)
 
 DELETE_SOURCE = False
 # [MODE 8 only] Whether to delete the source TIFF after successful encoding.
@@ -105,8 +105,8 @@ DELETE_SOURCE = False
 #   - encode status is ok or overwrite (never deletes on error or skip)
 #   - the JXL file exists at its final destination (after staging move if applicable)
 #
-# False (default) -&gt; never delete source TIFFs. JXL and TIFF coexist in the same folder.
-# True            -&gt; delete source TIFF after confirmed successful encode.
+# False (default) -> never delete source TIFFs. JXL and TIFF coexist in the same folder.
+# True            -> delete source TIFF after confirmed successful encode.
 #
 # WARNING: irreversible. Only enable after testing on a small batch first.
 # Has no effect on modes 0–7.
@@ -130,7 +130,7 @@ CONVERTED_JXL_FOLDER = "converted_jxl"
 # Example: .../TIFF_FOLDER/converted_jxl/photo.jxl
 
 # || MODE 2 SETTINGS ||
-# No settings needed. Flat: input directory -&gt; output directory.
+# No settings needed. Flat: input directory -> output directory.
 # py jxl_tiff_encoder.py <input_dir> <output_dir> --mode 2
 
 # || MODE 3 SETTINGS ||
@@ -143,7 +143,7 @@ TIFF_SUFFIX_TO_REPLACE = "TIFF"
 JXL_SUFFIX_REPLACE     = "JXL"
 # [MODE 4] Replaces TIFF_SUFFIX_TO_REPLACE with JXL_SUFFIX_REPLACE in the folder name.
 # Case-insensitive (TIFF, tiff, Tiff all match).
-# Example: C1_Export_1_TIFF -&gt; C1_Export_1_JXL
+# Example: C1_Export_1_TIFF -> C1_Export_1_JXL
 
 # || MODE 5 SETTINGS ||
 # Sibling folder next to each TIFF folder — no extra settings needed.
@@ -161,9 +161,9 @@ EXPORT_JXL_FOLDER = "16B_JXL"
 # TIFFs outside EXPORT_MARKER (mode 6 only): relative path from EXPORT_MARKER's parent is preserved.
 #
 # Example (mode 7, EXPORT_TIFF_SUBFOLDER = "TIFF16"):
-#   EXPORT_MARKER/TIFF16/photo.tif      -&gt;  EXPORT_MARKER/EXPORT_JXL_FOLDER/photo.jxl
-#   EXPORT_MARKER/AdobeRGB/photo.tif    -&gt;  ignored
-#   EXPORT_MARKER/sRGB/photo.tif        -&gt;  ignored
+#   EXPORT_MARKER/TIFF16/photo.tif      ->  EXPORT_MARKER/EXPORT_JXL_FOLDER/photo.jxl
+#   EXPORT_MARKER/AdobeRGB/photo.tif    ->  ignored
+#   EXPORT_MARKER/sRGB/photo.tif        ->  ignored
 
 EXPORT_TIFF_SUBFOLDER = ""
 # [MODE 7] If set, only TIFFs in this specific subfolder of EXPORT_MARKER are processed,
@@ -175,7 +175,7 @@ EXPORT_TIFF_SUBFOLDER = ""
 # || MODE 8 SETTINGS ||
 # No extra settings. Mode 8 converts TIFFs recursively and outputs JXLs in the same
 # folder as each source TIFF. Controlled by DELETE_SOURCE above.
-# Example: .../session/photo.tif -&gt; .../session/photo.jxl
+# Example: .../session/photo.tif -> .../session/photo.jxl
 
 
 # ─────────────────────────────────────────────
@@ -187,12 +187,12 @@ EXPORT_TIFF_SUBFOLDER = ""
 
 DELETE_CONFIRM = True
 # Only relevant when DELETE_SOURCE = True (mode 8).
-# True  (default) -&gt; require interactive confirmation before deleting any source file.
+# True  (default) -> require interactive confirmation before deleting any source file.
 #   - Lossless conversion: type "yes" to confirm.
 #   - Lossy conversion: type the current time (HHMM) shown on screen. This cannot
 #     be automated and forces a conscious decision — you are about to delete TIFFs
 #     that cannot be recovered from a lossy JXL.
-# False -&gt; skip all confirmations. Useful if running the script from another program
+# False -> skip all confirmations. Useful if running the script from another program
 #         or automation pipeline. Leave True unless you have a specific reason.
 #
 # Recommendation: leave this True. It takes 3 seconds and prevents accidents.
@@ -253,7 +253,7 @@ def confirm_deletion_tiff(is_lossy: bool) -> bool:
         print("     recovered from a lossy JXL. This deletion is IRREVERSIBLE.")
         now   = _dt.now()
         token = now.strftime("%H%M")
-        print(f"     Current time: {now.strftime('%H:%M')}  -&gt;  to confirm, type: {token}")
+        print(f"     Current time: {now.strftime('%H:%M')}  ->  to confirm, type: {token}")
         print()
         try:
             answer = input("     > ").strip()
@@ -287,7 +287,7 @@ def confirm_deletion_tiff(is_lossy: bool) -> bool:
 
 def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     # Mode 0: single file in-place — handled in main() before calling this
-    # Mode 1: single file -&gt; converted_jxl/ subfolder — handled in main() before calling this
+    # Mode 1: single file -> converted_jxl/ subfolder — handled in main() before calling this
 
     if mode == 2:
         # Flat directory: input_root/photo.jxl
@@ -419,7 +419,7 @@ def read_existing_description(xmp_path):
     try:
         r = subprocess.run(
             ["exiftool", "-s", "-XMP-dc:Description", str(xmp_path)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -506,7 +506,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # Instead, we update the EXIF Software field
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = subprocess.run(["exiftool", "-@", str(sw_arg)], capture_output=True, text=True)
+        r_sw = subprocess.run(["exiftool", "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
         new_sw = f"{original_sw} | {encoding_desc}"
         args_lines.append(f"-Software={new_sw}")
@@ -612,7 +612,7 @@ def reorder_jxl_boxes(jxl_path):
         else:
             other_boxes.append((name, h, p))
 
-    # Final order: structure -&gt; metadata -&gt; codestream -&gt; others
+    # Final order: structure -> metadata -> codestream -> others
     out = b""
     for _, h, p in meta_order_boxes:  out += h + p
     for _, h, p in meta_extra_boxes:  out += h + p
@@ -704,8 +704,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original
             )
             
-            r2 = subprocess.run(["exiftool", "-@", str(inject_args)], 
-                              capture_output=True, text=True)
+            r2 = subprocess.run(["exiftool", "-@", str(inject_args)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
@@ -716,7 +716,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
             label  = "OVERWRITE" if overwritten else "OK"
-            logger.info(f"[{n}/{total}] {label} | {tiff_path.name} -&gt; {final_path}")
+            logger.info(f"[{n}/{total}] {label} | {tiff_path.name} -> {final_path}")
             return (str(tiff_path), status, str(final_path), tiff_path)
 
         except Exception as e:
@@ -760,7 +760,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
                 shutil.move(str(write_jxl), str(final_jxl))
                 moved += 1
         if moved:
-            logger.info(f"  -&gt; Moved {moved} file(s) from staging to final destination")
+            logger.info(f"  -> Moved {moved} file(s) from staging to final destination")
 
     # Delete source TIFFs after confirmed encode — only for mode 8, only after staging.
     # Checks: encode succeeded + JXL exists at final destination.
@@ -780,7 +780,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
             deleted += 1
             logger.info(f"  DELETED source | {src_tiff.name}")
         if deleted:
-            logger.info(f"  -&gt; Deleted {deleted} source TIFF(s)")
+            logger.info(f"  -> Deleted {deleted} source TIFF(s)")
 
     return results
 
@@ -834,7 +834,7 @@ def find_tiffs_mode7(input_path: Path):
     return filtered
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -&gt; JPEG XL converter")
+    parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
     parser.add_argument("input",             type=Path, help="Input root folder")
     parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
     parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
@@ -937,7 +937,7 @@ def main():
                 jxl = t.parent / t.with_suffix(".jxl").name
         elif args.mode in (1, 2):
             if args.input.is_file():
-                # Single file -&gt; converted_jxl/ subfolder
+                # Single file -> converted_jxl/ subfolder
                 jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
             else:
                 jxl = output_root / t.with_suffix(".jxl").name
@@ -989,8 +989,8 @@ def main():
     logger.info(f"\n{'-'*50}")
     if args.sync:
         logger.info(f"SYNC done: {synced} reconverted | {skipped} up to date | {err} errors")
-        logger.info(f"  -&gt; Reconverted: TIFFs newer than their existing JXL")
-        logger.info(f"  -&gt; Up to date: JXL is newer than or equal to TIFF")
+        logger.info(f"  -> Reconverted: TIFFs newer than their existing JXL")
+        logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
     logger.info(f"Log: {log_file}")
