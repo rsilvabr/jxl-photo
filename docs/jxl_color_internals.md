@@ -340,4 +340,4 @@ IrfanView has known issues with lossless JXL on color-calibrated systems.
 ---
 
 *This document is part of the JXL-TIFF-JPEG Converter project.*
-*For usage instructions, see [README_tiff_to_jxl.md](README_tiff_to_jxl.md) and [README_jxl_to_tiff.md](README_jxl_to_tiff.md).*
+*For usage instructions, see [README_jxl_tiff_encoder.md](README_jxl_tiff_encoder.md) and [README_jxl_tiff_decoder.md](README_jxl_tiff_decoder.md).*

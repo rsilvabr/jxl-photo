@@ -134,7 +134,7 @@ OVERWRITE = "smart"
 
 **Lossless transcoding (JPEG ↔ JXL):**
 ```
-⚠ WARNING — DELETE_SOURCE is enabled
+WARNING — DELETE_SOURCE is enabled
 Source files will be deleted after successful operation.
 This is IRREVERSIBLE. Type 'yes' to confirm.
 
@@ -144,7 +144,7 @@ Confirmed.
 
 **Lossy conversion (JXL → JPEG/PNG, or PNG → JXL):**
 ```
-⚠️  WARNING — DELETE_SOURCE is enabled for LOSSY conversion
+WARNING — DELETE_SOURCE is enabled for LOSSY conversion
 Source files will be PERMANENTLY DELETED after conversion.
 This operation involves LOSSY compression and is IRREVERSIBLE.
 
@@ -176,7 +176,7 @@ The script analyzes the input file extension and content to determine the optima
 
 * * *
 
-## ⚠️ Modes 6 and 7 — ONLY files inside `_EXPORT`
+##  Modes 6 and 7 — ONLY files inside `_EXPORT`
 
 **Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
 
@@ -505,6 +505,23 @@ These tools were made for my personal workflow. Use at your own risk — I am no
 However, if you find any bugs, feel free to report to me — I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
+
+* * *
+
+## Changes since v1.0
+
+### New Features
+- **Lossy JPEG→JXL** — now works correctly. Added `--lossless_jpeg=0` when distance>0 (fixed cjxl 0.11.2 incompatibility with default --lossless_jpeg=1)
+- **Lossless JPEG↔JXL** — MD5 verification for bit-perfect transcode, jbrd box detection for automatic routing
+
+### Bug Fixes
+- Race condition in staging directory (UUID-based filenames)
+- Wrong delete confirmation for lossy operations (HHMM vs yes)
+- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
+- Distance not passed to cjxl for PNG→JXL encoding
+- Integer overflow in JXL box parser (size limits)
+
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
 
 * * *
 

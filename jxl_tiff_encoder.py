@@ -11,7 +11,7 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil, base64
+import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -87,6 +87,23 @@ ENCODE_TAG_MODE = "xmp"
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
+
+D50_PATCH_MODE = "auto"
+# Controls the D50 illuminant patch for Capture One compatibility.
+# "on"   -> Always apply D50 patch (fixes Capture One ICC non-conformance)
+# "off"  -> Never apply D50 patch (use original ICC values)
+# "auto" -> Apply only if source software matches D50_PATCH_SOFTWARE_LIST
+# The patch fixes a rounding error in ICC profiles from Capture One.
+# "auto" is recommended and safe for all workflows.
+
+D50_PATCH_SOFTWARE_LIST = [
+    "capture one",
+    "captureone",
+    # "my software",  # <-- add more software names here (uncomment to enable)
+]
+# Software names that trigger D50 patch when D50_PATCH_MODE="auto".
+# Case-insensitive matching. Add your own software if it has the same ICC bug.
+# Example: ["capture one", "myapp"] will match "Capture One 23" or "MYAPP Pro"
 # The ICC is NOT used by the JXL decoder (JXL uses native primaries),
 # but is preserved for round-trip conversion back to TIFF/JPEG.
 # This ensures the exact original ICC (with TRC curves, copyright, etc.)
@@ -204,6 +221,8 @@ LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
 logger     = None
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
+_d50_patch_count = {"applied": 0, "skipped": 0}
+_d50_patch_lock = threading.Lock()
 
 def setup_logger():
     global logger
@@ -366,8 +385,52 @@ def extract_exif_raw(tiff_path, tmp_dir):
         return p
     return None
 
+def get_exif_software(tiff_path):
+    """Extracts Software field from EXIF metadata.
+    Returns software string or empty string if not found."""
+    try:
+        r = subprocess.run(
+            ["exiftool", "-s", "-Software", str(tiff_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+        )
+        if r.returncode == 0 and r.stdout:
+            stdout = r.stdout.strip()
+            # Parse "Software : Capture One 23" format
+            if " : " in stdout:
+                return stdout.split(" : ", 1)[1].strip()
+            elif ":" in stdout:
+                return stdout.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+def should_apply_d50_patch(tiff_path):
+    """Determine if D50 patch should be applied based on D50_PATCH_MODE setting.
+    Returns True if patch should be applied, False otherwise."""
+    mode = D50_PATCH_MODE.lower()
+    
+    if mode == "on":
+        return True
+    elif mode == "off":
+        return False
+    elif mode == "auto":
+        software = get_exif_software(tiff_path).lower()
+        for pattern in D50_PATCH_SOFTWARE_LIST:
+            if pattern.lower() in software:
+                return True
+        return False
+    else:
+        # Invalid mode, default to auto
+        logger.warning(f"Invalid D50_PATCH_MODE '{D50_PATCH_MODE}', using 'auto'")
+        software = get_exif_software(tiff_path).lower()
+        for pattern in D50_PATCH_SOFTWARE_LIST:
+            if pattern.lower() in software:
+                return True
+        return False
+
 def extract_icc_fixed(tiff_path):
-    """Extracts ICC profile and patches D50 illuminant rounding error (Capture One non-conformance).
+    """Extracts ICC profile and optionally patches D50 illuminant rounding error.
+    The patch is applied based on D50_PATCH_MODE and D50_PATCH_SOFTWARE_LIST settings.
     Safe for any ICC profile: if bytes are already correct, the patch has no effect.
     Returns patched ICC bytes or None."""
     with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
@@ -376,7 +439,18 @@ def extract_icc_fixed(tiff_path):
         r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
     if r.returncode == 0 and len(r.stdout) > 128:
         icc = bytearray(r.stdout)
-        icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
+        
+        # Apply D50 patch only if enabled for this file
+        if should_apply_d50_patch(tiff_path):
+            icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
+            with _d50_patch_lock:
+                _d50_patch_count["applied"] += 1
+            logger.debug(f"Applied D50 patch to {tiff_path.name}")
+        else:
+            with _d50_patch_lock:
+                _d50_patch_count["skipped"] += 1
+            logger.debug(f"Skipped D50 patch for {tiff_path.name}")
+        
         return bytes(icc)
     return None
 
@@ -423,6 +497,12 @@ def read_existing_description(xmp_path):
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
+            # Filter out exiftool warnings from output
+            lines = [ln for ln in stdout.splitlines() 
+                     if not ln.strip().startswith(("Warning:", "[minor]", "[major]"))]
+            stdout = "\n".join(lines).strip()
+            if not stdout:
+                return ""
             # Try multiple parsing strategies
             # Strategy 1: Split by " : " (standard exiftool output)
             if " : " in stdout:
@@ -434,8 +514,7 @@ def read_existing_description(xmp_path):
             if match:
                 return match.group(1).strip()
             # Strategy 3: If no colon, return whole string (might be just the value)
-            if stdout and not stdout.startswith("Warning"):
-                return stdout
+            return stdout
     except Exception as e:
         logger.debug(f"Failed to read description: {e}")
     return ""
@@ -573,23 +652,50 @@ def reorder_jxl_boxes(jxl_path):
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
     Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
+    file_size = len(data)
+    
+    # Sanity check: reasonable file size (prevent OOM on malformed files)
+    MAX_JXL_SIZE = 4 * 1024 * 1024 * 1024  # 4GB max
+    if file_size > MAX_JXL_SIZE:
+        raise RuntimeError(f"JXL file too large ({file_size} bytes), skipping box reorder")
+    if file_size < 12:  # Minimum valid JXL: 12-byte signature
+        return  # Too small to have boxes, leave as-is
+    
     boxes = []
     i = 0
-    while i < len(data):
-        if i + 8 > len(data): break
+    MAX_BOX_SIZE = min(file_size, MAX_JXL_SIZE)
+    
+    while i < file_size:
+        if i + 8 > file_size:
+            break
+        
         size = int.from_bytes(data[i:i+4], "big")
         name = data[i+4:i+8]
+        
+        # Validate size to prevent integer overflow / OOM
+        if size > MAX_BOX_SIZE:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, possible corrupted file")
+        if size < 8 and size != 0:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
+        
         if size == 1:
-            size = int.from_bytes(data[i+8:i+16], "big")
-            header, payload = data[i:i+16], data[i+16:i+size]
+            # Extended size (64-bit)
+            if i + 16 > file_size:
+                break
+            ext_size = int.from_bytes(data[i+8:i+16], "big")
+            if ext_size > MAX_BOX_SIZE:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            size = ext_size
         elif size == 0:
+            # Box extends to end of file
             header, payload = data[i:i+8], data[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             header, payload = data[i:i+8], data[i+8:i+size]
-        boxes.append((name, header, payload))
-        i += size if size != 0 else len(data)
+            boxes.append((name, header, payload))
+        i += size if size != 0 else file_size
 
     # Separa boxes em grupos: metadados (antes do codestream) e codestream
     CODESTREAM = {b"jxlc", b"jxlp"}
@@ -740,7 +846,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
     for tiff, final_jxl in group_pairs:
         if use_staging:
             # Unique staging name to avoid collisions across different source folders
-            write_jxl = staging_dir / f"{tiff.parent.name}__{tiff.stem}.jxl"
+            write_jxl = staging_dir / f"{uuid.uuid4().hex}_{tiff.stem}.jxl"
         else:
             write_jxl = final_jxl
         tasks.append((tiff, write_jxl, final_jxl))
@@ -859,9 +965,11 @@ def main():
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
     parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
                         help="Where to record encoding params: xmp (default), software, or off")
+    parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
+                        help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -882,6 +990,8 @@ def main():
         TEMP2_DIR = args.staging
     if args.encode_tag is not None:
         ENCODE_TAG_MODE = args.encode_tag
+    if args.d50_patch is not None:
+        D50_PATCH_MODE = args.d50_patch
 
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
@@ -892,7 +1002,7 @@ def main():
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
         f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
-        f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | {_delete_label} | Workers: {args.workers}"
+        f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | D50 patch: {D50_PATCH_MODE} | {_delete_label} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
 
@@ -993,6 +1103,12 @@ def main():
         logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+    
+    # D50 patch summary
+    total_processed = _d50_patch_count["applied"] + _d50_patch_count["skipped"]
+    if total_processed > 0:
+        logger.info(f"D50 patch: {_d50_patch_count['applied']} applied | {_d50_patch_count['skipped']} skipped (mode: {D50_PATCH_MODE})")
+    
     logger.info(f"Log: {log_file}")
 
 if __name__ == "__main__":

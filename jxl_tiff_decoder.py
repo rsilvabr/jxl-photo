@@ -12,7 +12,7 @@ Requirements:
  exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -370,6 +370,7 @@ def read_ppm_to_numpy(ppm_path):
     Read PPM/PGM file and convert to numpy array.
     Supports P6 (RGB) and P5 (grayscale) with 8-bit or 16-bit depth.
     Returns uint16 numpy array (always 3-channel for RGB, 2D for grayscale).
+    Validates that file is complete (not truncated).
     """
     with open(ppm_path, 'rb') as f:
         magic = f.readline().strip()
@@ -394,6 +395,20 @@ def read_ppm_to_numpy(ppm_path):
         maxval = int(maxval_line)
 
         raw = f.read()
+
+        # Validate data size (prevent truncated PPM from djxl crash)
+        bytes_per_pixel = 1 if maxval <= 255 else 2
+        channels = 3 if magic == b'P6' else 1
+        expected_size = width * height * channels * bytes_per_pixel
+        
+        if len(raw) < expected_size:
+            raise RuntimeError(
+                f"PPM file truncated: expected {expected_size} bytes, got {len(raw)}. "
+                f"djxl may have crashed during decoding."
+            )
+        if len(raw) > expected_size:
+            # Trim extra data (just in case)
+            raw = raw[:expected_size]
 
         if magic == b'P6':
             # RGB
@@ -945,7 +960,7 @@ def process_group(group_pairs, workers, mode, target_icc=None):
     tasks = []
     for jxl, final_tiff in group_pairs:
         if use_staging:
-            write_tiff_path = staging_dir / f"{jxl.parent.name}__{jxl.stem}.tif"
+            write_tiff_path = staging_dir / f"{uuid.uuid4().hex}_{jxl.stem}.tif"
         else:
             write_tiff_path = final_tiff
         tasks.append((jxl, write_tiff_path, final_tiff))

@@ -177,8 +177,8 @@ Depending on your needs, three common approaches:
 | Document | Contents |
 |----------|----------|
 | [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
-| [docs/README_tiff_to_jxl.md](docs/README_tiff_to_jxl.md) | Full documentation for TIFF → JXL encoding |
-| [docs/README_jxl_to_tiff.md](docs/README_jxl_to_tiff.md) | Full documentation for JXL → TIFF decoding |
+| [docs/README_jxl_tiff_encoder.md](docs/README_jxl_tiff_encoder.md) | Full documentation for TIFF → JXL encoding |
+| [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | Full documentation for JXL → TIFF decoding |
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
@@ -335,13 +335,35 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Preserving 16-bit depth through the conversion pipeline
 - Embedding EXIF so it is visible in IrfanView and other applications
 - Correctly handling ICC profiles from Capture One exports (sRGB, AdobeRGB, ProPhoto RGB)
-- **Fixing XMP overwrite bug that destroyed original metadata**
-- **Fixing EXIF binary extraction that produced corrupted data**
+- Fixing XMP overwrite bug that destroyed original metadata
+- Fixing EXIF binary extraction that produced corrupted data
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
 Getting there required finding and fixing several bugs that appears because of the specific combination of softwares I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
+
+---
+
+## Changes since v1.0
+
+### New Features
+- **D50 illuminant patch** — configurable (on/off/auto) to fix ICC rounding errors from Capture One exports. Prevents cjxl warnings and ensures correct color handling.
+- **Lossy JPEG → JXL conversion** — now works correctly. Added `--lossless_jpeg=0` when distance>0 (cjxl 0.11.2 default was incompatible with lossy mode).
+
+### Bug Fixes
+- Race condition in staging directory (UUID-based filenames)
+- Distance parameter not passed to cjxl for PNG→JXL encoding
+- Wrong confirmation for lossy JXL→JPEG delete (mode 8)
+- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
+- PPM truncation handling (validate completeness)
+- Integer overflow in JXL box parser (size limits added)
+- Missing UUID in process_group_transcode staging
+- Invalid --resize option removed (not supported by scripts)
+- cjxl --lossless_jpeg=1 incompatible with distance>0 (fixed)
+
+Full bug tracking: [`docs/bug_tracking_since_v1.0.md`](docs/bug_tracking_since_v1.0.md)
+Detailed explanations: [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md)
 
 ---
 

@@ -30,6 +30,7 @@ import threading
 import hashlib
 import argparse
 import re
+import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -237,24 +238,50 @@ def jxl_has_any_exif(jxl_path: Path) -> bool:
 def reorder_jxl_boxes(jxl_path: Path):
     """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
     data = jxl_path.read_bytes()
+    file_size = len(data)
+    
+    # Sanity check: reasonable file size (prevent OOM on malformed files)
+    MAX_JXL_SIZE = 4 * 1024 * 1024 * 1024  # 4GB max
+    if file_size > MAX_JXL_SIZE:
+        raise RuntimeError(f"JXL file too large ({file_size} bytes), skipping box reorder")
+    if file_size < 12:  # Minimum valid JXL: 12-byte signature
+        return  # Too small to have boxes, leave as-is
+    
     boxes = []
     i = 0
-    while i < len(data):
-        if i + 8 > len(data):
+    MAX_BOX_SIZE = min(file_size, MAX_JXL_SIZE)
+    
+    while i < file_size:
+        if i + 8 > file_size:
             break
+        
         size = int.from_bytes(data[i:i+4], "big")
         name = data[i+4:i+8]
+        
+        # Validate size to prevent integer overflow / OOM
+        if size > MAX_BOX_SIZE:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, possible corrupted file")
+        if size < 8 and size != 0:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
+        
         if size == 1:
-            size = int.from_bytes(data[i+8:i+16], "big")
-            header, payload = data[i:i+16], data[i+16:i+size]
+            # Extended size (64-bit)
+            if i + 16 > file_size:
+                break
+            ext_size = int.from_bytes(data[i+8:i+16], "big")
+            if ext_size > MAX_BOX_SIZE:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            size = ext_size
         elif size == 0:
+            # Box extends to end of file
             header, payload = data[i:i+8], data[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             header, payload = data[i:i+8], data[i+8:i+size]
             boxes.append((name, header, payload))
-        i += size if size != 0 else len(data)
+        i += size if size != 0 else file_size
 
     CODESTREAM = {b"jxlc", b"jxlp"}
     meta_order_boxes, meta_extra_boxes, codestream_boxes, other_boxes = [], [], [], []
@@ -642,7 +669,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     ext = ".jpg" if decode else ".jxl"
     tasks = []
     for src, final_out in group_pairs:
-        write_out = (staging_dir / f"{src.parent.name}__{src.stem}{ext}") if use_staging else final_out
+        write_out = (staging_dir / f"{uuid.uuid4().hex}_{src.stem}{ext}") if use_staging else final_out
         tasks.append((src, write_out, final_out))
 
     results = []
@@ -765,9 +792,16 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     if args.mode == 8 and DELETE_SOURCE:
         if DELETE_CONFIRM:
-            if not confirm_deletion_jpeg():
-                logger.info("Deletion not confirmed -- exiting.")
-                return
+            # Check if this is lossy decode (JXL -> JPEG) or lossless transcode
+            is_lossy_decode = decode and not args.force_transcode
+            if is_lossy_decode:
+                if not confirm_deletion_lossy():
+                    logger.info("Deletion not confirmed -- exiting.")
+                    return
+            else:
+                if not confirm_deletion_jpeg():
+                    logger.info("Deletion not confirmed -- exiting.")
+                    return
 
     logger.info(f"Output groups: {len(groups)}")
 
@@ -881,7 +915,7 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         raise ValueError(f"Invalid convert mode: {mode}")
 
 def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path, 
-                  effort: int, reconvert_val: bool, smart: bool) -> tuple:
+                  effort: int, distance: float, reconvert_val: bool, smart: bool) -> tuple:
     """Convert any image (JPEG/PNG) to JXL."""
     # Use should_process for consistent logic
     if not should_process(src_path, final_path, smart, reconvert_val):
@@ -897,7 +931,10 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
 
     try:
         # Build cjxl command
-        cmd = ["cjxl", str(src_path), str(write_path), "--effort", str(effort)]
+        cmd = ["cjxl", str(src_path), str(write_path), "--effort", str(effort), "-d", str(distance)]
+        # cjxl 0.11.2 default --lossless_jpeg=1 is incompatible with distance>0
+        if distance > 0:
+            cmd.append("--lossless_jpeg=0")
 
         # Add container flag for metadata support (needed for EXIF in IrfanView)
         if FORCE_CONTAINER_FOR_LOSSY:
@@ -968,10 +1005,20 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE
                     )
                     djxl_proc.stdout.close()
-                    magick_proc.communicate()
+                    # Read stderr from both processes to prevent deadlock
+                    # Use threads to read djxl stderr while magick runs
+                    djxl_stderr_holder = [b""]
+                    def read_djxl_stderr():
+                        if djxl_proc.stderr:
+                            djxl_stderr_holder[0] = djxl_proc.stderr.read()
+                    stderr_thread = threading.Thread(target=read_djxl_stderr)
+                    stderr_thread.start()
+                    magick_stdout, magick_stderr = magick_proc.communicate(timeout=300)
+                    stderr_thread.join(timeout=300)
                     djxl_proc.wait()
                     if djxl_proc.returncode != 0 or magick_proc.returncode != 0:
-                        raise RuntimeError("djxl/magick failed")
+                        err_msg = (djxl_stderr_holder[0] + magick_stderr).decode(errors='replace')[:300]
+                        raise RuntimeError(f"djxl/magick failed: {err_msg}")
                 else:
                     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                         tmp_png = Path(tmp) / "tmp.png"
@@ -1004,8 +1051,20 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 djxl_proc.stdout.close()
-                magick_proc.communicate()
+                # Read stderr from both processes to prevent deadlock
+                # Use threads to read djxl stderr while magick runs
+                djxl_stderr_holder = [b""]
+                def read_djxl_stderr():
+                    if djxl_proc.stderr:
+                        djxl_stderr_holder[0] = djxl_proc.stderr.read()
+                stderr_thread = threading.Thread(target=read_djxl_stderr)
+                stderr_thread.start()
+                magick_stdout, magick_stderr = magick_proc.communicate(timeout=300)
+                stderr_thread.join(timeout=300)
                 djxl_proc.wait()
+                if djxl_proc.returncode != 0 or magick_proc.returncode != 0:
+                    err_msg = (djxl_stderr_holder[0] + magick_stderr).decode(errors='replace')[:300]
+                    raise RuntimeError(f"djxl/magick failed: {err_msg}")
             else:
                 # Direct djxl to PNG
                 r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True)
@@ -1023,7 +1082,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "error", str(e))
 
 def process_group_convert(group_pairs: list, workers: int, direction: str,
-                          quality: int, fmt: str, bit_depth: int,
+                          quality: int, distance: float, fmt: str, bit_depth: int,
                           output_icc: str, use_ram: bool, effort: int, reconvert_val: bool,
                           use_internal_srgb: bool, smart: bool) -> list:
     use_staging = TEMP2_DIR is not None
@@ -1035,7 +1094,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     for src, final_out in group_pairs:
         if use_staging:
             ext = final_out.suffix
-            write_out = staging_dir / f"{src.parent.name}__{src.stem}{ext}"
+            write_out = staging_dir / f"{uuid.uuid4().hex}_{src.stem}{ext}"
         else:
             write_out = final_out
         tasks.append((src, write_out, final_out))
@@ -1043,7 +1102,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         if direction == "to_jxl":
-            futures = {ex.submit(encode_to_jxl, s, w, f, effort, reconvert_val, smart): (s, w, f) 
+            futures = {ex.submit(encode_to_jxl, s, w, f, effort, distance, reconvert_val, smart): (s, w, f) 
                       for s, w, f in tasks}
         else:
             futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth, 
@@ -1190,12 +1249,27 @@ def cmd_convert(args, from_jxl: bool = True):
 
     logger.info(f"Output groups: {len(groups)}")
 
-    # Safety confirmation for Mode 8 + DELETE_SOURCE (lossy operation)
+    # Safety confirmation for Mode 8 + DELETE_SOURCE
+    # Determine if operation is lossy based on direction and settings
     if args.mode == 8 and DELETE_SOURCE:
         if DELETE_CONFIRM:
-            if not confirm_deletion_lossy():
-                logger.info("Deletion not confirmed -- exiting.")
-                return
+            is_lossy = False
+            if direction == "to_jxl":
+                # PNG/JPEG -> JXL: lossy if distance > 0
+                is_lossy = args.distance > 0
+            else:
+                # JXL -> JPEG/PNG: lossy if output is JPEG, or if PNG with ICC conversion
+                fmt = args.format if args.format else "jpeg"
+                is_lossy = (fmt == "jpeg") or (args.icc_profile is not None)
+            
+            if is_lossy:
+                if not confirm_deletion_lossy():
+                    logger.info("Deletion not confirmed -- exiting.")
+                    return
+            else:
+                if not confirm_deletion_jpeg():
+                    logger.info("Deletion not confirmed -- exiting.")
+                    return
 
     ok = err = skipped = overwritten = 0
     for dest_folder, group_pairs in groups.items():
@@ -1204,7 +1278,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
         results = process_group_convert(
             group_pairs, args.workers, direction,
-            args.quality, args.format, args.bit_depth,
+            args.quality, args.distance, args.format, args.bit_depth,
             args.icc_profile, args.ram, args.effort, reconvert_explicit,
             False, smart_mode
         )
@@ -1283,6 +1357,8 @@ Examples:
                         help="Output format (for JXL decode). PNG defaults to 16-bit.")
     parser.add_argument("--quality", type=int, default=JPEG_DEFAULT_QUALITY,
                         help="JPEG quality 1-100")
+    parser.add_argument("--distance", type=float, default=1.0,
+                        help="JXL butteraugli distance for lossy encoding (0.0=lossless, 1.0=default, higher=smaller)")
     parser.add_argument("--bit-depth", type=int, choices=[8, 16], default=None,
                         help="Output bit depth (PNG only, default: 16)")
     parser.add_argument("--icc-profile", type=str, default=None,

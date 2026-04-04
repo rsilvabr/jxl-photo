@@ -125,7 +125,7 @@ How output files are organized. Press `?` for detailed explanations with visual 
 
 Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
 
-### ⚠️ Modes 6 and 7 — CRITICAL BEHAVIOR
+### Modes 6 and 7
 
 **These modes ONLY process files inside `_EXPORT` folders. Everything outside is IGNORED.**
 
@@ -218,7 +218,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Bit depth | Step 6 | 8 or 16 for TIFF output |
 | Dry run | Step 6 | All workflows |
 | Strip metadata | 6A | TIFF→JXL |
-| Resize | 6A | TIFF→JXL |
+| D50 patch mode | 6A | auto / on / off |
 | Encode tag location | 6A | xmp / software / off |
 | ICC matrix mode | 6A | JXL→TIFF |
 | Target ICC profile | 6A | JXL→TIFF |
@@ -336,6 +336,27 @@ Use at your own risk — I am not responsible for any issues you may encounter.
 However, if you find any bugs, feel free to report to me — I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
+
+* * *
+
+## Changes since v1.0
+
+### New Features
+- **D50 patch option** — wizard now asks for D50 patch mode (auto/on/off) in Step 6A for TIFF→JXL workflows
+- **Lossy JPEG→JXL** — fixed cjxl 0.11.2 incompatibility: added `--lossless_jpeg=0` when distance>0
+
+### Bug Fixes
+- Race condition in staging (UUID-based filenames in all scripts)
+- Distance not passed to cjxl for PNG→JXL encoding
+- Wrong delete confirmation for lossy operations (HHMM vs yes)
+- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
+- PPM truncation validation
+- Integer overflow in JXL box parser (size limits)
+- Missing UUID in process_group_transcode staging
+- D50 patch not preserved when repeating last workflow
+- Invalid --resize option removed (not supported by any script)
+
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
 
 * * *
 

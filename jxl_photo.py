@@ -509,17 +509,17 @@ class InteractiveMenu:
         options = []
 
         if origin == "jpeg" and status.get('cjxl'):
-            options.append(("1", "JXL Lossless", "Reversible JPEG transcoding", "transcode_lossless"))
-            options.append(("2", "JXL Lossy", "Re-encode for smaller size", "convert_lossy"))
+            options.append(("1", "JXL Lossless", "Lossless JPEG⇌JXL transcoding (recommended)", "transcode_lossless"))
+            options.append(("2", "JXL Lossy   ", "Lossy — JXL→JPEG decode loses quality", "convert_lossy"))
             # dest_format will be set below based on choice
         elif origin == "tiff" and status.get('cjxl'):
-            options.append(("1", "d=0", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
-            options.append(("2", "d=0.1", "Near-lossless (recommended)", "jxl_tiff_encoder"))
-            options.append(("3", "d=1.0", "Visually lossless", "jxl_tiff_encoder"))
+            options.append(("1", "d=0   ", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
+            options.append(("2", "d=0.1 ", "Near-lossless (recommended)", "jxl_tiff_encoder"))
+            options.append(("3", "d=1.0 ", "Visually lossless", "jxl_tiff_encoder"))
             options.append(("4", "Custom", "Enter any value 0-15", "jxl_tiff_encoder"))
         elif origin == "jxl" and status.get('djxl'):
             options.append(("1", "JPEG", "Standard JPEG output", "jxl_to_jpeg_smart"))
-            options.append(("2", "PNG", "PNG with transparency", "jxl_to_png"))
+            options.append(("2", "PNG ", "PNG with transparency", "jxl_to_png"))
             if status.get('tifffile'):
                 options.append(("3", "TIFF", "Lossless master", "jxl_tiff_decoder"))
 
@@ -538,7 +538,7 @@ class InteractiveMenu:
                 if choice:
                     break
         else:
-            print(f"\n--- Step 2: Destination ---")
+            print(f"\n\n--- Step 2: Destination ---")
             for key, name, desc, _ in options:
                 print(f"[{key}] {name} - {desc}")
 
@@ -556,15 +556,43 @@ class InteractiveMenu:
             if choice == "1":
                 workflow['distance_choice'] = "0"
                 workflow['dest_format'] = 'jxl'
+                workflow['quality'] = 0.0
             elif choice == "2":
                 workflow['distance_choice'] = "0.1"
                 workflow['dest_format'] = 'jxl'
+                workflow['quality'] = 0.1
             elif choice == "3":
                 workflow['distance_choice'] = "1.0"
                 workflow['dest_format'] = 'jxl'
+                workflow['quality'] = 1.0
             else:
                 workflow['distance_choice'] = "custom"
                 workflow['dest_format'] = 'jxl'
+
+            # Ask distance and effort for TIFF->JXL options
+            # Presets 1/2/3: show distance, ask only effort
+            # Custom (4): ask distance input, then effort
+            if RICH_AVAILABLE and console:
+                if choice == "4":
+                    dist_default = workflow.get('quality', 0.1)
+                    dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(dist_default))
+                    try:
+                        workflow['quality'] = float(dist_str)
+                    except:
+                        workflow['quality'] = dist_default
+                custom_effort = IntPrompt.ask("Effort (1-10, higher=smaller)", default=workflow['effort'])
+                workflow['effort'] = max(1, min(custom_effort, 10))
+            else:
+                if choice == "4":
+                    dist_default = workflow.get('quality', 0.1)
+                    dist_str = input(f"Distance (0.0-15.0) [{dist_default}]: ").strip()
+                    try:
+                        workflow['quality'] = float(dist_str) if dist_str else dist_default
+                    except:
+                        workflow['quality'] = dist_default
+                effort_input = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
+                if effort_input.isdigit():
+                    workflow['effort'] = max(1, min(int(effort_input), 10))
         elif origin == "jpeg":
             workflow['dest_format'] = 'jxl'
         elif origin == "jxl":
@@ -730,6 +758,7 @@ class InteractiveMenu:
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Step 4: Organization Mode[/bold cyan]")
             console.print("[dim]Items in [green]green[/green] (e.g. 'converted_jxl', '_EXPORT') are configurable in option 4[/dim]")
+            console.print("[dim]Other folder names (e.g. 'JXL_16bits', '16B_TIFF') require editing the scripts directly[/dim]")
             for key, name, desc in modes:
                 style = "red" if key == "8" else "green"
                 console.print(f"[{key}] [bold {style}]{name}[/bold {style}]")
@@ -745,6 +774,7 @@ class InteractiveMenu:
         else:
             print(f"\n--- Step 4: Organization Mode ---")
             print("Items in green (e.g. 'converted_jxl', '_EXPORT') are configurable in option 4")
+            print("Other folder names (e.g. 'JXL_16bits', '16B_TIFF') require editing the scripts directly")
             for key, name, desc in modes:
                 warning = " ⚠️ WARNING!" if key == "8" else ""
                 print(f"[{key}] {name}{warning}")
@@ -883,11 +913,11 @@ class InteractiveMenu:
         token = now.strftime("%H%M")
 
         if RICH_AVAILABLE and console:
-            console.print("[bold red]⚠️  ARCHIVE MODE[/bold red]")
+            console.print("[bold red]⚠️  DELETE ORIGINALS MODE[/bold red]")
             console.print("[red]Original files will be DELETED[/red]")
             console.print(f"Enter current time ({token}) to confirm:")
         else:
-            print("\n⚠️  ARCHIVE MODE")
+            print("\n⚠️  DELETE ORIGINALS MODE")
             print("⚠️  Original files will be DELETED")
             print(f"Enter {token} to confirm:")
 
@@ -927,34 +957,11 @@ class InteractiveMenu:
 
             # Quality/Distance/Effort - context aware
             if origin == 'tiff' and dest == 'jxl':
-                # Show destination summary from Step 2
+                # Show destination summary — all values were set in Step 2
                 dist_choice = workflow.get('distance_choice', '')
-                if dist_choice == "0":
-                    lossless_label = "Lossless (d=0)"
-                elif dist_choice == "custom":
-                    lossless_label = f"Custom (last d={workflow.get('quality', 0.1):.2f}) — change below"
-                else:
-                    lossless_label = f"Lossy (d={dist_choice})"
-                console.print(f"[dim]Destination:[/dim] {workflow['dest_format'].upper()} — {lossless_label}")
-
-                # For TIFF->JXL: Distance (0-15 float)
-                distance_map = {"0": 0.0, "0.1": 0.1, "1.0": 1.0}
-                dist_choice = workflow.get('distance_choice', '')
-                if dist_choice in distance_map:
-                    distance_default = distance_map[dist_choice]
-                elif dist_choice == "custom":
-                    distance_default = workflow.get('quality', 0.1)  # Remember last custom value
-                else:
-                    distance_default = 0.1
-                distance_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(distance_default))
-                try:
-                    workflow['quality'] = float(distance_str)
-                except:
-                    workflow['quality'] = distance_default
-
-                # Effort for JXL encoding
-                effort = IntPrompt.ask("Effort (1-10, higher=smaller)", default=workflow['effort'])
-                workflow['effort'] = max(1, min(effort, 10))
+                q = workflow.get('quality', 0.1)
+                console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
+                console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
 
             elif 'lossy' in conv_type:
                 # JPEG->JXL lossy
@@ -1004,6 +1011,11 @@ class InteractiveMenu:
             ow = Prompt.ask("If exists", choices=["0", "1", "2"], default="2")
             workflow['overwrite_mode'] = ow
 
+            # D50 patch (TIFF->JXL only)
+            if origin == 'tiff' and dest == 'jxl':
+                d50 = Prompt.ask("D50 patch", choices=["auto", "on", "off"], default="auto")
+                workflow['d50_patch'] = d50
+
         else:
             print("\n--- Step 6: Basic Parameters ---")
 
@@ -1018,32 +1030,9 @@ class InteractiveMenu:
 
             # Quality/Distance/Effort
             if origin == 'tiff' and dest == 'jxl':
-                # Show destination summary from Step 2
-                dist_choice = workflow.get('distance_choice', '')
-                if dist_choice == "0":
-                    lossless_label = "Lossless (d=0)"
-                elif dist_choice == "custom":
-                    lossless_label = f"Custom (last d={workflow.get('quality', 0.1):.2f}) — change below"
-                else:
-                    lossless_label = f"Lossy (d={dist_choice})"
-                print(f"[{workflow['dest_format'].upper()}] {lossless_label}")
-
-                distance_map = {"0": 0.0, "0.1": 0.1, "1.0": 1.0}
-                dist_choice = workflow.get('distance_choice', '')
-                if dist_choice in distance_map:
-                    distance_default = distance_map[dist_choice]
-                elif dist_choice == "custom":
-                    distance_default = workflow.get('quality', 0.1)  # Remember last custom value
-                else:
-                    distance_default = 0.1
-                distance_str = input(f"Distance (0.0-15.0) [{distance_default}]: ").strip()
-                try:
-                    workflow['quality'] = float(distance_str) if distance_str else distance_default
-                except:
-                    workflow['quality'] = distance_default
-
-                effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = int(effort) if effort.isdigit() else workflow['effort']
+                # Show values set in Step 2 — no prompts here
+                print(f"Distance: {workflow.get('quality', 0.1):.2f} (set in Step 2)")
+                print(f"Effort: {workflow['effort']} (set in Step 2)")
 
             elif 'lossy' in conv_type:
                 quality = input(f"Quality (1-100) [{workflow['quality']}]: ").strip()
@@ -1053,6 +1042,11 @@ class InteractiveMenu:
             else:
                 effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
                 workflow['effort'] = int(effort) if effort.isdigit() else workflow['effort']
+
+            # D50 patch (TIFF->JXL only)
+            if origin == 'tiff' and dest == 'jxl':
+                d50_input = input("D50 patch (auto/on/off) [auto]: ").strip().lower() or "auto"
+                workflow['d50_patch'] = d50_input if d50_input in ["auto", "on", "off"] else "auto"
 
             # Staging with memory
             staging_input = input(f"Staging [{staging_display}]: ").strip()
@@ -1127,17 +1121,17 @@ class InteractiveMenu:
             # jxl_tiff_encoder advanced options
             if RICH_AVAILABLE and console:
                 strip_meta = Confirm.ask("Strip metadata?", default=False)
-                resize = Prompt.ask("Resize (e.g., 50%, 1920x1080, or empty)", default="")
                 encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"], default="xmp")
+                # D50 patch already asked in Step 6
                 # Overwrite mode already asked in Step 6
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source TIFFs after conversion? (mode 8)", default=False)
             else:
                 strip_input = input("Strip metadata? [y/N]: ").strip().lower()
                 strip_meta = strip_input.startswith('y')
-                resize = input("Resize (e.g., 50%, 1920x1080): ").strip()
                 encode_tag_input = input("Encode tag (xmp/software/off) [xmp]: ").strip().lower() or "xmp"
                 encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else "xmp"
+                # D50 patch already asked in Step 6
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source TIFFs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
@@ -1151,8 +1145,8 @@ class InteractiveMenu:
                 overwrite, sync = False, False
 
             advanced_options['strip'] = strip_meta
-            advanced_options['resize'] = resize if resize else None
             advanced_options['encode_tag'] = encode_tag
+            advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
@@ -1301,6 +1295,9 @@ class InteractiveMenu:
 
             if origin == 'tiff' and dest == 'jxl':
                 table.add_row("Distance:", str(workflow['quality']))
+                # Show D50 patch mode if configured
+                if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
+                    table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
             elif 'lossy' in workflow['conversion_type']:
                 table.add_row("Quality:", str(workflow['quality']))
             table.add_row("Effort:", str(workflow['effort']))
@@ -1332,6 +1329,9 @@ class InteractiveMenu:
 
             if origin == 'tiff' and dest == 'jxl':
                 print(f"Distance: {workflow['quality']}")
+                # Show D50 patch mode if configured
+                if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
+                    print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
             elif 'lossy' in workflow['conversion_type']:
                 print(f"Quality: {workflow['quality']}")
             print(f"Effort: {workflow['effort']}")
@@ -1381,8 +1381,8 @@ class InteractiveMenu:
             # Advanced options
             if advanced.get('strip'):
                 cmd.append('--strip')
-            if advanced.get('resize'):
-                cmd.extend(['--resize', advanced['resize']])
+            if advanced.get('d50_patch'):
+                cmd.extend(['--d50-patch', advanced['d50_patch']])
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('delete_source'):
@@ -1443,6 +1443,7 @@ class InteractiveMenu:
                 cmd.append('--force-transcode')
             elif 'lossy' in workflow['conversion_type']:
                 cmd.extend(['--quality', str(workflow['quality'])])
+                cmd.extend(['--distance', str(workflow['quality'])])
 
             # Effort
             cmd.extend(['--effort', str(workflow['effort'])])
@@ -1660,7 +1661,7 @@ def main():
                             if retry.startswith('n'):
                                 break
                 else:
-                    print("Configuration saved. Use 'Repeat last workflow' to execute later.")
+                    print("\nConfiguration saved. Use 'Repeat last workflow' to execute later.")
             else:
                 continue
 
@@ -1776,7 +1777,14 @@ def main():
             workflow['compression'] = 'zip'
             workflow['bit_depth'] = 16
             workflow['dry_run'] = False
-            workflow['advanced_options'] = {'overwrite': overwrite, 'sync': sync}
+            # Preserve advanced options from last workflow (including d50_patch)
+            last_advanced = last.get('advanced_options', {})
+            workflow['advanced_options'] = {
+                'overwrite': overwrite,
+                'sync': sync,
+                'd50_patch': last_advanced.get('d50_patch', 'auto') if origin == 'tiff' else None,
+                'encode_tag': last_advanced.get('encode_tag', 'xmp') if origin == 'tiff' else None,
+            }
             workflow['expert_flags'] = ''
 
             if origin == 'jpeg':

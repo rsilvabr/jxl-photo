@@ -257,7 +257,7 @@ it takes 3 seconds and is much safer.
 
 ---
 
-## ⚠️ Modes 6 and 7 — ONLY files inside `_EXPORT`
+## Modes 6 and 7 — ONLY files inside `_EXPORT`
 
 **Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
 
@@ -517,6 +517,21 @@ Use at your own risk — I am not responsible for any issues you may encounter.
 However, If you find any bugs, report to me - I want to try my best to improve this project.
 
 Always test with a small batch before processing important archives.
+
+---
+
+## Changes since v1.0
+
+### New Features
+- **8-bit output support** — `--depth 8` flag for web/delivery workflows
+
+### Bug Fixes
+- Race condition in staging directory (UUID-based filenames)
+- PPM truncation validation
+- Integer overflow in JXL box parser (size limits)
+
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
+
 ---
 
 ## License
