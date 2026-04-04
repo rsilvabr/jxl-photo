@@ -318,6 +318,13 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ---
 
+## Changelog
+
+- [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
+- [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
+
+---
+
 ## Disclaimer
 
 These tools were made for my personal workflow. 
