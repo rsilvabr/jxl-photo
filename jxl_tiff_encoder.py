@@ -11,7 +11,7 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid
+import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -215,13 +215,18 @@ DELETE_CONFIRM = True
 # Recommendation: leave this True. It takes 3 seconds and prevents accidents.
 # If you disable it, you are one misconfigured run away from losing originals.
 
+STRIP_METADATA = False
+# If True, strip all metadata from output (no EXIF/XMP preservation).
+# Only encoding params (cjxl d=X e=Y) are added to dc:Description.
+# Useful for creating clean JXL files without embedded metadata.
+# Can also be set via --strip CLI flag.
 
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
 logger     = None
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
-_d50_patch_count = {"applied": 0, "skipped": 0}
+_d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0}
 _d50_patch_lock = threading.Lock()
 
 def setup_logger():
@@ -389,10 +394,14 @@ def get_exif_software(tiff_path):
     """Extracts Software field from EXIF metadata.
     Returns software string or empty string if not found."""
     try:
-        r = subprocess.run(
-            ["exiftool", "-s", "-Software", str(tiff_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
-        )
+        # Use -@ argument file to avoid wildcard expansion issues with brackets in paths
+        with tempfile.TemporaryDirectory(prefix="exiftmp_") as tmp:
+            arg_file = Path(tmp) / "args.txt"
+            arg_file.write_text(f"-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+            r = subprocess.run(
+                ["exiftool", "-@", str(arg_file)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+            )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
             # Parse "Software : Capture One 23" format
@@ -404,11 +413,19 @@ def get_exif_software(tiff_path):
         pass
     return ""
 
+def _is_d50_already_correct(icc_bytes: bytes) -> bool:
+    """Check if ICC profile already has correct D50 illuminant values.
+    Returns True if D50 bytes are already correct (no patch needed)."""
+    if len(icc_bytes) < 80:
+        return False
+    CORRECT_D50 = bytes.fromhex("0000f6d6000100000000d32d")
+    return icc_bytes[68:80] == CORRECT_D50
+
 def should_apply_d50_patch(tiff_path):
     """Determine if D50 patch should be applied based on D50_PATCH_MODE setting.
     Returns True if patch should be applied, False otherwise."""
     mode = D50_PATCH_MODE.lower()
-    
+
     if mode == "on":
         return True
     elif mode == "off":
@@ -439,18 +456,27 @@ def extract_icc_fixed(tiff_path):
         r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
     if r.returncode == 0 and len(r.stdout) > 128:
         icc = bytearray(r.stdout)
-        
+
         # Apply D50 patch only if enabled for this file
         if should_apply_d50_patch(tiff_path):
+            # Check if bytes were already correct BEFORE patching
+            was_correct = _is_d50_already_correct(bytes(icc))
             icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
             with _d50_patch_lock:
                 _d50_patch_count["applied"] += 1
-            logger.debug(f"Applied D50 patch to {tiff_path.name}")
+                if was_correct:
+                    _d50_patch_count["already_correct"] += 1
+            logger.debug(f"Applied D50 patch to {tiff_path.name}" + (" (was already correct)" if was_correct else ""))
         else:
+            # Even when skipping, track correctness so user knows how many files would have needed patching
+            was_correct = _is_d50_already_correct(bytes(icc))
             with _d50_patch_lock:
-                _d50_patch_count["skipped"] += 1
-            logger.debug(f"Skipped D50 patch for {tiff_path.name}")
-        
+                if was_correct:
+                    _d50_patch_count["already_correct"] += 1
+                else:
+                    _d50_patch_count["skipped_needed"] += 1
+            logger.debug(f"D50 patch skipped for {tiff_path.name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
+
         return bytes(icc)
     return None
 
@@ -536,7 +562,7 @@ def read_existing_creator_tool(xmp_path):
             return stdout.split(":", 1)[1].strip()
     return ""
 
-def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original):
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, strip_metadata=False):
     """Build exiftool arguments for metadata injection with proper XMP preservation.
     
     Strategy:
@@ -544,9 +570,28 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     2. Copy all metadata from source TIFF (preserving original XMP)
     3. Add/modify specific XMP tags without overwriting the whole package
     
+    Args:
+        strip_metadata: If True, strip all metadata (no EXIF/XMP preservation)
+    
     Returns path to arg file.
     """
     args_lines = ["-overwrite_original"]
+    
+    # If stripping metadata, only add minimal encoding info and exit
+    if strip_metadata:
+        # Just set encoding params in dc:Description (no other metadata)
+        encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+        args_lines.append(f"-xmp-dc:Description={encoding_desc}")
+        # Strip all EXIF
+        args_lines.append("-exif:all=")
+        # Strip all XMP except our description
+        args_lines.append("-xmp:all=")
+        # Target file
+        args_lines.append(str(write_path))
+        # Write args file
+        arg_file = tmp_dir / "inject.args"
+        arg_file.write_text("\n".join(args_lines), encoding="utf-8")
+        return arg_file
     
     # 1. Inject raw EXIF binary blob if extracted
     if exif_bin:
@@ -807,7 +852,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             # This preserves original XMP, adds encoding tags, and embeds ICC if configured
             # Uses icc_original (unmodified) for round-trip preservation
             inject_args = build_metadata_injection_args(
-                tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original
+                tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original, 
+                strip_metadata=STRIP_METADATA
             )
             
             r2 = subprocess.run(["exiftool", "-@", str(inject_args)],
@@ -967,6 +1013,8 @@ def main():
                         help="Where to record encoding params: xmp (default), software, or off")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
                         help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
+    parser.add_argument("--strip",           action="store_true",
+                        help="Strip all metadata from output (no EXIF/XMP preservation)")
     args = parser.parse_args()
 
     global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE
@@ -992,6 +1040,11 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
         D50_PATCH_MODE = args.d50_patch
+
+    # Handle --strip flag - store in global for use in convert_one
+    global STRIP_METADATA
+    if args.strip:
+        STRIP_METADATA = True
 
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
@@ -1091,8 +1144,12 @@ def main():
 
         for result in results:
             status = result[1]
-            if   status == "ok":        ok += 1
-            elif status == "overwrite": ok += 1; overwritten += 1; synced += 1
+            if   status == "ok":
+                ok += 1
+                if args.sync:
+                    synced += 1
+            elif status == "overwrite":
+                ok += 1; overwritten += 1; synced += 1
             elif status == "skipped":   skipped += 1
             elif status == "error":     err += 1
 
@@ -1103,12 +1160,23 @@ def main():
         logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
-    
+
     # D50 patch summary
-    total_processed = _d50_patch_count["applied"] + _d50_patch_count["skipped"]
+    applied = _d50_patch_count["applied"]
+    skipped = _d50_patch_count["skipped"]
+    already_correct = _d50_patch_count["already_correct"]
+    skipped_needed = _d50_patch_count["skipped_needed"]
+    total_processed = applied + skipped + skipped_needed
     if total_processed > 0:
-        logger.info(f"D50 patch: {_d50_patch_count['applied']} applied | {_d50_patch_count['skipped']} skipped (mode: {D50_PATCH_MODE})")
-    
+        if D50_PATCH_MODE == "off":
+            # For mode off, we still tracked correctness so user knows how many would have needed patch
+            logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
+        elif already_correct > 0:
+            needed_patch = applied - already_correct
+            logger.info(f"D50 patch: {applied} applied ({needed_patch} needed, {already_correct} already correct) | {skipped} skipped (mode: {D50_PATCH_MODE})")
+        else:
+            logger.info(f"D50 patch: {applied} applied | {skipped} skipped (mode: {D50_PATCH_MODE})")
+
     logger.info(f"Log: {log_file}")
 
 if __name__ == "__main__":

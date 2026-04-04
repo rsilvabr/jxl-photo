@@ -128,7 +128,7 @@ TIFF (no ICC attached)
 **When**: `--matrix` flag specified (or `USE_MATRIX_MODE = True` in settings)
 
 ```
-djxl --color_space=RGB_D65_202_Per_Lin
+djxl --color_space=RGB_D65_2020_Per_Lin
     ↓
 LittleCMS transform: Rec.2020 Linear → Target ICC
     ↓

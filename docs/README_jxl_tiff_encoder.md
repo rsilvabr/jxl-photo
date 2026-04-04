@@ -321,7 +321,7 @@ This ensures:
 
 ### What is it?
 
-Capture One (and some other software) creates ICC profiles with a **slightly incorrect D50 illuminant value** due to a rounding error. The ICC specification defines D50 as:
+Capture One (and some other software) **may create** ICC profiles with a **slightly incorrect D50 illuminant value** due to a rounding error. The ICC specification defines D50 as:
 - X = 0.9642, Y = 1.0000, Z = 0.8249
 
 But Capture One writes:
@@ -504,7 +504,7 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 These tools were made for my personal workflow. 
 Use at your own risk — I am not responsible for any issues you may encounter.
 
-However, If you find any bugs, fell free to report to me - I will gladly try my best to improve this project.
+However, If you find any bugs, feel free to report to me - I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
 
@@ -515,7 +515,7 @@ Always test with a small batch before processing important archives.
 ### New Features
 
 **D50 illuminant patch — auto-detection (default)**
-Capture One exports have a known ICC rounding error that causes cjxl warnings. The patch was already part of the toolkit, but now supports three operating modes:
+Capture One **may export** files with a known ICC rounding error that causes cjxl warnings. The patch was already part of the toolkit, but now supports three operating modes:
 
 - `auto` (default): Only applies D50 patch when EXIF `Software` field contains `capture one` or `captureone` — other files are unaffected.
 - `on`: Always applies the D50 patch to all files (forces correction regardless of source software).

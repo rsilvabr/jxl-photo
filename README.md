@@ -237,12 +237,12 @@ TIFF (original ProPhoto ICC restored!)
 The ICC is base64-encoded and stored in XMP:
 
 ```xml
-<dc:description>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVog...</dc:description>
-<xmp:CreatorTool>cjxl d=0.1 e=7</xmp:CreatorTool>
+<xmp:CreatorTool>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVog...</xmp:CreatorTool>
+<dc:description>cjxl d=0.1 e=7</dc:description>
 ```
 
-- **dc:Description:** Base64 ICC data (not human-readable, machine-parsable)
-- **CreatorTool:** Encoding params (visible in Windows Properties)
+- **xmp:CreatorTool:** Base64 ICC data with "ICC:" prefix (for round-trip preservation)
+- **dc:Description:** Encoding params `cjxl d=X e=Y` (visible in Windows Properties)
 
 → See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for full technical details.
 
@@ -323,7 +323,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 These tools were made for my personal workflow. 
 Use at your own risk — I am not responsible for any issues you may encounter.
 
-However, If you find any bugs, fell free to report to me - I will gladly try my best to improve this project.
+However, If you find any bugs, feel free to report to me - I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
 

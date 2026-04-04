@@ -940,9 +940,9 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 )
 
             n, total = next_count()
-            status = "OVERWRITE" if overwritten else "OK"
-            logger.info(f"[{n}/{total}] {status} | {jxl_path.name} ({reason})")
-            return str(jxl_path), "ok", str(final_path)
+            status = "overwrite" if overwritten else "ok"
+            logger.info(f"[{n}/{total}] {status.upper()} | {jxl_path.name} ({reason})")
+            return str(jxl_path), status, str(final_path)
 
         except Exception as e:
             n, total = next_count()

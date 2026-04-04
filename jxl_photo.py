@@ -62,6 +62,8 @@ class ToolConfig:
     last_quality: Optional[int] = None
     last_distance: Optional[float] = None  # For TIFF->JXL distance
     last_origin_format: Optional[str] = None  # jpeg / tiff / jxl
+    last_d50_patch: Optional[str] = None  # auto / on / off
+    last_encode_tag: Optional[str] = None  # xmp / software / off
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -110,7 +112,9 @@ class ConfigManager:
                          workers: int, staging: Optional[str],
                          effort: int = 7, quality: int = 95,
                          distance: Optional[float] = None,
-                         origin_format: Optional[str] = None) -> None:
+                         origin_format: Optional[str] = None,
+                         d50_patch: Optional[str] = None,
+                         encode_tag: Optional[str] = None) -> None:
         self.config.last_input_dir = input_dir
         self.config.last_output_mode = output_mode
         self.config.last_workers = workers
@@ -119,6 +123,8 @@ class ConfigManager:
         self.config.last_quality = quality
         self.config.last_distance = distance
         self.config.last_origin_format = origin_format
+        self.config.last_d50_patch = d50_patch
+        self.config.last_encode_tag = encode_tag
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -1113,6 +1119,10 @@ class InteractiveMenu:
             else:
                 advanced_options['overwrite'] = False
                 advanced_options['sync'] = False
+            # Preserve d50_patch and encode_tag from Step 6 (they were set there)
+            if origin == 'tiff' and dest == 'jxl':
+                advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
+                advanced_options['encode_tag'] = workflow.get('encode_tag', 'xmp')
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -1542,7 +1552,7 @@ class InteractiveMenu:
             process.wait()
 
             if process.returncode == 0:
-                self._print_success("\n✓ Conversion completed successfully!")
+                self._print_success("✓ Conversion completed successfully!\n")
                 return True
             else:
                 self._print_error(f"\n✗ Conversion failed (code {process.returncode})")
@@ -1625,7 +1635,9 @@ def main():
                     workflow['effort'],
                     saved_quality,
                     saved_distance,
-                    workflow['origin_format']
+                    workflow['origin_format'],
+                    workflow.get('advanced_options', {}).get('d50_patch'),
+                    workflow.get('advanced_options', {}).get('encode_tag')
                 )
 
                 # Ask if execute now
@@ -1675,6 +1687,8 @@ def main():
             last_quality = last.last_quality or 95
             last_distance = last.last_distance  # May be None for non-TIFF workflows
             last_origin = last.last_origin_format or "tiff"
+            last_d50_patch = last.last_d50_patch or "auto"
+            last_encode_tag = last.last_encode_tag or "xmp"
 
             if RICH_AVAILABLE and console:
                 settings = [
@@ -1777,13 +1791,12 @@ def main():
             workflow['compression'] = 'zip'
             workflow['bit_depth'] = 16
             workflow['dry_run'] = False
-            # Preserve advanced options from last workflow (including d50_patch)
-            last_advanced = last.get('advanced_options', {})
+            # Use preserved d50_patch and encode_tag from last session
             workflow['advanced_options'] = {
                 'overwrite': overwrite,
                 'sync': sync,
-                'd50_patch': last_advanced.get('d50_patch', 'auto') if origin == 'tiff' else None,
-                'encode_tag': last_advanced.get('encode_tag', 'xmp') if origin == 'tiff' else None,
+                'd50_patch': last_d50_patch if origin == 'tiff' else None,
+                'encode_tag': last_encode_tag if origin == 'tiff' else None,
             }
             workflow['expert_flags'] = ''
 
