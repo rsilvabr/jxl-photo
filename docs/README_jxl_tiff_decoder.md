@@ -27,13 +27,40 @@ exiftool  →  https://exiftool.org
 
 Both `djxl.exe` and `exiftool.exe` must be on your PATH.
 
-Quick way to add them (run in PowerShell, then reopen the terminal):
+### Download the Correct Files
+
+| Tool | Download | What to Get |
+|------|----------|-------------|
+| **djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+
+### exiftool Setup (Important!)
+
+The download comes as `exiftool(-k).exe`. **Rename it:**
+
 ```powershell
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool", "User")
+# Option A: Rename
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
 
-Verify:
+### Add to PATH
+
+**Replace with YOUR actual paths:**
+
+```powershell
+$myPaths = @(
+    "C:\tools\libjxl\bin",    # where djxl.exe is
+    "C:\tools\exiftool"        # where exiftool.exe is (RENAMED!)
+)
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+# Restart PowerShell after this!
+```
+
+### Verify
 ```powershell
 djxl --version      # JPEG XL decoder v0.11.x
 exiftool -ver       # 13.xx

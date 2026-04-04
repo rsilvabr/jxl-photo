@@ -24,16 +24,43 @@ magick → https://imagemagick.org (optional, for ICC conversion only)
 
 Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagick is only required if using `--icc-profile`.
 
-Quick way to add them (PowerShell, then reopen terminal):
+### Download the Correct Files
+
+| Tool | Download | What to Get |
+|------|----------|-------------|
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
+
+### exiftool Setup (Important!)
+
+The download comes as `exiftool(-k).exe`. **Rename it:**
 
 ```powershell
+# Option A: Rename
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
+```
+
+### Add to PATH
+
+**Replace with YOUR actual paths:**
+
+```powershell
+$myPaths = @(
+    "C:\tools\libjxl\bin",                           # cjxl.exe, djxl.exe
+    "C:\tools\exiftool",                              # exiftool.exe (RENAMED!)
+    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # magick.exe
+)
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool;C:\Program Files\ImageMagick-7.1.1-Q16-HDRI", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+# Restart PowerShell after this!
 ```
 
-Verify:
-
-```
+### Verify
+```powershell
 cjxl --version  # JPEG XL encoder v0.11.x
 djxl --version  # JPEG XL decoder v0.11.x
 exiftool -ver   # 13.xx
@@ -211,7 +238,7 @@ session/_EXPORT/AdobeRGB/photo.jxl → ignored
 
 ## Output modes
 
-Modes 0-8 mirror the original `jxl_jpg_lossless_transcoder.py` structure:
+Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.com/rsilvabr/jxl_jpg_lossless_transcoder) structure:
 
 ### Encode modes (JPEG → JXL)
 
@@ -485,11 +512,11 @@ IrfanView's JXL support depends on system display profile. The files are correct
 
 | Script | Purpose | This script replaces... |
 | --- | --- | --- |
-| `jxl_jpeg_transcoder.py` | **This tool** — Unified JPEG/JXL/PNG with auto-detect | `jxl_jpg_lossless_transcoder.py` + `jxl_to_jpg_png.py` |
+| `jxl_jpeg_transcoder.py` | **This tool** — Unified JPEG/JXL/PNG with auto-detect | [`jxl_jpg_lossless_transcoder.py`](https://github.com/rsilvabr/jxl_jpg_lossless_transcoder) + `jxl_to_jpg_png.py` |
 | `jxl_tiff_encoder.py` | 16-bit TIFF → JXL | Not replaced — use for Capture One 16-bit TIFFs |
 | `jxl_tiff_decoder.py` | JXL → 16-bit TIFF with ICC embedding | Not replaced — companion to jxl_tiff_encoder |
 
-**Migration from `jxl_jpg_lossless_transcoder.py`:**
+**Migration from [`jxl_jpg_lossless_transcoder.py`](https://github.com/rsilvabr/jxl_jpg_lossless_transcoder):**
 
 - All modes (0-8) work identically
 - MD5 database format is the same (checksums.md5)

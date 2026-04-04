@@ -185,21 +185,92 @@ Depending on your needs, three common approaches:
 
 ---
 
-## Requirements
+## Requirements & Installation
 
-```
-Python 3.10+
-pip install tifffile numpy pillow rich
-cjxl / djxl → https://github.com/libjxl/libjxl/releases
-exiftool → https://exiftool.org
-ImageMagick → https://imagemagick.org  (for ICC color conversion)
-```
+### 1. Python 3.10+ and Packages
 
-Quick setup (PowerShell):
 ```powershell
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool;C:\Program Files\ImageMagick-7.1.1-Q16-HDRI", "User")
+# Install required packages
+pip install tifffile numpy pillow rich
 ```
+
+⚠️ **Important:** Install packages in the same Python version you'll use to run the scripts.
+
+### 2. External Tools (Download Executables, NOT Source Code)
+
+| Tool | Download URL | What to Download | Extract to |
+|------|-------------|------------------|------------|
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip`)** | `C:\tools\libjxl\` or your choice |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
+| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
+
+#### ⚠️ Common Download Mistakes
+
+| Wrong Download | Why It Fails | Correct Download |
+|---------------|--------------|------------------|
+| `jxl-x64-windows.zip` | Only DLLs, no executables | `jxl-x64-windows-static.zip` |
+| `exiftool-XX.XX.tar.gz` | Perl source code, needs Perl installed | `exiftool-XX.XX_64.zip` (Windows executable) |
+
+#### exiftool Setup (Important!)
+
+The Windows download comes as `exiftool(-k).exe`. **You need to rename it**:
+
+```powershell
+# Option A: Rename the file
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps the original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
+```
+
+The scripts look for `exiftool.exe`. The `(-k)` suffix (means "keep console open") prevents detection if not renamed.
+
+### 3. Add to PATH (PowerShell)
+
+**Replace the example paths below with YOUR actual installation paths:**
+
+```powershell
+# EDIT THESE PATHS to match where YOU extracted the tools:
+$myPaths = @(
+    "C:\tools\libjxl\bin",                           # where cjxl.exe and djxl.exe are
+    "C:\tools\exiftool",                              # where exiftool.exe is (RENAMED!)
+    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
+)
+
+# Add to user PATH
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+
+# ⚠️ RESTART your PowerShell/terminal after this!
+```
+
+### 4. Verify Installation
+
+**Restart PowerShell**, then run:
+
+```powershell
+# Each should return a version number
+cjxl --version          # Should show: cjxl v0.XX.X
+exiftool -ver           # Should show: 12.XX or 13.XX
+magick -version         # Should show: ImageMagick version
+python -c "import tifffile, PIL, rich; print('All Python packages OK')"
+
+# Test full environment
+cd "C:\Users\YourName\Documents\GitHub\jxl-photo"  # adjust path
+py jxl_photo.py
+```
+
+You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich`
+
+### Troubleshooting
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
+| `exiftool` not recognized | File still named `exiftool(-k).exe` | Rename to `exiftool.exe` (see step 2) |
+| `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
+| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
+| PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
 
 ---
 

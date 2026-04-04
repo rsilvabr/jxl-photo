@@ -28,13 +28,40 @@ exiftool  →  https://exiftool.org
 
 Both `cjxl.exe` and `exiftool.exe` must be on your PATH.
 
-Quick way to add them (run in PowerShell, then reopen the terminal):
+### Download the Correct Files
+
+| Tool | Download | What to Get |
+|------|----------|-------------|
+| **cjxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+
+### exiftool Setup (Important!)
+
+The download comes as `exiftool(-k).exe`. **Rename it:**
+
 ```powershell
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool", "User")
+# Option A: Rename
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
 
-Verify:
+### Add to PATH
+
+**Replace with YOUR actual paths:**
+
+```powershell
+$myPaths = @(
+    "C:\tools\libjxl\bin",    # where cjxl.exe is
+    "C:\tools\exiftool"        # where exiftool.exe is (RENAMED!)
+)
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+# Restart PowerShell after this!
+```
+
+### Verify
 ```powershell
 cjxl --version      # JPEG XL encoder v0.11.x
 exiftool -ver       # 13.xx
@@ -197,7 +224,7 @@ session/_EXPORT/AdobeRGB/photo.tif → ignored
 
 | Mode | Input | Output location | Example |
 |------|-------|----------------|---------|
-| `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.jxl` / `output_dir/photo.jxl` |
+| `0` | File: single file / Folder: all files | In-place (output in same folder) | `photo.jxl` |
 | `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
 | `2` | Directory | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |

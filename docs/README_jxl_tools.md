@@ -26,7 +26,29 @@ $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 
 If `rich` is not installed, the tool falls back to plain text mode automatically.
 
-Verify:
+### Download the Correct Files
+
+| Tool | Download | What to Get |
+|------|----------|-------------|
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
+
+### exiftool Setup (Important!)
+
+The download comes as `exiftool(-k).exe`. **Rename it:**
+
+```powershell
+# Option A: Rename
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
+```
+
+The wrapper detects tools automatically, but requires `exiftool.exe` (not `exiftool(-k).exe`).
+
+### Verify
 ```powershell
 cjxl --version
 djxl --version
