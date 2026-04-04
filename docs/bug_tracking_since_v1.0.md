@@ -20,6 +20,8 @@ Scripts: `jxl_photo.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg
 | 9 | D50 patch not preserved in repeat workflow | photo | ✅ FIXED |
 | 10 | Invalid --resize option in wizard | photo | ✅ REMOVED |
 | 11 | cjxl --lossless_jpeg=1 incompatible with distance>0 | transcoder | ✅ FIXED |
+| 12 | Strip flag not implemented | encoder | ✅ FIXED |
+| 13 | Status string case inconsistency | decoder | ✅ FIXED |
 
 ---
 
@@ -292,11 +294,82 @@ DSC00004_AdobeRGB_v1.jpg → DSC00004_AdobeRGB_v1.jxl (lossy, distance=1.0)
 
 ---
 
+### Bug #12 — Strip Flag Not Implemented
+
+**Location:** `jxl_tiff_encoder.py` — `build_metadata_injection_args()`
+
+**Problem:** The CLI accepted `--strip` flag, but it did nothing. Even with the flag set, all EXIF/XMP metadata was preserved in the output JXL. The `STRIP_METADATA` global existed but was never actually used to modify the exiftool arguments.
+
+**Root Cause:** The function `build_metadata_injection_args()` completely ignored the `strip_metadata` parameter that was passed to it. It always ran the full metadata preservation logic regardless of the flag.
+
+```python
+# BEFORE (buggy)
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, ...):
+    # strip_metadata parameter accepted but never checked!
+    args_lines = ["-overwrite_original"]
+    # ... full EXIF/XMP preservation logic always ran
+```
+
+**Fix:** Added proper conditional logic:
+```python
+# AFTER (fixed)
+def build_metadata_injection_args(..., strip_metadata=False):
+    args_lines = ["-overwrite_original"]
+    
+    if strip_metadata:
+        # Only encoding params, no metadata
+        encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+        args_lines.append(f"-xmp-dc:Description={encoding_desc}")
+        args_lines.append("-exif:all=")  # Strip all EXIF
+        args_lines.append("-xmp:all=")   # Strip all XMP
+        # ... return early
+    
+    # Normal metadata preservation only runs if NOT stripping
+```
+
+**Files affected:**
+- `jxl_tiff_encoder.py` — Added `STRIP_METADATA` global, updated `build_metadata_injection_args()`, added CLI argument
+
+---
+
+### Bug #13 — Status String Case Inconsistency
+
+**Location:** `jxl_tiff_decoder.py` — `convert_one()` and `process_group()`
+
+**Problem:** `convert_one()` returned status strings in UPPERCASE ("OK", "overwrite"), but `process_group()` checked against lowercase ("ok", "overwrite"). This caused silent failures in status tracking — files that converted successfully were sometimes treated as errors because the string didn't match.
+
+```python
+# BEFORE (inconsistent)
+def convert_one(...):
+    status = "overwrite" if overwritten else "OK"  # "OK" is uppercase!
+    return str(jxl_path), status, str(final_path)
+
+def process_group(...):
+    for result in results:
+        status = result[1]
+        if status not in ("ok", "overwrite"):  # Checks lowercase!
+            # "OK" would fail this check and be treated as error
+```
+
+**Fix:** Standardized on lowercase for internal status, uppercase only for display:
+```python
+# AFTER (consistent)
+def convert_one(...):
+    status = "overwrite" if overwritten else "ok"  # lowercase
+    label = "OVERWRITE" if overwritten else "OK"   # uppercase for UI
+    logger.info(f"[{n}/{total}] {label} | ...")     # display uses label
+    return str(jxl_path), status, str(final_path)  # return uses status
+```
+
+**Impact:** Fixed silent failures where successful conversions were logged as errors due to case mismatch.
+
+---
+
 ## Scripts Affected
 
 - `jxl_jpeg_transcoder.py` — Bug fixes #1, #2, #3, #4, #6, #8, #11
-- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7
-- `jxl_tiff_decoder.py` — Bug fixes #1, #5
+- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7, #12
+- `jxl_tiff_decoder.py` — Bug fixes #1, #5, #13
 - `jxl_photo.py` — Bug fixes #2, #9, #10
 
 ---
