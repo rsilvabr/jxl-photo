@@ -1165,7 +1165,16 @@ class InteractiveMenu:
             # jxl_tiff_decoder advanced options
             if RICH_AVAILABLE and console:
                 use_matrix = Confirm.ask("Use ICC matrix conversion?", default=False)
-                use_basic = Confirm.ask("Use basic ICC mode?", default=False) if not use_matrix else False
+                use_none = False
+                use_basic = False
+                if not use_matrix:
+                    icc_mode = Prompt.ask(
+                        "ICC mode",
+                        choices=["auto", "basic", "none"],
+                        default="auto"
+                    )
+                    use_basic = (icc_mode == "basic")
+                    use_none = (icc_mode == "none")
                 target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "Adobe RGB", "ProPhoto", "custom"], default="")
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
@@ -1173,10 +1182,15 @@ class InteractiveMenu:
             else:
                 matrix_input = input("Use ICC matrix conversion? [y/N]: ").strip().lower()
                 use_matrix = matrix_input.startswith('y')
+                use_none = False
                 use_basic = False
                 if not use_matrix:
-                    basic_input = input("Use basic ICC mode? [y/N]: ").strip().lower()
-                    use_basic = basic_input.startswith('y')
+                    print("ICC mode: auto = use ICC from XMP or djxl (default)")
+                    print("          basic = force Basic mode (djxl ICC)")
+                    print("          none  = no ICC handling")
+                    icc_mode = input("ICC mode [auto/basic/none]: ").strip().lower()
+                    use_basic = (icc_mode == "basic")
+                    use_none = (icc_mode == "none")
                 target_icc = input("Target ICC (sRGB/Adobe RGB/ProPhoto/custom/empty): ").strip()
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
@@ -1194,6 +1208,7 @@ class InteractiveMenu:
 
             advanced_options['matrix'] = use_matrix
             advanced_options['basic'] = use_basic
+            advanced_options['none'] = use_none
             advanced_options['target_icc'] = target_icc if target_icc else None
             advanced_options['no_icc_cleanup'] = no_cleanup
             advanced_options['overwrite'] = overwrite
@@ -1422,6 +1437,8 @@ class InteractiveMenu:
             # Advanced ICC options (mutually exclusive handling)
             if advanced.get('matrix'):
                 cmd.append('--matrix')
+            elif advanced.get('none'):
+                cmd.append('--none')
             elif advanced.get('basic'):
                 cmd.append('--basic')
 

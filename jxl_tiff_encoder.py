@@ -378,7 +378,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         # In-place recursive: JXL goes to the same folder as the source TIFF.
         return tiff_path.parent / tiff_path.with_suffix(".jxl").name
 
-    raise ValueError(f"Modo invalido: {mode}")
+    raise ValueError(f"Invalid mode: {mode}")
 
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
@@ -493,7 +493,7 @@ def extract_icc_original(tiff_path):
     return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NOVAS FUNÇÕES PARA PRESERVAÇÃO DE XMP (CORREÇÃO DO BUG DE OVERWRITE)
+# NEW FUNCTIONS FOR XMP PRESERVATION (XMP OVERWRITE BUG FIX)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_xmp_original(tiff_path, tmp_dir):
@@ -742,12 +742,12 @@ def reorder_jxl_boxes(jxl_path):
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
-    # Separa boxes em grupos: metadados (antes do codestream) e codestream
+    # Split boxes into groups: metadata (before codestream) and codestream
     CODESTREAM = {b"jxlc", b"jxlp"}
-    META_ORDER = [b"JXL ", b"ftyp", b"jxll"]  # estrutura obrigatória primeiro
-    META_EXTRA = [b"Exif", b"xml "]            # metadados que queremos antes do codestream
+    META_ORDER = [b"JXL ", b"ftyp", b"jxll"]  # required structure first
+    META_EXTRA = [b"Exif", b"xml "]            # metadata we want before codestream
 
-    # Agrupa por tipo preservando ordem de aparição (importante para múltiplos jxlp)
+    # Group by type preserving appearance order (important for multiple jxlp)
     meta_order_boxes  = []
     meta_extra_boxes  = []
     codestream_boxes  = []

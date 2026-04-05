@@ -194,17 +194,17 @@ Depending on your needs, three common approaches:
 pip install tifffile numpy pillow rich
 ```
 
-⚠️ **Important:** Install packages in the same Python version you'll use to run the scripts.
+ **Important:** Install packages in the same Python version you'll use to run the scripts.
 
 ### 2. External Tools (Download Executables, NOT Source Code)
 
 | Tool | Download URL | What to Download | Extract to |
 |------|-------------|------------------|------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip`)** | `C:\tools\libjxl\` or your choice |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`   **(NOT `jxl-x64-windows.zip`)** | `C:\tools\libjxl\` or your choice |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
 | **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
 
-#### ⚠️ Common Download Mistakes
+####  Common Download Mistakes
 
 | Wrong Download | Why It Fails | Correct Download |
 |---------------|--------------|------------------|
@@ -241,7 +241,7 @@ $myPaths = @(
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 [Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
 
-# ⚠️ RESTART your PowerShell/terminal after this!
+# RESTART your PowerShell/terminal after this!
 ```
 
 ### 4. Verify Installation

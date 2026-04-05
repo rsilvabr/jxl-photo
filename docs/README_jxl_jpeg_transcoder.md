@@ -28,8 +28,8 @@ Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagic
 
 | Tool | Download | What to Get |
 |------|----------|-------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 | **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
 
 ### exiftool Setup (Important!)

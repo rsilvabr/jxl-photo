@@ -32,8 +32,8 @@ Both `cjxl.exe` and `exiftool.exe` must be on your PATH.
 
 | Tool | Download | What to Get |
 |------|----------|-------------|
-| **cjxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` ⚠️ **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` ⚠️ **(Windows .zip, NOT .tar.gz source)** |
+| **cjxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 
 ### exiftool Setup (Important!)
 
