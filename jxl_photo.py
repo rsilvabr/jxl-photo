@@ -74,6 +74,8 @@ class ToolConfig:
     last_quality: Optional[int] = None
     last_distance: Optional[float] = None
     last_origin_format: Optional[str] = None
+    last_dest_format: Optional[str] = None
+    last_conversion_type: Optional[str] = None
     last_d50_patch: Optional[str] = None
     last_encode_tag: Optional[str] = None
     last_jpeg_thumbnail: Optional[bool] = None  # True = embed, False = don't embed, None = ask each time
@@ -124,6 +126,8 @@ class ConfigManager:
                          effort: Optional[int] = None, quality: Optional[int] = 95,
                          distance: Optional[float] = None,
                          origin_format: Optional[str] = None,
+                         dest_format: Optional[str] = None,
+                         conversion_type: Optional[str] = None,
                          d50_patch: Optional[str] = None,
                          encode_tag: Optional[str] = None,
                          jpeg_thumbnail: Optional[bool] = None) -> None:
@@ -143,6 +147,10 @@ class ConfigManager:
             self.config.last_distance = distance
         if origin_format is not None:
             self.config.last_origin_format = origin_format
+        if dest_format is not None:
+            self.config.last_dest_format = dest_format
+        if conversion_type is not None:
+            self.config.last_conversion_type = conversion_type
         if d50_patch is not None:
             self.config.last_d50_patch = d50_patch
         if encode_tag is not None:
@@ -899,10 +907,15 @@ class InteractiveMenu:
             options.append(("3", "d=1.0 ", "Visually lossless", "jxl_tiff_encoder"))
             options.append(("4", "Custom", "Enter any value 0-15", "jxl_tiff_encoder"))
         elif origin == "jxl" and status.get('djxl'):
-            options.append(("1", "JPEG", "Standard JPEG output", "jxl_to_jpeg_smart"))
-            options.append(("2", "PNG ", "PNG with transparency", "jxl_to_png"))
+            options.append(("1", "JPEG Lossless Transcode", "Lossless recovery (requires jbrd box)", "jxl_to_jpeg_lossless"))
+            options.append(("2", "JPEG Lossy Convert", "Lossy conversion with quality/ICC control", "jxl_to_jpeg_force"))
+            if RICH_AVAILABLE and console:
+                console.print("[dim][3] AUTO mode - in development (auto-detect per-file not available)[/dim]")
+            else:
+                print("[3] AUTO mode - in development (not available)")
+            options.append(("4", "PNG", "PNG with transparency", "jxl_to_png"))
             if status.get('tifffile'):
-                options.append(("3", "TIFF", "Lossless master", "jxl_tiff_decoder"))
+                options.append(("5", "TIFF", "Lossless master", "jxl_tiff_decoder"))
 
         if not options:
             self._print_error(f"No conversions available for {origin}.")
@@ -973,12 +986,15 @@ class InteractiveMenu:
         elif origin == "jpeg":
             workflow['dest_format'] = 'jxl'
         elif origin == "jxl":
-            if choice == "1":
+            if choice in ["1", "2"]:
+                # Choice 1 = JPEG Lossless Transcode, Choice 2 = JPEG Lossy Convert
                 workflow['dest_format'] = 'jpeg'
-            elif choice == "2":
+            elif choice == "4":
                 workflow['dest_format'] = 'png'
-            else:
+            elif choice == "5":
                 workflow['dest_format'] = 'tiff'
+            else:
+                workflow['dest_format'] = 'jpeg'
         return True
 
     def _wizard_select_files(self, workflow: Dict) -> bool:
@@ -1773,10 +1789,15 @@ class InteractiveMenu:
             else:
                 workflow['staging'] = staging_input
 
-            if origin == 'jxl' and dest in ['jpeg', 'png'] and status.get('magick'):
-                convert_icc = Confirm.ask("Convert to sRGB? (recommended for compatibility)", default=False)
-                if convert_icc:
-                    workflow['icc_profile'] = 'sRGB'
+            # Quality and ICC settings for JPEG output (only for lossy conversion)
+            if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+                quality = IntPrompt.ask("Quality (1-100)", default=workflow.get('quality', 95))
+                workflow['quality'] = max(1, min(quality, 100))
+                
+                if status.get('magick'):
+                    convert_icc = Confirm.ask("Convert to sRGB?", default=False)
+                    if convert_icc:
+                        workflow['icc_profile'] = 'sRGB'
 
             if dest == 'tiff':
                 compression = Prompt.ask("TIFF compression", choices=["zip", "lzw", "none"], default=workflow['compression'])
@@ -1827,10 +1848,16 @@ class InteractiveMenu:
             elif staging_input:
                 workflow['staging'] = staging_input
 
-            if origin == 'jxl' and dest in ['jpeg', 'png'] and status.get('magick'):
-                icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
-                if icc_input.startswith('y'):
-                    workflow['icc_profile'] = 'sRGB'
+            # Quality and ICC settings for JPEG output (only for lossy conversion)
+            if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+                quality = input(f"Quality (1-100) [{workflow.get('quality', 95)}]: ").strip()
+                if quality.isdigit():
+                    workflow['quality'] = max(1, min(int(quality), 100))
+                
+                if status.get('magick'):
+                    icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
+                    if icc_input.startswith('y'):
+                        workflow['icc_profile'] = 'sRGB'
 
             if dest == 'tiff':
                 comp_input = input(f"TIFF compression (zip/lzw/none) [{workflow['compression']}]: ").strip()
@@ -2111,6 +2138,10 @@ class InteractiveMenu:
                     table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
             elif 'lossy' in workflow['conversion_type']:
                 table.add_row("Quality:", str(workflow['quality']))
+            elif origin == 'jxl' and dest == 'jpeg':
+                # JXL->JPEG: only show quality for lossy mode
+                if workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+                    table.add_row("Quality:", str(workflow.get('quality', 95)))
             table.add_row("Effort:", str(workflow['effort']))
 
             if extra_info:
@@ -2145,6 +2176,10 @@ class InteractiveMenu:
                     print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
             elif 'lossy' in workflow['conversion_type']:
                 print(f"Quality: {workflow['quality']}")
+            elif origin == 'jxl' and dest == 'jpeg':
+                # JXL->JPEG: only show quality for lossy mode
+                if workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+                    print(f"Quality: {workflow.get('quality', 95)}")
             print(f"Effort: {workflow['effort']}")
 
             if extra_info:
@@ -2476,6 +2511,9 @@ class InteractiveMenu:
 
         else:
             script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')
+            
+            conv_type = workflow.get('conversion_type', '')
+            
             cmd = [
                 sys.executable, script,
                 input_dir,
@@ -2483,14 +2521,28 @@ class InteractiveMenu:
                 '--workers', str(workers)
             ]
 
-            if workflow['conversion_type'] == 'transcode_lossless':
+            # Handle conversion type flags
+            # Note: transcoder auto-detects direction based on file extensions
+            if conv_type == 'transcode_lossless':
+                # JPEG->JXL lossless
                 cmd.append('--force-transcode')
-            elif 'lossy' in workflow['conversion_type']:
-                # JPEG->JXL uses DISTANCE (cjxl -d), JXL->JPEG uses QUALITY (magick -quality)
-                if origin == 'jpeg' and dest == 'jxl':
-                    cmd.extend(['--distance', str(workflow['distance'])])
-                else:
-                    cmd.extend(['--quality', str(workflow['quality'])])
+            elif conv_type == 'convert_lossy':
+                # JPEG->JXL lossy
+                cmd.append('--force-convert')
+                cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            elif conv_type == 'jxl_to_jpeg_lossless':
+                # JXL->JPEG: force lossless transcode (requires jbrd)
+                cmd.append('--force-transcode')
+            elif conv_type == 'jxl_to_jpeg_force':
+                # JXL->JPEG: force lossy
+                cmd.append('--force-convert')
+            elif conv_type == 'jxl_to_png':
+                # JXL->PNG
+                cmd.extend(['--format', 'png'])
+            
+            # Add quality for JXL->JPEG/PNG (used in convert mode)
+            if origin == 'jxl' and dest in ['jpeg', 'png']:
+                cmd.extend(['--quality', str(workflow.get('quality', 95))])
 
             cmd.extend(['--effort', str(workflow['effort'])])
 
@@ -2656,6 +2708,8 @@ def main():
                     saved_quality,
                     saved_distance,
                     workflow['origin_format'],
+                    workflow['dest_format'],
+                    workflow['conversion_type'],
                     workflow.get('advanced_options', {}).get('d50_patch'),
                     workflow.get('advanced_options', {}).get('encode_tag')
                 )
@@ -2701,6 +2755,8 @@ def main():
             last_quality = last.last_quality or 95
             last_distance = last.last_distance
             last_origin = last.last_origin_format or "tiff"
+            last_dest = last.last_dest_format or ("jxl" if last_origin != "jxl" else "jpeg")
+            last_conv_type = last.last_conversion_type or ""
             last_d50_patch = last.last_d50_patch or "auto"
             last_encode_tag = last.last_encode_tag or "xmp"
 
@@ -2708,6 +2764,7 @@ def main():
                 settings = [
                     ["Input folder", last_dir],
                     ["Source", last_origin.upper()],
+                    ["Destination", last_dest.upper()],
                     ["Mode", last_mode],
                     ["Workers", str(last_workers)],
                     ["Effort", str(last_effort)],
@@ -2718,7 +2775,7 @@ def main():
                     settings.append(["Distance", f"{last_distance}"])
                 elif last_origin == 'jpeg':
                     settings.append(["Quality", str(last_quality)])
-                elif last_origin == 'jxl' and last_quality is not None:
+                elif last_origin == 'jxl' and last_quality is not None and last_conv_type == 'jxl_to_jpeg_force':
                     settings.append(["Quality", str(last_quality)])
                 settings.append(["Staging", last_staging or "(none)"])
                 
@@ -2732,6 +2789,7 @@ def main():
                 print("\n=== Last Workflow Settings ===")
                 print(f"  Input folder: {last_dir}")
                 print(f"  Source:       {last_origin.upper()}")
+                print(f"  Destination:  {last_dest.upper()}")
                 print(f"  Mode:         {last_mode}")
                 print(f"  Workers:      {last_workers}")
                 print(f"  Effort:       {last_effort}")
@@ -2813,7 +2871,7 @@ def main():
                 workflow['mode_config'] = {}
 
             workflow['origin_format'] = origin
-            workflow['dest_format'] = 'jxl' if origin != 'jxl' else 'tiff'
+            workflow['dest_format'] = last_dest
             workflow['selected_files'] = []
             workflow['use_ram'] = True
             workflow['icc_profile'] = None
@@ -2828,13 +2886,23 @@ def main():
             }
             workflow['expert_flags'] = ''
             workflow['auto_mode_used'] = False
-
-            if origin == 'jpeg':
+            
+            # Use saved conversion type or fallback to defaults
+            if last_conv_type:
+                workflow['conversion_type'] = last_conv_type
+            elif origin == 'jpeg':
                 workflow['conversion_type'] = 'transcode_lossless'
             elif origin == 'tiff':
                 workflow['conversion_type'] = 'jxl_tiff_encoder'
-            else:
+            elif origin == 'jxl' and last_dest == 'tiff':
                 workflow['conversion_type'] = 'jxl_tiff_decoder'
+            elif origin == 'jxl' and last_dest == 'jpeg':
+                # Default to lossy if no previous conversion type saved
+                workflow['conversion_type'] = 'jxl_to_jpeg_force'
+            elif origin == 'jxl' and last_dest == 'png':
+                workflow['conversion_type'] = 'jxl_to_png'
+            else:
+                workflow['conversion_type'] = 'jxl_to_jpeg_force'
 
             menu.execute_workflow(workflow, status)
 

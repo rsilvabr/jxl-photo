@@ -46,6 +46,10 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 32 | `import Path` redundant in `_execute_manifest_workflow` | photo | ✅ FIXED (v1.3) |
 | 33 | Rich markup leaking in fallback without Rich | photo | ✅ FIXED (v1.3) |
 | 34 | Type hint `str \| None` (Python < 3.10 incompatible) | transcoder | ✅ FIXED (v1.3) |
+| 35 | JXL→JPEG auto mode not working for directories | transcoder, photo | 🔄 IN DEVELOPMENT |
+| 36 | Quality/sRGB asked for lossless JXL→JPEG | photo | ✅ FIXED (v1.4) |
+| 37 | Repeat last workflow not saving dest format | photo | ✅ FIXED (v1.4) |
+| 38 | Step 2 TIFF option misnumbered | photo | ✅ FIXED (v1.4) |
 
 ---
 
@@ -824,3 +828,66 @@ if args.distance is not None:
 - **Type hint fixed:** `_show_mode_details_and_select` now correctly typed as `-> bool`
 - **Script path resolution:** All script references now use absolute paths via `SCRIPT_DIR`
 - **Error handling:** Timeout handling added in both `_run_subprocess` and `execute_workflow`
+
+---
+
+## v1.4 Bug Fixes (Detailed)
+
+### Bug #35 — JXL→JPEG Auto Mode Not Working for Directories
+
+**Location:** `jxl_jpeg_transcoder.py`, `jxl_photo.py`
+
+**Problem:** The transcoder's auto-detect feature (checking for jbrd box to decide lossless vs lossy) only works for single files, not directories. When a directory is passed, the transcoder requires explicit `--force-transcode` or `--force-convert` flags.
+
+**Current Workaround in jxl_photo.py:**
+- Option [1]: JPEG Lossless Transcode (force --force-transcode)
+- Option [2]: JPEG Lossy Convert (force --force-convert)  
+- Option [3]: AUTO mode shown as "[In development]" (grayed out)
+
+**Future Fix:** Modify transcoder to auto-detect jbrd per-file even in batch mode, routing each file to the appropriate handler.
+
+---
+
+### Bug #36 — Quality/sRGB Asked for Lossless JXL→JPEG
+
+**Location:** `jxl_photo.py` Step 6 (lines ~1793, ~1852)
+
+**Problem:** The wizard was asking for Quality and sRGB conversion even when "JPEG Lossless Transcode" was selected. These settings are irrelevant for lossless transcoding.
+
+**Fix:** Added check for `conversion_type == 'jxl_to_jpeg_force'` before asking quality/sRGB questions.
+
+```python
+# Only ask for lossy mode
+if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+    # ask quality and sRGB
+```
+
+---
+
+### Bug #37 — Repeat Last Workflow Not Saving Destination Format
+
+**Location:** `jxl_photo.py` `save_last_session()`, Repeat workflow section
+
+**Problem:** When using "Repeat last workflow", the system didn't remember if the last JXL→? conversion was to JPEG, PNG, or TIFF. It would always default to TIFF for JXL source.
+
+**Fix:** 
+1. Added `last_dest_format` and `last_conversion_type` fields to ToolConfig
+2. Updated `save_last_session()` to save these fields
+3. Updated Repeat workflow to use saved values
+
+---
+
+### Bug #38 — Step 2 TIFF Option Misnumbered
+
+**Location:** `jxl_photo.py` Step 2 options
+
+**Problem:** When JXL source was selected, the TIFF option had the same number [3] as PNG, causing confusion.
+
+**Fix:** Renumbered options:
+- [1] JPEG Lossless Transcode
+- [2] JPEG Lossy Convert  
+- [3] AUTO (in development) - shown as grayed out
+- [4] PNG
+- [5] TIFF
+
+---
