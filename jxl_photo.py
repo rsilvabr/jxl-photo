@@ -891,8 +891,8 @@ class InteractiveMenu:
         options = []
 
         if origin == "jpeg" and status.get('cjxl'):
-            options.append(("1", "JXL Lossless", "Lossless JPEG⇌JXL transcoding (recommended)", "transcode_lossless"))
-            options.append(("2", "JXL Lossy   ", "Lossy — JXL→JPEG decode loses quality", "convert_lossy"))
+            options.append(("1", "JXL Lossless  ", "Lossless JPEG ⇌ JXL transcoding (recommended)", "transcode_lossless"))
+            options.append(("2", "JXL Lossy     ", "Lossy — JPEG→JXL encode loses quality", "convert_lossy"))
         elif origin == "tiff" and status.get('cjxl'):
             options.append(("1", "d=0   ", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
             options.append(("2", "d=0.1 ", "Near-lossless (recommended)", "jxl_tiff_encoder"))
