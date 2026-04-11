@@ -2,7 +2,7 @@
 
 Date: 2026-04-04  
 v1.2 Update: 2026-04-05  
-v1.3 Update: 2026-04-10  
+v1.3 Update: 2026-04-11  
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`  
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
 
@@ -423,7 +423,7 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 
 ---
 
-## v1.3 Release Notes (2026-04-10)
+## v1.3 Release Notes (2026-04-11)
 
 ### File Reorganization (Decoder)
 
@@ -438,10 +438,11 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 **Key improvements:**
 | Feature | Old (v1) | Current (v1.3) |
 |---------|----------|----------------|
-| JPEG Preview | Page 1 (secondary) | Page 0 (thumbnail flag) |
+| JPEG Preview | Page 1 (secondary) | Page 1 (with NEWSubfileType=1 flag) |
 | Windows Explorer | Generic icon | **Color-managed thumbnail** |
-| ICC in preview | ❌ No | ✅ Yes |
-| NEWSubfileType flag | ❌ No | ✅ Yes (value 1) |
+| Preview colorspace | ❌ Original (needs ICC, shows wrong colors) | ✅ **sRGB converted** (correct colors without ICC) |
+| ICC in main image | ✅ Yes | ✅ Yes |
+| ICC in preview | ❌ No | ❌ No (not needed — sRGB native) |
 | File integrity verification | ❌ No | ✅ Yes (before source deletion) |
 | Python 3.8 compatibility | ❌ No | ✅ Yes (backport included) |
 
