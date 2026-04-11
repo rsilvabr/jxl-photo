@@ -2284,8 +2284,6 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('encode_tag'):
                 cmd.extend(['--encode-tag', advanced['encode_tag']])
-            if advanced.get('embed_thumbnail'):
-                cmd.append('--embed-thumbnail')
 
         elif origin == 'jxl' and dest == 'tiff':
             cmd.extend(['--compression', workflow.get('compression', 'zip')])
@@ -2441,6 +2439,8 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('encode_tag'):
                 cmd.extend(['--encode-tag', advanced['encode_tag']])
+            if advanced.get('embed_thumbnail'):
+                cmd.append('--embed-thumbnail')
 
         elif origin == 'jxl' and dest == 'tiff':
             script = str(SCRIPT_DIR / 'jxl_tiff_decoder.py')
