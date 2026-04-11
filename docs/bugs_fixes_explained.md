@@ -6,7 +6,8 @@ produced files where either the colors were wrong, the EXIF was missing, or the 
 was silently corrupted.
 
 This document explains each problem, why it happens, and what the fix is.
-(This document was made before release v1.0)
+(This document was made before v1.0 release)
+
 ---
 
 ## Bug 1 — cjxl does not read TIFF
