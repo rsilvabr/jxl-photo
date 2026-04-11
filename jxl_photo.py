@@ -936,37 +936,37 @@ class InteractiveMenu:
             if choice == "1":
                 workflow['distance_choice'] = "0"
                 workflow['dest_format'] = 'jxl'
-                workflow['quality'] = 0.0
+                workflow['distance'] = 0.0
             elif choice == "2":
                 workflow['distance_choice'] = "0.1"
                 workflow['dest_format'] = 'jxl'
-                workflow['quality'] = 0.1
+                workflow['distance'] = 0.1
             elif choice == "3":
                 workflow['distance_choice'] = "1.0"
                 workflow['dest_format'] = 'jxl'
-                workflow['quality'] = 1.0
+                workflow['distance'] = 1.0
             else:
                 workflow['distance_choice'] = "custom"
                 workflow['dest_format'] = 'jxl'
 
             if RICH_AVAILABLE and console:
                 if choice == "4":
-                    dist_default = workflow.get('quality', 0.1)
+                    dist_default = workflow.get('distance', 0.1)
                     dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(dist_default))
                     try:
-                        workflow['quality'] = float(dist_str)
+                        workflow['distance'] = float(dist_str)
                     except ValueError:
-                        workflow['quality'] = dist_default
+                        workflow['distance'] = dist_default
                 custom_effort = IntPrompt.ask("Effort (1-10, higher=smaller)", default=workflow['effort'])
                 workflow['effort'] = max(1, min(custom_effort, 10))
             else:
                 if choice == "4":
-                    dist_default = workflow.get('quality', 0.1)
+                    dist_default = workflow.get('distance', 0.1)
                     dist_str = input(f"Distance (0.0-15.0) [{dist_default}]: ").strip()
                     try:
-                        workflow['quality'] = float(dist_str) if dist_str else dist_default
+                        workflow['distance'] = float(dist_str) if dist_str else dist_default
                     except ValueError:
-                        workflow['quality'] = dist_default
+                        workflow['distance'] = dist_default
                 effort_input = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
                 if effort_input.isdigit():
                     workflow['effort'] = max(1, min(int(effort_input), 10))
@@ -1750,7 +1750,7 @@ class InteractiveMenu:
 
             if origin == 'tiff' and dest == 'jxl':
                 dist_choice = workflow.get('distance_choice', '')
-                q = workflow.get('quality', 0.1)
+                q = workflow.get('distance', 0.1)
                 console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
                 console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
 
@@ -1806,7 +1806,7 @@ class InteractiveMenu:
             workflow['workers'] = int(workers) if workers.isdigit() else workflow['workers']
 
             if origin == 'tiff' and dest == 'jxl':
-                print(f"Distance: {workflow.get('quality', 0.1):.2f} (set in Step 2)")
+                print(f"Distance: {workflow.get('distance', 0.1):.2f} (set in Step 2)")
                 print(f"Effort: {workflow['effort']} (set in Step 2)")
             elif 'lossy' in conv_type:
                 quality = input(f"Quality (1-100) [{workflow['quality']}]: ").strip()
@@ -2106,7 +2106,7 @@ class InteractiveMenu:
             table.add_row("Workers:", str(workflow['workers']))
 
             if origin == 'tiff' and dest == 'jxl':
-                table.add_row("Distance:", str(workflow['quality']))
+                table.add_row("Distance:", str(workflow['distance']))
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
             elif 'lossy' in workflow['conversion_type']:
@@ -2140,7 +2140,7 @@ class InteractiveMenu:
             print(f"Workers: {workflow['workers']}")
 
             if origin == 'tiff' and dest == 'jxl':
-                print(f"Distance: {workflow['quality']}")
+                print(f"Distance: {workflow['distance']}")
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
             elif 'lossy' in workflow['conversion_type']:
@@ -2263,7 +2263,7 @@ class InteractiveMenu:
         cmd = [sys.executable, script, source, '--mode', str(mode), '--workers', str(workers)]
 
         if origin == 'tiff' and dest == 'jxl':
-            distance = workflow.get('quality', 0.1)
+            distance = workflow.get('distance', 0.1)
             cmd.extend(['--distance', str(distance)])
             cmd.extend(['--effort', str(workflow.get('effort', 7))])
 
@@ -2418,7 +2418,7 @@ class InteractiveMenu:
                 '--workers', str(workers)
             ]
 
-            distance = workflow.get('quality', 0.1)
+            distance = workflow.get('distance', 0.1)
             cmd.extend(['--distance', str(distance)])
             cmd.extend(['--effort', str(workflow['effort'])])
 
@@ -2486,7 +2486,11 @@ class InteractiveMenu:
             if workflow['conversion_type'] == 'transcode_lossless':
                 cmd.append('--force-transcode')
             elif 'lossy' in workflow['conversion_type']:
-                cmd.extend(['--quality', str(workflow['quality'])])
+                # JPEG->JXL uses DISTANCE (cjxl -d), JXL->JPEG uses QUALITY (magick -quality)
+                if origin == 'jpeg' and dest == 'jxl':
+                    cmd.extend(['--distance', str(workflow['distance'])])
+                else:
+                    cmd.extend(['--quality', str(workflow['quality'])])
 
             cmd.extend(['--effort', str(workflow['effort'])])
 
@@ -2634,15 +2638,14 @@ def main():
                 dest = workflow['dest_format']
 
                 if origin == 'tiff' and dest == 'jxl':
-                    saved_quality = workflow.get('quality') or 0.1
+                    saved_distance = workflow.get('distance') or 0.1
+                    saved_quality = None
                 elif 'lossy' in workflow['conversion_type']:
                     saved_quality = workflow.get('quality') or 95
+                    saved_distance = None
                 else:
                     saved_quality = config.config.default_quality
-
-                saved_distance = None
-                if origin == 'tiff' and dest == 'jxl':
-                    saved_distance = workflow.get('quality') or 0.1
+                    saved_distance = None
 
                 config.save_last_session(
                     workflow['input_dir'],
@@ -2708,10 +2711,17 @@ def main():
                     ["Mode", last_mode],
                     ["Workers", str(last_workers)],
                     ["Effort", str(last_effort)],
-                    ["Quality", str(last_quality)],
-                    ["Distance", f"{last_distance}" if last_distance is not None else "(n/a)"],
-                    ["Staging", last_staging or "(none)"],
                 ]
+                # Show relevant field based on origin format
+                # TIFF→JXL: uses distance | JPEG→JXL: uses quality | JXL→?: may use quality if JPEG dest
+                if last_origin == 'tiff' and last_distance is not None:
+                    settings.append(["Distance", f"{last_distance}"])
+                elif last_origin == 'jpeg':
+                    settings.append(["Quality", str(last_quality)])
+                elif last_origin == 'jxl' and last_quality is not None:
+                    settings.append(["Quality", str(last_quality)])
+                settings.append(["Staging", last_staging or "(none)"])
+                
                 t = Table(box=BOX_SIMPLE, show_header=False, pad_edge=False)
                 t.add_column("", style="cyan")
                 t.add_column("")
@@ -2725,8 +2735,13 @@ def main():
                 print(f"  Mode:         {last_mode}")
                 print(f"  Workers:      {last_workers}")
                 print(f"  Effort:       {last_effort}")
-                print(f"  Quality:      {last_quality}")
-                print(f"  Distance:     {last_distance if last_distance is not None else '(n/a)'}")
+                # Show relevant field based on origin format
+                if last_origin == 'tiff' and last_distance is not None:
+                    print(f"  Distance:     {last_distance}")
+                elif last_origin == 'jpeg':
+                    print(f"  Quality:      {last_quality}")
+                elif last_origin == 'jxl' and last_quality is not None:
+                    print(f"  Quality:      {last_quality}")
                 print(f"  Staging:      {last_staging or '(none)'}")
                 print()
 
@@ -2770,17 +2785,27 @@ def main():
             if not proceed:
                 continue
 
-            effective_quality = last_distance if (origin == 'tiff' and last_distance is not None) else (last_quality or 95)
-
-            workflow = {
-                'input_dir': new_folder,
-                'mode': int(last_mode or 0),
-                'workers': last_workers or 4,
-                'staging': last_staging,
-                'effort': last_effort or 7,
-                'quality': effective_quality,
-                'overwrite_mode': ow_choice,
-            }
+            # Separate distance (TIFF) and quality (JPEG) - don't mix!
+            if origin == 'tiff':
+                workflow = {
+                    'input_dir': new_folder,
+                    'mode': int(last_mode or 0),
+                    'workers': last_workers or 4,
+                    'staging': last_staging,
+                    'effort': last_effort or 7,
+                    'distance': last_distance or 0.1,
+                    'overwrite_mode': ow_choice,
+                }
+            else:
+                workflow = {
+                    'input_dir': new_folder,
+                    'mode': int(last_mode or 0),
+                    'workers': last_workers or 4,
+                    'staging': last_staging,
+                    'effort': last_effort or 7,
+                    'quality': last_quality or 95,
+                    'overwrite_mode': ow_choice,
+                }
 
             if workflow['mode'] == 2:
                 workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
