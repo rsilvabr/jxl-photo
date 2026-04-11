@@ -161,6 +161,15 @@ The wizard guides you through: Source format → Destination → Directory → O
   → Executes the underlying script with all options
 ```
 
+> **Tip:** The value shown in **blue** (or between `[brackets]`/`(parentheses)`) is the default. Just press `Enter` to accept!
+>
+> Example:
+> ```
+> Workers [4]:          ← Press Enter to use 4
+> Distance [0.1]:       ← Press Enter to use 0.1
+> Execute? [y/n] (y):   ← Press Enter to accept 'y' (yes)
+> ```
+
 ---
 
 ##  Auto Mode (New in v1.3)
