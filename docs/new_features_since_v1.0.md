@@ -87,7 +87,7 @@ python jxl_tiff_encoder.py folder/ --embed-thumbnail
 ```
 
 **Supported viewers:**
-- ✅ IrfanView — shows thumbnail in file list
+- ✅ IrfanView — shows thumbnail in file list (color fix reported, test with latest plugin)
 - ✅ XnView MP — fast thumbnail preview
 - ✅ digiKam — uses embedded thumbnail
 - ✅ darktable — EXIF thumbnail support
@@ -99,6 +99,10 @@ The Windows JXL WIC codec (from Microsoft Store) has two problems:
 2. **No color management** — converts ProPhoto/Adobe RGB to thumbnail without ICC profile, resulting in wrong/washed-out colors
 
 This is a **Windows codec limitation**, not a bug in this software. The embedded thumbnail is correct (sRGB, properly converted), but Windows doesn't use it. For accurate thumbnails on Windows, use IrfanView, XnView MP, or digiKam.
+
+**Note on EXIF in IrfanView:** While thumbnails display correctly with the latest plugin, EXIF visibility depends on JXL source:
+- **TIFF → JXL:** EXIF visible ✅ (boxes reordered)
+- **JPEG → JXL:** EXIF not visible ❌ (Brotli compression)
 
 ---
 

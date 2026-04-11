@@ -24,6 +24,29 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
 
+## What's New in v1.5
+
+### JXL → JPEG Auto-Detect Mode
+**Smart per-file detection** for mixed JXL archives:
+- Files **with jbrd box** → lossless transcoding (original JPEG recovered)
+- Files **without jbrd** → lossy conversion with configurable quality
+- Processes entire folders automatically, routing each file to the optimal method
+
+### Optional JPEG Preview in TIFF Output
+JXL → TIFF conversion now supports **disabling the embedded JPEG preview**:
+```bash
+python jxl_tiff_decoder.py folder/ --no-preview  # Smaller files, no preview
+```
+Default behavior unchanged (preview enabled for compatibility).
+
+### Refined JXL → JPEG Options
+Step 2 now offers three clear choices:
+1. **JPEG Auto-Detect** — Recommended (auto-routes based on jbrd presence)
+2. **JPEG Lossless** — Force lossless transcoding (requires jbrd)
+3. **JPEG Lossy** — Force lossy conversion with quality/ICC control
+
+---
+
 ## What's New in v1.3
 
 ### Auto Mode + Manifest System
@@ -53,6 +76,16 @@ python jxl_tiff_encoder.py folder/ --embed-thumbnail
 Adds ~20KB per file.
 
 **Windows Explorer Note:** The current JXL WIC codec from Microsoft Store generates its own thumbnail and **ignores the embedded EXIF thumbnail**. Worse, it does so **without color management** — so if your image uses ProPhoto RGB or Adobe RGB, the thumbnail will show wrong/washed-out colors. This is a **Windows codec limitation, not a bug in this software**. Use IrfanView, XnView MP, or digiKam for accurate thumbnails.
+
+**IrfanView Note:** EXIF display in JXL has limitations with this software:
+
+| Source | JXL Type | EXIF in IrfanView | Why |
+|--------|----------|-------------------|-----|
+| **TIFF → JXL** | Lossless | ✅ Shows | Boxes reordered (Exif before codestream) |
+| **JPEG → JXL** | Lossless | ❌ Hidden | Brotli compression (`brob` box) - IrfanView can't read |
+| **JPEG → JXL** | Lossy | ❌ Hidden | Brotli compression (`brob` box) - IrfanView can't read |
+
+For reliable EXIF viewing regardless of source, use **XnView MP** or **digiKam**.
 
 ---
 

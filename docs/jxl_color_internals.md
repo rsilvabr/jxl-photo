@@ -319,14 +319,18 @@ files, regardless of actual colorspace. This is a display bug, not a conversion 
 
 Verify with `jxlinfo` or open in GIMP/Darktable.
 
-### Issue: IrfanView shows wrong colors (calibrated monitor)
+### Issue: IrfanView shows wrong colors (calibrated monitor) — reported & fixed
 
-IrfanView has known issues with lossless JXL on color-calibrated systems.
+**Update:** This issue was reported to the IrfanView developer and an updated plugin DLL with correct ICC profile handling was received. It is recommended to download the latest JXL plugin from the IrfanView website to test if the fix has been publicly released.
 
-**Workarounds:**
+*Previous behavior (old plugin):
+IrfanView had issues with lossless JXL on color-calibrated systems.
+
+**Workarounds (if using old plugin):**
+- Update to latest IrfanView JXL plugin
 - Use lossy JXL at `d=0.1` (imperceptible difference)
 - Open in GIMP, Darktable, or browser instead
-- The file itself is correct; the issue is viewer-specific
+- The file itself is correct; the issue was viewer-specific
 
 ---
 

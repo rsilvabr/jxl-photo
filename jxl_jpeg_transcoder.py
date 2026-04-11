@@ -280,7 +280,7 @@ def setup_logger():
     log_file = LOG_DIR / f"{timestamp}.log"
 
     logger = logging.getLogger("jxl_jpeg_transcoder")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
@@ -356,12 +356,47 @@ def read_md5_db(jxl_path: Path) -> Optional[str]:
 def has_jbrd_box(jxl_path: Path) -> bool:
     """Check if JXL has jbrd (JPEG Bitstream Reconstruction Data) box.
     Returns True if this JXL can be losslessly transcoded back to JPEG.
-    Reads up to 16KB to handle files with large metadata headers."""
+    Reads up to 16KB to handle files with large metadata headers.
+    Uses ISOBMFF box parsing for reliable detection (not naive substring search)."""
     try:
         with open(jxl_path, 'rb') as f:
-            header = f.read(16384)  # Increased from 4KB to 16KB for safety
-            # jbrd box signature
-            return b'jbrd' in header
+            data = f.read(16384)
+        
+        # Skip JXL signature (12 bytes) if present
+        offset = 0
+        if data[:2] == b'\xff\x0a':  # Bare codestream
+            return False  # No boxes = no jbrd
+        elif data[:12] == b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':
+            offset = 12  # Container signature
+        
+        # Parse ISOBMFF boxes
+        while offset < len(data) - 8:
+            # Read box size (4 bytes, big-endian)
+            size = int.from_bytes(data[offset:offset+4], 'big')
+            # Read box type (4 bytes)
+            box_type = data[offset+4:offset+8]
+            
+            # Check for jbrd box
+            if box_type == b'jbrd':
+                return True
+            
+            # Move to next box
+            if size == 0:  # Until end of file
+                break
+            elif size == 1:  # Extended size (64-bit)
+                if offset + 16 > len(data):
+                    break
+                size = int.from_bytes(data[offset+8:offset+16], 'big')
+            
+            if size < 8:  # Invalid box
+                break
+            offset += size
+            
+            # Safety limit
+            if offset > 16384:
+                break
+        
+        return False
     except Exception:
         return False
 
@@ -797,7 +832,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "error", str(e))
 
 def process_group_transcode(group_pairs: list, workers: int, decode: bool, 
-                            verify: bool, mode: int, reconvert_val: bool, smart: bool) -> list:
+                            verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
     if use_staging:
@@ -815,7 +850,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             futures = {ex.submit(decode_one_transcode, s, w, f, verify, reconvert_val, smart): (s, w, f) 
                       for s, w, f in tasks}
         else:
-            futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, CJXL_EFFORT, smart): (s, w, f) 
+            futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, effort, smart): (s, w, f) 
                       for s, w, f in tasks}
         for fut in as_completed(futures):
             results.append(fut.result())
@@ -951,7 +986,7 @@ def cmd_transcode(args, auto_decode: bool = False):
             logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
 
         results = process_group_transcode(group_pairs, args.workers, decode,
-                                         not args.no_verify, args.mode, reconvert_explicit, smart_mode)
+                                         not args.no_verify, args.mode, reconvert_explicit, smart_mode, args.effort)
 
         for result in results:
             status = result[1]
@@ -1150,7 +1185,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
         else:  # PNG output
-            if use_ram and MAGICK_AVAILABLE and output_icc:
+            if output_icc and MAGICK_AVAILABLE:
                 # Handle built-in color spaces vs ICC file paths
                 builtins = ('sRGB', 'Adobe RGB', 'ProPhoto RGB')
                 if output_icc in builtins:
@@ -1160,12 +1195,18 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
                     logger.debug(f"Using ICC profile: {output_icc}")
-                djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
-                magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
+                if use_ram:
+                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
+                    magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
+                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
+                else:
+                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+                        tmp_png = Path(tmp) / "tmp.png"
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), "--output_format=png"], check=True)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True)
             else:
                 # Direct djxl to PNG
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True)
+                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1417,6 +1458,108 @@ def cmd_convert(args, from_jxl: bool = True):
     logger.info(f"Log: {log_file}")
 
 # --------------------------------------------─
+# AUTO MODE (Per-file detection for directories)
+# --------------------------------------------─
+
+def cmd_auto(args):
+    """Auto-detect per-file for batch processing.
+    
+    For directories containing JXL files:
+    - Files WITH jbrd box -> lossless transcode
+    - Files WITHOUT jbrd -> lossy convert
+    """
+    global _counter, TEMP2_DIR, RECONVERT, DELETE_SOURCE
+    _counter = {"done": 0, "total": 0}
+    
+    TEMP2_DIR = args.staging
+    smart_mode = args.sync
+    reconvert_explicit = args.overwrite
+    
+    if args.delete_source:
+        DELETE_SOURCE = True
+    
+    log_file = setup_logger()
+    
+    # Collect all JXL files
+    if args.mode == 0:
+        all_files = find_jxls_flat(args.input)
+    else:
+        all_files = find_jxls_recursive(args.input)
+    
+    if not all_files:
+        logger.warning("No JXL files found.")
+        return
+    
+    # Separate files by jbrd presence
+    transcode_files = []  # Have jbrd - can do lossless
+    convert_files = []    # No jbrd - must do lossy
+    
+    for f in all_files:
+        if has_jbrd_box(f):
+            transcode_files.append(f)
+        else:
+            convert_files.append(f)
+    
+    total_files = len(transcode_files) + len(convert_files)
+    _counter["total"] = total_files
+    
+    logger.info(f"AUTO MODE | Directory: {args.input}")
+    logger.info(f"Files with jbrd (lossless): {len(transcode_files)}")
+    logger.info(f"Files without jbrd (lossy): {len(convert_files)}")
+    logger.info(f"Mode: {args.mode} | Workers: {args.workers} | Staging: {TEMP2_DIR or 'disabled'}")
+    
+    # Process transcode files (lossless)
+    if transcode_files:
+        logger.info(f"\n--- Processing {len(transcode_files)} files with jbrd (lossless) ---")
+        _process_file_group(transcode_files, args, use_transcode=True)
+    
+    # Process convert files (lossy)
+    if convert_files:
+        logger.info(f"\n--- Processing {len(convert_files)} files without jbrd (lossy) ---")
+        _process_file_group(convert_files, args, use_transcode=False)
+    
+    logger.info(f"\n{'-'*50}")
+    logger.info(f"AUTO MODE complete | Total: {total_files} files")
+    logger.info(f"Log: {log_file}")
+
+def _process_file_group(files, args, use_transcode=True):
+    """Process a group of files with the same method."""
+    global _counter
+    
+    # Build output pairs
+    pairs = []
+    for f in files:
+        out = resolve_output_transcode(f, args.mode, args.input, decode=True)
+        if out:
+            pairs.append((f, out))
+    
+    if not pairs:
+        return
+    
+    # Group by output folder
+    groups = {}
+    for f, out in pairs:
+        groups.setdefault(out.parent, []).append((f, out))
+    
+    # Process each group
+    for dest_folder, group_pairs in groups.items():
+        if use_transcode:
+            results = process_group_transcode(
+                group_pairs, args.workers, decode=True,
+                verify=not args.no_verify, mode=args.mode, 
+                reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
+            )
+        else:
+            results = process_group_convert(
+                group_pairs, args.workers, direction="from_jxl",
+                quality=args.quality, distance=args.distance,
+                fmt=args.format or "jpeg", bit_depth=args.bit_depth,
+                output_icc=args.icc_profile, use_ram=args.ram,
+                effort=args.effort, reconvert_val=args.overwrite,
+                use_internal_srgb=False, smart=args.sync
+            )
+
+# --------------------------------------------─
 # MAIN ENTRY POINT (Auto-routing)
 # --------------------------------------------─
 
@@ -1525,11 +1668,12 @@ Examples:
             cmd_convert(args, from_jxl=True)
         else:
             cmd_convert(args, from_jxl=False)
+    elif cmd == "auto":
+        # Auto-detect per-file for directories
+        cmd_auto(args)
     else:
-        # Auto with directory - requires explicit subcommand
-        print("ERROR: Directory input requires explicit 'transcode' or 'convert' subcommand.")
-        print("Use: python jxl_jpeg_transcoder.py transcode <folder> [options]")
-        print("Or:  python jxl_jpeg_transcoder.py convert <folder> [options]")
+        # Fallback - should not reach here
+        print(f"ERROR: Unknown command state: {cmd}")
         sys.exit(1)
 
 if __name__ == "__main__":

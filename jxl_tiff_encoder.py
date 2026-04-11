@@ -146,6 +146,12 @@ ENCODE_TAG_MODE = "xmp"
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
+# The ICC is NOT used by the JXL decoder (JXL uses native primaries),
+# but is preserved for round-trip conversion back to TIFF/JPEG.
+# This ensures the exact original ICC (with TRC curves, copyright, etc.)
+# is available when converting JXL -> TIFF, even for lossy JXLs.
+# True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
+# False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 D50_PATCH_MODE = "auto"
 # Controls the D50 illuminant patch for Capture One compatibility.
@@ -163,12 +169,6 @@ D50_PATCH_SOFTWARE_LIST = [
 # Software names that trigger D50 patch when D50_PATCH_MODE="auto".
 # Case-insensitive matching. Add your own software if it has the same ICC bug.
 # Example: ["capture one", "myapp"] will match "Capture One 23" or "MYAPP Pro"
-# The ICC is NOT used by the JXL decoder (JXL uses native primaries),
-# but is preserved for round-trip conversion back to TIFF/JPEG.
-# This ensures the exact original ICC (with TRC curves, copyright, etc.)
-# is available when converting JXL -> TIFF, even for lossy JXLs.
-# True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
-# False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 CLEANUP_XMP_ICC_MARKER = False
 # Remove legacy ICC markers from XMP if present.
@@ -306,7 +306,7 @@ def setup_logger():
     log_file  = LOG_DIR / f"{timestamp}.log"
 
     logger = logging.getLogger("jxl_convert")
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
@@ -389,7 +389,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
 
     elif mode == 3:
         # Subfolder inside each TIFF folder
-        return tiff_path.parent / CONVERTED_JXL_FOLDER / tiff_path.with_suffix(".jxl").name
+        return tiff_path.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
 
     elif mode == 4:
         # Rename folder replacing TIFF suffix with JXL suffix
@@ -851,7 +851,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
     overwritten = final_path.exists()
 
     if overwritten:
-        if OVERWRITE == False:
+        if OVERWRITE is False:
             n, total = next_count()
             logger.info(f"[{n}/{total}] SKIP (exists) | {tiff_path.name}")
             return (str(tiff_path), "skipped", str(final_path), None)
@@ -981,6 +981,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                         logger.debug(f"  >Thumbnail embedding failed (non-critical)")
                 except Exception as e:
                     logger.debug(f"  >Thumbnail generation failed: {e}")
+                    
+                    # Check if PIL is available before fallback
+                    if 'Image' not in locals():
+                        logger.debug("  >PIL not available, skipping thumbnail fallback")
+                        pass  # Continue without thumbnail, don't abort conversion
                     
                     # Read TIFF with tifffile (preserves ICC and bit depth)
                     with tifffile.TiffFile(str(tiff_path)) as tif:
@@ -1116,7 +1121,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
 def find_files_mode0(input_path: Path):
     seen = set()
     files = []
-    for ext in ("*.jpg", "*.jpeg", "*.tif", "*.tiff"):
+    for ext in ("*.tif", "*.tiff"):
         for f in input_path.glob(ext):
             key = f.resolve()
             if key not in seen:
@@ -1347,19 +1352,19 @@ def main():
 
     # D50 patch summary
     applied = _d50_patch_count["applied"]
-    skipped = _d50_patch_count["skipped"]
+    d50_skipped = _d50_patch_count["skipped"]
     already_correct = _d50_patch_count["already_correct"]
     skipped_needed = _d50_patch_count["skipped_needed"]
-    total_processed = applied + skipped + skipped_needed
+    total_processed = applied + d50_skipped + skipped_needed
     if total_processed > 0:
         if D50_PATCH_MODE == "off":
             # For mode off, we still tracked correctness so user knows how many would have needed patch
             logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
         elif already_correct > 0:
             needed_patch = applied - already_correct
-            logger.info(f"D50 patch: {applied} applied ({needed_patch} needed, {already_correct} already correct) | {skipped} skipped (mode: {D50_PATCH_MODE})")
+            logger.info(f"D50 patch: {applied} applied ({needed_patch} needed, {already_correct} already correct) | {d50_skipped} skipped (mode: {D50_PATCH_MODE})")
         else:
-            logger.info(f"D50 patch: {applied} applied | {skipped} skipped (mode: {D50_PATCH_MODE})")
+            logger.info(f"D50 patch: {applied} applied | {d50_skipped} skipped (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
 

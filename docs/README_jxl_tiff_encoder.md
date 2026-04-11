@@ -490,23 +490,37 @@ jxlinfo -v photo.jxl
 
 ## Known behaviors 
 
-### IrfanView and color-calibrated monitors
+### IrfanView and color-calibrated monitors (reported & fixed)
+
+**Update:** This issue was reported to the IrfanView developer and an updated plugin DLL with proper ICC profile support was received. It is recommended to download the latest JXL plugin from the IrfanView website to test if the fix has been publicly released.
+
+*Previous behavior (old plugin):
 ```
 JXL lossless files embed the ICC color profile as a blob. Most software handles this
 correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
 display correct colors.
 
-IrfanView's behavior with lossless JXL appears to depend on the system display profile
-installed on the machine. The issue is specific to IrfanView on calibrated systems.
+IrfanView's behavior with lossless JXL appeared to depend on the system display profile
+installed on the machine. The issue was specific to IrfanView on calibrated systems.
 
 **The files themselves are correct.** Any conformant JXL decoder will display the colors
-accurately. If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` 
+accurately. If using an old IrfanView plugin where colors look wrong, use lossy at `d=0.1` 
 (imperceptible difference), or open the files in any of the other viewers listed above.
+```
 
 *For detailed technical information about JXL color management, XYB vs non-XYB, 
 ICC blobs vs native primaries, and primary coordinates reference tables, 
 see [JXL Color Internals](jxl_color_internals.md).*
-```
+
+### IrfanView EXIF display limitations
+
+**TIFF → JXL (this tool):** EXIF is visible in IrfanView ✅  
+*Reason: Boxes are reordered so Exif comes before codestream.*
+
+**JPEG → JXL:** EXIF is **not visible** in IrfanView ❌  
+*Reason: Uses Brotli compression (`brob` box) which IrfanView cannot read.*
+
+**Recommendation:** Use **XnView MP** or **digiKam** for reliable EXIF viewing regardless of source format.
 
 ### XnView MP color profile display for lossy JXL
 ```

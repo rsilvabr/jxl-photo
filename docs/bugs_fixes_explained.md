@@ -258,25 +258,23 @@ coordinates reference table.
 
 ---
 
-## Known behavior — IrfanView and color-calibrated monitors
+## Known behavior — IrfanView and color-calibrated monitors (reported & fixed)
+
+**Update (2026-04):** This issue was reported to the IrfanView developer and an updated plugin DLL with correct ICC profile handling was received. It is recommended to download the latest JXL plugin from the IrfanView website to test if the fix has been publicly released.
+
+*Previous behavior (documented for reference):
 
 JXL lossless files embed the ICC color profile as a blob. Most software handles this
 correctly — GIMP, XnView MP, Darktable, Firefox, Waterfox, and `jxl_to_jpeg.py` all
 display correct colors.
 
-IrfanView's behavior with lossless JXL appears to depend on the system display profile
-installed on the machine. In my testing, it worked correctly on an uncalibrated monitor.
+IrfanView's behavior with lossless JXL appeared to depend on the system display profile
+installed on the machine. In testing, it worked correctly on an uncalibrated monitor.
 After hardware calibration with an Eizo monitor, IrfanView stopped showing correct colors
-for lossless JXL while continuing to show correct colors for lossy JXL. The cause appears
+for lossless JXL while continuing to show correct colors for lossy JXL. The cause appeared
 to be double color management — IrfanView applying both the embedded ICC and the system
 display profile simultaneously.
 
-Lossy JXL (`d > 0`) uses native JXL color primaries instead of an ICC blob and is not
-affected by this issue.
-
 **The files themselves are correct.** Any conformant JXL decoder will display the colors
-accurately. The issue is specific to IrfanView on calibrated systems.
-
-If lossless JXL colors look wrong in IrfanView, use lossy at `d=0.1` (imperceptible
-difference, ~34MB for 45MP), or open the files in any of the viewers listed above.
-Files also convert correctly to JPEG using `jxl_to_jpeg.py`.
+accurately. If using an old IrfanView plugin version, use XnView MP or browsers for 
+verification, or use lossy at `d=0.1` (imperceptible difference, ~34MB for 45MP).

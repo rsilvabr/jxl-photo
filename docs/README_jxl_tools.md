@@ -123,9 +123,23 @@ Unavailable formats (missing dependencies) are shown with `✗` and cannot be se
 
 ### Step 2 — Destination
 Choose the output format based on the source:
-- JPEG → JXL Lossless (reversible) / JXL Lossy (smaller)
-- TIFF → JXL d=0.1 (near-lossless) / JXL d=0 (lossless)
-- JXL → JPEG / PNG / TIFF
+
+**JPEG source:**
+- JXL Lossless — Reversible transcoding, ~20% smaller
+- JXL Lossy — Smaller files, configurable distance
+
+**TIFF source:**
+- JXL d=0 — Lossless (exact replica)
+- JXL d=0.1 — Near-lossless (recommended, much smaller)
+- JXL d=1.0 — Visually lossless (smallest)
+- Custom distance — Any value 0-15
+
+**JXL source:**
+- **JPEG Auto-Detect** — Recommended: lossless if jbrd present, else lossy
+- JPEG Lossless — Force lossless transcoding (requires jbrd box)
+- JPEG Lossy — Force lossy conversion with quality/ICC control
+- PNG — With transparency support
+- TIFF — Lossless master with optional JPEG preview
 
 ### Step 3 — Source Directory
 Enter the folder path containing the files. Shows a preview of found files before proceeding.
@@ -238,6 +252,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | ICC conversion (sRGB) | Step 6 | JXL→JPEG/PNG |
 | TIFF compression | Step 6 | zip/lzw/none |
 | Bit depth | Step 6 | 8 or 16 for TIFF output |
+| JPEG Preview | Step 6 | JXL→TIFF (default: yes) |
 | Dry run | Step 6 | All workflows |
 | Strip metadata | 6A | TIFF→JXL |
 | D50 patch mode | 6A | auto / on / off |

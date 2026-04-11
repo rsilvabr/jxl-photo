@@ -195,6 +195,16 @@ The script analyzes the input file extension and content to determine the optima
 | `.jxl` without `jbrd` | Box scan | **CONVERT** decode | New JPEG/PNG (lossy recompression) |
 | `.png` | File extension | **CONVERT** encode | JXL (modular or VarDCT) |
 
+### Batch processing (directories)
+
+When processing a folder with JXL files, the transcoder automatically:
+1. Scans all `.jxl` files in the directory
+2. Checks each file for the `jbrd` box
+3. Routes files **with jbrd** → lossless transcoding
+4. Routes files **without jbrd** → lossy conversion
+
+This allows mixed archives (some lossless-transcodable, some not) to be processed optimally in one pass.
+
 **Override flags** (when auto-detect isn't what you need):
 
 - `--force-transcode` → Force lossless transcoding (will fail if jbrd missing on decode)
@@ -502,9 +512,23 @@ The JXL was modified after encoding, or was not encoded with `--lossless_jpeg=1`
 
 Some JPEGs lack EXIF or use non-standard formats. EXIF is optional for viewing but may affect metadata workflows.
 
-### IrfanView shows wrong colors
+### IrfanView EXIF display limitations
 
-IrfanView's JXL support depends on system display profile. The files are correct — use XnView MP, GIMP, or browsers for verification. If critical, use lossy decode (`--force-convert`) which generates standard JPEG ICC.
+IrfanView has specific requirements for displaying EXIF in JXL files:
+
+| File Source | EXIF Visible in IrfanView | Notes |
+|-------------|---------------------------|-------|
+| **TIFF → JXL** (this tool) | ✅ Yes | Boxes reordered: Exif before codestream |
+| **JPEG → JXL** lossless | ❌ No | Uses Brotli compression (`brob` box) |
+| **JPEG → JXL** lossy | ❌ No | Uses Brotli compression (`brob` box) |
+
+**Workaround:** Use **XnView MP** or **digiKam** for reliable EXIF viewing regardless of JXL source or compression. These applications read EXIF correctly even with Brotli compression.
+
+### IrfanView shows wrong colors (reported & fixed)
+
+**Update:** This issue was reported to the IrfanView developer and an updated plugin DLL with proper ICC profile support was received. It is recommended to download the latest JXL plugin from the IrfanView website to test if the fix has been publicly released.
+
+*Previous behavior (old plugin):* IrfanView's JXL color display depended on system display profile. The files are correct — use XnView MP, GIMP, or browsers for verification.
 
 * * *
 

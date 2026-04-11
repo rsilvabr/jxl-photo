@@ -210,6 +210,7 @@ ADD_JPEG_PREVIEW = True
 # and image viewers without loading the full-resolution image.
 # True  → Add JPEG preview (default, recommended)
 # False → No preview, slightly smaller file
+# CLI override: --no-preview (disables preview for that run)
 
 JPEG_PREVIEW_SIZE = 256
 # Maximum dimension (width or height) of the JPEG preview.
@@ -375,6 +376,7 @@ Options:
   --no-icc-cleanup    Keep ICC:base64 marker in XMP CreatorTool
   --depth 8|16        Output bit depth (overrides DJXL_OUTPUT_DEPTH setting)
   --compression TYPE  TIFF compression: uncompressed, lzw, or zip (default: zip)
+  --no-preview        Skip JPEG preview generation (smaller TIFF files)
   --staging PATH     Staging directory for output files
   --delete-source    Delete source JXLs after successful decode (mode 8 only)
   --dry-run          Preview operations without converting
