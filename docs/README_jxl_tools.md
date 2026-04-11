@@ -96,6 +96,13 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 ```
 
 > **Tip:** Values shown in **blue/cyan** (Rich) or between `[brackets]`/`(parentheses)` are defaults. Just press `Enter` to accept!
+>
+> Example:
+> ```
+> Workers [4]:          ← Press Enter to use 4
+> Distance [0.1]:       ← Press Enter to use 0.1
+> Execute? [y/n] (y):   ← Press Enter to accept 'y' (yes)
+> ```
 
 * * *
 
@@ -212,6 +219,13 @@ Basic parameters always shown:
 Optional advanced and expert flags follow.
 
 > **Tip:** The value shown in **blue** (or between `[brackets]`/`(parentheses)`) is the default. Just press `Enter` to accept!
+>
+> Example:
+> ```
+> Workers [4]:          ← Press Enter to use 4
+> Distance [0.1]:       ← Press Enter to use 0.1
+> Execute? [y/n] (y):   ← Press Enter to accept 'y' (yes)
+> ```
 
 ### Step 7 — Summary
 Full review of all settings before execution. Type `YES` to confirm.
