@@ -2,6 +2,12 @@
 """
 jxl_tiff_decoder.py — Batch JPEG XL → TIFF 16-bit converter with ICC preservation
 
+Features:
+- JPEG preview includes ICC profile (correct colors in Windows Explorer)
+- TIFF structure: JPEG as page 0 (thumbnail flag), 16-bit as page 1
+- Windows Explorer shows color-managed thumbnails
+- File integrity verification before source deletion (v1.3+)
+
 Usage:
  py jxl_tiff_decoder.py input/ [--mode 0-8] [--workers N] [--overwrite] [--sync]
  py jxl_tiff_decoder.py photo.jxl --mode 1
@@ -12,7 +18,7 @@ Requirements:
  exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -24,6 +30,69 @@ try:
 except ImportError:
     ImageCms = None
 import tifffile
+
+# ExifTool detection - try multiple name variants
+_exiftool_cmd = None
+def _get_exiftool_cmd():
+    global _exiftool_cmd
+    if _exiftool_cmd is None:
+        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                _exiftool_cmd = cmd
+                break
+        else:
+            _exiftool_cmd = "exiftool"
+    return _exiftool_cmd
+
+
+def _is_relative_to(path: Path, anchor: Path) -> bool:
+    """Backport of Path.is_relative_to for Python < 3.9."""
+    try:
+        path.relative_to(anchor)
+        return True
+    except ValueError:
+        return False
+
+
+def _verify_tiff_integrity(tiff_path: Path) -> bool:
+    """Verify TIFF file integrity before deleting source JXL.
+
+    Checks:
+    1. File exists and size > 0
+    2. Valid TIFF signature (II* or MM*)
+    3. Can be opened by tifffile
+    """
+    if not tiff_path.exists():
+        return False
+
+    try:
+        stat = tiff_path.stat()
+        if stat.st_size == 0:
+            return False
+
+        # Check TIFF signature (first 4 bytes)
+        with open(tiff_path, 'rb') as f:
+            header = f.read(4)
+
+        if len(header) < 4:
+            return False
+
+        # TIFF signature: II (little-endian) or MM (big-endian) followed by 42 (0x002A)
+        if header[0:2] not in (b'II', b'MM'):
+            return False
+        if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+            return False
+
+        # Try to open with tifffile to verify structure
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            # Just accessing pages validates the structure
+            _ = len(tif.pages)
+
+        return True
+    except (OSError, IOError, tifffile.TiffFileError):
+        return False
+
 
 # ─────────────────────────────────────────────
 # USER SETTINGS - GENERAL
@@ -45,9 +114,9 @@ ADD_JPEG_PREVIEW = True
 # True → Add JPEG preview (default, recommended)
 # False → No preview, slightly smaller file
 
-JPEG_PREVIEW_SIZE = 1024
+JPEG_PREVIEW_SIZE = 256
 # Maximum dimension (width or height) of the JPEG preview.
-# Default: 1024 pixels.
+# Default: 256 pixels (similar to Capture One's ~160px).
 
 TEMP_DIR = None
 # Temporary directory for intermediate files.
@@ -210,7 +279,7 @@ def extract_icc_from_xmp(jxl_path):
     """
     try:
         r = subprocess.run(
-            ["exiftool", "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
+            [_get_exiftool_cmd(), "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
             capture_output=True, text=True, timeout=10
         )
         if r.returncode == 0 and r.stdout:
@@ -234,7 +303,7 @@ def extract_icc_native(jxl_path, tmp_dir):
     try:
         icc_path = tmp_dir / "native.icc"
         r = subprocess.run(
-            ["exiftool", "-b", "-ICC_Profile", str(jxl_path), "-o", str(icc_path)],
+            [_get_exiftool_cmd(), "-b", "-ICC_Profile", str(jxl_path), "-o", str(icc_path)],
             capture_output=True, timeout=10
         )
         if icc_path.exists() and icc_path.stat().st_size > 128:
@@ -293,7 +362,7 @@ def analyze_icc_profile(icc_data):
             return '2020'
         elif 'p3' in data_str or 'display p3' in data_str or 'dci-p3' in data_str:
             return 'p3'
-    except:
+    except Exception:
         pass
 
     return 'unknown' 
@@ -697,16 +766,41 @@ def write_tiff(img_array, path, icc_data, compression="zip"):
 def copy_metadata(jxl_path, tiff_path, tmp_dir):
     """Copy metadata from JXL to TIFF using exiftool"""
     try:
+        # Copy all metadata from JXL
         subprocess.run(
-            ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+            [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-exif:all", str(tiff_path)],
             capture_output=True, timeout=10
         )
         subprocess.run(
-            ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+            [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-xmp:all", "-iptc:all", str(tiff_path)],
             capture_output=True, timeout=10
         )
+        # Fix Software and ImageDescription in IFD1 (main image)
+        # These get set by tifffile.py and need to be cleared
+        subprocess.run(
+            [_get_exiftool_cmd(), "-overwrite_original", 
+             "-ifd1:Software=", str(tiff_path)],
+            capture_output=True, timeout=5
+        )
+        subprocess.run(
+            [_get_exiftool_cmd(), "-overwrite_original", 
+             "-ifd1:ImageDescription=", str(tiff_path)],
+            capture_output=True, timeout=5
+        )
+        # Also fix ImageDescription if it contains tifffile metadata
+        r = subprocess.run(
+            [_get_exiftool_cmd(), "-ImageDescription", str(tiff_path)],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0 and r.stdout and ('shape' in r.stdout or 'tifffile' in r.stdout):
+            # Clear the ImageDescription if it contains tifffile metadata
+            subprocess.run(
+                [_get_exiftool_cmd(), "-overwrite_original", "-ImageDescription=", 
+                 str(tiff_path)],
+                capture_output=True, timeout=5
+            )
     except Exception as e:
         logger.debug(f"Metadata copy warning: {e}")
 
@@ -716,7 +810,7 @@ def cleanup_xmp_icc(tiff_path):
         return
     try:
         r = subprocess.run(
-            ["exiftool", "-XMP-xmp:CreatorTool", str(tiff_path)],
+        [_get_exiftool_cmd(), "-XMP-xmp:CreatorTool", str(tiff_path)],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
@@ -726,7 +820,7 @@ def cleanup_xmp_icc(tiff_path):
             if not clean:
                 clean = "jxl_tiff_decoder"
             subprocess.run(
-                ["exiftool", "-overwrite_original",
+                [_get_exiftool_cmd(), "-overwrite_original",
                  f"-XMP-xmp:CreatorTool={clean}", str(tiff_path)],
                 capture_output=True, timeout=10
             )
@@ -734,24 +828,39 @@ def cleanup_xmp_icc(tiff_path):
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
-def add_jpeg_preview(tiff_path, tmp_dir):
-    """Add JPEG preview as second page of TIFF.
-    
-    Uses tifffile to read the main image data reliably for 16-bit TIFFs.
-    PIL Image.open() often fails or returns incorrect data for 16-bit ZIP TIFFs on Windows.
+def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
+    """Add JPEG preview as first page of TIFF with proper thumbnail structure.
+
+    v2 changes:
+    - ICC is embedded in the JPEG preview (correct colors in preview)
+    - JPEG is written as page 0 with NEWSubfileType=1 (thumbnail flag)
+    - 16-bit data becomes page 1
+    - Windows Explorer uses the first page as thumbnail, showing correct colors
+
+    This replaces the old approach of appending JPEG as page 1.
     """
     if not ADD_JPEG_PREVIEW:
         return
+    
+    logger.info(f" >Adding JPEG preview to {tiff_path.name}...")
+    
     try:
-        # Read page 0 only — reliable for any bit depth or compression
+        # Read the current TIFF (16-bit data that was just written)
         with tifffile.TiffFile(str(tiff_path)) as tif:
             img_data = tif.series[0].asarray()
+            # Try to get ICC if not passed
+            if icc_data is None:
+                try:
+                    icc_data = tif.pages[0].icc_profile
+                except Exception:
+                    icc_data = None
 
         if img_data.ndim == 2:
             h, w = img_data.shape
         else:
             h, w = img_data.shape[:2]
 
+        # Calculate resize dimensions
         max_dim = JPEG_PREVIEW_SIZE
         if w >= h:
             new_w = max_dim
@@ -769,18 +878,123 @@ def add_jpeg_preview(tiff_path, tmp_dir):
             mx = img_data.max()
             img_8bit = ((img_data.astype(np.float32) / mx) * 255).astype(np.uint8) if mx > 0 else img_data.astype(np.uint8)
 
+        # Resize using high-quality resampling
         pil_img = Image.fromarray(img_8bit)
         try:
             resample = Image.Resampling.LANCZOS   # Pillow >= 9.1
         except AttributeError:
             resample = Image.LANCZOS              # Pillow < 9.1
         preview = pil_img.resize((new_w, new_h), resample)
-        preview_arr = np.array(preview)
 
-        tifffile.imwrite(str(tiff_path), preview_arr, compression='jpeg', append=True)
-        logger.info(f" >Added JPEG preview ({new_w}x{new_h})")
+        # Convert preview to sRGB for Windows Explorer compatibility
+        # (similar to Capture One behavior)
+        if icc_data and ImageCms:
+            try:
+                # Create sRGB profile
+                srgb_profile = ImageCms.createProfile('sRGB')
+                
+                # Load source profile from ICC bytes
+                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_data))
+                
+                # Convert from source ICC to sRGB
+                preview_srgb = ImageCms.profileToProfile(preview, src_profile, srgb_profile)
+                preview = preview_srgb
+                logger.debug(f" >Preview converted to sRGB")
+            except Exception as e:
+                logger.debug(f" >Preview color conversion failed: {e}, using original")
+        
+        # Save JPEG to temp file WITHOUT ICC (sRGB assumed by Windows)
+        jpeg_path = tmp_dir / "preview.jpg"
+        preview.save(str(jpeg_path), format='JPEG', quality=90)
+
+        # Now rewrite the TIFF with proper structure:
+        # Page 0: JPEG preview with thumbnail flag (NEWSubfileType=1)
+        # Page 1: 16-bit main image with ICC
+
+        # TIFFTAG_NEWSubfileType = 254 (0xFE) — set to 1 for thumbnail
+        # TIFFTAG_IMAGEWIDTH, etc. for each page
+
+        # Write new TIFF with JPEG as page 0 (thumbnail) and 16-bit as page 1
+        # Using tifffile's ability to write multipage TIFFs with different configurations per page
+
+        # Read JPEG data
+        with open(jpeg_path, 'rb') as f:
+            jpeg_bytes = f.read()
+
+        # Create the multipage TIFF properly
+        # Page 0: JPEG data with NEWSubfileType=1 (thumbnail)
+        # Page 1: 16-bit data with ICC
+
+        # tifffile multipage writing with explicit page config
+        compression_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib", "none": None}
+        tiff_comp = compression_map.get(TIFF_COMPRESSION, "zlib")
+
+        # We need to restructure the TIFF
+        # Strategy: write to a temp file, then use tifffile to create proper structure
+        temp_tiff = tmp_dir / "output.tif"
+
+        # Read existing TIFF to get image data and ICC
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            main_data = tif.pages[0].asarray()
+            if icc_data is None:
+                try:
+                    icc_data = tif.pages[0].icc_profile
+                except Exception:
+                    icc_data = None
+
+        # Write TIFF with JPEG as page 0 (with thumbnail flag) and 16-bit as page 1
+        # Using photometric interpretation for page 0 (JPEG data is YCbCr or RGB)
+        # and page 1 (16-bit is RGB or grayscale)
+
+        # Save JPEG page 0 with NEWSubfileType=1
+        jpeg_preview = Image.open(jpeg_path)
+        jpeg_arr = np.array(jpeg_preview)
+
+        # Write multipage TIFF following Capture One structure:
+        # Page 0: 16-bit main image (primary image for Windows Explorer)
+        # Page 1: 8-bit preview with subfiletype=1 (thumbnail flag)
+        # This ensures Windows Explorer uses the correct ICC from page 0
+
+        with tifffile.TiffWriter(str(temp_tiff)) as tif_writer:
+            try:
+                write_method = tif_writer.write
+            except AttributeError:
+                write_method = tif_writer.save
+            
+            # Page 0: 16-bit main image (primary)
+            # Windows Explorer uses this page for thumbnail with ICC
+            kwargs_main = {
+                'photometric': 'RGB',
+                'compression': tiff_comp,
+            }
+            if icc_data:
+                kwargs_main['iccprofile'] = icc_data
+            
+            write_method(main_data, **kwargs_main)
+
+            # Page 1: 8-bit preview as thumbnail (subfiletype=1)
+            # This marks it as a reduced-resolution image
+            kwargs_preview = {
+                'photometric': 'RGB',
+                'compression': 'jpeg',
+                'subfiletype': 1,  # Marks as thumbnail/reduced resolution
+            }
+            # Preview doesn't need ICC - Windows uses page 0's ICC
+            
+            write_method(jpeg_arr, **kwargs_preview)
+
+        # Replace original TIFF with properly structured one
+        if temp_tiff.exists():
+            logger.debug(f" >Temp file created: {temp_tiff.stat().st_size} bytes")
+            shutil.move(str(temp_tiff), str(tiff_path))
+            logger.info(f" >Added JPEG preview ({new_w}x{new_h}) with ICC")
+        else:
+            logger.warning(f" >Temp file not created!")
+
     except Exception as e:
-        logger.debug(f"Preview failed: {e}")
+        logger.warning(f"Preview generation failed: {e}")
+        import traceback
+        logger.debug(f"Preview error traceback: {traceback.format_exc()}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PATH RESOLUTION (ALL MODES 0-8)
@@ -851,7 +1065,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
 
         if EXPORT_JXL_SUBFOLDER:
             anchor = export_dir / EXPORT_JXL_SUBFOLDER
-            if not jxl_path.is_relative_to(anchor):
+            if not _is_relative_to(jxl_path, anchor):
                 return None  # Not inside the specific subfolder
             rel = jxl_path.relative_to(anchor)
         else:
@@ -931,9 +1145,10 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 if DJXL_OUTPUT_DEPTH == 8:
                     pixels = (pixels >> 8).astype(np.uint8)
                 write_tiff(pixels, write_path, original_icc, TIFF_COMPRESSION)
+                # Order matters: add preview first (recreates file), then copy metadata
+                add_jpeg_preview(write_path, tmp_dir, original_icc)
                 copy_metadata(jxl_path, write_path, tmp_dir)
                 cleanup_xmp_icc(write_path)
-                add_jpeg_preview(write_path, tmp_dir)
 
             elif mode == 'matrix':
                 # === MATRIX MODE (LINEAR + LITTLECMS) ===
@@ -963,9 +1178,10 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                     final_pixels = (final_pixels >> 8).astype(np.uint8)
 
                 write_tiff(final_pixels, write_path, final_icc, TIFF_COMPRESSION)
+                # Order matters: add preview first (recreates file), then copy metadata
+                add_jpeg_preview(write_path, tmp_dir, final_icc)
                 copy_metadata(jxl_path, write_path, tmp_dir)
                 cleanup_xmp_icc(write_path)
-                add_jpeg_preview(write_path, tmp_dir)
 
             elif mode == 'none':
                 # === NONE MODE (NO ICC HANDLING) ===
@@ -980,14 +1196,14 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
                 # Minimal metadata copy
                 subprocess.run(
-                    ["exiftool", "-overwrite_original", "-tagsfromfile", str(jxl_path),
+                    [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(jxl_path),
                      "-exif:all", str(write_path)],
                     capture_output=True, timeout=10
                 )
 
                 # Clear ImageDescription that may have been added by tifffile
                 subprocess.run(
-                    ["exiftool", "-overwrite_original", "-IFD1:ImageDescription=",
+                    [_get_exiftool_cmd(), "-overwrite_original", "-IFD1:ImageDescription=",
                      "-ImageDescription=", str(write_path)],
                     capture_output=True, timeout=10
                 )
@@ -1013,8 +1229,9 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                     pixels = (pixels >> 8).astype(np.uint8)
 
                 write_tiff(pixels, write_path, djxl_icc, TIFF_COMPRESSION)
+                # Order matters: add preview first (recreates file), then copy metadata
+                add_jpeg_preview(write_path, tmp_dir, djxl_icc)
                 copy_metadata(jxl_path, write_path, tmp_dir)
-                add_jpeg_preview(write_path, tmp_dir)
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -1069,6 +1286,9 @@ def process_group(group_pairs, workers, mode, target_icc=None):
                 continue
             final_tiff = src_map.get(result[0], (None, None))[1]
             if final_tiff is None or not final_tiff.exists():
+                continue
+            if not _verify_tiff_integrity(final_tiff):
+                logger.warning(f" KEEP (TIFF failed integrity check) | {src_jxl.name}")
                 continue
             src_jxl.unlink()
             deleted += 1

@@ -19,7 +19,7 @@ Capture One exports, or any libjxl-based workflow.
 ## Requirements
 
 ```
-Python 3.12+
+Python 3.8+
 pip install tifffile numpy pillow
 djxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
@@ -211,9 +211,11 @@ ADD_JPEG_PREVIEW = True
 # True  → Add JPEG preview (default, recommended)
 # False → No preview, slightly smaller file
 
-JPEG_PREVIEW_SIZE = 1024
+JPEG_PREVIEW_SIZE = 256
 # Maximum dimension (width or height) of the JPEG preview.
-# Default: 1024 pixels. Larger = better preview quality, larger file.
+# Default: 256 pixels (similar to Capture One's ~160px preview).
+# The preview is automatically converted to sRGB for maximum compatibility
+# with Windows Explorer and other viewers.
 
 USE_MATRIX_MODE = False
 # When True, use Matrix decode mode (linear + LittleCMS color transform).
@@ -495,14 +497,22 @@ with a JPEG-compressed preview image. This enables:
 - **Quick preview** in image viewers without loading full 16-bit data
 - **Compatibility** with older software that expects embedded previews
 
-The preview is stored as a **separate page** (subIFD) in the TIFF:
+The resulting TIFF uses a **Capture One-compatible structure**:
 ```
-Page 0: 7195x4802 @ 16-bit (main image, ZIP compressed)
-Page 1: 1024x683 @ 8-bit (preview, JPEG compressed)
+Page 0: 7195x4802 @ 16-bit (main image, ZIP compressed, ICC profile embedded)
+Page 1: 256x171 @ 8-bit sRGB (preview, JPEG compressed, no ICC, thumbnail flag)
 ```
 
+**Key features:**
+- **sRGB conversion**: The preview is automatically converted from the source color space 
+  (e.g., ProPhoto RGB) to sRGB using LittleCMS. This ensures correct colors in 
+  Windows Explorer and other viewers that assume sRGB for thumbnails.
+- **ICC placement**: The ICC profile is embedded **only in the main image** (Page 0),
+  matching Capture One's behavior. The preview (Page 1) has no embedded ICC and
+  is assumed to be sRGB.
+
 **To disable:** Set `ADD_JPEG_PREVIEW = False` at the top of the script.
-**To adjust size:** Change `JPEG_PREVIEW_SIZE` (default: 1024 pixels max dimension).
+**To adjust size:** Change `JPEG_PREVIEW_SIZE` (default: 256 pixels max dimension).
 
 ---
 
@@ -566,10 +576,17 @@ Always test with a small batch before processing important archives.
 
 ## Changes since v1.0
 
-### New Features
-- **8-bit output support** — `--depth 8` flag for web/delivery workflows
+### v1.3 (2026-04-10)
+- **Complete rebuild** - Decoder restructured for Capture One compatibility
+- **TIFF page order fixed** - Main image is Page 0, preview is Page 1 (matching C1 structure)
+- **sRGB preview conversion** - Preview automatically converted to sRGB via LittleCMS
+- **ICC placement corrected** - ICC profile only on main image (Page 0), removed from preview
+- **Preview size** - Changed from 1024px to 256px (similar to Capture One's ~160px)
+- **File integrity verification** - Validates TIFF before deleting source JXL
+- **Python 3.8 compatibility** - Backported `is_relative_to()`
 
-### Bug Fixes
+### Earlier Changes
+- **8-bit output support** — `--depth 8` flag for web/delivery workflows
 - Race condition in staging directory (UUID-based filenames)
 - PPM truncation validation
 - Integer overflow in JXL box parser (size limits)
@@ -589,4 +606,7 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
-- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion
+
+
+

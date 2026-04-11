@@ -109,7 +109,7 @@ Edit at the top of the script:
 CJXL_DISTANCE = 0.1
 # 0   = mathematically lossless (pixel-perfect, ~173MB for 45MP)
 # 0.05 = near-lossless (~47MB, imperceptible difference) ⭐ RECOMMENDED for archive
-# 0.1 = near-lossless (~34MB, imperceptible difference)
+# 0.1 = near-lossless (~34MB, imperceptible difference)  ⭐ ALSO RECOMMENDED for archive
 # 0.5 = high quality lossy (~13MB) — recommended starting point (libjxl authors)
 # 1.0 = "visually lossless" per libjxl documentation (~8MB)
 
@@ -571,4 +571,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
-- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion

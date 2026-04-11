@@ -19,6 +19,65 @@ import argparse
 import numpy as np
 import tifffile
 
+
+def _verify_jxl_integrity(jxl_path: Path) -> bool:
+    """Verify JXL file integrity before deleting source.
+    
+    Checks:
+    1. File exists and size > 0
+    2. File has valid JXL signature (0xFF 0x0A for bare JXL or ISOBMFF box)
+    """
+    if not jxl_path.exists():
+        return False
+    
+    try:
+        stat = jxl_path.stat()
+        if stat.st_size == 0:
+            return False
+        
+        # Check JXL signature (first 2 bytes for bare JXL, or first 12 for container)
+        with open(jxl_path, 'rb') as f:
+            header = f.read(12)
+        
+        if len(header) < 2:
+            return False
+        
+        # Bare JXL starts with 0xFF 0x0A
+        if header[0:2] == b'\xff\x0a':
+            return True
+        
+        # Container format starts with 0x00 0x00 0x00 0x0C 0x4A 0x58 0x4C 0x20 0x0D 0x0A 0x87 0x0A
+        if header == b'\x00\x00\x00\x0cJXL \r\n\x87\n':
+            return True
+        
+        return False
+    except (OSError, IOError):
+        return False
+
+
+def _is_relative_to(path: Path, anchor: Path) -> bool:
+    """Backport of Path.is_relative_to for Python < 3.9."""
+    try:
+        path.relative_to(anchor)
+        return True
+    except ValueError:
+        return False
+
+
+# ExifTool detection - try multiple name variants
+_exiftool_cmd = None
+def _get_exiftool_cmd():
+    global _exiftool_cmd
+    if _exiftool_cmd is None:
+        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                _exiftool_cmd = cmd
+                break
+        else:
+            _exiftool_cmd = "exiftool"
+    return _exiftool_cmd
+
 # ─────────────────────────────────────────────
 # USER SETTINGS - GENERAL
 # ─────────────────────────────────────────────
@@ -115,6 +174,17 @@ CLEANUP_XMP_ICC_MARKER = False
 # Remove legacy ICC markers from XMP if present.
 # True  -> clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
 # False -> keeps existing ICC markers (default)
+
+EMBED_JPEG_THUMBNAIL = False
+# Embed a JPEG thumbnail (256px) in the JXL file EXIF metadata.
+# True  -> creates a 256px JPEG preview and embeds it as EXIF thumbnail
+#          Increases file size by ~10-30KB per image
+#          Useful for fast preview in IrfanView, XnView, digiKam
+#          (Windows Explorer with JXL codec usually ignores EXIF thumbnail)
+# False -> no embedded thumbnail (default, smaller files)
+#
+# The thumbnail is generated from the PNG intermediate and injected via exiftool
+# after the JXL encoding is complete.
 
 DELETE_SOURCE = False
 # [MODE 8 only] Whether to delete the source TIFF after successful encoding.
@@ -365,7 +435,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
 
         if EXPORT_TIFF_SUBFOLDER:
             anchor = export_dir / EXPORT_TIFF_SUBFOLDER
-            if not tiff_path.is_relative_to(anchor):
+            if not _is_relative_to(tiff_path, anchor):
                 return None  # Not inside the specific subfolder
             rel = tiff_path.relative_to(anchor)
         else:
@@ -383,7 +453,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
-    r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
+    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
     if r.returncode == 0 and len(r.stdout) > 8:
         p = tmp_dir / f"{tiff_path.stem}.exif.bin"
         p.write_bytes(r.stdout)
@@ -399,7 +469,7 @@ def get_exif_software(tiff_path):
             arg_file = Path(tmp) / "args.txt"
             arg_file.write_text(f"-s\n-Software\n{tiff_path}\n", encoding="utf-8")
             r = subprocess.run(
-                ["exiftool", "-@", str(arg_file)],
+                [_get_exiftool_cmd(), "-@", str(arg_file)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
             )
         if r.returncode == 0 and r.stdout:
@@ -453,7 +523,7 @@ def extract_icc_fixed(tiff_path):
     with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
         arg_file = Path(tmp) / "icc_extract.args"
         arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
-        r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
+        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
     if r.returncode == 0 and len(r.stdout) > 128:
         icc = bytearray(r.stdout)
 
@@ -487,7 +557,7 @@ def extract_icc_original(tiff_path):
     with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
         arg_file = Path(tmp) / "icc_extract.args"
         arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
-        r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True)
+        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
     if r.returncode == 0 and len(r.stdout) > 128:
         return bytes(r.stdout)  # Return original, unmodified ICC
     return None
@@ -502,7 +572,7 @@ def extract_xmp_original(tiff_path, tmp_dir):
     xmp_path = tmp_dir / f"{tiff_path.stem}_original.xmp"
     # Correct order: -o output.xmp -b -XMP input.tif
     r = subprocess.run(
-        ["exiftool", "-o", str(xmp_path), "-b", "-XMP", str(tiff_path)],
+        [_get_exiftool_cmd(), "-o", str(xmp_path), "-b", "-XMP", str(tiff_path)],
         capture_output=True
     )
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
@@ -518,7 +588,7 @@ def read_existing_description(xmp_path):
         return ""
     try:
         r = subprocess.run(
-            ["exiftool", "-s", "-XMP-dc:Description", str(xmp_path)],
+            [_get_exiftool_cmd(), "-s", "-XMP-dc:Description", str(xmp_path)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
         )
         if r.returncode == 0 and r.stdout:
@@ -551,7 +621,7 @@ def read_existing_creator_tool(xmp_path):
     if not xmp_path or not xmp_path.exists():
         return ""
     r = subprocess.run(
-        ["exiftool", "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
+        [_get_exiftool_cmd(), "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
         capture_output=True, text=True
     )
     if r.returncode == 0 and r.stdout:
@@ -630,7 +700,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # Instead, we update the EXIF Software field
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = subprocess.run(["exiftool", "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
         new_sw = f"{original_sw} | {encoding_desc}"
         args_lines.append(f"-Software={new_sw}")
@@ -856,14 +926,118 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 strip_metadata=STRIP_METADATA
             )
             
-            r2 = subprocess.run(["exiftool", "-@", str(inject_args)],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+            r2 = subprocess.run([_get_exiftool_cmd(), "-@", str(inject_args)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
 
             # 7. Reorder JXL boxes so Exif comes before the codestream
             reorder_jxl_boxes(write_path)
+
+            # 8. Embed JPEG thumbnail if enabled
+            if EMBED_JPEG_THUMBNAIL:
+                try:
+                    from PIL import Image, ImageCms
+                    import io
+                    # Read the original TIFF to generate thumbnail
+                    with Image.open(str(tiff_path)) as img:
+                        # Extract ICC profile BEFORE any conversion
+                        icc_profile = img.info.get('icc_profile')
+                        
+                        # Convert color space if ICC profile exists
+                        if icc_profile:
+                            try:
+                                rgb_profile = ImageCms.createProfile('sRGB')
+                                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
+                                # Convert to sRGB using LittleCMS
+                                img = ImageCms.profileToProfile(img, src_profile, rgb_profile)
+                            except Exception as e:
+                                logger.debug(f"  >Thumbnail color conversion failed: {e}")
+                                # Fallback: convert to RGB without color management
+                                if img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                        else:
+                            # No ICC, just convert to RGB
+                            if img.mode != 'RGB':
+                                img = img.convert('RGB')
+                        
+                        # Calculate thumbnail size (max 256px)
+                        max_size = 256
+                        ratio = min(max_size / img.width, max_size / img.height)
+                        new_size = (int(img.width * ratio), int(img.height * ratio))
+                        thumb = img.resize(new_size, Image.Resampling.LANCZOS)
+                        # Save as JPEG temporary (sRGB, no ICC embedded)
+                        thumb_path = tmp_dir / "thumbnail.jpg"
+                        thumb.save(str(thumb_path), "JPEG", quality=85)
+                    # Inject thumbnail into JXL
+                    r_thumb = subprocess.run(
+                        [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                        capture_output=True, timeout=10
+                    )
+                    if r_thumb.returncode == 0:
+                        logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
+                    else:
+                        logger.debug(f"  >Thumbnail embedding failed (non-critical)")
+                except Exception as e:
+                    logger.debug(f"  >Thumbnail generation failed: {e}")
+                    
+                    # Read TIFF with tifffile (preserves ICC and bit depth)
+                    with tifffile.TiffFile(str(tiff_path)) as tif:
+                        # Read main image data as numpy array
+                        img_array = tif.pages[0].asarray()
+                        # Extract ICC profile
+                        icc_profile = None
+                        try:
+                            icc_profile = tif.pages[0].icc_profile
+                        except Exception:
+                            pass
+                    
+                    # Convert 16-bit to 8-bit if necessary
+                    if img_array.dtype == np.uint16:
+                        img_8bit = (img_array / 257).astype(np.uint8)  # 65535/255 = 257
+                    else:
+                        img_8bit = img_array
+                    
+                    # Ensure RGB
+                    if img_8bit.ndim == 2:
+                        img_8bit = np.stack([img_8bit] * 3, axis=-1)
+                    elif img_8bit.shape[2] == 4:
+                        img_8bit = img_8bit[:, :, :3]  # Remove alpha
+                    
+                    # Create PIL Image from array
+                    pil_img = Image.fromarray(img_8bit)
+                    
+                    # Convert to sRGB using ICC profile (same as decoder)
+                    if icc_profile:
+                        try:
+                            rgb_profile = ImageCms.createProfile('sRGB')
+                            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
+                            pil_img = ImageCms.profileToProfile(pil_img, src_profile, rgb_profile)
+                        except Exception as e:
+                            logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
+                    
+                    # Calculate thumbnail size (max 256px)
+                    max_size = 256
+                    ratio = min(max_size / pil_img.width, max_size / pil_img.height)
+                    new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
+                    thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
+                    
+                    # Save as JPEG temporary (sRGB, no ICC embedded)
+                    thumb_path = tmp_dir / "thumbnail.jpg"
+                    thumb.save(str(thumb_path), "JPEG", quality=85)
+                    
+                    # Inject thumbnail into JXL
+                    r_thumb = subprocess.run(
+                        [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                        capture_output=True, timeout=10
+                    )
+                    if r_thumb.returncode == 0:
+                        logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
+                    else:
+                        logger.debug(f"  >Thumbnail embedding failed (non-critical)")
+                except Exception as e:
+                    logger.debug(f"  >Thumbnail generation failed: {e}")
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -925,8 +1099,11 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
             if status not in ("ok", "overwrite") or src_tiff is None:
                 continue
             _, final_jxl = src_map.get(result[0], (None, None))
-            if final_jxl is None or not final_jxl.exists():
-                logger.warning(f"  KEEP (JXL not found at destination) | {src_tiff.name}")
+            if final_jxl is None:
+                logger.warning(f"  KEEP (JXL path not found) | {src_tiff.name}")
+                continue
+            if not _verify_jxl_integrity(final_jxl):
+                logger.warning(f"  KEEP (JXL failed integrity check) | {src_tiff.name}")
                 continue
             src_tiff.unlink()
             deleted += 1
@@ -1015,9 +1192,11 @@ def main():
                         help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
+    parser.add_argument("--embed-thumbnail", action="store_true",
+                        help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -1027,6 +1206,8 @@ def main():
         DELETE_SOURCE = True
 
     if args.distance is not None:
+        if not 0 <= args.distance <= 15:
+            parser.error("--distance must be between 0 and 15")
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort
@@ -1040,6 +1221,9 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
         D50_PATCH_MODE = args.d50_patch
+
+    if args.embed_thumbnail:
+        EMBED_JPEG_THUMBNAIL = True
 
     # Handle --strip flag - store in global for use in convert_one
     global STRIP_METADATA

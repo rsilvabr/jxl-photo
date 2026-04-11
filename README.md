@@ -24,6 +24,38 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
 
+## What's New in v1.3
+
+### Auto Mode + Manifest System
+
+> **Beta:** Auto Mode is functional but still being tested. If you encounter issues, use manual mode selection (options 0-8) which is fully stable.
+
+**[A] Auto Mode** analyzes your folder structure and recommends the best organization mode automatically:
+- Detects `_EXPORT`, `Export_Lightroom`, etc. (case-insensitive)
+- Shows folder mapping preview before running
+- Recommends mode with confidence level (high/medium/low)
+
+**[P] Manifest CSV** — Generate, edit in Excel, then run:
+```
+[A] Auto Mode → [P] Generate manifest → Edit in Excel → [M] Run from manifest
+```
+
+- Edit paths, delete rows, reorder before running
+- Comment out lines with `#` to skip temporarily
+- Manifests saved in `manifests/` folder — rerun anytime
+- Use with `--sync` to re-process only changed files
+
+### Embedded JPEG Thumbnail in JXL (Optional)
+Optional embedded 256px sRGB thumbnail in JXL files for fast preview in IrfanView, XnView, digiKam.
+```bash
+python jxl_tiff_encoder.py folder/ --embed-thumbnail
+```
+Adds ~20KB per file.
+
+**Windows Explorer Note:** The current JXL WIC codec from Microsoft Store generates its own thumbnail and **ignores the embedded EXIF thumbnail**. Worse, it does so **without color management** — so if your image uses ProPhoto RGB or Adobe RGB, the thumbnail will show wrong/washed-out colors. This is a **Windows codec limitation, not a bug in this software**. Use IrfanView, XnView MP, or digiKam for accurate thumbnails.
+
+---
+
 ## Features
 
 ### 1. **TIFF → JXL Encoding**
@@ -54,7 +86,7 @@ I have tested with different settings and posted on reddit, [click here to check
 
 | Script | Purpose | Key Feature |
 |--------|---------|-------------|
-| [`jxl_photo.py`](jxl_photo.py) | Interactive wizard | Guided workflow — best for most users |
+| [`jxl_photo.py`](jxl_photo.py) | Interactive wizard | Guided workflow with **Auto Mode** — analyzes folders and recommends best mode automatically |
 | [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation |
 | [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode, adds JPEG preview |
 | [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
@@ -95,6 +127,44 @@ The wizard guides you through: Source format → Destination → Directory → O
   Step 7: Summary         → Review and type YES to confirm
   → Executes the underlying script with all options
 ```
+
+---
+
+##  Auto Mode (New in v1.3)
+
+> **Beta:** Auto Mode is new and being actively tested. It works well for common folder structures, but if you encounter unexpected recommendations, use manual mode selection (0-8) which is fully stable and tested.
+
+Instead of memorizing modes 0-8, press **[A]** in Step 4. The wizard scans your folder and:
+
+1. **Analyzes** structure (flat, recursive, export folders)
+2. **Recommends** best mode with confidence level
+3. **Previews** folder mappings (source → destination)
+
+**Auto Mode detection:**
+- `_EXPORT`, `Export_*` → Mode 6/7 (Capture One/Lightroom workflows)
+- Deep subfolders → Mode 3 (recursive)
+- Multiple folders → Mode 2 (flat output)
+- Single folder → Mode 0 (in-place)
+
+**After analysis, choose:**
+- **[Y]** Accept and run
+- **[P]** Generate manifest CSV → edit in Excel → **[M]** Run from manifest
+- **[V]** View manifest (if exists)
+- **[N]** Choose mode manually
+
+### Manifest System
+
+Generate a CSV to edit before running:
+```csv
+Source,Destination
+F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\JXL
+F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL
+# F:\2025\Osaka\RAW,F:\2025\Osaka\JXL
+```
+
+- Edit paths, delete rows, reorder
+- Comment with `#` to skip
+- Rerun same manifest anytime
 
 ---
 
@@ -187,7 +257,7 @@ Depending on your needs, three common approaches:
 
 ## Requirements & Installation
 
-### 1. Python 3.10+ and Packages
+### 1. Python 3.8+ and Packages
 
 ```powershell
 # Install required packages
@@ -211,9 +281,11 @@ pip install tifffile numpy pillow rich
 | `jxl-x64-windows.zip` | Only DLLs, no executables | `jxl-x64-windows-static.zip` |
 | `exiftool-XX.XX.tar.gz` | Perl source code, needs Perl installed | `exiftool-XX.XX_64.zip` (Windows executable) |
 
-#### exiftool Setup (Important!)
+#### exiftool Setup
 
-The Windows download comes as `exiftool(-k).exe`. **You need to rename it**:
+> **Note (v1.3+):** The scripts now automatically detect both `exiftool.exe` and `exiftool(-k).exe`. Renaming is no longer required, but still works if you prefer.
+
+The Windows download comes as `exiftool(-k).exe`. **For v1.2 and earlier, you need to rename it:**
 
 ```powershell
 # Option A: Rename the file
@@ -223,7 +295,7 @@ Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
 Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
 
-The scripts look for `exiftool.exe`. The `(-k)` suffix (means "keep console open") prevents detection if not renamed.
+The `(-k)` suffix means "keep console open" — the original behavior. The scripts now handle both names automatically.
 
 ### 3. Add to PATH (PowerShell)
 
@@ -246,6 +318,8 @@ $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 
 ### 4. Verify Installation
 
+> **Important:** All tools must be in your PATH for both the wrapper and individual scripts to find them. The wrapper and scripts only search the system PATH — they do not look in other directories.
+
 **Restart PowerShell**, then run:
 
 ```powershell
@@ -267,10 +341,41 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
-| `exiftool` not recognized | File still named `exiftool(-k).exe` | Rename to `exiftool.exe` (see step 2) |
+| `exiftool` not recognized | File still named `exiftool(-k).exe` (v1.2 and earlier) | For v1.3+, automatic detection works. For earlier versions, rename to `exiftool.exe` (see step 2) |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
 | `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
+
+---
+
+##  Alternative: Simpler Setup (TIFF lossless compression)
+
+If the setup above feels overwhelming, there's an **easier alternative** that requires less installation:
+
+### [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate)
+A standalone PowerShell script that compresses TIFFs using ZIP/Deflate compression.
+
+**What you need:**
+- PowerShell 7 (or Windows PowerShell 5.1)
+- ImageMagick
+- ExifTool
+
+**What's NOT needed:**
+- Python or Python packages
+- libjxl (cjxl/djxl)
+
+**Compression comparison:**
+
+| Format | 16-bit Size | 8-bit Size |
+|--------|-------------|------------|
+| Uncompressed TIFF | ~260 MB | ~130 MB |
+| **ZIP/Deflate (PowerShell)** | ~220 MB (~15% smaller) | ~65 MB (~50% smaller) |
+| JXL lossless (this toolkit) | ~173 MB (~35% smaller) | ~43 MB (~67% smaller) |
+| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~8 MB (~94% smaller) |
+
+**Trade-off:** Easier to install, but less compression than JXL. Still better than nothing!
+
+When you're comfortable with ImageMagick and ExifTool, come back here for JXL with much better compression.
 
 ---
 
@@ -345,6 +450,19 @@ DJXL_OUTPUT_DEPTH = 8     # Smaller files
 TIFF_COMPRESSION = "zip"
 ADD_JPEG_PREVIEW = True   # Fast Explorer thumbnails
 ```
+
+---
+
+## Configuration File Location
+
+The wrapper (`jxl_photo.py`) saves settings in `.jxl_tools_config.json`:
+
+1. **First priority:** Script directory (where `jxl_photo.py` is located)
+2. **Fallback:** User home directory (`%USERPROFILE%` on Windows, `~` on Linux/Mac)
+
+This allows per-project configurations — place a config file in the script folder for project-specific settings, or use the user home for global defaults.
+
+To move settings between locations: use option **6** in the main menu.
 
 ---
 
@@ -423,27 +541,7 @@ Getting there required finding and fixing several bugs that appears because of t
 
 ---
 
-## Changes since v1.0
 
-### New Features
-- **D50 illuminant patch** — configurable (on/off/auto) to fix ICC rounding errors from Capture One exports. Prevents cjxl warnings and ensures correct color handling.
-- **Lossy JPEG → JXL conversion** — now works correctly. Added `--lossless_jpeg=0` when distance>0 (cjxl 0.11.2 default was incompatible with lossy mode).
-
-### Bug Fixes
-- Race condition in staging directory (UUID-based filenames)
-- Distance parameter not passed to cjxl for PNG→JXL encoding
-- Wrong confirmation for lossy JXL→JPEG delete (mode 8)
-- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
-- PPM truncation handling (validate completeness)
-- Integer overflow in JXL box parser (size limits added)
-- Missing UUID in process_group_transcode staging
-- Invalid --resize option removed (not supported by scripts)
-- cjxl --lossless_jpeg=1 incompatible with distance>0 (fixed)
-
-Full bug tracking: [`docs/bug_tracking_since_v1.0.md`](docs/bug_tracking_since_v1.0.md)
-Detailed explanations: [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md)
-
----
 
 ## License
 
@@ -456,4 +554,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
-- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion

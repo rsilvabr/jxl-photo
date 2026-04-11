@@ -393,4 +393,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O
-- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion

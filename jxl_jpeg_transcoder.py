@@ -34,6 +34,127 @@ import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Optional
+
+
+def _run_pipeline_safe(cmd1: list, cmd2: list, timeout: float = 300) -> tuple:
+    """Run two commands in a pipeline (cmd1 | cmd2) safely without deadlock.
+    
+    Returns: (returncode1, returncode2, stderr1, stderr2)
+    Raises: RuntimeError if either command fails
+    """
+    import threading
+    
+    # Start first process
+    proc1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    # Start second process with stdin from proc1
+    proc2 = subprocess.Popen(cmd2, stdin=proc1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc1.stdout.close()  # Allow proc1 to receive SIGPIPE if proc2 exits
+    
+    # Collect stderr from both processes using threads to prevent deadlock
+    stderr1_data = [b""]
+    stderr2_data = [b""]
+    
+    def read_stderr1():
+        if proc1.stderr:
+            stderr1_data[0] = proc1.stderr.read()
+    
+    def read_stderr2():
+        if proc2.stderr:
+            stderr2_data[0] = proc2.stderr.read()
+    
+    t1 = threading.Thread(target=read_stderr1)
+    t2 = threading.Thread(target=read_stderr2)
+    t1.start()
+    t2.start()
+    
+    try:
+        # Wait for proc2 to complete (it will consume proc1's output)
+        proc2.wait(timeout=timeout)
+        t2.join(timeout=5)
+        
+        # Wait for proc1 to complete
+        proc1.wait(timeout=timeout)
+        t1.join(timeout=5)
+        
+        if proc1.returncode != 0 or proc2.returncode != 0:
+            err_msg = (stderr1_data[0] + stderr2_data[0]).decode(errors='replace')[:500]
+            raise RuntimeError(f"Pipeline failed (codes: {proc1.returncode}, {proc2.returncode}): {err_msg}")
+        
+        return proc1.returncode, proc2.returncode, stderr1_data[0], stderr2_data[0]
+        
+    except subprocess.TimeoutExpired:
+        # Cleanup on timeout
+        proc1.kill()
+        proc2.kill()
+        proc1.wait()
+        proc2.wait()
+        raise RuntimeError(f"Pipeline timeout after {timeout}s")
+
+
+def _verify_file_integrity(file_path: Path) -> bool:
+    """Verify output file integrity before deleting source.
+    
+    Checks based on file extension:
+    - JXL: Valid JXL signature
+    - JPEG: Valid JPEG markers (SOI)
+    - PNG: Valid PNG signature
+    - TIFF: Valid TIFF header
+    """
+    if not file_path.exists():
+        return False
+    
+    try:
+        stat = file_path.stat()
+        if stat.st_size == 0:
+            return False
+        
+        ext = file_path.suffix.lower()
+        
+        with open(file_path, 'rb') as f:
+            header = f.read(12)
+        
+        if len(header) < 2:
+            return False
+        
+        if ext == '.jxl':
+            # Bare JXL: 0xFF 0x0A, Container: ISOBMFF
+            if header[0:2] == b'\xff\x0a':
+                return True
+            if header == b'\x00\x00\x00\x0cJXL \r\n\x87\n':
+                return True
+            return False
+        
+        elif ext in ('.jpg', '.jpeg'):
+            # JPEG starts with SOI marker 0xFFD8
+            return header[0:2] == b'\xff\xd8'
+        
+        elif ext == '.png':
+            # PNG signature: 0x89PNG\r\n\x1a\n
+            return header[0:8] == b'\x89PNG\r\n\x1a\n'
+        
+        elif ext in ('.tif', '.tiff'):
+            # TIFF: II (little) or MM (big) followed by 42
+            if header[0:2] not in (b'II', b'MM'):
+                return False
+            return header[2:4] in (b'\x2a\x00', b'\x00\x2a')
+        
+        # Unknown extension - allow deletion (conservative)
+        return True
+        
+    except (OSError, IOError):
+        return False
+
+
+def _is_relative_to(path: Path, anchor: Path) -> bool:
+    """Backport of Path.is_relative_to for Python < 3.9."""
+    try:
+        path.relative_to(anchor)
+        return True
+    except ValueError:
+        return False
+
 
 # --------------------------------------------─
 # USER SETTINGS - GENERAL
@@ -86,6 +207,20 @@ RECONVERT = "smart"
 
 # ImageMagick detection (auto, do not modify)
 MAGICK_AVAILABLE = shutil.which("magick") is not None
+
+# ExifTool detection - try both name variants
+_exiftool_cmd = None
+def _get_exiftool_cmd():
+    global _exiftool_cmd
+    if _exiftool_cmd is None:
+        candidates = ["exiftool", "exiftool(-k)", "exiftool-k"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                _exiftool_cmd = cmd
+                break
+        else:
+            _exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
+    return _exiftool_cmd
 
 # --------------------------------------------─
 # USER SETTINGS - TRANSCODE MODE CONFIGURATION
@@ -194,22 +329,24 @@ def store_md5_db(jxl_path: Path, md5: str):
         with open(db_path, "a", encoding="utf-8") as f:
             f.write(entry)
 
-def read_md5_db(jxl_path: Path) -> str | None:
+def read_md5_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     if not db_path.exists():
         return None
     target = jxl_path.name
     with open(db_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(None, 1)
-            if len(parts) == 2:
-                stored_hash, stored_name = parts
-                stored_name = stored_name.lstrip("*").strip()
-                if stored_name == target:
-                    return stored_hash
+        lines = f.readlines()
+    # Read from bottom to top to get the most recent entry
+    for line in reversed(lines):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            stored_hash, stored_name = parts
+            stored_name = stored_name.lstrip("*").strip()
+            if stored_name == target:
+                return stored_hash
     return None
 
 # --------------------------------------------─
@@ -232,7 +369,7 @@ def jxl_has_any_exif(jxl_path: Path) -> bool:
     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
         arg = Path(tmp) / "check.args"
         arg.write_text(f"-v3\n{jxl_path}\n", encoding="utf-8")
-        r = subprocess.run(["exiftool", "-@", str(arg)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         return ("Tag 'Exif'" in r.stdout) or ("BrotliEXIF" in r.stdout)
 
 def reorder_jxl_boxes(jxl_path: Path):
@@ -317,7 +454,7 @@ def inject_exif_to_jxl_from_jpeg(jxl_path: Path, jpeg_path: Path, tmp_dir: Path)
     # Extract raw EXIF binary from JPEG
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"-b\n-Exif\n{jpeg_path}\n", encoding="utf-8")
-    r = subprocess.run(["exiftool", "-@", str(arg_file)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if r.returncode != 0 or len(r.stdout) <= 8:
         logger.debug(f"  No EXIF to inject from {jpeg_path.name}")
         return
@@ -327,8 +464,8 @@ def inject_exif_to_jxl_from_jpeg(jxl_path: Path, jpeg_path: Path, tmp_dir: Path)
 
     # Inject EXIF into JXL
     r2 = subprocess.run(
-        ["exiftool", "-overwrite_original", f"-Exif<={exif_bin}", str(jxl_path)],
-        capture_output=True, text=True
+        [_get_exiftool_cmd(), "-overwrite_original", f"-Exif<={exif_bin}", str(jxl_path)],
+        capture_output=True, text=True, timeout=60
     )
     if r2.returncode != 0:
         logger.warning(f"  EXIF injection failed for {jpeg_path.name}: {r2.stderr[:100]}")
@@ -552,7 +689,7 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
             return src_path.parent / exp_out / src_path.with_suffix(out_ext).name
         export_dir = Path(*parts[:export_idx + 1])
         if mode == 6:
-            if src_path.is_relative_to(export_dir):
+            if _is_relative_to(src_path, export_dir):
                 rel_parts = src_path.relative_to(export_dir).parts
                 rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
             else:
@@ -694,7 +831,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists() and tasks:
-                final_db = Path(list({f for _, _, f in tasks})[0]).parent / CHECKSUMS_FILENAME
+                final_db = tasks[0][2].parent / CHECKSUMS_FILENAME
                 final_db.parent.mkdir(parents=True, exist_ok=True)
                 with _md5_db_lock:
                     with open(final_db, "a", encoding="utf-8") as dst:
@@ -719,6 +856,9 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 if src_md5 is None or read_md5_db(final_file) is None:
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
                     continue
+            if not _verify_file_integrity(final_file):
+                logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                continue
             src_path.unlink()
             deleted += 1
             logger.info(f" DELETED source | {src_path.name}")
@@ -901,7 +1041,7 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             # Mode 7: only files inside _EXPORT/EXPORT_JPEG_SUBFOLDER
             if EXPORT_JPEG_SUBFOLDER:
                 anchor = export_dir / EXPORT_JPEG_SUBFOLDER
-                if not src_path.is_relative_to(anchor):
+                if not _is_relative_to(src_path, anchor):
                     return None  # Not in the specific subfolder
                 rel = src_path.relative_to(anchor)
             else:
@@ -995,30 +1135,9 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     magick_output = ["-profile", output_icc, "-quality", str(quality)]
                     logger.debug(f"Using ICC profile: {output_icc}")
                 if use_ram:
-                    djxl_proc = subprocess.Popen(
-                        ["djxl", str(jxl_path), "-", "--output_format=png"],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                    )
+                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
                     magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                    magick_proc = subprocess.Popen(
-                        magick_cmd, stdin=djxl_proc.stdout,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                    )
-                    djxl_proc.stdout.close()
-                    # Read stderr from both processes to prevent deadlock
-                    # Use threads to read djxl stderr while magick runs
-                    djxl_stderr_holder = [b""]
-                    def read_djxl_stderr():
-                        if djxl_proc.stderr:
-                            djxl_stderr_holder[0] = djxl_proc.stderr.read()
-                    stderr_thread = threading.Thread(target=read_djxl_stderr)
-                    stderr_thread.start()
-                    magick_stdout, magick_stderr = magick_proc.communicate(timeout=300)
-                    stderr_thread.join(timeout=300)
-                    djxl_proc.wait()
-                    if djxl_proc.returncode != 0 or magick_proc.returncode != 0:
-                        err_msg = (djxl_stderr_holder[0] + magick_stderr).decode(errors='replace')[:300]
-                        raise RuntimeError(f"djxl/magick failed: {err_msg}")
+                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
                 else:
                     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                         tmp_png = Path(tmp) / "tmp.png"
@@ -1041,30 +1160,9 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
                     logger.debug(f"Using ICC profile: {output_icc}")
-                djxl_proc = subprocess.Popen(
-                    ["djxl", str(jxl_path), "-", "--output_format=png"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
+                djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
                 magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                magick_proc = subprocess.Popen(
-                    magick_cmd, stdin=djxl_proc.stdout,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                djxl_proc.stdout.close()
-                # Read stderr from both processes to prevent deadlock
-                # Use threads to read djxl stderr while magick runs
-                djxl_stderr_holder = [b""]
-                def read_djxl_stderr():
-                    if djxl_proc.stderr:
-                        djxl_stderr_holder[0] = djxl_proc.stderr.read()
-                stderr_thread = threading.Thread(target=read_djxl_stderr)
-                stderr_thread.start()
-                magick_stdout, magick_stderr = magick_proc.communicate(timeout=300)
-                stderr_thread.join(timeout=300)
-                djxl_proc.wait()
-                if djxl_proc.returncode != 0 or magick_proc.returncode != 0:
-                    err_msg = (djxl_stderr_holder[0] + magick_stderr).decode(errors='replace')[:300]
-                    raise RuntimeError(f"djxl/magick failed: {err_msg}")
+                _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
             else:
                 # Direct djxl to PNG
                 r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True)
@@ -1286,13 +1384,16 @@ def cmd_convert(args, from_jxl: bool = True):
         # Handle DELETE_SOURCE for convert mode (lossy)
         if DELETE_SOURCE and args.mode == 8:
             deleted = 0
-            src_map = {str(s): s for s, _ in group_pairs}
+            src_map = {str(s): (s, out) for s, out in group_pairs}
             for result in results:
                 status = result[1]
                 if status not in ("ok", "reconvert"):
                     continue
-                src_path = src_map.get(result[0])
+                src_path, final_file = src_map.get(result[0], (None, None))
                 if src_path is None:
+                    continue
+                if final_file is None or not _verify_file_integrity(final_file):
+                    logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                     continue
                 src_path.unlink()
                 deleted += 1

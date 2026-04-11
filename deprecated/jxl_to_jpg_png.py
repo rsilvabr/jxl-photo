@@ -21,6 +21,20 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+# ExifTool detection - try multiple name variants
+_exiftool_cmd = None
+def _get_exiftool_cmd():
+    global _exiftool_cmd
+    if _exiftool_cmd is None:
+        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                _exiftool_cmd = cmd
+                break
+        else:
+            _exiftool_cmd = "exiftool"
+    return _exiftool_cmd
+
 # ─────────────────────────────────────────────
 # USER SETTINGS (can be overridden by CLI args)
 # ─────────────────────────────────────────────
@@ -251,7 +265,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             cs_arg = Path(tempfile.mktemp(suffix=".args"))
             cs_arg.write_text(f"-overwrite_original\n-exif:ColorSpace=\n{actual_out}\n",
                               encoding="utf-8")
-            subprocess.run(["exiftool", "-@", str(cs_arg)], capture_output=True)
+            subprocess.run([_get_exiftool_cmd(), "-@", str(cs_arg)], capture_output=True)
             cs_arg.unlink(missing_ok=True)
 
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} → {actual_out.name}")

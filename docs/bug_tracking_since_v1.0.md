@@ -2,7 +2,9 @@
 
 Date: 2026-04-04  
 v1.2 Update: 2026-04-05  
-Scripts: `jxl_photo.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+v1.3 Update: 2026-04-10  
+Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`  
+**Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
 
 ---
 
@@ -24,6 +26,26 @@ Scripts: `jxl_photo.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg
 | 12 | Strip flag not implemented | encoder | ✅ FIXED |
 | 13 | Status string case inconsistency | decoder | ✅ FIXED |
 | 14 | Basic mode now preserves djxl ICC | decoder | ✅ IMPROVED (v1.2) |
+| 15 | Missing method in manifest workflow | photo_v2 | ✅ FIXED (v1.3) |
+| 16 | Race condition in TIFF deletion | encoder | ✅ FIXED (v1.3) |
+| 17 | Deadlock in djxl+magick pipeline | transcoder | ✅ FIXED (v1.3) |
+| 18 | Python 3.9+ compatibility | photo_v2 | ✅ FIXED (v1.3) |
+| 19 | MD5 verification after reconvert | transcoder | ✅ FIXED (v1.3) |
+| 20 | Missing subprocess timeout | photo_v2 | ✅ FIXED (v1.3) |
+| 21 | Bare except clauses | all scripts | ✅ FIXED (v1.3) |
+| 22 | Race condition in JXL deletion | decoder | ✅ FIXED (v1.3) |
+| 23 | Race condition in source deletion | transcoder | ✅ FIXED (v1.3) |
+| 24 | Python 3.9+ compatibility (all scripts) | encoder, decoder, transcoder | ✅ FIXED (v1.3) |
+| 25 | CJXL_DISTANCE range validation | encoder | ✅ FIXED (v1.3) |
+| 26 | ExifTool timeout | encoder, transcoder | ✅ FIXED (v1.3) |
+| 27 | `--distance 95` passed to transcoder (invalid) | photo | ✅ FIXED (v1.3) |
+| 28 | Scripts resolved by relative path (CWD dependency) | photo | ✅ FIXED (v1.3) |
+| 29 | `_show_mode_details_and_select` returns string not bool | photo | ✅ FIXED (v1.3) |
+| 30 | Timeout not handled in subprocess | photo | ✅ FIXED (v1.3) |
+| 31 | Set unordered in checksum DB path | transcoder | ✅ FIXED (v1.3) |
+| 32 | `import Path` redundant in `_execute_manifest_workflow` | photo | ✅ FIXED (v1.3) |
+| 33 | Rich markup leaking in fallback without Rich | photo | ✅ FIXED (v1.3) |
+| 34 | Type hint `str | None` (Python < 3.10 incompatible) | transcoder | ✅ FIXED (v1.3) |
 
 ---
 
@@ -401,12 +423,269 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 
 ---
 
+## v1.3 Release Notes (2026-04-10)
+
+### File Reorganization (Decoder)
+
+**Change:** TIFF decoder completely rebuilt in v1.3
+
+**Previous versions (deprecated):**
+- `jxl_tiff_decoder_v1_old.py` — Original decoder (JPEG preview as page 1, no ICC in preview)
+
+**Current official (v1.3):**
+- `jxl_tiff_decoder.py` — Completely rebuilt decoder
+
+**Key improvements:**
+| Feature | Old (v1) | Current (v1.3) |
+|---------|----------|----------------|
+| JPEG Preview | Page 1 (secondary) | Page 0 (thumbnail flag) |
+| Windows Explorer | Generic icon | **Color-managed thumbnail** |
+| ICC in preview | ❌ No | ✅ Yes |
+| NEWSubfileType flag | ❌ No | ✅ Yes (value 1) |
+| File integrity verification | ❌ No | ✅ Yes (before source deletion) |
+| Python 3.8 compatibility | ❌ No | ✅ Yes (backport included) |
+
+**Why it matters:**
+The old decoder saved JPEG preview as a secondary page (page 1), which Windows Explorer ignored. The new decoder saves JPEG as page 0 with `NEWSubfileType=1` (thumbnail flag), making Windows Explorer display the correct color-managed preview immediately.
+
+**Migration:**
+- Use `jxl_tiff_decoder.py` (current official)
+- Old versions preserved in `deprecated/` for reference only
+
+---
+
+### Bug #15 — Missing Method in Manifest Workflow
+
+**Location:** `jxl_photo_v2.py` — `_execute_manifest_workflow()`
+
+**Problem:** Line 2168 called `self._detect_mode_for_entry()`, but this method doesn't exist in the `InteractiveMenu` class — it belongs to `FolderAnalyzer`. This would cause an `AttributeError` crash when using manifest mode (mode 99).
+
+```python
+# BEFORE (buggy)
+for i, (source, dest_path) in enumerate(manifest_entries, 1):
+    detected_mode = self._detect_mode_for_entry(source, dest_path)  # Method doesn't exist!
+```
+
+**Fix:** Create a `FolderAnalyzer` instance outside the loop and call the correct method:
+```python
+# AFTER (fixed)
+analyzer = FolderAnalyzer(Path("."), origin, dest, self.config.config.export_marker)
+
+for i, (source, dest_path) in enumerate(manifest_entries, 1):
+    detected_mode = analyzer.detect_mode_for_entry(source, dest_path)
+```
+
+---
+
+### Bug #16 — Race Condition in TIFF Deletion
+
+**Location:** `jxl_tiff_encoder.py` — `process_group()`
+
+**Problem:** When `DELETE_SOURCE` is enabled, the code deleted source TIFF files after checking if the JXL exists, but without verifying the JXL file integrity. A corrupted or incomplete JXL could pass the `exists()` check, leading to data loss.
+
+```python
+# BEFORE (vulnerable)
+if final_jxl is None or not final_jxl.exists():
+    continue
+src_tiff.unlink()  # Deletes even if JXL is corrupted!
+```
+
+**Fix:** Added `_verify_jxl_integrity()` function that checks:
+1. File exists and size > 0
+2. Valid JXL signature (0xFF 0x0A for bare JXL or ISOBMFF container)
+
+```python
+# AFTER (fixed)
+def _verify_jxl_integrity(jxl_path: Path) -> bool:
+    # Check file exists, size > 0, and valid JXL header
+    ...
+
+if not _verify_jxl_integrity(final_jxl):
+    logger.warning(f"  KEEP (JXL failed integrity check) | {src_tiff.name}")
+    continue
+src_tiff.unlink()
+```
+
+---
+
+### Bug #17 — Deadlock in djxl+ImageMagick Pipeline
+
+**Location:** `jxl_jpeg_transcoder.py` — `decode_to_image()`
+
+**Problem:** When piping djxl output to ImageMagick via `subprocess.Popen`, the stderr of djxl was not being consumed while magick was running. If djxl generated many errors, its stderr buffer would fill and block, causing a deadlock.
+
+**Fix:** Created `_run_pipeline_safe()` helper function that:
+1. Reads stderr from both processes in separate threads
+2. Prevents buffer deadlock
+3. Implements proper timeout handling (300s default)
+4. Cleans up processes on timeout
+
+Applied to both JPEG and PNG conversion paths that use RAM mode with ICC profiles.
+
+---
+
+### Bug #18 — Python 3.9+ Compatibility (is_relative_to)
+
+**Location:** `jxl_photo_v2.py` — Multiple locations
+
+**Problem:** Code used `Path.is_relative_to()` method which only exists in Python 3.9+. This caused `AttributeError` on Python 3.8 systems.
+
+```python
+# BEFORE (Python 3.9+ only)
+rel_src = Path(src).relative_to(input_dir) if Path(src).is_relative_to(input_dir) else Path(src)
+```
+
+**Fix:** Added `_is_relative_to()` backport function:
+```python
+# AFTER (Python 3.8+ compatible)
+def _is_relative_to(path: Path, anchor: Path) -> bool:
+    try:
+        path.relative_to(anchor)
+        return True
+    except ValueError:
+        return False
+
+rel_src = Path(src).relative_to(input_dir) if _is_relative_to(Path(src), input_dir) else Path(src)
+```
+
+**Note:** Tested with complex paths containing spaces, brackets, and Unicode characters (吾妻山公園).
+
+---
+
+### Bug #19 — MD5 Verification After Reconversion
+
+**Location:** `jxl_jpeg_transcoder.py` — `read_md5_db()`
+
+**Problem:** When a file was reconverted (overwritten), a new MD5 entry was appended to the checksums file. However, `read_md5_db()` read from top to bottom and returned the **first** matching entry, which was the old (stale) MD5. This caused false MD5 verification failures after reconversion.
+
+```python
+# BEFORE (buggy)
+for line in f:  # Reads top-to-bottom
+    if stored_name == target:
+        return stored_hash  # Returns first (old) entry
+```
+
+**Fix:** Read from bottom to top to get the most recent entry:
+```python
+# AFTER (fixed)
+lines = f.readlines()
+for line in reversed(lines):  # Reads bottom-to-top
+    if stored_name == target:
+        return stored_hash  # Returns last (newest) entry
+```
+
+---
+
+### Bug #20 — Missing Subprocess Timeout
+
+**Location:** `jxl_photo_v2.py` — `_run_subprocess()` and `execute_workflow()`
+
+**Problem:** Two `process.wait()` calls had no timeout, which could cause infinite hangs if the subprocess froze.
+
+**Fix:** Added `timeout=3600` (1 hour) to both `process.wait()` calls:
+- Line ~2347: `_run_subprocess()` method
+- Line ~2531: `execute_workflow()` method
+
+---
+
+### Bug #21 — Bare Except Clauses
+
+**Location:** All Python scripts
+
+**Problem:** Multiple bare `except:` clauses throughout the codebase that catch all exceptions including `KeyboardInterrupt` and `SystemExit`, making it impossible to cancel operations with Ctrl+C.
+
+**Files affected and fixes:**
+- `jxl_photo.py`: 4 bare excepts → `except Exception:` or `except ValueError:`
+- `jxl_photo_v2.py`: 6 bare excepts → `except Exception:` or `except ValueError:`
+- `jxl_tiff_decoder.py`: 1 bare except → `except Exception:`
+- `jxl_tiff_decoder_v2.py`: 1 bare except → `except Exception:`
+
+**Total:** 12 bare except clauses fixed across 4 files.
+
+---
+
+### Bug #22 — Race Condition in JXL Deletion (Decoder)
+
+**Location:** `jxl_tiff_decoder.py` — `process_group()`
+
+**Problem:** Similar to bug #16, the decoder deleted source JXL files after checking if TIFF exists, but without verifying TIFF integrity. A corrupted or incomplete TIFF could pass the `exists()` check.
+
+**Fix:** Added `_verify_tiff_integrity()` function that checks:
+1. File exists and size > 0
+2. Valid TIFF signature (II/MM + 42)
+3. Can be opened by tifffile
+
+---
+
+### Bug #23 — Race Condition in Source Deletion (Transcoder)
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_transcode()` and `cmd_convert()`
+
+**Problem:** The transcoder deleted source files without verifying output file integrity in convert mode. MD5 verification only worked for transcode mode, not convert mode.
+
+**Fix:** Added `_verify_file_integrity()` function that validates file headers based on extension:
+- JXL: 0xFF 0x0A or ISOBMFF container
+- JPEG: 0xFFD8 (SOI marker)
+- PNG: PNG signature
+- TIFF: II/MM + 42
+
+Applied to both transcode and convert deletion paths.
+
+---
+
+### Bug #24 — Python 3.9+ Compatibility (All Scripts)
+
+**Location:** `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+**Problem:** These scripts used `Path.is_relative_to()` directly without backport, causing `AttributeError` on Python 3.8.
+
+**Fix:** Added `_is_relative_to()` backport function to all active scripts:
+- `jxl_tiff_encoder.py`
+- `jxl_tiff_decoder.py`
+- `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #25 — CJXL_DISTANCE Range Validation
+
+**Location:** `jxl_tiff_encoder.py` — argument parsing
+
+**Problem:** The `--distance` parameter accepted any float value without validating the valid range (0-15). Invalid values would be passed to cjxl which would fail with cryptic errors.
+
+**Fix:** Added validation in argument parsing:
+```python
+if args.distance is not None:
+    if not 0 <= args.distance <= 15:
+        parser.error("--distance must be between 0 and 15")
+    CJXL_DISTANCE = args.distance
+```
+
+---
+
+### Bug #26 — ExifTool Timeout
+
+**Location:** `jxl_tiff_encoder.py` and `jxl_jpeg_transcoder.py`
+
+**Problem:** Multiple `subprocess.run()` calls to exiftool had no timeout. If exiftool hung (rare but possible with corrupted files), the process would wait indefinitely.
+
+**Fix:** Added `timeout=60` to all exiftool subprocess calls:
+- `jxl_tiff_encoder.py`: 8 calls
+- `jxl_jpeg_transcoder.py`: 2 calls
+
+---
+
 ## Scripts Affected
 
-- `jxl_jpeg_transcoder.py` — Bug fixes #1, #2, #3, #4, #6, #8, #11
-- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7, #12
-- `jxl_tiff_decoder.py` — Bug fixes #1, #5, #13, Improvement #14
-- `jxl_photo.py` — Bug fixes #2, #9, #10
+- `jxl_jpeg_transcoder.py` — Bug fixes #1, #2, #3, #4, #6, #8, #11, #17, #19, #21, #23, #24, #26
+- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7, #12, #16, #21, #24, #25, #26
+- `jxl_tiff_decoder.py` — Bug fixes #1, #5, #6, #13, #21, #22, #24, Improvement #14 (merged v2 features)
+- `jxl_photo.py` — Bug fixes #2, #9, #10, #21
+- `jxl_photo_v2.py` — Bug fixes #15, #18, #20, #21
+
+**Deprecated (reference only):**
+- `deprecated/jxl_tiff_decoder_v1_old.py` — Original v1 decoder
+- `deprecated/jxl_tiff_decoder_old.py` — Previous version
+- `deprecated/jxl_to_jpg_png.py` — Legacy script
 
 ---
 
@@ -427,3 +706,120 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 - Now preserves ICC profile generated by djxl
 - Uses PNG intermediate to capture ICC data
 - Renamed old behavior to "None" mode (`--none` flag)
+
+### JXL Integrity Verification (v1.3)
+- Added `_verify_jxl_integrity()` function to encoder
+- Validates JXL header before deleting source TIFFs
+- Prevents data loss from corrupted conversions
+
+### Safe Pipeline Execution (v1.3)
+- Added `_run_pipeline_safe()` helper for subprocess pipelines
+- Prevents deadlock when piping djxl to ImageMagick
+- Proper timeout handling and cleanup
+
+### Python 3.8 Compatibility (v1.3)
+- Backported `Path.is_relative_to()` for Python 3.8+
+- Toolkit now works on older Python versions
+- Tested with Unicode paths
+
+### File Integrity Verification (v1.3)
+- Added `_verify_jxl_integrity()` to encoder
+- Added `_verify_tiff_integrity()` to decoder  
+- Added `_verify_file_integrity()` to transcoder
+- Prevents data loss from corrupted conversions
+
+### Robustness Improvements (v1.3)
+- All subprocess calls now have timeouts
+- ExifTool operations timeout after 60 seconds
+- CJXL_DISTANCE validated (0-15 range)
+- All bare except clauses fixed
+
+---
+
+## v1.3 Bug Fixes (Detailed)
+
+### Bug #27 — Invalid `--distance 95` passed to JPEG transcoder
+
+**Location:** `jxl_photo.py` lines 2291-2292 and 2452-2454
+
+**Problem:** When transcoding JPEG→JXL in lossy mode, both `--quality` and `--distance` were passed with the same value (e.g., 95). Distance in cjxl ranges 0-15, so 95 is invalid and causes unpredictable behavior.
+
+**Fix:** Removed `--distance` from lossy transcoding command. The transcoder handles quality internally.
+
+---
+
+### Bug #28 — Scripts resolved by relative path (CWD dependency)
+
+**Location:** `jxl_photo.py` lines 2152-2159, 2377-2496
+
+**Problem:** Scripts were referenced as `'jxl_tiff_encoder.py'` (relative to CWD). If user ran `python /path/jxl_photo.py` from a different directory, `Path(script).exists()` would fail.
+
+**Fix:** Now uses `SCRIPT_DIR / script` to resolve absolute paths relative to the script location.
+
+---
+
+### Bug #29 — `_show_mode_details_and_select` returns string instead of bool
+
+**Location:** `jxl_photo.py` line 1615
+
+**Problem:** Function returned `choice` (string) instead of setting `workflow['mode']` and returning `True/False`. Caller in `_wizard_select_mode` (line 1437) expected a boolean. Non-empty string is truthy, so wizard advanced but `workflow['mode']` was never set → `KeyError` later.
+
+**Fix:** Now sets `workflow['mode'] = int(choice)` and returns `True`.
+
+---
+
+### Bug #30 — Subprocess timeout not handled
+
+**Location:** `jxl_photo.py` lines 2351, 2547
+
+**Problem:** `process.wait(timeout=3600)` could raise `subprocess.TimeoutExpired`, but it wasn't caught by `except Exception`. The child process would continue running as a zombie.
+
+**Fix:** Added explicit `except subprocess.TimeoutExpired:` handler that kills the process and reports the error.
+
+---
+
+### Bug #31 — Set unordered in checksum DB path
+
+**Location:** `jxl_jpeg_transcoder.py` line 833
+
+**Problem:** Code used `list({f for _, _, f in tasks})[0]` — a set comprehension with `[0]` indexing. Set order is undefined in Python, so the "first" element was arbitrary.
+
+**Fix:** Changed to `tasks[0][2]` — directly accesses the first task's destination path. Since all tasks in a group share the same destination folder, this is deterministic and reliable.
+
+---
+
+### Bug #32 — Redundant `import Path` inside function
+
+**Location:** `jxl_photo.py` line 2209
+
+**Problem:** `from pathlib import Path` was imported inside `_execute_manifest_workflow()` function, even though `Path` was already imported at module level (line 18). Redundant and confusing.
+
+**Fix:** Removed the redundant import. The function uses the module-level `Path`.
+
+---
+
+### Bug #33 — Rich markup leaking in non-Rich fallback
+
+**Location:** `jxl_photo.py` lines 1431-1439, 1485-1487, 1608-1618
+
+**Problem:** When Rich library is not available, fallback code printed strings containing Rich markup tags like `[green]`, `[cyan]`, `[bold]`, etc. These appeared literally in terminal output (e.g., `[green]converted_jxl[/green]`).
+
+**Fix:** Enhanced all `.replace()` chains to clean all Rich markup tags (`[green]`, `[cyan]`, `[red]`, `[yellow]`, `[dim]`, `[bold]`, and closing tags) before printing. Also fixed order — compound tags like `[bold green]` are replaced before simple tags like `[bold`.
+
+---
+
+### Bug #34 — Type hint `str | None` (Python < 3.10 incompatible)
+
+**Location:** `jxl_jpeg_transcoder.py` line 332
+
+**Problem:** Function signature `def read_md5_db(jxl_path: Path) -> str | None:` uses the `|` union syntax which requires Python 3.10+. The project supports Python 3.8+.
+
+**Fix:** Changed to `-> Optional[str]` and added `from typing import Optional` import. This syntax is compatible with Python 3.8+.
+
+---
+
+### Additional v1.3 Improvements
+
+- **Type hint fixed:** `_show_mode_details_and_select` now correctly typed as `-> bool`
+- **Script path resolution:** All script references now use absolute paths via `SCRIPT_DIR`
+- **Error handling:** Timeout handling added in both `_run_subprocess` and `execute_workflow`

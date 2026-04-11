@@ -562,4 +562,4 @@ MIT License — feel free to use, modify, and distribute.
 
 - libjxl team for JPEG XL implementation
 - ExifTool by Phil Harvey for metadata handling
-- [MiniMax](https://www.minimax.io/) (MiniMax AI) and [Kimi](https://www.kimi.com) (Moonshot AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion

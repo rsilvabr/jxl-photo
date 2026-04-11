@@ -1,6 +1,108 @@
 # New Features Since v1.0
 
-## v1.2 (Current)
+## v1.3 (Current)
+
+Date: 2026-04-10
+Scripts: `jxl_photo.py` (formerly v2), `jxl_tiff_decoder.py`, `jxl_tiff_encoder.py`, `jxl_jpeg_transcoder.py`
+
+---
+
+### Feature #5 — Auto Mode + Manifest System (Beta)
+
+**Location:** `jxl_photo.py`
+
+> **Status:** Auto Mode is functional and works well for common folder structures, but is still being tested. For critical workflows, manual mode selection (0-8) remains the stable option.
+
+**What changed:** Complete rebuild of the interactive wrapper with intelligent folder analysis.
+
+**New Auto Mode:**
+- Press `[A]` in Step 4 to analyze folder structure automatically
+- Detects `_EXPORT`, `Export_*` folders (case-insensitive)
+- Recommends best mode with confidence level (high/medium/low)
+- Shows folder mapping preview (source → destination)
+
+**New Manifest System:**
+```
+[A] Auto Mode → [P] Generate manifest → Edit in Excel → [M] Run from manifest
+```
+- Generate CSV manifest from folder analysis
+- Edit paths, delete rows, reorder before running
+- Comment out lines with `#` to skip temporarily
+- Manifests saved in `manifests/` folder — rerun anytime
+- Use with `--sync` to re-process only changed files
+
+**Benefits:**
+- No need to memorize modes 0-8
+- Visual preview before execution
+- Full control via Excel editing
+- Safe workflow with manifest review
+
+---
+
+### Feature #6 — Capture One-Compatible TIFF Preview
+
+**Location:** `jxl_tiff_decoder.py`
+
+**What changed:** TIFF preview structure rebuilt to match Capture One behavior.
+
+**Before (v1.0 - v1.2):**
+- Page 0: Preview (1024px, ICC embedded)
+- Page 1: Main 16-bit image
+- Preview kept original color space (not sRGB)
+
+**After (v1.3):**
+- Page 0: Main 16-bit image (ICC embedded)
+- Page 1: Preview (256px, sRGB, no ICC, thumbnail flag)
+- Preview automatically converted to sRGB via LittleCMS
+
+**Benefits:**
+- Correct thumbnail colors in Windows Explorer
+- Matches Capture One TIFF structure
+- Smaller preview size (256px vs 1024px)
+- ICC profile only on main image (standard behavior)
+
+---
+
+### Feature #7 — Embedded JPEG Thumbnail in JXL (Optional)
+
+**Location:** `jxl_tiff_encoder.py`
+
+**What changed:** Optional embedded JPEG thumbnail (256px, sRGB) in JXL files for fast preview in image viewers.
+
+**How it works:**
+- Generate 256px preview from source TIFF
+- Convert to sRGB using LittleCMS (correct colors)
+- Embed as EXIF ThumbnailImage via exiftool
+- Adds ~15-30KB per file
+
+**Enable:**
+```python
+# In jxl_tiff_encoder.py settings
+EMBED_JPEG_THUMBNAIL = True
+```
+
+Or via CLI:
+```bash
+python jxl_tiff_encoder.py folder/ --embed-thumbnail
+```
+
+**Supported viewers:**
+- ✅ IrfanView — shows thumbnail in file list
+- ✅ XnView MP — fast thumbnail preview
+- ✅ digiKam — uses embedded thumbnail
+- ✅ darktable — EXIF thumbnail support
+- ❌ Windows Explorer — current WIC codec ignores embedded thumbnail and generates its own without color management
+
+**Important — Windows Limitation:**
+The Windows JXL WIC codec (from Microsoft Store) has two problems:
+1. **Ignores the embedded EXIF thumbnail** — generates its own from scratch
+2. **No color management** — converts ProPhoto/Adobe RGB to thumbnail without ICC profile, resulting in wrong/washed-out colors
+
+This is a **Windows codec limitation**, not a bug in this software. The embedded thumbnail is correct (sRGB, properly converted), but Windows doesn't use it. For accurate thumbnails on Windows, use IrfanView, XnView MP, or digiKam.
+
+---
+
+## v1.2
 
 Date: 2026-04-05
 Scripts: `jxl_tiff_decoder.py`, `jxl_photo.py`
