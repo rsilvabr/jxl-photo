@@ -1607,7 +1607,7 @@ class InteractiveMenu:
                 console.print(Panel.fit(desc, border_style=style))
                 console.print()
 
-            valid_choices = [d[0] for d in details]
+            valid_choices = [d[0] for d in details] + ["A", "M"]
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice in valid_choices:
@@ -1628,10 +1628,17 @@ class InteractiveMenu:
                          .replace("[yellow]", "").replace("[/yellow]", "")
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"   {clean}\n")
-            valid_choices = [d[0] for d in details]
-            choice = input("Select mode [0-8/A/M/?]: ").strip()
+            valid_choices = [d[0] for d in details] + ["A", "M"]
+            choice = input("Select mode [0-8/A/M/?]: ").strip().upper()
             while choice not in valid_choices:
-                choice = input("Select mode [0-8/A/M/?]: ").strip()
+                choice = input("Select mode [0-8/A/M/?]: ").strip().upper()
+
+        # Handle Auto and Manifest from detail view
+        if choice == "A":
+            return self._wizard_auto_mode(workflow)
+
+        if choice == "M":
+            return self._wizard_run_from_manifest(workflow)
 
         if choice == "8":
             if not self._confirm_archive_mode():
