@@ -2,7 +2,7 @@
 
 ## v1.3 (Current)
 
-Date: 2026-04-10
+Date: 2026-04-11
 Scripts: `jxl_photo.py` (formerly v2), `jxl_tiff_decoder.py`, `jxl_tiff_encoder.py`, `jxl_jpeg_transcoder.py`
 
 ---
