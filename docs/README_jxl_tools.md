@@ -95,7 +95,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
   → Executes the underlying script with all options
 ```
 
-> **💡 Tip:** Values shown in `[brackets]` or `(parentheses)` are defaults. Just press `Enter` to accept them!
+> **Tip:** Values shown in `[brackets]` or `(parentheses)` are defaults. Just press `Enter` to accept them!
 
 * * *
 
@@ -211,7 +211,7 @@ Basic parameters always shown:
 
 Optional advanced and expert flags follow.
 
-> **💡 Tip:** Values shown in `[brackets]` or `(parentheses)` are defaults. Just press `Enter` to accept them — no need to type the value!
+> **Tip:** Values shown in `[brackets]` or `(parentheses)` are defaults. Just press `Enter` to accept them — no need to type the value!
 
 ### Step 7 — Summary
 Full review of all settings before execution. Type `YES` to confirm.
