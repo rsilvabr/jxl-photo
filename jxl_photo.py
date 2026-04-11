@@ -1418,7 +1418,7 @@ class InteractiveMenu:
 
             valid_choices = [m[0] for m in modes] + ["?", "A", "M"]
             while True:
-                choice = Prompt.ask("Select mode [0-8/A/M/?]", choices=valid_choices)
+                choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice:
                     break
         else:
