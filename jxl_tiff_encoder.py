@@ -454,7 +454,7 @@ def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
     r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
-    if r.returncode == 0 and len(r.stdout) > 8:
+    if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
         p = tmp_dir / f"{tiff_path.stem}.exif.bin"
         p.write_bytes(r.stdout)
         return p
@@ -649,13 +649,13 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     
     # If stripping metadata, only add minimal encoding info and exit
     if strip_metadata:
-        # Just set encoding params in dc:Description (no other metadata)
+        # Strip all EXIF first
+        args_lines.append("-exif:all=")
+        # Strip all XMP (must come BEFORE setting new Description)
+        args_lines.append("-xmp:all=")
+        # Then set encoding params in dc:Description
         encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
         args_lines.append(f"-xmp-dc:Description={encoding_desc}")
-        # Strip all EXIF
-        args_lines.append("-exif:all=")
-        # Strip all XMP except our description
-        args_lines.append("-xmp:all=")
         # Target file
         args_lines.append(str(write_path))
         # Write args file
@@ -802,6 +802,7 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
             header, payload = data[i:i+16], data[i+16:i+ext_size]
             size = ext_size
+            boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
             header, payload = data[i:i+8], data[i+8:]
@@ -980,69 +981,69 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                     else:
                         logger.debug(f"  >Thumbnail embedding failed (non-critical)")
                 except Exception as e:
-                    logger.debug(f"  >Thumbnail generation failed: {e}")
+                    logger.debug(f"  >Thumbnail PIL approach failed: {e}")
                     
-                    # Check if PIL is available before fallback
+                    # Fallback: try tifffile approach (only if PIL might be available)
                     if 'Image' not in locals():
-                        logger.debug("  >PIL not available, skipping thumbnail fallback")
-                        pass  # Continue without thumbnail, don't abort conversion
-                    
-                    # Read TIFF with tifffile (preserves ICC and bit depth)
-                    with tifffile.TiffFile(str(tiff_path)) as tif:
-                        # Read main image data as numpy array
-                        img_array = tif.pages[0].asarray()
-                        # Extract ICC profile
-                        icc_profile = None
-                        try:
-                            icc_profile = tif.pages[0].icc_profile
-                        except Exception:
-                            pass
-                    
-                    # Convert 16-bit to 8-bit if necessary
-                    if img_array.dtype == np.uint16:
-                        img_8bit = (img_array / 257).astype(np.uint8)  # 65535/255 = 257
+                        logger.debug("  >PIL not available, skipping thumbnail entirely")
                     else:
-                        img_8bit = img_array
-                    
-                    # Ensure RGB
-                    if img_8bit.ndim == 2:
-                        img_8bit = np.stack([img_8bit] * 3, axis=-1)
-                    elif img_8bit.shape[2] == 4:
-                        img_8bit = img_8bit[:, :, :3]  # Remove alpha
-                    
-                    # Create PIL Image from array
-                    pil_img = Image.fromarray(img_8bit)
-                    
-                    # Convert to sRGB using ICC profile (same as decoder)
-                    if icc_profile:
                         try:
-                            rgb_profile = ImageCms.createProfile('sRGB')
-                            src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
-                            pil_img = ImageCms.profileToProfile(pil_img, src_profile, rgb_profile)
-                        except Exception as e:
-                            logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
-                    
-                    # Calculate thumbnail size (max 256px)
-                    max_size = 256
-                    ratio = min(max_size / pil_img.width, max_size / pil_img.height)
-                    new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
-                    thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
-                    
-                    # Save as JPEG temporary (sRGB, no ICC embedded)
-                    thumb_path = tmp_dir / "thumbnail.jpg"
-                    thumb.save(str(thumb_path), "JPEG", quality=85)
-                    
-                    # Inject thumbnail into JXL
-                    r_thumb = subprocess.run(
-                        [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                        capture_output=True, timeout=10
-                    )
-                    if r_thumb.returncode == 0:
-                        logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
-                    else:
-                        logger.debug(f"  >Thumbnail embedding failed (non-critical)")
-                except Exception as e:
-                    logger.debug(f"  >Thumbnail generation failed: {e}")
+                            # Read TIFF with tifffile (preserves ICC and bit depth)
+                            with tifffile.TiffFile(str(tiff_path)) as tif:
+                                # Read main image data as numpy array
+                                img_array = tif.pages[0].asarray()
+                                # Extract ICC profile
+                                icc_profile = None
+                                try:
+                                    icc_profile = tif.pages[0].icc_profile
+                                except Exception:
+                                    pass
+                            
+                            # Convert 16-bit to 8-bit if necessary
+                            if img_array.dtype == np.uint16:
+                                img_8bit = (img_array / 257).astype(np.uint8)  # 65535/255 = 257
+                            else:
+                                img_8bit = img_array
+                            
+                            # Ensure RGB
+                            if img_8bit.ndim == 2:
+                                img_8bit = np.stack([img_8bit] * 3, axis=-1)
+                            elif img_8bit.shape[2] == 4:
+                                img_8bit = img_8bit[:, :, :3]  # Remove alpha
+                            
+                            # Create PIL Image from array
+                            pil_img = Image.fromarray(img_8bit)
+                            
+                            # Convert to sRGB using ICC profile (same as decoder)
+                            if icc_profile:
+                                try:
+                                    rgb_profile = ImageCms.createProfile('sRGB')
+                                    src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
+                                    pil_img = ImageCms.profileToProfile(pil_img, src_profile, rgb_profile)
+                                except Exception as e:
+                                    logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
+                            
+                            # Calculate thumbnail size (max 256px)
+                            max_size = 256
+                            ratio = min(max_size / pil_img.width, max_size / pil_img.height)
+                            new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
+                            thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
+                            
+                            # Save as JPEG temporary (sRGB, no ICC embedded)
+                            thumb_path = tmp_dir / "thumbnail.jpg"
+                            thumb.save(str(thumb_path), "JPEG", quality=85)
+                            
+                            # Inject thumbnail into JXL
+                            r_thumb = subprocess.run(
+                                [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                                capture_output=True, timeout=10
+                            )
+                            if r_thumb.returncode == 0:
+                                logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
+                            else:
+                                logger.debug(f"  >Thumbnail embedding failed (non-critical)")
+                        except Exception as e2:
+                            logger.debug(f"  >Thumbnail fallback also failed: {e2}")
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -1216,10 +1217,10 @@ def main():
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort
-    if args.ram is not None:
+    if args.no_ram:
+        USE_RAM_FOR_PNG = False
+    elif args.ram is not None:
         USE_RAM_FOR_PNG = args.ram
-    elif args.no_ram is not None:
-        USE_RAM_FOR_PNG = not args.no_ram
     if args.staging is not None:
         TEMP2_DIR = args.staging
     if args.encode_tag is not None:
@@ -1287,11 +1288,15 @@ def main():
                 jxl = output_root / t.with_suffix(".jxl").name
             else:
                 jxl = t.parent / t.with_suffix(".jxl").name
-        elif args.mode in (1, 2):
+        elif args.mode == 1:
+            # Mode 1: Create converted_jxl/ subfolder next to source (file or directory)
+            jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+        elif args.mode == 2:
             if args.input.is_file():
                 # Single file -> converted_jxl/ subfolder
                 jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
             else:
+                # Directory -> flat to output_root
                 jxl = output_root / t.with_suffix(".jxl").name
         else:
             jxl = resolve_output(t, args.mode, args.input)

@@ -445,6 +445,7 @@ def reorder_jxl_boxes(jxl_path: Path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
             header, payload = data[i:i+16], data[i+16:i+ext_size]
             size = ext_size
+            boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
             header, payload = data[i:i+8], data[i+8:]
@@ -489,7 +490,7 @@ def inject_exif_to_jxl_from_jpeg(jxl_path: Path, jpeg_path: Path, tmp_dir: Path)
     # Extract raw EXIF binary from JPEG
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"-b\n-Exif\n{jpeg_path}\n", encoding="utf-8")
-    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
     if r.returncode != 0 or len(r.stdout) <= 8:
         logger.debug(f"  No EXIF to inject from {jpeg_path.name}")
         return
@@ -929,7 +930,7 @@ def cmd_transcode(args, auto_decode: bool = False):
         mode_str = "reconvert=ON"
     else:
         mode_str = "reconvert=OFF (skip existing)"
-    logger.info(f"{op_type} | Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
+    logger.info(f"{op_type} | Mode: {args.mode} | Effort: {args.effort} | "
                 f"Store MD5: {STORE_MD5} | delete_source={DELETE_SOURCE} | "
                 f"{mode_str} | Staging: {TEMP2_DIR or 'disabled'} | Workers: {args.workers}")
     logger.info(f"Input: {args.input}")
@@ -1553,7 +1554,7 @@ def _process_file_group(files, args, use_transcode=True):
             results = process_group_convert(
                 group_pairs, args.workers, direction="from_jxl",
                 quality=args.quality, distance=args.distance,
-                fmt=args.format or "jpeg", bit_depth=args.bit_depth,
+                fmt=args.format or "jpeg", bit_depth=args.bit_depth or PNG_DEFAULT_BIT_DEPTH,
                 output_icc=args.icc_profile, use_ram=args.ram,
                 effort=args.effort, reconvert_val=args.overwrite,
                 use_internal_srgb=False, smart=args.sync
@@ -1639,6 +1640,10 @@ Examples:
                         help="Force convert command")
 
     args = parser.parse_args()
+
+    # Normalize format: jpg -> jpeg
+    if args.format == "jpg":
+        args.format = "jpeg"
 
     # Handle --to-srgb shortcut
     if args.to_srgb:

@@ -225,7 +225,7 @@ session/_EXPORT/AdobeRGB/photo.tif → ignored
 | Mode | Input | Output location | Example |
 |------|-------|----------------|---------|
 | `0` | File: single file / Folder: all files | In-place (output in same folder) | `photo.jxl` |
-| `1` | Single file | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
+| `1` | File or directory | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
 | `2` | Directory | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
 | `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
 | `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |

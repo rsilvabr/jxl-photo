@@ -810,7 +810,7 @@ def cleanup_xmp_icc(tiff_path):
         return
     try:
         r = subprocess.run(
-        [_get_exiftool_cmd(), "-XMP-xmp:CreatorTool", str(tiff_path)],
+        [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(tiff_path)],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
@@ -1142,7 +1142,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
-                if DJXL_OUTPUT_DEPTH == 8:
+                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
                     pixels = (pixels >> 8).astype(np.uint8)
                 write_tiff(pixels, write_path, original_icc, TIFF_COMPRESSION)
                 # Order matters: add preview first (recreates file), then copy metadata
@@ -1174,7 +1174,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                     final_pixels = pixels
                     final_icc = djxl_icc
 
-                if DJXL_OUTPUT_DEPTH == 8:
+                if DJXL_OUTPUT_DEPTH == 8 and final_pixels.dtype == np.uint16:
                     final_pixels = (final_pixels >> 8).astype(np.uint8)
 
                 write_tiff(final_pixels, write_path, final_icc, TIFF_COMPRESSION)
@@ -1190,7 +1190,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
                 decode_auto(jxl_path, ppm_path)
                 pixels = read_ppm_to_numpy(ppm_path)
-                if DJXL_OUTPUT_DEPTH == 8:
+                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
                     pixels = (pixels >> 8).astype(np.uint8)
                 write_tiff(pixels, write_path, None, TIFF_COMPRESSION)
 
@@ -1225,7 +1225,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 else:
                     logger.debug(" >No ICC in djxl output")
 
-                if DJXL_OUTPUT_DEPTH == 8:
+                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
                     pixels = (pixels >> 8).astype(np.uint8)
 
                 write_tiff(pixels, write_path, djxl_icc, TIFF_COMPRESSION)
