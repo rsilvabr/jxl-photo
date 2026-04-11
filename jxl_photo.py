@@ -1418,7 +1418,7 @@ class InteractiveMenu:
 
             valid_choices = [m[0] for m in modes] + ["?", "A", "M"]
             while True:
-                choice = Prompt.ask("Select mode (0-8, A for auto, M for manifest, ? for details)", choices=valid_choices)
+                choice = Prompt.ask("Select mode [0-8/A/M/?]", choices=valid_choices)
                 if choice:
                     break
         else:
@@ -1629,9 +1629,9 @@ class InteractiveMenu:
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"   {clean}\n")
             valid_choices = [d[0] for d in details]
-            choice = input(f"Select mode (0-8): ").strip()
+            choice = input("Select mode [0-8/A/M/?]: ").strip()
             while choice not in valid_choices:
-                choice = input(f"Select mode (0-8): ").strip()
+                choice = input("Select mode [0-8/A/M/?]: ").strip()
 
         if choice == "8":
             if not self._confirm_archive_mode():
