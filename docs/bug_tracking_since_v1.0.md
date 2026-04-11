@@ -45,7 +45,7 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 31 | Set unordered in checksum DB path | transcoder | ✅ FIXED (v1.3) |
 | 32 | `import Path` redundant in `_execute_manifest_workflow` | photo | ✅ FIXED (v1.3) |
 | 33 | Rich markup leaking in fallback without Rich | photo | ✅ FIXED (v1.3) |
-| 34 | Type hint `str | None` (Python < 3.10 incompatible) | transcoder | ✅ FIXED (v1.3) |
+| 34 | Type hint `str \| None` (Python < 3.10 incompatible) | transcoder | ✅ FIXED (v1.3) |
 
 ---
 
