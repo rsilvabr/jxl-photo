@@ -442,7 +442,7 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 | Windows Explorer | Generic icon | **Color-managed thumbnail** |
 | Preview colorspace | ❌ Original (needs ICC, shows wrong colors) | ✅ **sRGB converted** (correct colors without ICC) |
 | ICC in main image | ✅ Yes | ✅ Yes |
-| ICC in preview | ❌ No | ❌ No (not needed — sRGB native) |
+| ICC in preview | ❌ No (needed - not sRGB) | ✅ No (not needed — sRGB native) |
 | File integrity verification | ❌ No | ✅ Yes (before source deletion) |
 | Python 3.8 compatibility | ❌ No | ✅ Yes (backport included) |
 
