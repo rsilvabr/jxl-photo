@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Logs e temporários
+Logs/
+*.log
+*.tmp
+
+# IDEs e ferramentas
+.claude/
+.vscode/
+.idea/
+
+# Testes locais
+test_roundtrip/
+tests/__pycache__/
+
+# Build e distribuição (usar apenas quando fizer release)
+NOT_COMMIT/
+pypi_release/
+build/
+dist/
+*.egg-info/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
