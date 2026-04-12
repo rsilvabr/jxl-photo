@@ -1446,7 +1446,7 @@ def cmd_convert(args, from_jxl: bool = True):
             if deleted:
                 logger.info(f" -> Deleted {deleted} source file(s)")
 
-        for _, status, _ in results:
+        for _, status, _, _ in results:
             if status == "ok":
                 ok += 1
             elif status == "reconvert":
