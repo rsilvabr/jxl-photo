@@ -771,7 +771,10 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         reorder_jxl_boxes(write_path)
 
         if src_md5:
-            store_md5_db(write_path, src_md5)
+            # Use write_path directory but final_path name (no UUID) for checksum entry
+            # This ensures checksums.md5 has correct filenames even with staging
+            checksum_path = write_path.parent / final_path.name
+            store_md5_db(checksum_path, src_md5)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
@@ -1153,6 +1156,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 logger.warning(f" JPEG doesn't support 16-bit, switching to PNG | {jxl_path.name}")
                 fmt = "png"
                 actual_out = write_path.with_suffix(".png")
+                final_path = final_path.with_suffix(".png")
 
             # JPEG output via djxl directly (no magick needed unless ICC conversion)
             if output_icc and MAGICK_AVAILABLE:
@@ -1200,7 +1204,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                         tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), "--output_format=png"], check=True)
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True)
                         subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True)
             else:
                 # Direct djxl to PNG
@@ -1211,7 +1215,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {actual_out.name}")
-        return (str(jxl_path), "reconvert" if overwritten else "ok", str(actual_out))
+        return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path))
 
     except Exception as e:
         n, total = next_count()

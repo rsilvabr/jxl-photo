@@ -466,7 +466,7 @@ class FolderAnalyzer:
             reasoning.append("Mode 0 recommended — files stay side by side")
 
         # Mode 5: folder suffix when source type is in folder name
-        elif any(self.origin.lower() in p.name.lower() for p in result['subfolders'][:3]):
+        elif any(self.origin.lower() in Path(p).name.lower() for p in result['subfolders'][:3]):
             result['recommended_mode'] = 5
             confidence = 'medium'
             reasoning.append(f"Folder names contain '{self.origin}' — Mode 5 (suffix) recommended")
@@ -2334,7 +2334,7 @@ class InteractiveMenu:
                                    origin: str, dest: str, workers: int,
                                    workflow: Dict, advanced: Dict) -> Optional[List]:
         """Build command line for a single manifest entry."""
-        cmd = [sys.executable, script, source, '--mode', str(mode), '--workers', str(workers)]
+        cmd = [sys.executable, script, source, dest_path, '--mode', str(mode), '--workers', str(workers)]
 
         if origin == 'tiff' and dest == 'jxl':
             distance = workflow.get('distance', 0.1)

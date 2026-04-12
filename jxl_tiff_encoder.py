@@ -542,6 +542,7 @@ def extract_icc_fixed(tiff_path):
             # Even when skipping, track correctness so user knows how many files would have needed patching
             was_correct = _is_d50_already_correct(bytes(icc))
             with _d50_patch_lock:
+                _d50_patch_count["skipped"] += 1
                 if was_correct:
                     _d50_patch_count["already_correct"] += 1
                 else:

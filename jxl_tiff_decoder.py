@@ -457,17 +457,27 @@ def read_png_to_numpy(png_path):
     Read PNG file and convert to numpy array.
     Handles 8-bit and 16-bit RGB/RGBA.
     """
-    img = Image.open(png_path)
-    if img.mode == 'RGBA':
-        arr = np.array(img)
-        rgb = arr[:, :, :3]
-        alpha = arr[:, :, 3]
-        return rgb, alpha
-    elif img.mode == 'RGB':
-        return np.array(img), None
-    else:
-        rgb_img = img.convert('RGB')
-        return np.array(rgb_img), None
+    with Image.open(png_path) as img:
+        # Handle 16-bit modes (I;16, I) - convert to uint16 RGB
+        if img.mode in ('I;16', 'I'):
+            # Convert 16-bit grayscale to RGB
+            arr = np.array(img)
+            if arr.dtype == np.int32:
+                # PIL I mode returns int32, convert to uint16
+                arr = arr.astype(np.uint16)
+            # Convert grayscale to RGB
+            rgb = np.stack([arr, arr, arr], axis=-1)
+            return rgb, None
+        elif img.mode == 'RGBA':
+            arr = np.array(img)
+            rgb = arr[:, :, :3]
+            alpha = arr[:, :, 3]
+            return rgb, alpha
+        elif img.mode == 'RGB':
+            return np.array(img), None
+        else:
+            rgb_img = img.convert('RGB')
+            return np.array(rgb_img), None
 
 def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
     """
