@@ -202,9 +202,6 @@ TEMP2_DIR = None
 # Staging directory for output files during conversion
 # Example: r"E:\staging_jxl"
 
-RECONVERT = "smart"
-# False = skip existing. True = always reconvert. "smart" = only if source newer.
-
 # ImageMagick detection (auto, do not modify)
 MAGICK_AVAILABLE = shutil.which("magick") is not None
 
