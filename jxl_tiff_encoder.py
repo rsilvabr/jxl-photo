@@ -749,6 +749,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
 def make_png_bytes(img, icc_bytes=None):
     """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
+    import numpy as np
     h, w, c = img.shape
     color_type = 2 if c == 3 else (0 if c == 1 else 6)
 
@@ -756,7 +757,12 @@ def make_png_bytes(img, icc_bytes=None):
         p = name + data
         return struct.pack(">I", len(data)) + p + struct.pack(">I", zlib.crc32(p) & 0xFFFFFFFF)
 
-    img_be = img.astype(">u2")
+    # Scale 8-bit to 16-bit correctly (multiply by 257: 65535/255)
+    if img.dtype == np.uint8:
+        img_16 = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
+        img_be = img_16.astype(">u2")
+    else:
+        img_be = img.astype(">u2")
     raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
 
     out = b"\x89PNG\r\n\x1a\n"
@@ -889,7 +895,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
 
             # 4. Read TIFF pixel data (series[0] = main image, ignores thumbnails)
             with tifffile.TiffFile(str(tiff_path)) as tif:
-                img = tif.series[0].asarray().astype(np.uint16)
+                img = tif.series[0].asarray()
+                # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
+                if img.dtype == np.uint8:
+                    img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
+                else:
+                    img = img.astype(np.uint16)
             if img.ndim == 2:
                 img = img[:, :, np.newaxis]
 
