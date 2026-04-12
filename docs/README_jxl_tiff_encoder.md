@@ -20,7 +20,7 @@ the detailed ICC information (gamma curves, copyright, etc.).
 ## Requirements
 
 ```
-Python 3.12+
+Python 3.9+
 pip install tifffile numpy
 cjxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org

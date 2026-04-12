@@ -9,7 +9,7 @@ Handles TIFF → JXL, JXL → TIFF, JPEG → JXL, JXL → JPEG, and JXL → PNG 
 ## Requirements
 
 ```
-Python 3.10+
+Python 3.9+
 rich            (optional — enables fancy UI, auto-detected)
 tifffile        (for TIFF workflows)
 numpy           (tifffile dependency)

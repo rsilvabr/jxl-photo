@@ -299,7 +299,7 @@ Depending on your needs, three common approaches:
 
 ## Requirements & Installation
 
-### 1. Python 3.8+ and Packages
+### 1. Python 3.9+ and Packages
 
 ```powershell
 # Install required packages

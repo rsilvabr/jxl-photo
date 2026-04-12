@@ -4,7 +4,7 @@ Testbench automatizado para o toolkit de conversão JXL. Executa testes em todas
 
 ## 📋 Requisitos
 
-- Python 3.8+
+- Python 3.9+
 - Pasta de testes com imagens de exemplo (ver estrutura abaixo)
 - Todas as dependências do toolkit instaladas (cjxl, djxl, exiftool, etc.)
 

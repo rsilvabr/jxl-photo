@@ -16,7 +16,7 @@ This eliminates the need to remember multiple scripts or command structures — 
 ## Requirements
 
 ```
-Python 3.10+
+Python 3.9+
 cjxl / djxl → https://github.com/libjxl/libjxl/releases
 exiftool → https://exiftool.org
 magick → https://imagemagick.org (optional, for ICC conversion only)

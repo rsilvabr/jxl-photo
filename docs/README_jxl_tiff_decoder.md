@@ -19,7 +19,7 @@ Capture One exports, or any libjxl-based workflow.
 ## Requirements
 
 ```
-Python 3.8+
+Python 3.9+
 pip install tifffile numpy pillow
 djxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
@@ -584,7 +584,7 @@ Always test with a small batch before processing important archives.
 - **ICC placement corrected** - ICC profile only on main image (Page 0), removed from preview
 - **Preview size** - Changed from 1024px to 256px (similar to Capture One's ~160px)
 - **File integrity verification** - Validates TIFF before deleting source JXL
-- **Python 3.8 compatibility** - Backported `is_relative_to()`
+- **Python 3.9+ compatibility** - Works with modern Python versions
 
 ### Earlier Changes
 - **8-bit output support** — `--depth 8` flag for web/delivery workflows
