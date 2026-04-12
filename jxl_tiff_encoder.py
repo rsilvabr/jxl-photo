@@ -748,7 +748,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def make_png_bytes(img, icc_bytes=None):
-    """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
+    """Encodes a numpy array as PNG in memory (pure Python, no temp file).
+    Supports both 8-bit and 16-bit images."""
     h, w, c = img.shape
     color_type = 2 if c == 3 else (0 if c == 1 else 6)
 
@@ -756,11 +757,18 @@ def make_png_bytes(img, icc_bytes=None):
         p = name + data
         return struct.pack(">I", len(data)) + p + struct.pack(">I", zlib.crc32(p) & 0xFFFFFFFF)
 
-    img_be = img.astype(">u2")
+    # Detect bit depth from array dtype
+    if img.dtype == np.uint8:
+        bit_depth = 8
+        img_be = img.astype(np.uint8)  # Keep as 8-bit
+    else:
+        bit_depth = 16
+        img_be = img.astype(">u2")  # Convert to 16-bit big-endian
+    
     raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
 
     out = b"\x89PNG\r\n\x1a\n"
-    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, color_type, 0, 0, 0))
+    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))
     if icc_bytes:
         out += chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes))
     out += chunk(b"IDAT", zlib.compress(raw, 1))
