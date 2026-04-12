@@ -622,17 +622,23 @@ def extract_trc_from_icc(icc_bytes):
 
                         if func_type == 0:
                             # Simple gamma: Y = X^gamma
-                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+12)[0]
+                            # ICC spec: s15Fixed16Number (signed 16.16 fixed point)
+                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+12)[0]
+                            gamma = gamma_fixed / 65536.0
                             curves[name] = ('gamma', gamma)
                         elif func_type == 1:
                             # Gamma with offset: Y = (aX + b)^gamma
                             # We approximate with just the gamma parameter
-                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+16)[0]
+                            # ICC spec: s15Fixed16Number at offset 16
+                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+16)[0]
+                            gamma = gamma_fixed / 65536.0
                             curves[name] = ('gamma', gamma)
                         elif func_type == 2:
                             # Segmented curve (ProPhoto uses type 2)
                             # For simplicity, we approximate with the main gamma parameter
-                            gamma = struct.unpack_from('>f', icc_bytes, data_offset+16)[0]
+                            # ICC spec: s15Fixed16Number at offset 16
+                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+16)[0]
+                            gamma = gamma_fixed / 65536.0
                             curves[name] = ('gamma', gamma)
 
                     elif curve_type == b'curv':
@@ -1052,7 +1058,8 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 6:
         # Mode 6: EXPORT anchor - only JXLs INSIDE _EXPORT
         parts = list(jxl_path.parts)
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             return None  # Skip files outside _EXPORT
 
@@ -1067,7 +1074,8 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 7:
         # Mode 7: EXPORT anchor - only JXLs inside _EXPORT/[subfolder]
         parts = list(jxl_path.parts)
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             return None  # Skip files outside _EXPORT
 
@@ -1338,7 +1346,8 @@ def find_jxls_mode6(input_path):
     filtered = []
     for j in all_jxls:
         parts_str = list(j.parts)
-        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is not None:
             filtered.append(j)
     return filtered
@@ -1349,7 +1358,8 @@ def find_jxls_mode7(input_path):
     filtered = []
     for j in all_jxls:
         parts_str = list(j.parts)
-        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             continue
         if EXPORT_JXL_SUBFOLDER:

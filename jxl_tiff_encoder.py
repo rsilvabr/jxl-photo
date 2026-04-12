@@ -413,7 +413,9 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 6:
         # _EXPORT anchor — only TIFFs INSIDE _EXPORT (ignores everything outside)
         parts = tiff_path.parts
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        # e.g., "_EXPORT", "Export_Lightroom", "Lightroom_Export" but NOT "NOT_EXPORT_DATA"
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             return None  # Skip files outside _EXPORT
 
@@ -428,7 +430,8 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 7:
         # _EXPORT anchor — only TIFFs inside _EXPORT/[subfolder]
         parts = tiff_path.parts
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             return None  # Skip files outside _EXPORT
 

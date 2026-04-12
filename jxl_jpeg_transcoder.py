@@ -716,7 +716,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
     elif mode in (6, 7):
         parts = src_path.parts
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             logger.warning(f"'{EXPORT_MARKER}' not found in {src_path}, using local folder")
             return src_path.parent / exp_out / src_path.with_suffix(out_ext).name
@@ -1531,7 +1532,15 @@ def _process_file_group(files, args, use_transcode=True):
     # Build output pairs
     pairs = []
     for f in files:
-        out = resolve_output_transcode(f, args.mode, args.input, decode=True)
+        if use_transcode:
+            # Lossless transcode: output is JPEG
+            out = resolve_output_transcode(f, args.mode, args.input, decode=True)
+        else:
+            # Lossy convert: output format depends on --format flag
+            out = resolve_output_convert(
+                f, args.mode, args.output_name, args.output_suffix,
+                args.rename_from, args.rename_to, args.input
+            )
         if out:
             pairs.append((f, out))
     
