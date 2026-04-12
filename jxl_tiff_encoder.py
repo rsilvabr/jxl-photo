@@ -1152,7 +1152,8 @@ def find_tiffs_mode6(input_path: Path):
     filtered = []
     for t in all_tiffs:
         parts_str = list(t.parts)
-        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is not None:
             filtered.append(t)
     return filtered
@@ -1163,7 +1164,8 @@ def find_tiffs_mode7(input_path: Path):
     filtered = []
     for t in all_tiffs:
         parts_str = list(t.parts)
-        export_idx = next((i for i, p in enumerate(parts_str) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             continue
         if EXPORT_TIFF_SUBFOLDER:

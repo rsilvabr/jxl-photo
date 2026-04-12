@@ -797,7 +797,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
-        return (str(jxl_path), "skipped", str(final_path))
+        return (str(jxl_path), "skipped", str(final_path), None)
 
     overwritten = final_path.exists()
     write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -823,15 +823,15 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                     logger.info(f"[{n}/{total}] OK [MD5 PASS] | {jxl_path.name}")
                 else:
                     logger.error(f"[{n}/{total}] MD5 FAIL | {jxl_path.name}")
-                    return (str(jxl_path), "md5_fail", str(final_path))
+                    return (str(jxl_path), "md5_fail", str(final_path), None)
         else:
             logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
 
-        return (str(jxl_path), "ok", str(final_path))
+        return (str(jxl_path), "ok", str(final_path), None)
     except Exception as e:
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
-        return (str(jxl_path), "error", str(e))
+        return (str(jxl_path), "error", str(e), None)
 
 def process_group_transcode(group_pairs: list, workers: int, decode: bool, 
                             verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
@@ -1066,7 +1066,8 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
     elif mode in (6, 7):
         # Export marker modes - only process files INSIDE _EXPORT
         parts = src_path.parts
-        export_idx = next((i for i, p in enumerate(parts) if EXPORT_MARKER in p), None)
+        # Match folders starting or ending with EXPORT_MARKER (not substring)
+        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
         if export_idx is None:
             return None  # Skip files outside _EXPORT
         export_dir = Path(*parts[:export_idx + 1])
@@ -1144,7 +1145,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {jxl_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
-        return (str(jxl_path), "skipped", str(final_path))
+        return (str(jxl_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
     write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1216,12 +1217,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {actual_out.name}")
-        return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path))
+        return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
     except Exception as e:
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
-        return (str(jxl_path), "error", str(e))
+        return (str(jxl_path), "error", str(e), None)
 
 def process_group_convert(group_pairs: list, workers: int, direction: str,
                           quality: int, distance: float, fmt: str, bit_depth: int,
@@ -1537,9 +1538,12 @@ def _process_file_group(files, args, use_transcode=True):
             out = resolve_output_transcode(f, args.mode, args.input, decode=True)
         else:
             # Lossy convert: output format depends on --format flag
+            # Determine output extension based on format
+            out_ext = ".jpg" if args.format == "jpeg" else ".png"
             out = resolve_output_convert(
                 f, args.mode, args.output_name, args.output_suffix,
-                args.rename_from, args.rename_to, args.input
+                out_ext, args.rename_from, args.rename_to,
+                Path(args.input) if args.input else None, decode=True
             )
         if out:
             pairs.append((f, out))
