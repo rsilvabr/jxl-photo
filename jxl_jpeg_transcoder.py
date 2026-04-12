@@ -904,7 +904,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     return results
 
 def cmd_transcode(args, auto_decode: bool = False):
-    global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR, RECONVERT
+    global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR
     _counter = {"done": 0, "total": 0}
 
     TEMP2_DIR = args.staging
@@ -1264,7 +1264,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     return results
 
 def cmd_convert(args, from_jxl: bool = True):
-    global _counter, TEMP2_DIR, RECONVERT, DELETE_SOURCE
+    global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
 
     if args.icc_profile and not MAGICK_AVAILABLE:
@@ -1469,7 +1469,7 @@ def cmd_auto(args):
     - Files WITH jbrd box -> lossless transcode
     - Files WITHOUT jbrd -> lossy convert
     """
-    global _counter, TEMP2_DIR, RECONVERT, DELETE_SOURCE
+    global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
     
     TEMP2_DIR = args.staging

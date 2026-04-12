@@ -1411,7 +1411,7 @@ Examples:
     # Output options
     parser.add_argument("--depth", type=int, choices=[8, 16], default=None,
                       help="Output bit depth")
-    parser.add_argument("--compression", choices=["zip", "lzw", "none"], default=None,
+    parser.add_argument("--compression", choices=["zip", "lzw", "none", "uncompressed"], default=None,
                       help="TIFF compression")
     parser.add_argument("--staging", type=str, default=None,
                       help="Staging directory for output files")

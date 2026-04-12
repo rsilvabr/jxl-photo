@@ -1774,6 +1774,9 @@ class InteractiveMenu:
                 console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
                 console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
 
+            elif origin == 'jxl' and dest == 'tiff':
+                # No effort parameter for JXL decoding - djxl doesn't use it
+                pass
             elif 'lossy' in conv_type:
                 quality = IntPrompt.ask("Quality (1-100)", default=workflow['quality'])
                 workflow['quality'] = max(1, min(quality, 100))
@@ -1837,6 +1840,9 @@ class InteractiveMenu:
             if origin == 'tiff' and dest == 'jxl':
                 print(f"Distance: {workflow.get('distance', 0.1):.2f} (set in Step 2)")
                 print(f"Effort: {workflow['effort']} (set in Step 2)")
+            elif origin == 'jxl' and dest == 'tiff':
+                # No effort parameter for JXL decoding - djxl doesn't use it
+                pass
             elif 'lossy' in conv_type:
                 quality = input(f"Quality (1-100) [{workflow['quality']}]: ").strip()
                 workflow['quality'] = int(quality) if quality.isdigit() else workflow['quality']

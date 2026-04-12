@@ -15,6 +15,7 @@ import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import Dict
 import argparse
 import numpy as np
 import tifffile
@@ -1322,7 +1323,7 @@ def main():
         logger.info("Mode 8 -- in-place recursive | DELETE_SOURCE=False: TIFF and JXL will coexist")
 
     # Group by output folder (one bulk move per group)
-    groups: dict[Path, list] = {}
+    groups: Dict[Path, list] = {}
     for t, j in pairs:
         groups.setdefault(j.parent, []).append((t, j))
 

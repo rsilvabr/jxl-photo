@@ -372,7 +372,6 @@ Options:
   --matrix            Use Matrix decode mode (linear + LittleCMS)
   --basic             Force Basic mode (no ICC handling)
   --target-icc PATH   Convert to specific ICC profile (requires --matrix)
-  --perceptual        Use perceptual rendering intent
   --no-icc-cleanup    Keep ICC:base64 marker in XMP CreatorTool
   --depth 8|16        Output bit depth (overrides DJXL_OUTPUT_DEPTH setting)
   --compression TYPE  TIFF compression: uncompressed, lzw, or zip (default: zip)
