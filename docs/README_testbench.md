@@ -86,7 +86,7 @@ Certifique-se de que a pasta `tiff/` existe dentro do diretório de testes e con
 Verifique se:
 - `cjxl.exe` está no PATH
 - `exiftool.exe` está no PATH
-- Pacotes Python estão instalados: `pip install tifffile numpy pillow`
+- Pacotes Python estão instalados: `pip install tifffile numpy pillow imagecodecs`
 
 ### "Command timed out"
 Arquivos muito grandes ou muitos arquivos podem causar timeout. Use o modo `--quick` ou reduza o número de arquivos de teste.

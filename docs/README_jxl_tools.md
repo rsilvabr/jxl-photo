@@ -13,6 +13,7 @@ Python 3.9+
 rich            (optional — enables fancy UI, auto-detected)
 tifffile        (for TIFF workflows)
 numpy           (tifffile dependency)
+imagecodecs     (for LZW/ZIP compressed TIFFs)
 cjxl / djxl →  https://github.com/libjxl/libjxl/releases
 exiftool    →  https://exiftool.org
 ImageMagick →  https://imagemagick.org  (for JXL -> JPEG/PNG ICC conversion)

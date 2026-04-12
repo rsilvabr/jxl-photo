@@ -303,7 +303,7 @@ Depending on your needs, three common approaches:
 
 ```powershell
 # Install required packages
-pip install tifffile numpy pillow rich
+pip install tifffile numpy pillow rich imagecodecs
 ```
 
  **Important:** Install packages in the same Python version you'll use to run the scripts.

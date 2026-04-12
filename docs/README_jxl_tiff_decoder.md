@@ -20,7 +20,7 @@ Capture One exports, or any libjxl-based workflow.
 
 ```
 Python 3.9+
-pip install tifffile numpy pillow
+pip install tifffile numpy pillow imagecodecs
 djxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
 ```

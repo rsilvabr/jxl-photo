@@ -21,7 +21,7 @@ the detailed ICC information (gamma curves, copyright, etc.).
 
 ```
 Python 3.9+
-pip install tifffile numpy
+pip install tifffile numpy imagecodecs
 cjxl  →  https://github.com/libjxl/libjxl/releases
 exiftool  →  https://exiftool.org
 ```
