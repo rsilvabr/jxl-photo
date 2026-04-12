@@ -5,6 +5,7 @@ v1.2 Update: 2026-04-05
 v1.3 Update: 2026-04-11  
 v1.5 Update: 2026-04-12  
 v1.5 Final: 2026-04-12 (third pass)  
+v1.5.2: 2026-04-13 (critical 8-bit fix)  
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`  
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
 
@@ -100,8 +101,9 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 84 | resolve_output_convert parâmetros trocados | transcoder | ✅ FIXED (v1.5.1) |
 | 85 | EXPORT_MARKER find_* vs resolve_output inconsistente | encoder, transcoder | ✅ FIXED (v1.5.1) |
 | 86 | Retornos inconsistentes 3 vs 4 elementos | transcoder | ✅ FIXED (v1.5.1) |
+| 87 | 8-bit TIFF → JXL imagens pretas (escalonamento) | encoder | ✅ FIXED (v1.5.2) |
 
-**Total bugs fixed: 86**
+**Total bugs fixed: 87**
 
 ## Detailed Bug Reports
 
@@ -1569,4 +1571,63 @@ if args.format == "jpg":
 - ExifTool operations timeout after 60 seconds
 - CJXL_DISTANCE validated (0-15 range)
 - All bare except clauses fixed
+
+---
+
+## v1.5.2 Critical Bug Fix
+
+### Bug #87 — 8-bit TIFF to JXL Produces Black Images (CRITICAL)
+
+**Location:** `jxl_tiff_encoder.py` - `convert_one()` and `make_png_bytes()`
+
+**Problem:** When converting 8-bit TIFF files to JXL, the resulting images were completely black and extremely small (~25 KB instead of ~25 MB). This affected users converting TIFFs from:
+- NX Studio (Nikon)
+- GIMP (8-bit export)
+- Adobe Lightroom (8-bit export)
+- Any software generating 8-bit TIFFs
+
+**Root Cause:** The 8→16 bit conversion did not scale pixel values correctly:
+```python
+# BROKEN (v1.5.1 and earlier)
+img = tif.series[0].asarray().astype(np.uint16)
+# uint8 255 → uint16 255 (0.39% brightness in 0-65535 range)
+```
+
+When an 8-bit value (0-255) is cast to 16-bit without scaling:
+- White (255) becomes 255 in a 0-65535 range = effectively black
+- The JXL compressor efficiently encodes these near-zero values
+- Result: 25 KB "black" image instead of 25 MB proper image
+
+**Fix:** Applied proper scaling (multiply by 257 = 65535/255):
+```python
+# FIXED (v1.5.2)
+img = tif.series[0].asarray()
+if img.dtype == np.uint8:
+    img = img.astype(np.uint16) * 257  # 0-255 → 0-65535
+else:
+    img = img.astype(np.uint16)
+```
+
+Same fix applied to `make_png_bytes()` as a fallback:
+```python
+if img.dtype == np.uint8:
+    img_16 = img.astype(np.uint16) * 257
+    img_be = img_16.astype(">u2")
+```
+
+**Impact:** This was a **critical data corruption bug** affecting all 8-bit TIFF conversions. Users could unknowingly convert their images to black JXLs. The fix ensures proper brightness preservation regardless of source bit depth.
+
+**Reported by:** WiseTomCat (NX Studio 8-bit LZW TIFFs)
+
+**Tested with:**
+- 8-bit GIMP TIFF exports (50 MB → 26 MB JXL)
+- 8-bit BigTIFF files
+- 8-bit LZW compressed TIFFs
+- 8-bit with ICC profiles
+- EXIF preservation verified on all conversions
+
+**Files changed:**
+- `jxl_tiff_encoder.py` lines 752-765, 898-903
+
+---
 
