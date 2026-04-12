@@ -288,6 +288,7 @@ class DependencyChecker:
             f"[{icons['exiftool']}] exiftool",
             f"[{icons['magick']}] magick",
             f"[{icons['tifffile']}] tifffile",
+            f"[{icons['imagecodecs']}] imagecodecs",
             f"[{icons['pillow']}] pillow",
             f"[{icons['rich']}] rich",
         ]
@@ -296,12 +297,12 @@ class DependencyChecker:
             parts[2] += " (ICC off)"
         if not status.get('tifffile'):
             parts[3] += " (TIFF off)"
-        elif not status.get('imagecodecs'):
-            parts[3] += " (LZW/ZIP TIFFs need: pip install imagecodecs)"
+        if not status.get('imagecodecs'):
+            parts[4] += " (LZW/ZIP TIFFs need: pip install imagecodecs)"
         if not status.get('pillow'):
-            parts[4] += " (JPG previews off)"
+            parts[5] += " (JPG previews off)"
         if not status.get('rich'):
-            parts[5] += " (basic UI)"
+            parts[6] += " (basic UI)"
 
         return " | ".join(parts)
 
