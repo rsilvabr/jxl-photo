@@ -185,6 +185,14 @@ class ConfigManager:
         except ImportError:
             return False
 
+    def _check_imagecodecs(self) -> bool:
+        """Check if imagecodecs is available for compressed TIFF support."""
+        try:
+            import imagecodecs
+            return True
+        except ImportError:
+            return False
+
 
 class DependencyChecker:
     def __init__(self, config_manager: ConfigManager):
@@ -232,6 +240,7 @@ class DependencyChecker:
 
         status['tifffile'] = self.config._check_tiff_support()
         status['numpy'] = status['tifffile']
+        status['imagecodecs'] = self.config._check_imagecodecs()
         status['pillow'] = self._check_pillow()
         status['rich'] = self._check_rich()
         status['icc_profiles'] = status.get('magick', False)
@@ -269,6 +278,7 @@ class DependencyChecker:
             'exiftool': '✓' if status.get('exiftool') else '✗',
             'magick': '✓' if status.get('magick') else '⚠',
             'tifffile': '✓' if status.get('tifffile') else '✗',
+            'imagecodecs': '✓' if status.get('imagecodecs') else '⚠',
             'pillow': '✓' if status.get('pillow') else '✗',
             'rich': '✓' if status.get('rich') else '✗',
         }
@@ -286,6 +296,8 @@ class DependencyChecker:
             parts[2] += " (ICC off)"
         if not status.get('tifffile'):
             parts[3] += " (TIFF off)"
+        elif not status.get('imagecodecs'):
+            parts[3] += " (LZW/ZIP TIFFs need: pip install imagecodecs)"
         if not status.get('pillow'):
             parts[4] += " (JPG previews off)"
         if not status.get('rich'):
