@@ -87,21 +87,21 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 70 | cleanup_xmp_icc duplicates label | decoder | ✅ FIXED (v1.5) |
 | 71 | --format jpg falls to PNG path | transcoder | ✅ FIXED (v1.5) |
 | 72 | _d50_patch_count["skipped"] never incremented | encoder | ✅ FIXED (v1.5.1) |
-| 73 | Image.open() sem with/close (file leak) | decoder | ✅ FIXED (v1.5.1) |
-| 74 | Basic mode PIL pode perder 16-bit | decoder | ✅ FIXED (v1.5.1) |
-| 75 | MD5 checksums gravados com UUID (staging) | transcoder | ✅ FIXED (v1.5.1) |
-| 76 | decode_to_image retorna staging path | transcoder | ✅ FIXED (v1.5.1) |
-| 77 | JPEG 16-bit→PNG sem atualizar final_path | transcoder | ✅ FIXED (v1.5.1) |
+| 73 | Image.open() without with/close (file leak) | decoder | ✅ FIXED (v1.5.1) |
+| 74 | Basic mode PIL can lose 16-bit | decoder | ✅ FIXED (v1.5.1) |
+| 75 | MD5 checksums saved with UUID (staging) | transcoder | ✅ FIXED (v1.5.1) |
+| 76 | decode_to_image returns staging path | transcoder | ✅ FIXED (v1.5.1) |
+| 77 | JPEG 16-bit→PNG without updating final_path | transcoder | ✅ FIXED (v1.5.1) |
 | 78 | --output_format not supported djxl 0.11.x | transcoder | ✅ FIXED (v1.5.1) |
-| 79 | subfolders strings com .name (AttributeError) | photo | ✅ FIXED (v1.5.1) |
-| 80 | dest_path do manifest nunca usado | photo | ✅ FIXED (v1.5.1) |
-| 81 | ICC TRC parsing s15Fixed16Number como float | decoder | ✅ FIXED (v1.5.1) |
-| 82 | cmd_auto usa resolver errado para convert | transcoder | ✅ FIXED (v1.5.1) |
-| 83 | EXPORT_MARKER substring match inconsistente | encoder, decoder, transcoder | ✅ FIXED (v1.5.1) |
-| 84 | resolve_output_convert parâmetros trocados | transcoder | ✅ FIXED (v1.5.1) |
-| 85 | EXPORT_MARKER find_* vs resolve_output inconsistente | encoder, transcoder | ✅ FIXED (v1.5.1) |
-| 86 | Retornos inconsistentes 3 vs 4 elementos | transcoder | ✅ FIXED (v1.5.1) |
-| 87 | 8-bit TIFF → JXL imagens pretas (escalonamento) | encoder | ✅ FIXED (v1.5.2) |
+| 79 | subfolders strings with .name (AttributeError) | photo | ✅ FIXED (v1.5.1) |
+| 80 | manifest dest_path never used | photo | ✅ FIXED (v1.5.1) |
+| 81 | ICC TRC parsing s15Fixed16Number as float | decoder | ✅ FIXED (v1.5.1) |
+| 82 | cmd_auto uses wrong resolver for convert | transcoder | ✅ FIXED (v1.5.1) |
+| 83 | EXPORT_MARKER substring match inconsistent | encoder, decoder, transcoder | ✅ FIXED (v1.5.1) |
+| 84 | resolve_output_convert parameters swapped | transcoder | ✅ FIXED (v1.5.1) |
+| 85 | EXPORT_MARKER find_* vs resolve_output inconsistent | encoder, transcoder | ✅ FIXED (v1.5.1) |
+| 86 | Inconsistent returns 3 vs 4 elements | transcoder | ✅ FIXED (v1.5.1) |
+| 87 | 8-bit TIFF → JXL black images (scaling) | encoder | ✅ FIXED (v1.5.2) |
 
 **Total bugs fixed: 87**
 
