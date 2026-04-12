@@ -39,7 +39,7 @@ except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
 
-# Backport de Path.is_relative_to para Python < 3.9
+# Backport of Path.is_relative_to for Python < 3.9
 def _is_relative_to(path: Path, anchor: Path) -> bool:
     """Return True if path is relative to anchor (Python < 3.9 compatible)."""
     try:
@@ -2277,7 +2277,7 @@ class InteractiveMenu:
                 print("DRY RUN MODE")
             print()
 
-        # Criar analyzer uma vez fora do loop para eficiencia
+        # Create analyzer once outside the loop for efficiency
         analyzer = FolderAnalyzer(Path("."), origin, dest, self.config.config.export_marker)
         
         for i, (source, dest_path) in enumerate(manifest_entries, 1):

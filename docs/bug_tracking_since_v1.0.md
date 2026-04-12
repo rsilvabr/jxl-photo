@@ -92,7 +92,7 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 75 | MD5 checksums gravados com UUID (staging) | transcoder | ✅ FIXED (v1.5.1) |
 | 76 | decode_to_image retorna staging path | transcoder | ✅ FIXED (v1.5.1) |
 | 77 | JPEG 16-bit→PNG sem atualizar final_path | transcoder | ✅ FIXED (v1.5.1) |
-| 78 | --output_format não suportado djxl 0.11.x | transcoder | ✅ FIXED (v1.5.1) |
+| 78 | --output_format not supported djxl 0.11.x | transcoder | ✅ FIXED (v1.5.1) |
 | 79 | subfolders strings com .name (AttributeError) | photo | ✅ FIXED (v1.5.1) |
 | 80 | dest_path do manifest nunca usado | photo | ✅ FIXED (v1.5.1) |
 | 81 | ICC TRC parsing s15Fixed16Number como float | decoder | ✅ FIXED (v1.5.1) |

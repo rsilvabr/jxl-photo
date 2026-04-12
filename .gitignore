@@ -5,7 +5,7 @@ __pycache__/
 *.so
 .Python
 
-# Logs e temporários
+# Logs and temporary files
 Logs/
 *.log
 *.tmp
@@ -19,7 +19,7 @@ Logs/
 test_roundtrip/
 tests/__pycache__/
 
-# Build e distribuição (usar apenas quando fizer release)
+# Build and distribution (use only when making a release)
 NOT_COMMIT/
 pypi_release/
 build/

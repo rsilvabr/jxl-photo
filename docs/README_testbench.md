@@ -1,97 +1,97 @@
 # jxl-photo Testbench
 
-Testbench automatizado para o toolkit de conversão JXL. Executa testes em todas as direções de conversão e verifica integridade.
+Automated testbench for the JXL conversion toolkit. Runs tests in all conversion directions and verifies integrity.
 
-## 📋 Requisitos
+## 📋 Requirements
 
 - Python 3.9+
-- Pasta de testes com imagens de exemplo (ver estrutura abaixo)
-- Todas as dependências do toolkit instaladas (cjxl, djxl, exiftool, etc.)
+- Test folder with sample images (see structure below)
+- All toolkit dependencies installed (cjxl, djxl, exiftool, etc.)
 
-## 📁 Estrutura de Pasta de Testes
+## 📁 Test Folder Structure
 
 ```
-E:\TESTAR (ou pasta configurada)
-├── tiff\          # Arquivos TIFF 16-bit para teste
-│   ├── foto1.tif
-│   └── foto2.tif
-├── jxl\           # Arquivos JXL para teste
-│   ├── foto1.jxl
-│   └── foto2.jxl
-└── jpg\           # Arquivos JPEG para teste
-    ├── foto1.jpg
-    └── foto2.jpg
+E:\TESTAR (or configured folder)
+├── tiff\          # 16-bit TIFF files for testing
+│   ├── photo1.tif
+│   └── photo2.tif
+├── jxl\           # JXL files for testing
+│   ├── photo1.jxl
+│   └── photo2.jxl
+└── jpg\           # JPEG files for testing
+    ├── photo1.jpg
+    └── photo2.jpg
 ```
 
-> **Dica:** Use uma pasta com poucos arquivos (3-5 de cada tipo) para testes rápidos.
+> **Tip:** Use a folder with few files (3-5 of each type) for quick tests.
 
-## 🚀 Uso
+## 🚀 Usage
 
-### Executar todos os testes
+### Run all tests
 ```powershell
 python testbench.py
 ```
 
-### Modo rápido (apenas 3 primeiros testes)
+### Quick mode (only first 3 tests)
 ```powershell
 python testbench.py --quick
 ```
 
-### Manter arquivos de saída para inspeção
+### Keep output files for inspection
 ```powershell
 python testbench.py --keep-outputs
 ```
 
-### Ver saída detalhada
+### See detailed output
 ```powershell
 python testbench.py --verbose
 ```
 
-### Usar pasta de testes diferente
+### Use different test folder
 ```powershell
-python testbench.py --input-dir "D:\MeusTestes" --output-dir "D:\TestResults"
+python testbench.py --input-dir "D:\MyTests" --output-dir "D:\TestResults"
 ```
 
-## 🧪 Testes Realizados
+## 🧪 Tests Performed
 
-| # | Teste | Script | Verificação |
-|---|-------|--------|-------------|
-| 1 | TIFF → JXL | `jxl_tiff_encoder.py` | Arquivos JXL criados, compressão verificada |
-| 2 | JXL → TIFF | `jxl_tiff_decoder.py` | Arquivos TIFF criados, preview gerado |
-| 3 | JPEG → JXL | `jxl_jpeg_transcoder.py` | Arquivos JXL criados |
-| 4 | JXL → JPEG | `jxl_jpeg_transcoder.py` | Arquivos JPEG criados |
-| 5 | Roundtrip | encoder + decoder | TIFF → JXL → TIFF, verificação de integridade |
+| # | Test | Script | Verification |
+|---|------|--------|--------------|
+| 1 | TIFF → JXL | `jxl_tiff_encoder.py` | JXL files created, compression verified |
+| 2 | JXL → TIFF | `jxl_tiff_decoder.py` | TIFF files created, preview generated |
+| 3 | JPEG → JXL | `jxl_jpeg_transcoder.py` | JXL files created |
+| 4 | JXL → JPEG | `jxl_jpeg_transcoder.py` | JPEG files created |
+| 5 | Roundtrip | encoder + decoder | TIFF → JXL → TIFF, integrity verification |
 
-## 📊 Interpretação de Resultados
+## 📊 Interpreting Results
 
 ### ✓ PASS
-Teste completou com sucesso e todos os arquivos esperados foram criados.
+Test completed successfully and all expected files were created.
 
 ### ✗ FAIL
-Teste falhou. Possíveis causas:
-- Script com erro de sintaxe
-- Dependência faltando (cjxl, djxl, exiftool)
-- Bug no código
-- Arquivos de entrada corrompidos
+Test failed. Possible causes:
+- Script syntax error
+- Missing dependency (cjxl, djxl, exiftool)
+- Bug in the code
+- Corrupted input files
 
 ### ⊘ SKIP
-Teste foi pulado (arquivos de entrada não encontrados na pasta de testes).
+Test was skipped (input files not found in the test folder).
 
-## 🔧 Solução de Problemas
+## 🔧 Troubleshooting
 
 ### "No TIFF files found"
-Certifique-se de que a pasta `tiff/` existe dentro do diretório de testes e contém arquivos `.tif` ou `.tiff`.
+Make sure the `tiff/` folder exists within the test directory and contains `.tif` or `.tiff` files.
 
 ### "Encoder failed"
-Verifique se:
-- `cjxl.exe` está no PATH
-- `exiftool.exe` está no PATH
-- Pacotes Python estão instalados: `pip install tifffile numpy pillow imagecodecs`
+Check if:
+- `cjxl.exe` is in PATH
+- `exiftool.exe` is in PATH
+- Python packages are installed: `pip install tifffile numpy pillow imagecodecs`
 
 ### "Command timed out"
-Arquivos muito grandes ou muitos arquivos podem causar timeout. Use o modo `--quick` ou reduza o número de arquivos de teste.
+Very large files or too many files can cause timeout. Use `--quick` mode or reduce the number of test files.
 
-## 📝 Exemplo de Saída
+## 📝 Example Output
 
 ```
 ============================================================
@@ -136,36 +136,36 @@ Results:
 Finished: 2026-04-10 18:35:00
 ```
 
-## 🔄 Integração com Workflow de Desenvolvimento
+## 🔄 Development Workflow Integration
 
-### Antes de commitar mudanças
+### Before committing changes
 ```powershell
-# 1. Rodar testbench
+# 1. Run testbench
 python testbench.py
 
-# 2. Se tudo passar, commitar
+# 2. If everything passes, commit
 
-# 3. Se falhar, corrigir antes de commitar
+# 3. If it fails, fix before committing
 ```
 
-### Testes de regressão
+### Regression tests
 ```powershell
-# Após corrigir bug, rodar testbench para garantir que não quebrou nada
+# After fixing a bug, run testbench to ensure nothing else broke
 python testbench.py --verbose
 ```
 
-## 🐛 Reportando Bugs
+## 🐛 Reporting Bugs
 
-Se o testbench encontrar falhas:
+If the testbench finds failures:
 
-1. Execute com `--verbose` para obter detalhes
-2. Execute com `--keep-outputs` para inspecionar arquivos
-3. Verifique os logs em `Logs/` dentro da pasta do script
-4. Reporte o problema com:
-   - Saída do testbench
-   - Arquivos de log relevantes
-   - Descrição do ambiente (Windows versão, Python versão)
+1. Run with `--verbose` to get details
+2. Run with `--keep-outputs` to inspect files
+3. Check logs in `Logs/` within the script folder
+4. Report the issue with:
+   - Testbench output
+   - Relevant log files
+   - Environment description (Windows version, Python version)
 
-## 📄 Licença
+## 📄 License
 
-MIT License - mesmo do projeto principal.
+MIT License - same as the main project.
