@@ -1,6 +1,114 @@
 # New Features Since v1.0
 
-## v1.3 (Current)
+## v1.5.1 (Current)
+
+Date: 2026-04-13
+
+### Critical Bug Fix — 8-bit TIFF Conversion
+
+**Location:** `jxl_tiff_encoder.py`
+
+**The Bug:** When converting 8-bit TIFF files to JXL, images appeared completely black (~25 KB instead of ~25 MB). This was a critical data corruption bug affecting all 8-bit TIFF sources (NX Studio, GIMP, Lightroom 8-bit exports).
+
+**Root Cause:** When converting 8→16 bit, pixel values were not scaled. Value 255 (white) became 255 in 0-65535 range = 0.39% brightness.
+
+**Fix:** Proper scaling (multiply by 257 = 65535/255):
+```python
+if img.dtype == np.uint8:
+    img = img.astype(np.uint16) * 257  # 0-255 → 0-65535
+```
+
+**Reported by:** WiseTomCat (NX Studio 8-bit LZW TIFFs)
+
+---
+
+## v1.5
+
+Date: 2026-04-12
+
+### Feature #8 — JXL→JPEG Auto Mode for Directories
+
+**Location:** `jxl_jpeg_transcoder.py`, `jxl_photo.py`
+
+**What changed:** The transcoder can now auto-detect per-file in batch mode:
+- Files WITH jbrd box → lossless transcoding
+- Files WITHOUT jbrd → lossy conversion
+
+**CLI:**
+```bash
+python jxl_jpeg_transcoder.py folder/ --mode 8  # auto-detect per file
+```
+
+**Wizard:** Option [1] "JPEG Auto-Detect" now works for directories
+
+---
+
+### Feature #9 — Configurable JXL→TIFF Preview
+
+**Location:** `jxl_tiff_decoder.py`
+
+**What changed:** Users can now disable the embedded JPEG preview in output TIFF files.
+
+**CLI:**
+```bash
+# With preview (default)
+python jxl_tiff_decoder.py folder/ --mode 1
+
+# Without preview (smaller files)
+python jxl_tiff_decoder.py folder/ --mode 1 --no-preview
+```
+
+**Wizard:** Step 6 asks "Add JPEG preview?"
+
+---
+
+### Feature #10 — Complete Manifest System
+
+**Location:** `jxl_photo.py`
+
+**What changed:** Full workflow support via manifest CSV files:
+- All flags supported (--staging, --embed-thumbnail, --delete-source, --no-preview, --encode-tag, --d50-patch)
+- Consistent behavior between interactive and manifest modes
+- Edit in Excel, comment lines with `#`
+
+**Evolution from v1.3:** The manifest system in v1.3 was functional but missing many flags that existed in interactive mode. In v1.5, all missing flags were added, achieving full parity between interactive and manifest workflows. Previously, using a manifest would result in different behavior (missing thumbnails, different staging, etc.) — now both modes produce identical results.
+
+---
+
+### Feature #11 — D50 Patch Tracking in OFF Mode
+
+**Location:** `jxl_tiff_encoder.py`
+
+**What changed:** When D50 patch is disabled, the script now tracks statistics showing how many files were already correct vs would have needed patching.
+
+---
+
+## v1.4
+
+Date: 2026-04-11
+
+### Feature #7 — Embedded JPEG Thumbnail in JXL (Optional)
+
+**Location:** `jxl_tiff_encoder.py`
+
+**What changed:** Optional embedded JPEG thumbnail (256px, sRGB) in JXL files for fast preview in image viewers.
+
+**CLI:**
+```bash
+python jxl_tiff_encoder.py folder/ --embed-thumbnail
+```
+
+---
+
+### Improvements
+
+- **Auto Mode improvements** — Better folder structure detection
+- **Repeat workflow** — Now saves destination format correctly
+- **Step 2 renumbering** — Fixed TIFF option numbering
+
+---
+
+## v1.3 (Legacy)
 
 Date: 2026-04-11
 Scripts: `jxl_photo.py` (formerly v2), `jxl_tiff_decoder.py`, `jxl_tiff_encoder.py`, `jxl_jpeg_transcoder.py`

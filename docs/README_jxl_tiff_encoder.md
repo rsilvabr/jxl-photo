@@ -256,9 +256,11 @@ Options:
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after successful encode (mode 8 only)
   --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
-  --encode-tag    Where to record encoding params: xmp (default), software, off
-  --d50-patch     D50 illuminant patch: on (always), off (never), auto (detect)
-  --dry-run       Preview operations without converting
+  --encode-tag      Where to record encoding params: xmp (default), software, off
+  --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
+  --strip           Strip all metadata from output (no EXIF/XMP preservation)
+  --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
+  --dry-run         Preview operations without converting
 ```
 
 **D50 Patch option:**

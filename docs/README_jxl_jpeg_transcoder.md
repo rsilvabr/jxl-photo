@@ -284,10 +284,11 @@ Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.
 ## CLI reference
 
 ```
-py jxl_jpeg_transcoder.py <input> [options]
+py jxl_jpeg_transcoder.py <input> [output] [options]
 
 Arguments:
   input              Input file or folder (JXL, JPEG, or PNG)
+  output             Output folder (optional, for mode 0)
 
 Options:
   --mode 0-8         Output folder mode (default: 0 for in-place)
@@ -317,6 +318,12 @@ Options:
 
   --staging PATH     Staging directory for output files
   --effort 1-10      cjxl effort (default: 7)
+  --ram              Use RAM pipeline (faster, default: True)
+  --no-ram           Use disk pipeline (slower, less memory)
+  --output-name NAME Output folder name for convert mode (default: "converted_jxl")
+  --output-suffix SFX Suffix for converted files (default: "")
+  --rename-from PAT  Pattern to rename files (regex)
+  --rename-to REP    Replacement pattern for renamed files
   --dry-run          Preview operations without converting
 ```
 
