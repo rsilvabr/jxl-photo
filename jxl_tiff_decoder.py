@@ -25,6 +25,8 @@ from datetime import datetime
 import argparse
 import numpy as np
 from PIL import Image
+# Disable PIL's decompression bomb warning for large panoramas
+Image.MAX_IMAGE_PIXELS = None
 try:
     from PIL import ImageCms
 except ImportError:
@@ -139,6 +141,11 @@ DELETE_SOURCE = False
 
 DELETE_CONFIRM = True
 # Require interactive confirmation before deleting (MODE 8)
+
+PIL_MAX_IMAGE_PIXELS = None
+# PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
+# None  -> Disable the limit completely (recommended for trusted local files/panoramas)
+# N     -> Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
 
 # ICC Color Management
 CLEANUP_XMP_ICC_MARKER = True

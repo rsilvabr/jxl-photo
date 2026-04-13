@@ -218,6 +218,12 @@ JPEG_PREVIEW_SIZE = 256
 # The preview is automatically converted to sRGB for maximum compatibility
 # with Windows Explorer and other viewers.
 
+PIL_MAX_IMAGE_PIXELS = None
+# PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
+# None  → Disable the limit completely (recommended for trusted local files/panoramas)
+# N     → Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
+# The default PIL limit (~89MP) is too low for large panoramas. Set to None for photography workflows.
+
 USE_MATRIX_MODE = False
 # When True, use Matrix decode mode (linear + LittleCMS color transform).
 # Useful for color space conversions or special workflows.
@@ -585,6 +591,7 @@ Always test with a small batch before processing important archives.
 - **Preview size** - Changed from 1024px to 256px (similar to Capture One's ~160px)
 - **File integrity verification** - Validates TIFF before deleting source JXL
 - **Python 3.9+ compatibility** - Works with modern Python versions
+- **PIL decompression limit** - Added `PIL_MAX_IMAGE_PIXELS` setting for large panoramas (100+ MP)
 
 ### Earlier Changes
 - **8-bit output support** — `--depth 8` flag for web/delivery workflows

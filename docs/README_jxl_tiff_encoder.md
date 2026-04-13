@@ -159,6 +159,12 @@ USE_RAM_FOR_PNG = False
 # True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
+PIL_MAX_IMAGE_PIXELS = None
+# PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
+# None  → Disable the limit completely (recommended for trusted local files/panoramas)
+# N     → Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
+# The default PIL limit (~89MP) is too low for large panoramas. Set to None for photography workflows.
+
 TEMP2_DIR = r"E:\staging"
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
 # Files are moved to their final destination after each folder group completes.
@@ -556,6 +562,12 @@ Always test with a small batch before processing important archives.
 ## Changes since v1.0
 
 ### New Features
+
+**PIL decompression bomb limit — configurable for large panoramas**
+Added `PIL_MAX_IMAGE_PIXELS` setting to disable or configure PIL's decompression bomb protection. This prevents false "DOS attack" warnings when processing large panoramas (100+ MP) that exceed PIL's default ~89MP limit.
+
+- `None` (default): Disable the limit completely (recommended for trusted local files)
+- `N`: Set custom pixel limit (e.g., `500_000_000` for ~500MP)
 
 **D50 illuminant patch — auto-detection (default)**
 Capture One **may export** files with a known ICC rounding error that causes cjxl warnings. The patch was already part of the toolkit, but now supports three operating modes:

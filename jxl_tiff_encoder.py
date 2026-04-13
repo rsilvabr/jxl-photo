@@ -114,6 +114,11 @@ USE_RAM_FOR_PNG = False
 # True  -> PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False -> PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
+PIL_MAX_IMAGE_PIXELS = None
+# PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
+# None  -> Disable the limit completely (recommended for trusted local files/panoramas)
+# N     -> Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
+
 TEMP_DIR = None
 # Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
 # None -> use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
@@ -957,6 +962,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 try:
                     from PIL import Image, ImageCms
                     import io
+                    # Apply user's PIL pixel limit setting (for large panoramas)
+                    Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
                     # Read the original TIFF to generate thumbnail
                     with Image.open(str(tiff_path)) as img:
                         # Extract ICC profile BEFORE any conversion
@@ -1378,16 +1385,19 @@ def main():
     d50_skipped = _d50_patch_count["skipped"]
     already_correct = _d50_patch_count["already_correct"]
     skipped_needed = _d50_patch_count["skipped_needed"]
-    total_processed = applied + d50_skipped + skipped_needed
-    if total_processed > 0:
+    
+    # Total files analyzed for D50 = those where patch was applied + those skipped
+    total_analyzed = applied + d50_skipped
+    # Total that actually needed the patch (were corrected + would have needed but were skipped)
+    total_needed_patch = applied + skipped_needed
+    
+    if total_analyzed > 0:
         if D50_PATCH_MODE == "off":
             # For mode off, we still tracked correctness so user knows how many would have needed patch
             logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
-        elif already_correct > 0:
-            needed_patch = applied - already_correct
-            logger.info(f"D50 patch: {applied} applied ({needed_patch} needed, {already_correct} already correct) | {d50_skipped} skipped (mode: {D50_PATCH_MODE})")
         else:
-            logger.info(f"D50 patch: {applied} applied | {d50_skipped} skipped (mode: {D50_PATCH_MODE})")
+            # Show: applied | skipped | needed patch vs already correct
+            logger.info(f"D50 patch: {applied} applied | {d50_skipped} skipped | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
 
