@@ -135,7 +135,7 @@ The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided
 
 ```
 ╭───────────────────────────────────────────── JXL Tools Environment ────────────────────────────────────────────────╮
-│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich                                 │
+│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
 │  1  New workflow                                                                                                   │
@@ -378,7 +378,7 @@ cd "C:\Users\YourName\Documents\GitHub\jxl-photo"  # adjust path
 py jxl_photo.py
 ```
 
-You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich`
+You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich`
 
 ### Troubleshooting
 

@@ -70,7 +70,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 
 ```
 ╭───────────────────────────────────────────── JXL Tools Environment ────────────────────────────────────────────────╮
-│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] rich                                 │
+│ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
 │  1  New workflow                                                                                                   │
