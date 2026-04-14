@@ -146,6 +146,7 @@ PIL_MAX_IMAGE_PIXELS = None
 # PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
 # None  -> Disable the limit completely (recommended for trusted local files/panoramas)
 # N     -> Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
+Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
 
 # ICC Color Management
 CLEANUP_XMP_ICC_MARKER = True
@@ -200,8 +201,8 @@ EXPORT_TIFF_FOLDER = "16B_TIFF"
 EXPORT_JXL_SUBFOLDER = ""
 # [MODE 6/7] Uses EXPORT_MARKER as an anchor in the path
 # All TIFFs go into EXPORT_MARKER/EXPORT_TIFF_FOLDER/
-# Mode 6: processes JXLs both inside and outside EXPORT_MARKER
-# Mode 7: only processes JXLs inside EXPORT_MARKER
+# Mode 6: processes ALL JXLs inside EXPORT_MARKER recursively (ignores JXLs outside)
+# Mode 7: only processes JXLs inside a specific subfolder of EXPORT_MARKER
 #
 # Example (mode 7, EXPORT_JXL_SUBFOLDER = "JXL"):
 # EXPORT_MARKER/JXL/photo.jxl → EXPORT_MARKER/EXPORT_TIFF_FOLDER/photo.tif
@@ -459,10 +460,11 @@ def extract_icc_from_png(png_path):
         logger.debug(f"PNG ICC extraction failed: {e}")
     return None
 
-def read_png_to_numpy(png_path):
+def read_png_to_numpy(png_path, target_depth=16):
     """
     Read PNG file and convert to numpy array.
     Handles 8-bit and 16-bit RGB/RGBA.
+    Scales 8-bit to 16-bit when target_depth=16.
     """
     with Image.open(png_path) as img:
         # Handle 16-bit modes (I;16, I) - convert to uint16 RGB
@@ -479,12 +481,19 @@ def read_png_to_numpy(png_path):
             arr = np.array(img)
             rgb = arr[:, :, :3]
             alpha = arr[:, :, 3]
-            return rgb, alpha
         elif img.mode == 'RGB':
-            return np.array(img), None
+            rgb = np.array(img)
+            alpha = None
         else:
             rgb_img = img.convert('RGB')
-            return np.array(rgb_img), None
+            rgb = np.array(rgb_img)
+            alpha = None
+
+        # Scale 8-bit → 16-bit when writing 16-bit TIFF
+        if target_depth == 16 and rgb.dtype == np.uint8:
+            rgb = rgb.astype(np.uint16) * 257  # 0-255 → 0-65535
+
+        return rgb, alpha
 
 def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
     """
@@ -1241,7 +1250,7 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
                 # Use PNG intermediate to capture ICC profile from djxl
                 png_path = tmp_dir / f"{jxl_path.stem}_basic.png"
                 decode_auto_png(jxl_path, png_path)
-                pixels, _ = read_png_to_numpy(png_path)
+                pixels, _ = read_png_to_numpy(png_path, target_depth=DJXL_OUTPUT_DEPTH)
                 
                 # Extract ICC from the PNG that djxl generated
                 djxl_icc = extract_icc_from_png(png_path)
@@ -1492,7 +1501,7 @@ Examples:
                 logger.info("Deletion not confirmed -- exiting.")
                 return
 
-    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else "no")
+    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else "no"))
     logger.info(f"Mode: {args.mode} | Depth: {DJXL_OUTPUT_DEPTH} | "
                 f"Compression: {TIFF_COMPRESSION} | Workers: {args.workers}")
     logger.info(f"Matrix: {USE_MATRIX_MODE} | Basic: {FORCE_BASIC_MODE} | None: {FORCE_NONE_MODE} | "

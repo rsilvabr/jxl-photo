@@ -247,11 +247,10 @@ EXPORT_MARKER     = "_EXPORT"
 EXPORT_JXL_FOLDER = "16B_JXL"
 # [MODE 6/7] Uses EXPORT_MARKER as an anchor in the path.
 # All JXLs go into EXPORT_MARKER/EXPORT_JXL_FOLDER/.
-# Mode 6: processes TIFFs both inside and outside EXPORT_MARKER (same parent hierarchy).
-# Mode 7: only processes TIFFs inside EXPORT_MARKER (ignores TIFFs outside).
+# Mode 6: processes ALL TIFFs inside EXPORT_MARKER recursively (ignores TIFFs outside).
+# Mode 7: only processes TIFFs inside a specific subfolder of EXPORT_MARKER (ignores everything else).
 #
 # TIFFs inside EXPORT_MARKER: immediate subfolder (e.g. color space name) is dropped.
-# TIFFs outside EXPORT_MARKER (mode 6 only): relative path from EXPORT_MARKER's parent is preserved.
 #
 # Example (mode 7, EXPORT_TIFF_SUBFOLDER = "TIFF16"):
 #   EXPORT_MARKER/TIFF16/photo.tif      ->  EXPORT_MARKER/EXPORT_JXL_FOLDER/photo.jxl
@@ -1264,7 +1263,7 @@ def main():
     log_file = setup_logger()
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
-    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else "no")
+    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else "no"))
     _tag_label     = ENCODE_TAG_MODE  # xmp, software, or off
     logger.info(
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "

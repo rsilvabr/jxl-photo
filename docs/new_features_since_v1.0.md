@@ -1,6 +1,6 @@
 # New Features Since v1.0
 
-## v1.5.1 (Current)
+## v1.5.1
 
 Date: 2026-04-13
 
@@ -340,6 +340,8 @@ D50 patch: 2 already correct | 8 would have needed (mode: off)
 ## Bug Fixes Summary
 
 **All bugs from v1.0 and v1.1 are documented in `bug_tracking_since_v1.0.md`.**
+
+**Code quality and compatibility notes are in `code_quality_refactoring.md`.**
 
 Key fixes that improved robustness:
 - Race conditions in staging directory (UUID added)

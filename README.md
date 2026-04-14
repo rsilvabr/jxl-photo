@@ -87,6 +87,8 @@ Adds ~20KB per file.
 
 For reliable EXIF viewing regardless of source, use **XnView MP** or **digiKam**.
 
+**Wide-gamut Note:** On an Adobe RGB calibrated monitor, IrfanView and XnView MP may display wide-gamut JXL files (e.g. ProPhoto RGB) with a slightly muted appearance — comparable to the difference between an original Adobe RGB file and the same file properly converted to sRGB. The most vibrant colors that extend beyond sRGB may appear dulled. This is a **subtle viewer rendering limitation**, not data loss — the JXL file still holds the full gamut intact. If the image looks *heavily* desaturated, that is a real bug. You can verify preservation by decoding the JXL back to TIFF: the round-trip TIFF will show the original vibrant colors again in any color-managed editor. See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for details.
+
 ---
 
 ## Features
@@ -553,6 +555,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
+- [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code
 
 ---
 

@@ -32,9 +32,11 @@ Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagic
 | **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 | **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
 
-### exiftool Setup (Important!)
+### exiftool Setup
 
-The download comes as `exiftool(-k).exe`. **Rename it:**
+> **Note:** The scripts automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
+
+The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
 
 ```powershell
 # Option A: Rename
@@ -51,7 +53,7 @@ Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```powershell
 $myPaths = @(
     "C:\tools\libjxl\bin",                           # cjxl.exe, djxl.exe
-    "C:\tools\exiftool",                              # exiftool.exe (RENAMED!)
+    "C:\tools\exiftool",                              # exiftool.exe / exiftool(-k).exe
     "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # magick.exe
 )
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -143,6 +145,11 @@ PNG_BIT_DEPTH = 16
 # 8 or 16. Default 16-bit for PNG preserves full tonal range.
 # Automatically switches to PNG if 16-bit requested with JPEG format.
 
+FORCE_CONTAINER_FOR_LOSSY = True
+# True  → adds --container=1 for lossy JXL encoding (required for EXIF injection)
+# False → skip container flag (may break EXIF visibility in some viewers)
+# Required for lossy (d>0) to allow exiftool to inject metadata
+
 # ── Paths ─────────────────────────────────────────────────────────
 TEMP2_DIR = None
 # Staging directory for output files during conversion.
@@ -232,16 +239,14 @@ E:\sessao\
 
 **Mode 6** — processes ALL files under ALL `_EXPORT` folders found recursively.
 
-**Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT`.
-Default for encode (JPEG→JXL): `_EXPORT/JPEG_recovered`
-Default for decode (JXL→JPEG): `_EXPORT/JPEG_recovered`
+**Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT` (configurable via `EXPORT_JPEG_SUBFOLDER`; default is `""`, which processes all subfolders inside `_EXPORT`).
 
 ```
-Mode 7 example (encode):
+Mode 7 example (encode) with EXPORT_JPEG_SUBFOLDER = "JPEG_recovered":
 session/_EXPORT/JPEG_recovered/photo.jpg → session/_EXPORT/JXL_jpeg/photo.jxl  ✓
 session/_EXPORT/sRGB/photo.jpg          → ignored (doesn't match subfolder)
 
-Mode 7 example (decode):
+Mode 7 example (decode) with EXPORT_JPEG_SUBFOLDER = "JXL":
 session/_EXPORT/JXL/photo.jxl      → session/_EXPORT/JPEG_recovered/photo.jpg  ✓
 session/_EXPORT/AdobeRGB/photo.jxl → ignored
 ```
@@ -252,30 +257,31 @@ Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.
 
 ### Encode modes (JPEG → JXL)
 
-| Mode | Input | Output location | Example |
-| --- | --- | --- | --- |
-| `0` | File or folder | In-place (flat, non-recursive) | `photo.jxl` (same folder) |
-| `1` | Single file | `converted_jxl/` subfolder | `.../converted_jxl/photo.jxl` |
-| `2` | Directory | Recursive to output_root | `output_root/photo.jxl` |
-| `3` | Directory | `converted_jxl/` inside each folder | `.../JPEG/converted_jxl/photo.jxl` |
-| `4` | Directory | Sibling folder `JXL_jpeg/` | `.../JXL_jpeg/photo.jxl` |
-| `5` | Directory | Rename folder (JPEG→JXL) | `.../Export_JXL/photo.jxl` |
-| `6` | Directory | ONLY files INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/JXL_jpeg/...` |
-| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/JXL_jpeg/...` |
-| `8` | Directory | In-place recursive | `.../session/photo.jxl` (next to each JPEG) |
+| Mode | Input | How it finds files | Output location | Example |
+| --- | --- | --- | --- | --- |
+| `0` | File or folder | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) | `photo.jxl` (same folder) |
+| `1` | File or folder | Flat (non-recursive) — only files in the given folder | `converted_jxl/` subfolder | `.../converted_jxl/photo.jxl` |
+| `2` | Directory | Recursive — all subfolders | Recursive to output_root | `output_root/photo.jxl` |
+| `3` | Directory | Recursive — all subfolders | `converted_jxl/` inside each folder | `.../JPEG/converted_jxl/photo.jxl` |
+| `4` | Directory | Recursive — all subfolders | Sibling folder `JXL_jpeg/` | `.../JXL_jpeg/photo.jxl` |
+| `5` | Directory | Recursive — all subfolders | Rename folder (JPEG→JXL) | `.../Export_JXL/photo.jxl` |
+| `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/JXL_jpeg/...` |
+| `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../session/_EXPORT/JXL_jpeg/...` |
+| `8` | File or folder | Recursive — walks all subfolders | In-place **recursive** | `.../session/photo.jxl` (next to each JPEG) |
 
 ### Decode modes (JXL → JPEG)
 
-| Mode | Input | Output location | Example |
-| --- | --- | --- | --- |
-| `0` | Single file | In-place | `photo.jpg` (same folder) |
-| `1` | Single file | `recovered_jpeg/` subfolder | `.../recovered_jpeg/photo.jpg` |
-| `2` | Directory | Recursive to output_root | `output_root/photo.jpg` |
-| `3` | Directory | `recovered_jpeg/` inside each folder | `.../JXL/recovered_jpeg/photo.jpg` |
-| `4` | Directory | Sibling folder `JPEG_recovered/` | `.../JPEG_recovered/photo.jpg` |
-| `5` | Directory | Rename folder (JXL→JPEG_recovered) | `.../Export_JPEG_recovered/photo.jpg` |
-| `6-7` | Directory | ONLY files INSIDE `_EXPORT` — ignores everything outside | `.../_EXPORT/JPEG_recovered/...` |
-| `8` | Directory | In-place recursive | `.../session/photo.jpg` (next to each JXL) |
+| Mode | Input | How it finds files | Output location | Example |
+| --- | --- | --- | --- | --- |
+| `0` | File or folder | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) | `photo.jpg` (same folder) |
+| `1` | File or folder | Flat (non-recursive) — only files in the given folder | `recovered_jpeg/` subfolder | `.../recovered_jpeg/photo.jpg` |
+| `2` | Directory | Recursive — all subfolders | Recursive to output_root | `output_root/photo.jpg` |
+| `3` | Directory | Recursive — all subfolders | `recovered_jpeg/` inside each folder | `.../JXL/recovered_jpeg/photo.jpg` |
+| `4` | Directory | Recursive — all subfolders | Sibling folder `JPEG_recovered/` | `.../JPEG_recovered/photo.jpg` |
+| `5` | Directory | Recursive — all subfolders | Rename folder (JXL→JPEG_recovered) | `.../Export_JPEG_recovered/photo.jpg` |
+| `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../_EXPORT/JPEG_recovered/...` |
+| `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../_EXPORT/JPEG_recovered/...` |
+| `8` | File or folder | Recursive — walks all subfolders | In-place **recursive** | `.../session/photo.jpg` (next to each JXL) |
 
 **Note:** Mode 8 with `--delete-source` is the "archive and replace" workflow — verify your setup with a small batch first. Remember: **lossy operations require HHMM confirmation**, while lossless only requires "yes".
 
@@ -318,6 +324,7 @@ Options:
 
   --staging PATH     Staging directory for output files
   --effort 1-10      cjxl effort (default: 7)
+  --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)
   --no-ram           Use disk pipeline (slower, less memory)
   --output-name NAME Output folder name for convert mode (default: "converted_jxl")
@@ -579,7 +586,7 @@ Always test with a small batch before processing important archives.
 - Distance not passed to cjxl for PNG→JXL encoding
 - Integer overflow in JXL box parser (size limits)
 
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
 
 * * *
 

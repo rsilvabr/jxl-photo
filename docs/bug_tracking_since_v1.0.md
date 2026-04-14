@@ -28,17 +28,13 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 11 | cjxl --lossless_jpeg=1 incompatible with distance>0 | transcoder | ✅ FIXED |
 | 12 | Strip flag not implemented | encoder | ✅ FIXED |
 | 13 | Status string case inconsistency | decoder | ✅ FIXED |
-| 14 | Basic mode now preserves djxl ICC | decoder | ✅ IMPROVED (v1.2) |
 | 15 | Missing method in manifest workflow | photo_v2 | ✅ FIXED (v1.3) |
 | 16 | Race condition in TIFF deletion | encoder | ✅ FIXED (v1.3) |
 | 17 | Deadlock in djxl+magick pipeline | transcoder | ✅ FIXED (v1.3) |
-| 18 | Python 3.9+ compatibility | photo_v2 | ✅ FIXED (v1.3) |
 | 19 | MD5 verification after reconvert | transcoder | ✅ FIXED (v1.3) |
 | 20 | Missing subprocess timeout | photo_v2 | ✅ FIXED (v1.3) |
-| 21 | Bare except clauses | all scripts | ✅ FIXED (v1.3) |
 | 22 | Race condition in JXL deletion | decoder | ✅ FIXED (v1.3) |
 | 23 | Race condition in source deletion | transcoder | ✅ FIXED (v1.3) |
-| 24 | Python 3.9+ compatibility (all scripts) | encoder, decoder, transcoder | ✅ FIXED (v1.3) |
 | 25 | CJXL_DISTANCE range validation | encoder | ✅ FIXED (v1.3) |
 | 26 | ExifTool timeout | encoder, transcoder | ✅ FIXED (v1.3) |
 | 27 | `--distance 95` passed to transcoder (invalid) | photo | ✅ FIXED (v1.3) |
@@ -46,14 +42,10 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 29 | `_show_mode_details_and_select` returns string not bool | photo | ✅ FIXED (v1.3) |
 | 30 | Timeout not handled in subprocess | photo | ✅ FIXED (v1.3) |
 | 31 | Set unordered in checksum DB path | transcoder | ✅ FIXED (v1.3) |
-| 32 | `import Path` redundant in `_execute_manifest_workflow` | photo | ✅ FIXED (v1.3) |
 | 33 | Rich markup leaking in fallback without Rich | photo | ✅ FIXED (v1.3) |
-| 34 | Type hint `str \| None` (Python < 3.10 incompatible) | transcoder | ✅ FIXED (v1.3) |
-| 35 | JXL→JPEG auto mode not working for directories | transcoder, photo | ✅ FIXED (v1.5) |
 | 36 | Quality/sRGB asked for lossless JXL→JPEG | photo | ✅ FIXED (v1.4) |
 | 37 | Repeat last workflow not saving dest format | photo | ✅ FIXED (v1.4) |
 | 38 | Step 2 TIFF option misnumbered | photo | ✅ FIXED (v1.4) |
-| 39 | JXL→TIFF preview not configurable | decoder, photo | ✅ FIXED (v1.5) |
 | 40 | TIFF encoder Mode 3 using wrong folder constant | encoder | ✅ FIXED (v1.5) |
 | 41 | TIFF encoder Mode 0 searching JPEG files | encoder | ✅ FIXED (v1.5) |
 | 42 | Variable 'skipped' overwritten in encoder summary | encoder | ✅ FIXED (v1.5) |
@@ -62,9 +54,6 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 45 | Thumbnail fallback using undefined PIL | encoder | ✅ FIXED (v1.5) |
 | 46 | D50 summary uses wrong variable | encoder | ✅ FIXED (v1.5) |
 | 47 | Thumbnail return aborts conversion | encoder | ✅ FIXED (v1.5) |
-| 48 | ICC comments misplaced | encoder | ✅ FIXED (v1.5) |
-| 49 | TIFF docstring order wrong | decoder | ✅ FIXED (v1.5) |
-| 50 | OVERWRITE == False should be 'is' | encoder, decoder | ✅ FIXED (v1.5) |
 | 51 | --effort CLI ignored in transcode | transcoder | ✅ FIXED (v1.5) |
 | 52 | bit_depth hardcoded in auto mode | transcoder | ✅ FIXED (v1.5) |
 | 53 | ICC ignored with --no-ram | transcoder | ✅ FIXED (v1.5) |
@@ -80,7 +69,6 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 63 | EXIF binary corrupted by text=True | transcoder | ✅ FIXED (v1.5) |
 | 64 | Mode 1 directory behavior wrong | encoder | ✅ FIXED (v1.5) |
 | 65 | extract_exif_raw r.stdout None check | encoder | ✅ FIXED (v1.5) |
-| 66 | _d50_patch_count["skipped"] never incremented | encoder | ⚠️ DEAD CODE |
 | 67 | --no-ram never works | encoder | ✅ FIXED (v1.5) |
 | 68 | strip_metadata deletes Description | encoder | ✅ FIXED (v1.5) |
 | 69 | PNG 8-bit shift results in zeros | decoder | ✅ FIXED (v1.5) |
@@ -92,7 +80,6 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 75 | MD5 checksums saved with UUID (staging) | transcoder | ✅ FIXED (v1.5.1) |
 | 76 | decode_to_image returns staging path | transcoder | ✅ FIXED (v1.5.1) |
 | 77 | JPEG 16-bit→PNG without updating final_path | transcoder | ✅ FIXED (v1.5.1) |
-| 78 | --output_format not supported djxl 0.11.x | transcoder | ✅ FIXED (v1.5.1) |
 | 79 | subfolders strings with .name (AttributeError) | photo | ✅ FIXED (v1.5.1) |
 | 80 | manifest dest_path never used | photo | ✅ FIXED (v1.5.1) |
 | 81 | ICC TRC parsing s15Fixed16Number as float | decoder | ✅ FIXED (v1.5.1) |
@@ -102,8 +89,15 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 85 | EXPORT_MARKER find_* vs resolve_output inconsistent | encoder, transcoder | ✅ FIXED (v1.5.1) |
 | 86 | Inconsistent returns 3 vs 4 elements | transcoder | ✅ FIXED (v1.5.1) |
 | 87 | 8-bit TIFF → JXL black images (scaling) | encoder | ✅ FIXED (v1.5.2) |
+| 88 | OVERWRITE log reports "no" when default is "smart" | encoder, decoder | ✅ FIXED |
+| 89 | PIL_MAX_IMAGE_PIXELS config ignored in decoder | decoder | ✅ FIXED |
+| 90 | 8-bit PNG not scaled to 16-bit in decoder | decoder | ✅ FIXED |
 
-**Total bugs fixed: 87**
+**Total bugs fixed: 78**
+
+> **Note:** Items related to new features, code quality, and compatibility have been moved to:
+> - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
+> - [`code_quality_refactoring.md`](code_quality_refactoring.md) — for internal cleanups, compat backports, and dead code
 
 ## Detailed Bug Reports
 
@@ -1487,15 +1481,60 @@ if args.format == "jpg":
 
 ---
 
+## Additional Fixes (Post v1.5.2)
+
+### Bug #88 — OVERWRITE Log Reports "no" When Default Is "smart"
+
+**Location:** `jxl_tiff_encoder.py` and `jxl_tiff_decoder.py`
+
+**Problem:** Both scripts set `OVERWRITE = "smart"` as the default behavior, but the startup log only checked CLI flags (`args.sync` and `args.overwrite`) when building the log string. If the user ran the script without any overwrite-related flags, the log would show `Overwrite: no` even though the actual behavior was smart sync (comparing file timestamps to skip up-to-date files). This was misleading and could cause confusion about why files were being skipped.
+
+**Fix:** Updated the log string to also check the global `OVERWRITE` variable:
+```python
+_overwrite_str = "sync" if args.sync else (
+    "yes" if args.overwrite else (
+        "smart" if OVERWRITE == "smart" else "no"
+    )
+)
+```
+
+---
+
+### Bug #89 — PIL_MAX_IMAGE_PIXELS Config Ignored in Decoder
+
+**Location:** `jxl_tiff_decoder.py`
+
+**Problem:** The script hardcoded `Image.MAX_IMAGE_PIXELS = None` immediately after importing PIL (line 29), but also provided a user-configurable variable `PIL_MAX_IMAGE_PIXELS = None` later in the settings block (line 145). If a user changed the value in the settings block, it had no effect because the hardcoded assignment was never updated.
+
+**Fix:** Added `Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS` after the user setting, matching the pattern already used in `jxl_tiff_encoder.py`.
+
+---
+
+### Bug #90 — 8-bit PNG Not Scaled to 16-bit in Decoder
+
+**Location:** `jxl_tiff_decoder.py` — `read_png_to_numpy()`
+
+**Problem:** When Basic decode mode extracted a PNG from `djxl`, the function returned 8-bit pixel data as `np.uint8` without scaling to 16-bit. If `DJXL_OUTPUT_DEPTH` was 16 (the default), the resulting TIFF would contain values 0-255 in a 16-bit container — producing a very dark image, similar to the critical Bug #87 in the encoder.
+
+**Fix:** Updated `read_png_to_numpy()` to accept a `target_depth` parameter. When `target_depth == 16` and the array dtype is `uint8`, it now applies the same `* 257` scaling used elsewhere in the codebase:
+```python
+if target_depth == 16 and rgb.dtype == np.uint8:
+    rgb = rgb.astype(np.uint16) * 257  # 0-255 → 0-65535
+```
+The Basic mode call was also updated to pass `DJXL_OUTPUT_DEPTH` explicitly.
+
+---
+
 ## Final Summary (All Bugs Fixed)
 
-**Total bugs fixed: 86**
+**Total bugs fixed: 78**
 - 45 bugs from v1.0-v1.4
 - 13 bugs from Claude Code audit (1st pass)
 - 3 bugs from first pass additions
 - 5 bugs from second pass (critical)
 - 5 bugs from third pass (polish)
 - 15 bugs from v1.5.1 final pass
+- 3 bugs from post-v1.5.2 audit
 
 **Critical bugs (would cause data loss/corruption):**
 - #6, #62: Integer overflow / Extended size
@@ -1506,8 +1545,9 @@ if args.format == "jpg":
 - #70: cleanup_xmp_icc duplicates label
 - #75: MD5 checksums with UUID (staging)
 - #84: resolve_output_convert parameters swapped
+- #87, #90: 8-bit scaling (TIFF encoder and PNG decoder)
 
-**All 86 bugs documented, fixed, and tested.**
+**All 78 bugs documented, fixed, and tested.**
 
 
 ---
@@ -1515,8 +1555,8 @@ if args.format == "jpg":
 ## Scripts Affected
 
 - `jxl_jpeg_transcoder.py` — Bug fixes #1, #2, #3, #4, #6, #8, #11, #17, #19, #21, #23, #24, #26
-- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7, #12, #16, #21, #24, #25, #26
-- `jxl_tiff_decoder.py` — Bug fixes #1, #5, #6, #13, #21, #22, #24, Improvement #14 (merged v2 features)
+- `jxl_tiff_encoder.py` — Bug fixes #1, #5, #6, #7, #12, #16, #21, #24, #25, #26, #88
+- `jxl_tiff_decoder.py` — Bug fixes #1, #5, #6, #13, #21, #22, #24, #69, #73, #74, #81, #88, #89, #90, Improvement #14 (merged v2 features)
 - `jxl_photo.py` — Bug fixes #2, #9, #10, #21
 - `jxl_photo_v2.py` — Bug fixes #15, #18, #20, #21
 

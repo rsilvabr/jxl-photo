@@ -288,6 +288,8 @@ exiftool -ProfileDescription -ProfileCopyright roundtrip.tif
 
 ## Troubleshooting Color Issues
 
+> **Golden rule:** When in doubt, test with a single photo or a small batch. Encode them, decode them back, and compare with the originals. If the round-trip files match, your workflow is safe — any difference you see in a viewer is simply how that viewer renders the file.
+
 ### Issue: Colors look different after round-trip
 
 **Check 1:** Was ICC embedded?
@@ -318,6 +320,25 @@ exiftool -ProfileDescription original.tif roundtrip.tif
 files, regardless of actual colorspace. This is a display bug, not a conversion issue.
 
 Verify with `jxlinfo` or open in GIMP/Darktable.
+
+### Issue: Wide-gamut JXL looks slightly muted in IrfanView / XnView MP on Adobe RGB monitors
+
+**What you see:** When opening a wide-gamut JXL (e.g. ProPhoto RGB) on an Adobe RGB calibrated monitor using IrfanView or XnView MP, the image may look slightly muted — comparable to the difference between viewing an original Adobe RGB file and the same file properly converted to sRGB on that same monitor. The most vibrant colors that extend beyond sRGB appear dulled, as if the viewer were limiting the gamut to sRGB for on-screen preview.
+
+> **Important distinction:** If the image looks *heavily* desaturated — as if ProPhoto RGB were being treated as sRGB — that is not this issue. Strong desaturation indicates a real conversion or color-management bug.
+
+**What is actually happening:** The JXL file still contains the full wide-gamut color data. IrfanView and XnView MP appear to render JXL on screen using a narrower gamut path, even when your monitor is capable of displaying a larger gamut. They are not showing you the full gamut that the file actually holds.
+
+**How to verify the file is really intact:**
+1. Decode the JXL back to TIFF with `jxl_tiff_decoder.py`
+2. Open the round-trip TIFF in an ICC-aware editor (Capture One, Photoshop, NX Studio)
+3. The colors will be fully vibrant again, identical to the original TIFF
+
+Alternatively, open the original JXL in a color-managed browser such as Waterfox (or Firefox). Browsers with proper color management may render the full gamut correctly on wide-gamut displays.
+
+> **The file is safe.** The subtle gamut reduction is only in how these viewers render the image on screen — the underlying pixel data and ICC profile remain fully preserved.
+
+---
 
 ### Issue: IrfanView shows wrong colors (calibrated monitor) — reported & fixed
 

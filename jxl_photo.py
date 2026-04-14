@@ -254,6 +254,9 @@ class DependencyChecker:
         variations = [cmd]
         if platform.system() == "Windows":
             variations.extend([f"{cmd}.exe", f"{cmd}.cmd", f"{cmd}.bat"])
+            if cmd == "exiftool":
+                variations.extend(["exiftool(-k)", "exiftool(-k).exe",
+                                   "exiftool-k", "exiftool-k.exe"])
 
         for variant in variations:
             path = shutil.which(variant)
@@ -2073,10 +2076,10 @@ class InteractiveMenu:
         if show_expert:
             if RICH_AVAILABLE and console:
                 console.print("[dim]Enter any additional flags as they would appear on command line:[/dim]")
-                console.print("[dim]Example: --strip --resize 50% --effort 10[/dim]")
+                console.print("[dim]Example: --strip --effort 10 --d50-patch warm[/dim]")
                 expert_flags = Prompt.ask("Custom flags", default="")
             else:
-                print("Enter additional flags (e.g., --strip --resize 50% --effort 10):")
+                print("Enter additional flags (e.g., --strip --effort 10 --d50-patch warm):")
                 expert_flags = input("> ").strip()
 
             workflow['expert_flags'] = expert_flags

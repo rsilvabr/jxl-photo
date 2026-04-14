@@ -35,9 +35,11 @@ If `rich` is not installed, the tool falls back to plain text mode automatically
 | **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 | **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
 
-### exiftool Setup (Important!)
+### exiftool Setup
 
-The download comes as `exiftool(-k).exe`. **Rename it:**
+> **Note:** The scripts (including the wrapper `jxl_photo.py`) automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
+
+The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
 
 ```powershell
 # Option A: Rename
@@ -46,8 +48,6 @@ Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
 # Option B: Duplicate and rename (keeps original)
 Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
-
-The wrapper detects tools automatically, but requires `exiftool.exe` (not `exiftool(-k).exe`).
 
 ### Verify
 ```powershell
@@ -157,17 +157,17 @@ Enter the folder path containing the files. Shows a preview of found files befor
 ### Step 4 — Organization Mode
 How output files are organized. Press `?` for detailed explanations with visual examples.
 
-| Mode | Name | Description |
-|------|------|-------------|
-| `0` | In-place | Same folder as source (non-recursive) |
-| `1` | Subfolder | Creates `converted_jxl/` or `converted_tiff/` subfolder |
-| `2` | Flat -> output folder | All files merged to single output folder (recursive) |
-| `3` | Recursive subfolders | Each subfolder gets its own output subfolder |
-| `4` | Sibling folder (rename) | Renames folder: `JXL_raw/` → `JXL_processed/` |
-| `5` | Folder suffix | Appends suffix: `Raw/` → `Raw_JXL/` |
-| `6` | Marker _EXPORT (full) | ONLY files INSIDE `_EXPORT` — ignores everything outside |
-| `7` | Marker _EXPORT (subfolder) | Like mode 6 but only specific `_EXPORT` subfolder (e.g. `_EXPORT/JXL`) |
-| `8` | DELETE originals ⚠️ | Same as mode 0 but deletes source files — IRREVERSIBLE |
+| Mode | Input | How it finds files | Name | Description |
+|------|-------|-------------------|------|-------------|
+| `0` | File or folder | Flat (non-recursive) — only files in the given folder | In-place (flat) | Same folder as source. If folder: non-recursive (flat) |
+| `1` | File or folder | Flat (non-recursive) — only files in the given folder | Subfolder | Creates `converted_jxl/` or `converted_tiff/` subfolder next to source |
+| `2` | Directory | Recursive — all subfolders | Flat → output folder | All files merged to single output folder (recursive) |
+| `3` | Directory | Recursive — all subfolders | Recursive subfolders | Each subfolder gets its own output subfolder |
+| `4` | Directory | Recursive — all subfolders | Sibling folder (rename) | Renames folder: `JXL_raw/` → `JXL_processed/` |
+| `5` | Directory | Recursive — all subfolders | Folder suffix | Appends suffix: `Raw/` → `Raw_JXL/` |
+| `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | Marker _EXPORT (full) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name is configurable. |
+| `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Marker _EXPORT (subfolder) | Like mode 6 but only a specific subfolder of `EXPORT_MARKER`. Both the marker name and the subfolder are configurable. |
+| `8` | File or folder | Recursive — walks all subfolders | DELETE originals ⚠️ | In-place **recursive**. Same folder as source, walks subfolders. Deletes source files — IRREVERSIBLE |
 
 Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
 
@@ -310,6 +310,8 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `JXL_SUFFIX_REPLACE` | `"JXL"` | Mode 4 suffix replacement |
 | `EMBED_ICC_IN_JXL` | `True` | Embed ICC in JXL metadata |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record d=/e= (now also via `--encode-tag`) |
+| `EMBED_JPEG_THUMBNAIL` | `False` | Embed 256px JPEG thumbnail in JXL (also `--embed-thumbnail`) |
+| `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
 | `DELETE_CONFIRM` | `True` | Require HHMMSS confirmation for mode 8 delete |
 
@@ -338,7 +340,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `PNG_DEFAULT_BIT_DEPTH` | `16` | Default PNG bit depth |
 | `STORE_MD5` | `True` | Store MD5 for losslessness verification |
 | `DELETE_CONFIRM` | `True` | Require confirmation for mode 8 delete |
-| `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy |
+| `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy encode |
 
 * * *
 
@@ -412,7 +414,7 @@ Always test with a small batch before processing important archives.
 - D50 patch not preserved when repeating last workflow
 - Invalid --resize option removed (not supported by any script)
 
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
 
 * * *
 

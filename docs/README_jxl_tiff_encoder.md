@@ -35,9 +35,11 @@ Both `cjxl.exe` and `exiftool.exe` must be on your PATH.
 | **cjxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
 | **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 
-### exiftool Setup (Important!)
+### exiftool Setup
 
-The download comes as `exiftool(-k).exe`. **Rename it:**
+> **Note:** The scripts automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
+
+The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
 
 ```powershell
 # Option A: Rename
@@ -54,7 +56,7 @@ Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```powershell
 $myPaths = @(
     "C:\tools\libjxl\bin",    # where cjxl.exe is
-    "C:\tools\exiftool"        # where exiftool.exe is (RENAMED!)
+    "C:\tools\exiftool"        # where exiftool.exe / exiftool(-k).exe is
 )
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 [Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
@@ -136,6 +138,20 @@ ENCODE_TAG_MODE = "xmp"
 # NOTE: When EMBED_ICC_IN_JXL is True, encoding params go to XMP:CreatorTool
 # (dc:Description is used for ICC embedding).
 
+EMBED_JPEG_THUMBNAIL = False
+# Embed a JPEG thumbnail (256px) in the JXL file EXIF metadata.
+# True  → creates a 256px JPEG preview and embeds it as EXIF thumbnail
+#          Increases file size by ~10-30KB per image
+#          Useful for fast preview in IrfanView, XnView, digiKam
+# False → no embedded thumbnail (default, smaller files)
+# Can also be set via --embed-thumbnail CLI argument.
+
+CJXL_MODULAR = False
+# False (default) — lossy uses VarDCT encoder + XYB colorspace.
+# True  — forces Modular encoder for lossy (--modular=1).
+#   Less efficient for photos, but good for screenshots/UI art.
+#   Use only if you need non-XYB encoding for compatibility reasons.
+
 D50_PATCH_MODE = "auto"
 # D50 illuminant patch for Capture One ICC compatibility.
 # Capture One has a bug where the D50 illuminant values are slightly off
@@ -216,10 +232,10 @@ E:\sessao\
 
 **Mode 6** — processes ALL TIFFs under ALL `_EXPORT` folders.
 
-**Mode 7** — only TIFFs inside a specific subfolder of `_EXPORT` (default: `_EXPORT/16B_TIFF` → output to `_EXPORT/16B_JXL`).
+**Mode 7** — only TIFFs inside a specific subfolder of `_EXPORT` (configurable via `EXPORT_TIFF_SUBFOLDER`; default is `""`, which processes all subfolders inside `_EXPORT`).
 
 ```
-Mode 7 example with default settings:
+Mode 7 example with EXPORT_TIFF_SUBFOLDER = "16B_TIFF":
 session/_EXPORT/16B_TIFF/photo.tif → session/_EXPORT/16B_JXL/photo.jxl  ✓
 session/_EXPORT/AdobeRGB/photo.tif → ignored
 ```
@@ -228,17 +244,17 @@ session/_EXPORT/AdobeRGB/photo.tif → ignored
 
 ## Output modes
 
-| Mode | Input | Output location | Example |
-|------|-------|----------------|---------|
-| `0` | File: single file / Folder: all files | In-place (output in same folder) | `photo.jxl` |
-| `1` | File or directory | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
-| `2` | Directory | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
-| `3` | Directory | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
-| `4` | Directory | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
-| `5` | Directory | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
-| `6` | Directory | ONLY TIFFs INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/16B_JXL/photo.jxl` |
-| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/16B_JXL/photo.jxl` |
-| `8` | Directory | In-place recursive — JXL next to each TIFF | `.../session/photo.jxl` |
+| Mode | Input | How it finds files | Output location | Example |
+|------|-------|-------------------|----------------|---------|
+| `0` | File or directory | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) | `photo.jxl` |
+| `1` | File or directory | Flat (non-recursive) — only files in the given folder | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
+| `2` | Directory | Recursive — all subfolders | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
+| `3` | Directory | Recursive — all subfolders | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
+| `4` | Directory | Recursive — all subfolders | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
+| `5` | Directory | Recursive — all subfolders | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
+| `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY TIFFs INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../session/_EXPORT/16B_JXL/photo.jxl` |
+| `8` | File or directory | Recursive — walks all subfolders | In-place **recursive** — JXL next to each TIFF | `.../session/photo.jxl` |
 
 ---
 
@@ -584,7 +600,7 @@ Script setting: `D50_PATCH_MODE = "auto"` (default)
 - Race condition in staging directory (UUID-based filenames)
 - D50 patch statistics now shown in summary output
 
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
 
 ---
 

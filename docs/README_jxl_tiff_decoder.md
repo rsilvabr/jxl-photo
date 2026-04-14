@@ -34,9 +34,11 @@ Both `djxl.exe` and `exiftool.exe` must be on your PATH.
 | **djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
 | **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
 
-### exiftool Setup (Important!)
+### exiftool Setup
 
-The download comes as `exiftool(-k).exe`. **Rename it:**
+> **Note:** The scripts automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
+
+The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
 
 ```powershell
 # Option A: Rename
@@ -53,7 +55,7 @@ Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```powershell
 $myPaths = @(
     "C:\tools\libjxl\bin",    # where djxl.exe is
-    "C:\tools\exiftool"        # where exiftool.exe is (RENAMED!)
+    "C:\tools\exiftool"        # where exiftool.exe / exiftool(-k).exe is
 )
 $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 [Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
@@ -249,7 +251,7 @@ OVERWRITE = "smart"
 # "smart" → same as --sync: reconvert only if JXL is newer than TIFF
 
 DELETE_SOURCE = False
-# [Modes 6/8 only] False → JXL and TIFF coexist (safe default)
+# [Mode 8 only] False → JXL and TIFF coexist (safe default)
 # True  → delete source JXL after confirmed successful decode (irreversible)
 
 # — Safety (DELETE_SOURCE only) —
@@ -329,10 +331,10 @@ E:\sessao\
 
 **Mode 6** — processes ALL JXLs under ALL `_EXPORT` folders.
 
-**Mode 7** — only JXLs inside a specific subfolder of `_EXPORT` (default: `_EXPORT/JXL` → output to `_EXPORT/16B_TIFF`).
+**Mode 7** — only JXLs inside a specific subfolder of `_EXPORT` (configurable via `EXPORT_JXL_SUBFOLDER`; default is `""`, which processes all subfolders inside `_EXPORT`).
 
 ```
-Mode 7 example with default settings:
+Mode 7 example with EXPORT_JXL_SUBFOLDER = "JXL":
 session/_EXPORT/JXL/photo.jxl      → session/_EXPORT/16B_TIFF/photo.tif  ✓
 session/_EXPORT/AdobeRGB/photo.jxl → ignored
 session/_EXPORT/sRGB/photo.jxl     → ignored
@@ -342,17 +344,17 @@ session/_EXPORT/sRGB/photo.jxl     → ignored
 
 ## Output modes
 
-| Mode | Input | Output location | Example |
-|------|-------|----------------|---------|
-| `0` | File or folder | In-place or → output_dir (flat, non-recursive) | `photo.tif` / `output_dir/photo.tif` |
-| `1` | Single file | `converted_tiff/` subfolder next to source | `.../converted_tiff/photo.tif` |
-| `2` | Directory | Recursive → output_dir | `output_dir/photo.tif` |
-| `3` | Directory | `converted_tiff/` inside each JXL folder | `.../JXL/converted_tiff/photo.tif` |
-| `4` | Directory | Rename folder `JXL` → `TIFF` | `.../Export_TIFF/photo.tif` |
-| `5` | Directory | Sibling folder `TIFF_16bits/` | `.../TIFF_16bits/photo.tif` |
-| `6` | Directory | ONLY JXLs INSIDE `_EXPORT` — ignores everything outside | `.../session/_EXPORT/16B_TIFF/photo.tif` |
-| `7` | Directory | Like mode 6 but only specific `_EXPORT` subfolder | `.../session/_EXPORT/16B_TIFF/photo.tif` |
-| `8` | Directory | In-place recursive — TIFF next to each JXL | `.../session/photo.tif` |
+| Mode | Input | How it finds files | Output location | Example |
+|------|-------|-------------------|----------------|---------|
+| `0` | File or directory | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) or → output_dir | `photo.tif` / `output_dir/photo.tif` |
+| `1` | File or directory | Flat (non-recursive) — only files in the given folder | `converted_tiff/` subfolder next to source | `.../converted_tiff/photo.tif` |
+| `2` | Directory | Recursive — all subfolders | Recursive → output_dir | `output_dir/photo.tif` |
+| `3` | Directory | Recursive — all subfolders | `converted_tiff/` inside each JXL folder | `.../JXL/converted_tiff/photo.tif` |
+| `4` | Directory | Recursive — all subfolders | Rename folder `JXL` → `TIFF` | `.../Export_TIFF/photo.tif` |
+| `5` | Directory | Recursive — all subfolders | Sibling folder `TIFF_16bits/` | `.../TIFF_16bits/photo.tif` |
+| `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY JXLs INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/16B_TIFF/photo.tif` |
+| `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../session/_EXPORT/16B_TIFF/photo.tif` |
+| `8` | File or directory | Recursive — walks all subfolders | In-place **recursive** — TIFF next to each JXL | `.../session/photo.tif` |
 ```
 session/_EXPORT/JXL/photo.jxl      →  session/_EXPORT/16B_TIFF/photo.tif  ✓
 session/_EXPORT/AdobeRGB/photo.jxl →  ignored
@@ -599,7 +601,7 @@ Always test with a small batch before processing important archives.
 - PPM truncation validation
 - Integer overflow in JXL box parser (size limits)
 
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md)
+Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
 
 ---
 
