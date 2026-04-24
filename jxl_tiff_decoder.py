@@ -288,7 +288,7 @@ def extract_icc_from_xmp(jxl_path):
     try:
         r = subprocess.run(
             [_get_exiftool_cmd(), "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
         )
         if r.returncode == 0 and r.stdout:
             # Look for ICC: prefix followed by base64 data (flexible regex)
@@ -847,7 +847,7 @@ def cleanup_xmp_icc(tiff_path):
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
             content = r.stdout.strip()
-            clean = re.sub(r'ICC:[A-Za-z0-9+/=]+', '', content).strip()
+            clean = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', content).strip()
             clean = re.sub(r'\s*\|\s*$', '', clean)
             if not clean:
                 clean = "jxl_tiff_decoder"
@@ -892,6 +892,11 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         else:
             h, w = img_data.shape[:2]
 
+        # Safety check: skip preview for empty/corrupted images
+        if h == 0 or w == 0 or img_data.size == 0:
+            logger.warning(f" >Skipping JPEG preview: empty image dimensions ({h}x{w})")
+            return
+
         # Calculate resize dimensions
         max_dim = JPEG_PREVIEW_SIZE
         if w >= h:
@@ -908,7 +913,12 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             img_8bit = img_data
         else:
             mx = img_data.max()
-            img_8bit = ((img_data.astype(np.float32) / mx) * 255).astype(np.uint8) if mx > 0 else img_data.astype(np.uint8)
+            # Handle NaN, Inf, or zero max values safely
+            if np.isnan(mx) or np.isinf(mx) or mx <= 0:
+                logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
+                img_8bit = np.clip(img_data, 0, 255).astype(np.uint8)
+            else:
+                img_8bit = ((img_data.astype(np.float32) / mx) * 255).astype(np.uint8)
 
         # Resize using high-quality resampling
         pil_img = Image.fromarray(img_8bit)
@@ -1147,7 +1157,10 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
 
     overwritten = already_exists
 
-    write_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
     with tempfile.TemporaryDirectory(prefix="tiff_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)

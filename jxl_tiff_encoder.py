@@ -582,7 +582,7 @@ def extract_xmp_original(tiff_path, tmp_dir):
     # Correct order: -o output.xmp -b -XMP input.tif
     r = subprocess.run(
         [_get_exiftool_cmd(), "-o", str(xmp_path), "-b", "-XMP", str(tiff_path)],
-        capture_output=True
+        capture_output=True, timeout=60
     )
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
         return xmp_path
@@ -631,7 +631,7 @@ def read_existing_creator_tool(xmp_path):
         return ""
     r = subprocess.run(
         [_get_exiftool_cmd(), "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
-        capture_output=True, text=True
+        capture_output=True, text=True, timeout=10
     )
     if r.returncode == 0 and r.stdout:
         stdout = r.stdout.strip()
@@ -765,8 +765,10 @@ def make_png_bytes(img, icc_bytes=None):
     if img.dtype == np.uint8:
         img_16 = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
         img_be = img_16.astype(">u2")
-    else:
+    elif img.dtype == np.uint16:
         img_be = img.astype(">u2")
+    else:
+        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
     raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
 
     out = b"\x89PNG\r\n\x1a\n"
@@ -811,10 +813,12 @@ def reorder_jxl_boxes(jxl_path):
         if size == 1:
             # Extended size (64-bit)
             if i + 16 > file_size:
-                break
+                raise RuntimeError(f"Truncated extended box at offset {i}: file too short for 16-byte header")
             ext_size = int.from_bytes(data[i+8:i+16], "big")
             if ext_size > MAX_BOX_SIZE:
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            if i + ext_size > file_size:
+                raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
             header, payload = data[i:i+16], data[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
@@ -824,6 +828,8 @@ def reorder_jxl_boxes(jxl_path):
             boxes.append((name, header, payload))
             break
         else:
+            if i + size > file_size:
+                raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
             header, payload = data[i:i+8], data[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
@@ -880,7 +886,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 return (str(tiff_path), "skipped", str(final_path), None)
             logger.info(f"  >SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
-    write_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # Another thread may have created it
 
     with tempfile.TemporaryDirectory(prefix="jxl_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
@@ -924,7 +933,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 png_input = make_png_bytes(img, icc_bytes)
                 del img
                 cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
-                r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True)
+                r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
                 del png_input
             else:
                 png_path = tmp_dir / f"{tiff_path.stem}.png"
@@ -933,7 +942,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                 png_path.write_bytes(png_bytes)
                 del png_bytes
                 cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
-                r = subprocess.run(cjxl_cmd, capture_output=True)
+                r = subprocess.run(cjxl_cmd, capture_output=True, timeout=600)
 
             if r.returncode != 0:
                 err = (r.stderr or b"").decode(errors='replace')[:200]
@@ -993,15 +1002,15 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                         # Save as JPEG temporary (sRGB, no ICC embedded)
                         thumb_path = tmp_dir / "thumbnail.jpg"
                         thumb.save(str(thumb_path), "JPEG", quality=85)
-                    # Inject thumbnail into JXL
-                    r_thumb = subprocess.run(
-                        [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                        capture_output=True, timeout=10
-                    )
-                    if r_thumb.returncode == 0:
-                        logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
-                    else:
-                        logger.debug(f"  >Thumbnail embedding failed (non-critical)")
+                        # Inject thumbnail into JXL
+                        r_thumb = subprocess.run(
+                            [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                            capture_output=True, timeout=10
+                        )
+                        if r_thumb.returncode == 0:
+                            logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
+                        else:
+                            logger.debug(f"  >Thumbnail embedding failed (non-critical)")
                 except Exception as e:
                     logger.debug(f"  >Thumbnail PIL approach failed: {e}")
                     

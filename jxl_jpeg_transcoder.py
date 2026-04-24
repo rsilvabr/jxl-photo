@@ -387,7 +387,7 @@ def has_jbrd_box(jxl_path: Path) -> bool:
             
             if size < 8:  # Invalid box
                 break
-            offset += size
+            offset = min(offset + size, len(data))
             
             # Safety limit
             if offset > 16384:
@@ -655,7 +655,7 @@ def determine_command(input_path: Path, force_transcode: bool = False,
     if input_path.is_file():
         ext = input_path.suffix.lower()
 
-        if ext in ('.jpg', '.jpeg'):
+        if ext in ('.jpg', '.jpeg', '.jfif', '.jpe'):
             # JPEG -> always transcode encode (lossless)
             return ("transcode", False, "JPEG detected: lossless encode to JXL")
 
@@ -756,15 +756,18 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     
     overwritten = final_path.exists()
 
-    write_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
 
     try:
         src_md5 = md5_of_file(src_path) if STORE_MD5 else None
 
         r = subprocess.run(
-            ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1", 
+            ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
              "--effort", str(effort)],
-            capture_output=True
+            capture_output=True, timeout=600
         )
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -807,7 +810,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
 
         r = subprocess.run(
             ["djxl", str(jxl_path), str(write_path)],
-            capture_output=True
+            capture_output=True, timeout=600
         )
         if r.returncode != 0:
             raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -868,11 +871,28 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists() and tasks:
-                final_db = tasks[0][2].parent / CHECKSUMS_FILENAME
-                final_db.parent.mkdir(parents=True, exist_ok=True)
-                with _md5_db_lock:
-                    with open(final_db, "a", encoding="utf-8") as dst:
-                        dst.write(staging_db.read_text(encoding="utf-8"))
+                # Map each filename in staging checksums to its final destination folder
+                from collections import defaultdict
+                # Build lookup: filename -> final parent folder
+                dest_map = {final_out.name: final_out.parent for _, _, final_out in tasks}
+                db_lines = staging_db.read_text(encoding="utf-8").splitlines(keepends=True)
+                folder_lines = defaultdict(list)
+                for line in db_lines:
+                    parts = line.strip().split("  ", 1)
+                    if len(parts) == 2:
+                        fname = parts[1]
+                        dest_folder = dest_map.get(fname)
+                        if dest_folder:
+                            folder_lines[dest_folder].append(line)
+                        else:
+                            # Fallback: put in first task's folder if unmatched
+                            folder_lines[tasks[0][2].parent].append(line)
+                for folder, lines in folder_lines.items():
+                    final_db = folder / CHECKSUMS_FILENAME
+                    final_db.parent.mkdir(parents=True, exist_ok=True)
+                    with _md5_db_lock:
+                        with open(final_db, "a", encoding="utf-8") as dst:
+                            dst.writelines(lines)
                 staging_db.unlink()
 
         if moved:
@@ -1118,7 +1138,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if FORCE_CONTAINER_FOR_LOSSY:
             cmd.append("--container=1")
 
-        r = subprocess.run(cmd, capture_output=True)
+        r = subprocess.run(cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1180,11 +1200,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                         tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True)
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
             else:
                 # Direct djxl to JPG (preserves embedded ICC)
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True)
+                r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1206,11 +1226,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                         tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True)
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
             else:
                 # Direct djxl to PNG
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True)
+                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 

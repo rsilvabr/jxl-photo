@@ -561,11 +561,27 @@ class FolderAnalyzer:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files)))
 
         elif mode == 7:
-            # Export folder / specific subfolder (JXL by default)
+            # Export folder / specific subfolder (auto-detect or default to JXL)
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
+                # Try common subfolder names, or auto-detect any subfolder with origin files
                 subfolder_name = "JXL"
                 jxl_subfolder = export_dir / subfolder_name
+                if not jxl_subfolder.exists() or not any(
+                    f.is_file() and f.suffix.lower() in origin_exts
+                    for f in jxl_subfolder.rglob('*')
+                ):
+                    # Auto-detect first subfolder containing origin files
+                    for subdir in export_dir.iterdir():
+                        if subdir.is_dir():
+                            if any(
+                                f.is_file() and f.suffix.lower() in origin_exts
+                                for f in subdir.rglob('*')
+                            ):
+                                jxl_subfolder = subdir
+                                break
+                    else:
+                        jxl_subfolder = export_dir / subfolder_name  # fallback
                 origin_files = [
                     f for f in jxl_subfolder.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
@@ -639,10 +655,26 @@ class FolderAnalyzer:
                 if origin_files:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files)))
         elif mode == 7:
-            # Mode 7: export / subfolder (JXL)
+            # Mode 7: export / subfolder (auto-detect or default to JXL)
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
-                jxl_subfolder = export_dir / "JXL"
+                subfolder_name = "JXL"
+                jxl_subfolder = export_dir / subfolder_name
+                if not jxl_subfolder.exists() or not any(
+                    f.is_file() and f.suffix.lower() in origin_exts
+                    for f in jxl_subfolder.rglob('*')
+                ):
+                    # Auto-detect first subfolder containing origin files
+                    for subdir in export_dir.iterdir():
+                        if subdir.is_dir():
+                            if any(
+                                f.is_file() and f.suffix.lower() in origin_exts
+                                for f in subdir.rglob('*')
+                            ):
+                                jxl_subfolder = subdir
+                                break
+                    else:
+                        jxl_subfolder = export_dir / subfolder_name  # fallback
                 origin_files = [
                     f for f in jxl_subfolder.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
@@ -1334,6 +1366,10 @@ class InteractiveMenu:
                     source = row[0].strip()
                     dest = row[1].strip() if len(row) > 1 else source
                     if source and not source.startswith('#'):
+                        # Validate paths to prevent directory traversal
+                        if '..' in source or '..' in dest:
+                            logger.warning(f"Skipping manifest entry with path traversal: {source} -> {dest}")
+                            continue
                         entries.append((source, dest))
 
         if not entries:
@@ -2422,7 +2458,7 @@ class InteractiveMenu:
         if workflow.get('expert_flags'):
             try:
                 import shlex
-                expert_args = shlex.split(workflow['expert_flags'])
+                expert_args = shlex.split(workflow['expert_flags'], posix=(os.name != 'nt'))
                 cmd.extend(expert_args)
             except ValueError:
                 cmd.extend(workflow['expert_flags'].split())
