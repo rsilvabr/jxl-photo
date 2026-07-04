@@ -500,8 +500,10 @@ def read_png_to_numpy(png_path, target_depth=16):
         arr = imagecodecs.png_decode(Path(png_path).read_bytes())
         if arr.ndim == 2:
             # Grayscale
+            if target_depth == 16 and arr.dtype == np.uint8:
+                arr = arr.astype(np.uint16) * 257
             rgb = np.stack([arr, arr, arr], axis=-1)
-            return rgb.astype(np.uint16) if arr.dtype != np.uint16 else rgb, None
+            return rgb.astype(np.uint16) if (arr.dtype != np.uint16 and rgb.dtype != np.uint16) else rgb, None
         elif arr.ndim == 3 and arr.shape[2] in (3, 4):
             rgb = arr[:, :, :3]
             alpha = arr[:, :, 3] if arr.shape[2] == 4 else None

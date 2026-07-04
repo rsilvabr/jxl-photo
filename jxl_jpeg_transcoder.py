@@ -430,7 +430,7 @@ def reorder_jxl_boxes(jxl_path: Path):
         # Validate size to prevent integer overflow / OOM
         if size > MAX_BOX_SIZE:
             raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, possible corrupted file")
-        if size < 8 and size != 0:
+        if 1 < size < 8:
             raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
         
         if size == 1:
@@ -1634,8 +1634,10 @@ def _process_file_group(files, args, use_transcode=True):
             out = resolve_output_transcode(f, args.mode, args.input, decode=not is_jpeg_input)
         else:
             # Lossy convert: output format depends on --format flag
-            # Determine output extension based on format
-            out_ext = ".jpg" if args.format == "jpeg" else ".png"
+            # Determine output extension based on format (without leading dot)
+            out_ext = "jpg" if args.format == "jpeg" else "png"
+            # Default bit depth per format, matching cmd_convert behavior
+            default_depth = 8 if (args.format or "jpeg") in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
             out = resolve_output_convert(
                 f, args.mode, args.output_name, args.output_suffix,
                 out_ext, args.rename_from, args.rename_to,
@@ -1674,7 +1676,7 @@ def _process_file_group(files, args, use_transcode=True):
             results = process_group_convert(
                 group_pairs, args.workers, direction="from_jxl",
                 quality=args.quality, distance=args.distance,
-                fmt=args.format or "jpeg", bit_depth=args.bit_depth or PNG_DEFAULT_BIT_DEPTH,
+                fmt=args.format or "jpeg", bit_depth=args.bit_depth or default_depth,
                 output_icc=args.icc_profile, use_ram=args.ram,
                 effort=args.effort, reconvert_val=args.overwrite,
                 use_internal_srgb=False, smart=args.sync

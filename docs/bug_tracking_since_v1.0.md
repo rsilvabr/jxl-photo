@@ -95,20 +95,23 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 90 | 8-bit PNG not scaled to 16-bit in decoder | decoder | ✅ FIXED |
 | 91 | `cmd_auto` routes JPEG folders to decode instead of encode | transcoder | ✅ FIXED (v1.5.3) |
 | 92 | Staging moves failed outputs to final destination | encoder, decoder, transcoder | ✅ FIXED (v1.5.3) |
-| 93 | `cmd_auto --delete-source` deletes without confirmation | transcoder, HDR transcoder | ✅ FIXED (v1.5.3) |
+| 93 | `cmd_auto --delete-source` deletes without confirmation | transcoder | ✅ FIXED (v1.5.3) |
 | 94 | Basic mode PNG reader downgrades 16-bit to 8-bit | decoder | ✅ FIXED (v1.5.3) |
 | 95 | Matrix mode `--color_space` token incompatible with libjxl v0.11.x | decoder | ✅ FIXED (v1.5.3) |
 | 96 | `--export-marker` case mismatch and missing propagation | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
 | 97 | Mode 2 output folder handling inconsistent | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
-| 98 | Manifest modes 6/7 reset to 0/2 by wrapper | photo | ✅ FIXED (v1.5.3) |
+| 98 | Manifest modes 6/7 reset to 0/2 by wrapper | photo | ⚠️ CLAIMED FIXED (v1.5.3), NOT FIXED |
 | 99 | `logger` undefined in wrapper aborts workflow | photo | ✅ FIXED (v1.5.3) |
-| 100 | Extended size box validation rejects valid JXL containers | encoder, transcoder | ✅ FIXED (v1.5.3) |
+| 100 | Extended size box validation rejects valid JXL containers | encoder, transcoder | ⚠️ CLAIMED FIXED (v1.5.3), NOT FIXED |
 | 101 | `--jpeg_quality` ignored in direct JXL→JPEG path | transcoder | ✅ FIXED (v1.5.3) |
 | 102 | Orphaned alternate-extension staging file left on failure | transcoder | ✅ FIXED (v1.5.3) |
 | 103 | `make_png_bytes` crashes on float/CMYK/unsupported shapes | encoder | ✅ FIXED (v1.5.3) |
 | 104 | D50 patch statistics printed wrong count | encoder | ✅ FIXED (v1.5.3) |
+| 105 | Encoder staging status_map mismatches under concurrency | encoder | ✅ FIXED (v1.5.3a) |
+| 106 | Basic mode grayscale 8-bit PNG not scaled to 16-bit | decoder | ✅ FIXED (v1.5.3a) |
+| 107 | `--format jpeg` in auto mode forces PNG / double-dot filename | transcoder | ✅ FIXED (v1.5.3a) |
 
-**Total bugs fixed: 93**
+**Total bugs fixed: 96**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -1857,11 +1860,20 @@ This is confirmed compatible with `djxl v0.11.2 332feb1` and preserves Rec.2020 
 
 **Problem:** The JXL box parser validated extended-size boxes with `extended_size < len(payload)`, but the correct check is `extended_size < len(payload) + 8` because the extended size field itself replaces the 8-byte size header. This caused valid containers with large boxes to fail reordering/injection.
 
-**Fix:** Corrected the comparison:
+**Fix (v1.5.3):** Corrected the interior comparison:
 
 ```python
 if extended_size < len(payload) + 8:
     raise ValueError("Extended size too small")
+```
+
+However, the guard `if size < 8 and size != 0:` still rejected `size == 1` *before* the extended-size branch, so that branch remained unreachable. The guard was therefore wrong.
+
+**Fix (v1.5.3a):** Changed the guard to allow `size == 1` to reach the extended-size branch:
+
+```python
+if 1 < size < 8:
+    raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
 ```
 
 **Files changed:**
@@ -1923,6 +1935,59 @@ djxl input.jxl output.jpg --jpeg_quality=95
 
 **Files changed:**
 - `jxl_tiff_encoder.py`
+
+---
+
+### Bug #105 — Encoder Staging `status_map` Mismatches Under Concurrency
+
+**Location:** `jxl_tiff_encoder.py` — `process_group()`
+
+**Problem:** `results` is filled from `as_completed()` (completion order), but the staging move loop built `status_map` by zipping it positionally against `tasks` (submission order):
+
+```python
+status_map = {str(t): r[1] for t, r in zip([task[0] for task in tasks], results)}
+```
+
+With `workers > 1`, statuses crossed over. A failing file could be moved to the destination while a successful file was withheld in staging.
+
+**Fix:** Use the source-path key that each worker result already carries, matching the decoder/transcoder:
+
+```python
+status_map = {r[0]: r[1] for r in results}
+```
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `process_group()`
+
+---
+
+### Bug #106 — Basic Mode Grayscale 8-bit PNG Not Scaled to 16-bit
+
+**Location:** `jxl_tiff_decoder.py` — `read_png_to_numpy()`
+
+**Problem:** The new `imagecodecs` path scaled RGB 8-bit up by `×257`, but the grayscale branch stacked the raw 8-bit plane into RGB and returned it unchanged. The resulting "16-bit" TIFF had max value 255 and looked nearly black.
+
+**Fix:** Apply the same `×257` scaling in the grayscale branch before stacking to RGB.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `read_png_to_numpy()`
+
+---
+
+### Bug #107 — `--format jpeg` in Auto Mode Forces PNG / Double-Dot Filename
+
+**Location:** `jxl_jpeg_transcoder.py` — `_process_file_group()`
+
+**Problem (Part 1):** `_process_file_group` passed `out_ext = ".png" / ".jpg"` (with leading dot) to `resolve_output_convert()`, which builds names as `f"{stem}.{ext}"`. Result: `name..png` / `name..jpg`.
+
+**Problem (Part 2):** The auto convert path always defaulted to `PNG_DEFAULT_BIT_DEPTH` (16), even for JPEG. `djxl` refuses 16-bit JPEG output, so the code fell back to PNG.
+
+**Fix:**
+1. Pass extension without dot: `out_ext = "jpg" if args.format == "jpeg" else "png"`.
+2. Mirror `cmd_convert` bit-depth defaulting: `8` for JPEG, `PNG_DEFAULT_BIT_DEPTH` otherwise.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_process_file_group()`
 
 ---
 

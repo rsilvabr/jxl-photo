@@ -825,7 +825,7 @@ def reorder_jxl_boxes(jxl_path):
         # Validate size to prevent integer overflow / OOM
         if size > MAX_BOX_SIZE:
             raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, possible corrupted file")
-        if size < 8 and size != 0:
+        if 1 < size < 8:
             raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
         
         if size == 1:
@@ -1137,7 +1137,7 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
     # Move from staging to final destination in bulk
     if use_staging:
         moved = 0
-        status_map = {str(t): r[1] for t, r in zip([task[0] for task in tasks], results)}
+        status_map = {r[0]: r[1] for r in results}
         for tiff, write_jxl, final_jxl in tasks:
             status = status_map.get(str(tiff), "error")
             if status not in ("ok", "overwrite"):
