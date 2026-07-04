@@ -1141,7 +1141,8 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
         for tiff, write_jxl, final_jxl in tasks:
             status = status_map.get(str(tiff), "error")
             if status not in ("ok", "overwrite"):
-                logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
+                if status != "skipped":
+                    logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
                 continue
             if not write_jxl.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_jxl.name}")
@@ -1440,8 +1441,13 @@ def main():
             # For mode off, we still tracked correctness so user knows how many would have needed patch
             logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
         else:
-            # Show: applied | skipped (not needed) | needed patch vs already correct
-            logger.info(f"D50 patch: {applied} applied | {d50_skipped - skipped_needed} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
+            # Files that were actually patched (had wrong D50)
+            actually_patched = applied - already_correct
+            # Files that were skipped because they were already correct
+            skipped_already_correct = d50_skipped - skipped_needed
+            # Total files that needed patching vs total that were already correct
+            total_needed_patch = actually_patched + skipped_needed
+            logger.info(f"D50 patch: {actually_patched} applied | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
 

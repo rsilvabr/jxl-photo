@@ -642,9 +642,7 @@ class FolderAnalyzer:
     def generate_manifest(self, analysis: Dict, mode: int) -> List[Tuple[str, str, int]]:
         """Generate manifest entries based on mode.
 
-        For manifest, we auto-detect mode 0 vs 7 based on folder structure:
-        - If source == destination and export subfolder detected -> mode 7
-        - Otherwise -> mode 0 (in-place)
+        Returns list of (source, destination, file_count, mode).
         """
         mappings = []
         origin_exts = self._get_extensions(self.origin)
@@ -658,7 +656,7 @@ class FolderAnalyzer:
                     if f.is_file() and f.suffix.lower() in origin_exts
                 ]
                 if origin_files:
-                    mappings.append((str(export_dir), str(export_dir), len(origin_files)))
+                    mappings.append((str(export_dir), str(export_dir), len(origin_files), 6))
         elif mode == 7:
             # Mode 7: export / subfolder (auto-detect or default to JXL)
             for export_path in analysis['export_marker_paths']:
@@ -685,10 +683,13 @@ class FolderAnalyzer:
                     if f.is_file() and f.suffix.lower() in origin_exts
                 ] if jxl_subfolder.exists() else []
                 if origin_files:
-                    mappings.append((str(jxl_subfolder), str(jxl_subfolder), len(origin_files)))
+                    mappings.append((str(jxl_subfolder), str(jxl_subfolder), len(origin_files), 7))
         else:
             # For other modes, use compute_folder_mappings
-            mappings = self.compute_folder_mappings(analysis, mode)
+            mappings = [
+                (src, dst, count, mode)
+                for src, dst, count in self.compute_folder_mappings(analysis, mode)
+            ]
 
         return mappings
 
@@ -1301,9 +1302,9 @@ class InteractiveMenu:
 
         with open(manifest_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(["Source", "Destination"])
-            for src, dst, count in mappings:
-                writer.writerow([src, dst])
+            writer.writerow(["Source", "Destination", "Mode"])
+            for src, dst, count, entry_mode in mappings:
+                writer.writerow([src, dst, entry_mode])
 
         return str(manifest_path)
 
@@ -1383,12 +1384,13 @@ class InteractiveMenu:
                 if row and len(row) >= 1:
                     source = row[0].strip()
                     dest = row[1].strip() if len(row) > 1 else source
+                    entry_mode = int(row[2].strip()) if len(row) > 2 and row[2].strip().isdigit() else 0
                     if source and not source.startswith('#'):
                         # Validate paths to prevent directory traversal
                         if '..' in source or '..' in dest:
                             logger.warning(f"Skipping manifest entry with path traversal: {source} -> {dest}")
                             continue
-                        entries.append((source, dest))
+                        entries.append((source, dest, entry_mode))
 
         if not entries:
             if RICH_AVAILABLE and console:
@@ -1405,8 +1407,9 @@ class InteractiveMenu:
             table.add_column("#", justify="right", style="dim")
             table.add_column("Source", style="red")
             table.add_column("Destination", style="green")
-            for i, (src, dst) in enumerate(entries[:15], 1):
-                table.add_row(str(i), self._truncate_path(src), self._truncate_path(dst))
+            table.add_column("Mode", style="magenta")
+            for i, (src, dst, mode) in enumerate(entries[:15], 1):
+                table.add_row(str(i), self._truncate_path(src), self._truncate_path(dst), str(mode))
             console.print(table)
             if len(entries) > 15:
                 console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
@@ -1416,9 +1419,9 @@ class InteractiveMenu:
         else:
             print(f"\nManifest: {manifest_path}")
             print(f"Entries to process: {len(entries)}\n")
-            for i, (src, dst) in enumerate(entries[:15], 1):
+            for i, (src, dst, mode) in enumerate(entries[:15], 1):
                 print(f"  {i}. {src}")
-                print(f"     -> {dst}")
+                print(f"     -> {dst} (mode {mode})")
             if len(entries) > 15:
                 print(f"  ... and {len(entries) - 15} more entries")
             print()
@@ -1902,7 +1905,7 @@ class InteractiveMenu:
                         advanced_options['none'] = True
 
                     target_icc = Prompt.ask(
-                        "Target ICC (file path or sRGB/Adobe RGB/ProPhoto RGB)",
+                        "Target ICC (file path or sRGB)",
                         default=""
                     )
                     if target_icc and target_icc.strip():
@@ -1911,8 +1914,8 @@ class InteractiveMenu:
             dry_run = Confirm.ask("Dry run? (simulate without converting)", default=False)
             workflow['dry_run'] = dry_run
 
-            console.print("Existing file handling: [0] skip | [1] overwrite all | [2] sync (reconvert if newer)")
-            ow = Prompt.ask("If exists", choices=["0", "1", "2"], default="2")
+            console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
+            ow = Prompt.ask("If exists", choices=["1", "2"], default="2")
             workflow['overwrite_mode'] = ow
 
             if origin == 'tiff' and dest == 'jxl':
@@ -1988,14 +1991,14 @@ class InteractiveMenu:
                     elif decode_mode == "none":
                         advanced_options['none'] = True
 
-                    target_icc = input("Target ICC (file path, sRGB, Adobe RGB, ProPhoto RGB, or empty): ").strip()
+                    target_icc = input("Target ICC (file path, sRGB, or empty): ").strip()
                     if target_icc:
                         advanced_options['target_icc'] = target_icc
 
             dry_input = input("Dry run? [y/N]: ").strip().lower()
             workflow['dry_run'] = dry_input.startswith('y')
 
-            ow_input = input("Existing file handling (0=skip, 1=overwrite, 2=sync) [2]: ").strip() or "2"
+            ow_input = input("Existing file handling (1=overwrite, 2=sync) [2]: ").strip() or "2"
             workflow['overwrite_mode'] = ow_input
 
         return self._wizard_parameters_advanced(workflow, status)
@@ -2021,12 +2024,10 @@ class InteractiveMenu:
             if ow_mode == "1":
                 advanced_options['overwrite'] = True
                 advanced_options['sync'] = False
-            elif ow_mode == "2":
+            else:
+                # Default and only other option is sync (2)
                 advanced_options['overwrite'] = False
                 advanced_options['sync'] = True
-            else:
-                advanced_options['overwrite'] = False
-                advanced_options['sync'] = False
             if origin == 'tiff' and dest == 'jxl':
                 advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
                 advanced_options['encode_tag'] = workflow.get('encode_tag', 'xmp')
@@ -2086,7 +2087,7 @@ class InteractiveMenu:
                     icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default="auto")
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
-                target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "Adobe RGB", "ProPhoto", "custom"], default="")
+                target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default="")
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
@@ -2102,7 +2103,7 @@ class InteractiveMenu:
                     icc_mode = input("ICC mode [auto/basic/none]: ").strip().lower()
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
-                target_icc = input("Target ICC (sRGB/Adobe RGB/ProPhoto/custom/empty): ").strip()
+                target_icc = input("Target ICC (sRGB/custom/empty): ").strip()
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
@@ -2379,10 +2380,9 @@ class InteractiveMenu:
         # Create analyzer once outside the loop for efficiency
         analyzer = FolderAnalyzer(Path("."), origin, dest, self.config.config.export_marker)
         
-        for i, (source, dest_path) in enumerate(manifest_entries, 1):
+        for i, (source, dest_path, entry_mode) in enumerate(manifest_entries, 1):
             # Preserve the mode the manifest was generated with (important for modes 6/7)
-            original_mode = workflow.get('mode', 0)
-            detected_mode = analyzer.detect_mode_for_entry(source, dest_path, original_mode=original_mode)
+            detected_mode = analyzer.detect_mode_for_entry(source, dest_path, original_mode=entry_mode)
 
             if RICH_AVAILABLE and console:
                 console.print(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {self._truncate_path(source, 40)} → {self._truncate_path(dest_path, 40)}")
@@ -3008,17 +3008,15 @@ def main():
             origin = last_origin
 
             if RICH_AVAILABLE and console:
-                console.print("Existing file handling: [0] skip | [1] overwrite all | [2] sync (reconvert if newer)")
-                ow_choice = Prompt.ask("If exists", choices=["0", "1", "2"], default="2")
+                console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
+                ow_choice = Prompt.ask("If exists", choices=["1", "2"], default="2")
             else:
-                ow_choice = input("If exists (0=skip, 1=overwrite, 2=sync) [2]: ").strip() or "2"
+                ow_choice = input("If exists (1=overwrite, 2=sync) [2]: ").strip() or "2"
 
             if ow_choice == "1":
                 overwrite, sync = True, False
-            elif ow_choice == "2":
-                overwrite, sync = False, True
             else:
-                overwrite, sync = False, False
+                overwrite, sync = False, True
 
             if RICH_AVAILABLE and console:
                 proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)

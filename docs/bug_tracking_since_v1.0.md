@@ -100,18 +100,21 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 95 | Matrix mode `--color_space` token incompatible with libjxl v0.11.x | decoder | ✅ FIXED (v1.5.3) |
 | 96 | `--export-marker` case mismatch and missing propagation | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
 | 97 | Mode 2 output folder handling inconsistent | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
-| 98 | Manifest modes 6/7 reset to 0/2 by wrapper | photo | ⚠️ CLAIMED FIXED (v1.5.3), NOT FIXED |
+| 98 | Manifest modes 6/7 reset to 0/2 by wrapper | photo | ✅ FIXED (v1.5.3b) |
 | 99 | `logger` undefined in wrapper aborts workflow | photo | ✅ FIXED (v1.5.3) |
-| 100 | Extended size box validation rejects valid JXL containers | encoder, transcoder | ⚠️ CLAIMED FIXED (v1.5.3), NOT FIXED |
+| 100 | Extended size box validation rejects valid JXL containers | encoder, transcoder | ✅ FIXED (v1.5.3a) |
 | 101 | `--jpeg_quality` ignored in direct JXL→JPEG path | transcoder | ✅ FIXED (v1.5.3) |
 | 102 | Orphaned alternate-extension staging file left on failure | transcoder | ✅ FIXED (v1.5.3) |
 | 103 | `make_png_bytes` crashes on float/CMYK/unsupported shapes | encoder | ✅ FIXED (v1.5.3) |
-| 104 | D50 patch statistics printed wrong count | encoder | ✅ FIXED (v1.5.3) |
-| 105 | Encoder staging status_map mismatches under concurrency | encoder | ✅ FIXED (v1.5.3a) |
+| 104 | D50 patch statistics printed wrong count | encoder | ✅ FIXED (v1.5.3b) |
+| 105 | Encoder staging `status_map` mismatches under concurrency | encoder | ✅ FIXED (v1.5.3a) |
 | 106 | Basic mode grayscale 8-bit PNG not scaled to 16-bit | decoder | ✅ FIXED (v1.5.3a) |
 | 107 | `--format jpeg` in auto mode forces PNG / double-dot filename | transcoder | ✅ FIXED (v1.5.3a) |
+| 108 | Skipped files spam "KEEP in staging" warning | encoder, decoder, transcoder | ✅ FIXED (v1.5.3b) |
+| 109 | Wizard offers non-functional "skip" existing-file option | photo | ✅ FIXED (v1.5.3b) |
+| 110 | Adobe RGB / ProPhoto RGB ICC aliases fail (PIL limitation) | decoder, photo | ✅ FIXED (v1.5.3b) |
 
-**Total bugs fixed: 96**
+**Total bugs fixed: 100**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -1988,6 +1991,49 @@ status_map = {r[0]: r[1] for r in results}
 
 **Files changed:**
 - `jxl_jpeg_transcoder.py` `_process_file_group()`
+
+---
+
+### Bug #108 — Skipped Files Spam "KEEP in Staging" Warning
+
+**Location:** staging move loops in `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+**Problem:** Files with status `"skipped"` never wrote anything to staging, but the new staging safety loops warned `KEEP in staging (skipped)` for every one of them. On a re-run of a large synced archive this produced thousands of spurious warnings.
+
+**Fix:** Only emit the staging warning for non-skipped non-success statuses.
+
+**Files changed:**
+- `jxl_tiff_encoder.py`
+- `jxl_tiff_decoder.py`
+- `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #109 — Wizard Offers Non-Functional "Skip" Existing-File Option
+
+**Location:** `jxl_photo.py`
+
+**Problem:** The wizard presented `[0] skip` for existing-file handling, but there was no true "skip" implementation — the choice silently behaved the same as sync or produced no-op behavior. This was confusing and inconsistent with the CLI, which only supports `--overwrite` and `--sync`.
+
+**Fix:** Removed the "skip" option from both the Rich and fallback prompts. Existing-file handling is now `overwrite` or `sync` only, matching the scripts.
+
+**Files changed:**
+- `jxl_photo.py`
+
+---
+
+### Bug #110 — Adobe RGB / ProPhoto RGB ICC Aliases Fail
+
+**Location:** `jxl_tiff_decoder.py` and `jxl_photo.py`
+
+**Problem:** `load_target_icc()` advertised built-in aliases for `Adobe RGB` and `ProPhoto RGB`, but `ImageCms.createProfile()` from Pillow only supports `sRGB`, `Lab`, and `XYZ`. Choosing either alias always raised `PyCMSError`.
+
+**Fix:** Removed the non-functional aliases. Only `sRGB` is supported as a built-in alias; other ICC profiles must be supplied as file paths. Updated prompts and help text accordingly.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `load_target_icc()`
+- `jxl_tiff_decoder.py` `--target-icc` help text
+- `jxl_photo.py` target-ICC prompts
 
 ---
 

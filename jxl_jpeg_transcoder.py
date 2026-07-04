@@ -888,7 +888,8 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         for src, write_out, final_out in tasks:
             status = status_map.get(str(src), "error")
             if status not in ("ok", "reconvert"):
-                logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
+                if status != "skipped":
+                    logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
                 continue
             if not write_out.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_out.name}")

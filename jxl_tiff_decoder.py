@@ -218,7 +218,7 @@ EXPORT_JXL_SUBFOLDER = ""
 
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
-logger = None
+logger = logging.getLogger("jxl_decode")
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 
@@ -335,7 +335,7 @@ def get_source_icc(jxl_path, tmp_dir):
 def load_target_icc(path):
     """Load target ICC profile from file path or built-in alias.
 
-    Built-in aliases: sRGB, Adobe RGB, ProPhoto RGB.
+    Built-in alias: sRGB only (PIL's ImageCms.createProfile only supports sRGB/LAB/XYZ).
     Returns ICC bytes or None.
     """
     if not path:
@@ -344,10 +344,6 @@ def load_target_icc(path):
     # Built-in aliases
     aliases = {
         'srgb': 'sRGB',
-        'adobe rgb': 'Adobe RGB',
-        'adobergb': 'Adobe RGB',
-        'prophoto rgb': 'ProPhoto RGB',
-        'prophoto': 'ProPhoto RGB',
     }
     key = str(path).strip().lower()
     if key in aliases:
@@ -1370,7 +1366,8 @@ def process_group(group_pairs, workers, mode, target_icc=None):
         for jxl_src, write_tiff, final_tiff in tasks:
             status = status_map.get(str(jxl_src), "error")
             if status not in ("ok", "overwrite"):
-                logger.warning(f"  KEEP in staging ({status}) | {write_tiff.name}")
+                if status != "skipped":
+                    logger.warning(f"  KEEP in staging ({status}) | {write_tiff.name}")
                 continue
             if not write_tiff.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_tiff.name}")
@@ -1514,7 +1511,7 @@ Examples:
 
     # ICC options
     parser.add_argument("--target-icc", type=str, default=None,
-                        help="Convert to specific ICC profile. Can be a file path or built-in: sRGB, Adobe RGB, ProPhoto RGB")
+                        help="Convert to specific ICC profile. Can be a file path or built-in: sRGB")
     parser.add_argument("--no-icc-cleanup", action="store_true", dest="no_icc_clean",
                       help="Keep ICC:base64 marker in XMP")
 
