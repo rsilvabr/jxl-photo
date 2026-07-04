@@ -333,12 +333,37 @@ def get_source_icc(jxl_path, tmp_dir):
     return None, None
 
 def load_target_icc(path):
-    """Load target ICC profile from file
-        Returns ICC bytes or None.
+    """Load target ICC profile from file path or built-in alias.
+
+    Built-in aliases: sRGB, Adobe RGB, ProPhoto RGB.
+    Returns ICC bytes or None.
     """
-   
     if not path:
         return None
+
+    # Built-in aliases
+    aliases = {
+        'srgb': 'sRGB',
+        'adobe rgb': 'Adobe RGB',
+        'adobergb': 'Adobe RGB',
+        'prophoto rgb': 'ProPhoto RGB',
+        'prophoto': 'ProPhoto RGB',
+    }
+    key = str(path).strip().lower()
+    if key in aliases:
+        if not ImageCms:
+            logger.error("ImageCms (Pillow) is required for built-in ICC profiles")
+            return None
+        try:
+            profile_name = aliases[key]
+            profile = ImageCms.createProfile(profile_name)
+            # Default intent is used by createProfile; use perceptual for sRGB photo work
+            intent = ImageCms.Intent.PERCEPTUAL if profile_name == 'sRGB' else ImageCms.Intent.RELATIVE_COLORIMETRIC
+            return ImageCms.getOpenProfile(profile).tobytes()
+        except Exception as e:
+            logger.error(f"Failed to create built-in ICC profile '{path}': {e}")
+            return None
+
     p = Path(path)
     if not p.exists():
         logger.error(f"Target ICC not found: {path}")
@@ -465,7 +490,28 @@ def read_png_to_numpy(png_path, target_depth=16):
     Read PNG file and convert to numpy array.
     Handles 8-bit and 16-bit RGB/RGBA.
     Scales 8-bit to 16-bit when target_depth=16.
+
+    Uses imagecodecs when available because PIL cannot faithfully read
+    16-bit RGB/RGBA PNGs (it returns uint8 data even for 16-bit files).
     """
+    # Try imagecodecs first for faithful 16-bit RGB/RGBA support.
+    try:
+        import imagecodecs
+        arr = imagecodecs.png_decode(Path(png_path).read_bytes())
+        if arr.ndim == 2:
+            # Grayscale
+            rgb = np.stack([arr, arr, arr], axis=-1)
+            return rgb.astype(np.uint16) if arr.dtype != np.uint16 else rgb, None
+        elif arr.ndim == 3 and arr.shape[2] in (3, 4):
+            rgb = arr[:, :, :3]
+            alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
+            if target_depth == 16 and rgb.dtype == np.uint8:
+                rgb = rgb.astype(np.uint16) * 257
+            return rgb, alpha
+    except Exception:
+        # imagecodecs not available or failed; fall through to PIL.
+        pass
+
     with Image.open(png_path) as img:
         # Handle 16-bit modes (I;16, I) - convert to uint16 RGB
         if img.mode in ('I;16', 'I'):
@@ -504,7 +550,7 @@ def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
     """
     cmd = [
         "djxl", str(jxl_path), str(output_ppm),
-        "--color_space=RGB_D65_2020_Per_Lin",   # was: RGB_D65_202_Per_Lin (typo — missing '0')
+        "--color_space=RGB_D65_202_Per_Lin",   # libjxl token for Rec.2020/BT.2100 primaries is "202"
         f"--icc_out={icc_out_path}",
     ]
     r = subprocess.run(cmd, capture_output=True, timeout=120)
@@ -1082,12 +1128,14 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         return jxl_path.parent.parent / TIFF_FOLDER_NAME / jxl_path.with_suffix(".tif").name
 
     elif mode == 6:
-        # Mode 6: EXPORT anchor - only JXLs INSIDE _EXPORT
+        # Mode 6: EXPORT anchor - only JXLs INSIDE export marker folder
         parts = list(jxl_path.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            return None  # Skip files outside _EXPORT
+            return None  # Skip files outside export marker folder
 
         export_dir = Path(*parts[:export_idx + 1])
         rel_parts = jxl_path.relative_to(export_dir).parts
@@ -1098,12 +1146,13 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         return export_dir / EXPORT_TIFF_FOLDER / rel.with_suffix(".tif")
 
     elif mode == 7:
-        # Mode 7: EXPORT anchor - only JXLs inside _EXPORT/[subfolder]
+        # Mode 7: EXPORT anchor - only JXLs inside export marker/[subfolder]
         parts = list(jxl_path.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            return None  # Skip files outside _EXPORT
+            return None  # Skip files outside export marker folder
 
         export_dir = Path(*parts[:export_idx + 1])
 
@@ -1315,11 +1364,18 @@ def process_group(group_pairs, workers, mode, target_icc=None):
 
     if use_staging:
         moved = 0
-        for _, write_tiff, final_tiff in tasks:
-            if write_tiff.exists():
-                final_tiff.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(write_tiff), str(final_tiff))
-                moved += 1
+        status_map = {r[0]: r[1] for r in results}
+        for jxl_src, write_tiff, final_tiff in tasks:
+            status = status_map.get(str(jxl_src), "error")
+            if status not in ("ok", "overwrite"):
+                logger.warning(f"  KEEP in staging ({status}) | {write_tiff.name}")
+                continue
+            if not write_tiff.exists():
+                logger.warning(f"  KEEP (staging file missing) | {write_tiff.name}")
+                continue
+            final_tiff.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(write_tiff), str(final_tiff))
+            moved += 1
         if moved:
             logger.info(f" >Moved {moved} file(s) from staging to final")
 
@@ -1373,22 +1429,25 @@ def find_jxls_mode6(input_path):
     """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
     all_jxls = find_jxls_recursive(input_path)
     filtered = []
+    marker_lower = EXPORT_MARKER.lower()
     for j in all_jxls:
         parts_str = list(j.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts_str)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is not None:
             filtered.append(j)
     return filtered
 
 def find_jxls_mode7(input_path):
-    """Mode 7: only JXLs inside _EXPORT/EXPORT_JXL_SUBFOLDER."""
+    """Mode 7: only JXLs inside EXPORT_MARKER/EXPORT_JXL_SUBFOLDER."""
     all_jxls = find_jxls_recursive(input_path)
     filtered = []
+    marker_lower = EXPORT_MARKER.lower()
     for j in all_jxls:
         parts_str = list(j.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        export_idx = next((i for i, p in enumerate(parts_str)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             continue
         if EXPORT_JXL_SUBFOLDER:
@@ -1452,8 +1511,8 @@ Examples:
                       help="Force None mode (djxl auto, no ICC handling)")
 
     # ICC options
-    parser.add_argument("--target-icc", type=Path, default=None,
-                      help="Convert to specific ICC profile")
+    parser.add_argument("--target-icc", type=str, default=None,
+                        help="Convert to specific ICC profile. Can be a file path or built-in: sRGB, Adobe RGB, ProPhoto RGB")
     parser.add_argument("--no-icc-cleanup", action="store_true", dest="no_icc_clean",
                       help="Keep ICC:base64 marker in XMP")
 
@@ -1463,9 +1522,11 @@ Examples:
     parser.add_argument("--compression", choices=["zip", "lzw", "none", "uncompressed"], default=None,
                       help="TIFF compression")
     parser.add_argument("--staging", type=str, default=None,
-                      help="Staging directory for output files")
+                        help="Staging directory for output files")
+    parser.add_argument("--export-marker", type=str, default="_EXPORT",
+                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
     parser.add_argument("--delete-source", action="store_true",
-                      help="Delete source JXLs after successful decode (mode 8 only)")
+                        help="Delete source JXLs after successful decode (mode 8 only)")
     parser.add_argument("--dry-run", action="store_true",
                       help="Preview operations without converting")
     parser.add_argument("--no-preview", action="store_true",
@@ -1501,6 +1562,9 @@ Examples:
         TIFF_COMPRESSION = args.compression
     if args.staging:
         TEMP2_DIR = args.staging
+    if args.export_marker:
+        global EXPORT_MARKER
+        EXPORT_MARKER = args.export_marker
     if args.no_preview:
         ADD_JPEG_PREVIEW = False
 
@@ -1534,7 +1598,11 @@ Examples:
             jxls = find_jxls_mode7(args.input)
         else:
             jxls = find_jxls_recursive(args.input)
-        output_root = args.output or args.input
+        if args.mode == 2:
+            output_root = args.output or args.input
+            output_root.mkdir(parents=True, exist_ok=True)
+        else:
+            output_root = args.output or args.input
 
     logger.info(f"Files found: {len(jxls)}")
     _counter["total"] = len(jxls)

@@ -438,8 +438,12 @@ def reorder_jxl_boxes(jxl_path: Path):
             if i + 16 > file_size:
                 break
             ext_size = int.from_bytes(data[i+8:i+16], "big")
-            if ext_size > MAX_BOX_SIZE:
+            if ext_size > MAX_JXL_SIZE:
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            if ext_size < 16:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
+            if i + ext_size > file_size:
+                raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
             header, payload = data[i:i+16], data[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
@@ -449,6 +453,8 @@ def reorder_jxl_boxes(jxl_path: Path):
             boxes.append((name, header, payload))
             break
         else:
+            if i + size > file_size:
+                raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
             header, payload = data[i:i+8], data[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
@@ -716,8 +722,10 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
     elif mode in (6, 7):
         parts = src_path.parts
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             logger.warning(f"'{EXPORT_MARKER}' not found in {src_path}, using local folder")
             return src_path.parent / exp_out / src_path.with_suffix(out_ext).name
@@ -764,15 +772,25 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     try:
         src_md5 = md5_of_file(src_path) if STORE_MD5 else None
 
-        r = subprocess.run(
-            ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
-             "--effort", str(effort)],
-            capture_output=True, timeout=600
-        )
-        if r.returncode != 0:
-            raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
+        # Determine if this is an encode (JPEG -> JXL) or decode (JXL -> JPEG)
+        is_jpeg_encode = src_path.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
 
-        reorder_jxl_boxes(write_path)
+        if is_jpeg_encode:
+            r = subprocess.run(
+                ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
+                 "--effort", str(effort)],
+                capture_output=True, timeout=600
+            )
+        else:
+            r = subprocess.run(
+                ["djxl", str(src_path), str(write_path)],
+                capture_output=True, timeout=600
+            )
+        if r.returncode != 0:
+            raise RuntimeError(f"{'cjxl' if is_jpeg_encode else 'djxl'}: {r.stderr.decode(errors='replace')[:200]}")
+
+        if is_jpeg_encode:
+            reorder_jxl_boxes(write_path)
 
         if src_md5:
             # Use write_path directory but final_path name (no UUID) for checksum entry
@@ -789,8 +807,12 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
 
-def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path, 
+def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                          verify: bool, reconvert_val: bool, smart: bool) -> tuple:
+    # This function now also handles JPEG -> JXL encode in auto mode; the
+    # verification path only applies to JXL decode.
+    is_jxl_decode = jxl_path.suffix.lower() == '.jxl'
+
     # Check if should process - pass both smart and reconvert_val
     if not should_process(jxl_path, final_path, smart, reconvert_val):
         n, total = next_count()
@@ -806,7 +828,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     write_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        stored_md5 = read_md5_db(jxl_path) if verify else None
+        stored_md5 = read_md5_db(jxl_path) if verify and is_jxl_decode else None
 
         r = subprocess.run(
             ["djxl", str(jxl_path), str(write_path)],
@@ -862,19 +884,30 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     if use_staging:
         moved = 0
-        for _, write_out, final_out in tasks:
-            if write_out.exists():
-                final_out.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(write_out), str(final_out))
-                moved += 1
+        status_map = {r[0]: r[1] for r in results}
+        for src, write_out, final_out in tasks:
+            status = status_map.get(str(src), "error")
+            if status not in ("ok", "reconvert"):
+                logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
+                continue
+            if not write_out.exists():
+                logger.warning(f"  KEEP (staging file missing) | {write_out.name}")
+                continue
+            final_out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(write_out), str(final_out))
+            moved += 1
 
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists() and tasks:
                 # Map each filename in staging checksums to its final destination folder
                 from collections import defaultdict
-                # Build lookup: filename -> final parent folder
-                dest_map = {final_out.name: final_out.parent for _, _, final_out in tasks}
+                # Build lookup: filename -> final parent folder (only for successful tasks)
+                dest_map = {}
+                for src, write_out, final_out in tasks:
+                    status = status_map.get(str(src), "error")
+                    if status in ("ok", "reconvert"):
+                        dest_map[final_out.name] = final_out.parent
                 db_lines = staging_db.read_text(encoding="utf-8").splitlines(keepends=True)
                 folder_lines = defaultdict(list)
                 for line in db_lines:
@@ -885,8 +918,11 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                         if dest_folder:
                             folder_lines[dest_folder].append(line)
                         else:
-                            # Fallback: put in first task's folder if unmatched
-                            folder_lines[tasks[0][2].parent].append(line)
+                            # Fallback: put in first successful task's folder if unmatched
+                            first_success = next((final_out.parent for src, _, final_out in tasks
+                                                  if status_map.get(str(src), "error") in ("ok", "reconvert")), None)
+                            if first_success:
+                                folder_lines[first_success].append(line)
                 for folder, lines in folder_lines.items():
                     final_db = folder / CHECKSUMS_FILENAME
                     final_db.parent.mkdir(parents=True, exist_ok=True)
@@ -963,9 +999,13 @@ def cmd_transcode(args, auto_decode: bool = False):
     elif decode:
         files = find_jxls_flat(args.input) if args.mode == 0 else find_jxls_recursive(args.input)
         output_root = args.output or args.input
+        if args.mode == 2:
+            output_root.mkdir(parents=True, exist_ok=True)
     else:
         files = find_jpegs_flat(args.input) if args.mode == 0 else find_jpegs_recursive(args.input)
         output_root = args.output or args.input
+        if args.mode == 2:
+            output_root.mkdir(parents=True, exist_ok=True)
 
     if not files:
         logger.warning("No input files found.")
@@ -1084,19 +1124,21 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / f"{stem}.{ext}"
     elif mode in (6, 7):
-        # Export marker modes - only process files INSIDE _EXPORT
+        # Export marker modes - only process files INSIDE export marker folder
         parts = src_path.parts
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            return None  # Skip files outside _EXPORT
+            return None  # Skip files outside export marker folder
         export_dir = Path(*parts[:export_idx + 1])
         if mode == 6:
-            # Mode 6: any file inside _EXPORT
+            # Mode 6: any file inside export marker folder
             rel_parts = src_path.relative_to(export_dir).parts
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         else:
-            # Mode 7: only files inside _EXPORT/EXPORT_JPEG_SUBFOLDER
+            # Mode 7: only files inside export marker / EXPORT_JPEG_SUBFOLDER
             if EXPORT_JPEG_SUBFOLDER:
                 anchor = export_dir / EXPORT_JPEG_SUBFOLDER
                 if not _is_relative_to(src_path, anchor):
@@ -1172,6 +1214,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
 
     try:
         actual_out = write_path
+        original_final_path = final_path
 
         if fmt == "jpeg":
             if bit_depth == 16:
@@ -1204,7 +1247,8 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                         subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
             else:
                 # Direct djxl to JPG (preserves embedded ICC)
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
+                quality_flag = f"--jpeg_quality={quality}"
+                r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1240,6 +1284,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
     except Exception as e:
+        # Clean up any alternate extension orphan created during bit_depth fallback
+        if actual_out != write_path and actual_out.exists():
+            try:
+                actual_out.unlink()
+            except OSError:
+                pass
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         return (str(jxl_path), "error", str(e), None)
@@ -1342,9 +1392,13 @@ def cmd_convert(args, from_jxl: bool = True):
                     args.bit_depth = 8
                 logger.debug("Auto-detected JXL content, switching to from_jxl")
         output_root = args.output or args.input
+        if args.mode == 2:
+            output_root.mkdir(parents=True, exist_ok=True)
     else:
         files = find_jxls_flat(args.input) if args.mode == 0 else find_jxls_recursive(args.input)
         output_root = args.output or args.input
+        if args.mode == 2:
+            output_root.mkdir(parents=True, exist_ok=True)
 
     if not files:
         logger.warning("No input files found.")
@@ -1488,9 +1542,10 @@ def cmd_convert(args, from_jxl: bool = True):
 def cmd_auto(args):
     """Auto-detect per-file for batch processing.
     
-    For directories containing JXL files:
-    - Files WITH jbrd box -> lossless transcode
-    - Files WITHOUT jbrd -> lossy convert
+    For directories containing JPEG and/or JXL files:
+    - JPEG files         -> lossless transcode encode to JXL
+    - JXL files WITH jbrd box -> lossless transcode decode to JPEG
+    - JXL files WITHOUT jbrd  -> lossy convert
     """
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
@@ -1499,48 +1554,68 @@ def cmd_auto(args):
     smart_mode = args.sync
     reconvert_explicit = args.overwrite
     
-    if args.delete_source:
-        DELETE_SOURCE = True
-    
     log_file = setup_logger()
     
-    # Collect all JXL files
+    # Collect JPEG files (encode direction) and JXL files (decode/convert direction)
     if args.mode == 0:
-        all_files = find_jxls_flat(args.input)
+        jpeg_files = find_jpegs_flat(args.input)
+        jxl_files = find_jxls_flat(args.input)
     else:
-        all_files = find_jxls_recursive(args.input)
+        jpeg_files = find_jpegs_recursive(args.input)
+        jxl_files = find_jxls_recursive(args.input)
     
-    if not all_files:
-        logger.warning("No JXL files found.")
+    if not jpeg_files and not jxl_files:
+        logger.warning("No JPEG or JXL files found.")
         return
     
-    # Separate files by jbrd presence
-    transcode_files = []  # Have jbrd - can do lossless
-    convert_files = []    # No jbrd - must do lossy
+    # Separate JXL files by jbrd presence
+    jxl_transcode_files = []  # Have jbrd - can decode losslessly to JPEG
+    jxl_convert_files = []    # No jbrd - must do lossy convert
     
-    for f in all_files:
+    for f in jxl_files:
         if has_jbrd_box(f):
-            transcode_files.append(f)
+            jxl_transcode_files.append(f)
         else:
-            convert_files.append(f)
+            jxl_convert_files.append(f)
     
-    total_files = len(transcode_files) + len(convert_files)
+    total_files = len(jpeg_files) + len(jxl_transcode_files) + len(jxl_convert_files)
     _counter["total"] = total_files
     
+    # Confirm source deletion BEFORE any processing. Lossy conversion requires
+    # stricter confirmation than lossless transcode.
+    if args.delete_source:
+        has_lossy = bool(jxl_convert_files)
+        has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
+        if has_lossy:
+            if not confirm_deletion_lossy():
+                logger.info("Deletion not confirmed -- exiting.")
+                return
+        elif has_lossless:
+            if not confirm_deletion_jpeg():
+                logger.info("Deletion not confirmed -- exiting.")
+                return
+        DELETE_SOURCE = True
+    
     logger.info(f"AUTO MODE | Directory: {args.input}")
-    logger.info(f"Files with jbrd (lossless): {len(transcode_files)}")
-    logger.info(f"Files without jbrd (lossy): {len(convert_files)}")
+    logger.info(f"JPEG files (lossless encode): {len(jpeg_files)}")
+    logger.info(f"JXL with jbrd (lossless decode): {len(jxl_transcode_files)}")
+    logger.info(f"JXL without jbrd (lossy): {len(jxl_convert_files)}")
     logger.info(f"Mode: {args.mode} | Workers: {args.workers} | Staging: {TEMP2_DIR or 'disabled'}")
     
-    # Process transcode files (lossless)
-    if transcode_files:
-        logger.info(f"\n--- Processing {len(transcode_files)} files with jbrd (lossless) ---")
-        _process_file_group(transcode_files, args, use_transcode=True)
+    # Process JPEG files (lossless encode to JXL)
+    if jpeg_files:
+        logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
+        _process_file_group(jpeg_files, args, use_transcode=True)
     
-    # Process convert files (lossy)
-    if convert_files:
-        logger.info(f"\n--- Processing {len(convert_files)} files without jbrd (lossy) ---")
-        _process_file_group(convert_files, args, use_transcode=False)
+    # Process JXL transcode files (lossless decode to JPEG)
+    if jxl_transcode_files:
+        logger.info(f"\n--- Processing {len(jxl_transcode_files)} JXL files with jbrd (lossless) ---")
+        _process_file_group(jxl_transcode_files, args, use_transcode=True)
+    
+    # Process JXL convert files (lossy)
+    if jxl_convert_files:
+        logger.info(f"\n--- Processing {len(jxl_convert_files)} JXL files without jbrd (lossy) ---")
+        _process_file_group(jxl_convert_files, args, use_transcode=False)
     
     logger.info(f"\n{'-'*50}")
     logger.info(f"AUTO MODE complete | Total: {total_files} files")
@@ -1554,8 +1629,9 @@ def _process_file_group(files, args, use_transcode=True):
     pairs = []
     for f in files:
         if use_transcode:
-            # Lossless transcode: output is JPEG
-            out = resolve_output_transcode(f, args.mode, args.input, decode=True)
+            # Lossless transcode: direction depends on input extension
+            is_jpeg_input = f.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
+            out = resolve_output_transcode(f, args.mode, args.input, decode=not is_jpeg_input)
         else:
             # Lossy convert: output format depends on --format flag
             # Determine output extension based on format
@@ -1579,11 +1655,21 @@ def _process_file_group(files, args, use_transcode=True):
     # Process each group
     for dest_folder, group_pairs in groups.items():
         if use_transcode:
-            results = process_group_transcode(
-                group_pairs, args.workers, decode=True,
-                verify=not args.no_verify, mode=args.mode, 
-                reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
-            )
+            # Separate JPEG encode vs JXL decode within the transcode group
+            encode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')]
+            decode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() == '.jxl']
+            if encode_pairs:
+                process_group_transcode(
+                    encode_pairs, args.workers, decode=False,
+                    verify=not args.no_verify, mode=args.mode,
+                    reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
+                )
+            if decode_pairs:
+                process_group_transcode(
+                    decode_pairs, args.workers, decode=True,
+                    verify=not args.no_verify, mode=args.mode,
+                    reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
+                )
         else:
             results = process_group_convert(
                 group_pairs, args.workers, direction="from_jxl",
@@ -1667,8 +1753,12 @@ Examples:
     parser.add_argument("--rename-from", type=str, default="", help="Rename pattern")
     parser.add_argument("--rename-to", type=str, default="", help="Rename replacement")
 
+    # Export marker (must match wrapper's configured marker)
+    parser.add_argument("--export-marker", type=str, default="_EXPORT",
+                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
+
     # Force override
-    parser.add_argument("--force-transcode", action="store_true", 
+    parser.add_argument("--force-transcode", action="store_true",
                         help="Force transcode command")
     parser.add_argument("--force-convert", action="store_true",
                         help="Force convert command")
@@ -1678,6 +1768,11 @@ Examples:
     # Normalize format: jpg -> jpeg
     if args.format == "jpg":
         args.format = "jpeg"
+
+    # Apply configurable export marker before resolving outputs
+    global EXPORT_MARKER
+    if args.export_marker:
+        EXPORT_MARKER = args.export_marker
 
     # Handle --to-srgb shortcut
     if args.to_srgb:

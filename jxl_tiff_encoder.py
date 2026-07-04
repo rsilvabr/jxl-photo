@@ -415,13 +415,14 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         return tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
 
     elif mode == 6:
-        # _EXPORT anchor — only TIFFs INSIDE _EXPORT (ignores everything outside)
+        # EXPORT_MARKER anchor — only TIFFs INSIDE export marker folder
         parts = tiff_path.parts
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        # e.g., "_EXPORT", "Export_Lightroom", "Lightroom_Export" but NOT "NOT_EXPORT_DATA"
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            return None  # Skip files outside _EXPORT
+            return None  # Skip files outside export marker folder
 
         export_dir = Path(*parts[:export_idx + 1])
         rel_parts = tiff_path.relative_to(export_dir).parts
@@ -432,12 +433,13 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
 
     elif mode == 7:
-        # _EXPORT anchor — only TIFFs inside _EXPORT/[subfolder]
+        # EXPORT_MARKER anchor — only TIFFs inside export marker/[subfolder]
         parts = tiff_path.parts
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        marker_lower = EXPORT_MARKER.lower()
+        export_idx = next((i for i, p in enumerate(parts)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            return None  # Skip files outside _EXPORT
+            return None  # Skip files outside export marker folder
 
         export_dir = Path(*parts[:export_idx + 1])
 
@@ -754,8 +756,26 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 def make_png_bytes(img, icc_bytes=None):
     """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
     import numpy as np
+
+    if img.dtype.kind == 'f':
+        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Float TIFFs are not supported by make_png_bytes.")
+    if img.dtype not in (np.uint8, np.uint16):
+        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
+
+    if img.ndim == 2:
+        img = img[:, :, np.newaxis]
+    if img.ndim != 3:
+        raise ValueError(f"Unsupported image shape: {img.shape}. Expected 2D or 3D array.")
+
     h, w, c = img.shape
-    color_type = 2 if c == 3 else (0 if c == 1 else 6)
+    if c == 1:
+        color_type = 0
+    elif c == 3:
+        color_type = 2
+    elif c == 4:
+        color_type = 6
+    else:
+        raise ValueError(f"Unsupported channel count: {c}. Expected 1, 3, or 4.")
 
     def chunk(name, data):
         p = name + data
@@ -765,10 +785,8 @@ def make_png_bytes(img, icc_bytes=None):
     if img.dtype == np.uint8:
         img_16 = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
         img_be = img_16.astype(">u2")
-    elif img.dtype == np.uint16:
-        img_be = img.astype(">u2")
     else:
-        raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
+        img_be = img.astype(">u2")
     raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
 
     out = b"\x89PNG\r\n\x1a\n"
@@ -815,8 +833,10 @@ def reorder_jxl_boxes(jxl_path):
             if i + 16 > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: file too short for 16-byte header")
             ext_size = int.from_bytes(data[i+8:i+16], "big")
-            if ext_size > MAX_BOX_SIZE:
+            if ext_size > MAX_JXL_SIZE:
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            if ext_size < 16:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
             if i + ext_size > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
             header, payload = data[i:i+16], data[i+16:i+ext_size]
@@ -1117,11 +1137,18 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
     # Move from staging to final destination in bulk
     if use_staging:
         moved = 0
+        status_map = {str(t): r[1] for t, r in zip([task[0] for task in tasks], results)}
         for tiff, write_jxl, final_jxl in tasks:
-            if write_jxl.exists():
-                final_jxl.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(write_jxl), str(final_jxl))
-                moved += 1
+            status = status_map.get(str(tiff), "error")
+            if status not in ("ok", "overwrite"):
+                logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
+                continue
+            if not write_jxl.exists():
+                logger.warning(f"  KEEP (staging file missing) | {write_jxl.name}")
+                continue
+            final_jxl.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(write_jxl), str(final_jxl))
+            moved += 1
         if moved:
             logger.info(f"  -> Moved {moved} file(s) from staging to final destination")
 
@@ -1176,22 +1203,25 @@ def find_tiffs_mode6(input_path: Path):
     """Mode 6: only TIFFs inside folders containing EXPORT_MARKER in their path (any subfolder)."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
+    marker_lower = EXPORT_MARKER.lower()
     for t in all_tiffs:
         parts_str = list(t.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        # Match folders starting or ending with EXPORT_MARKER case-insensitively
+        export_idx = next((i for i, p in enumerate(parts_str)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is not None:
             filtered.append(t)
     return filtered
 
 def find_tiffs_mode7(input_path: Path):
-    """Mode 7: only TIFFs inside _EXPORT/EXPORT_TIFF_SUBFOLDER specific subfolder."""
+    """Mode 7: only TIFFs inside EXPORT_MARKER/EXPORT_TIFF_SUBFOLDER specific subfolder."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
+    marker_lower = EXPORT_MARKER.lower()
     for t in all_tiffs:
         parts_str = list(t.parts)
-        # Match folders starting or ending with EXPORT_MARKER (not substring)
-        export_idx = next((i for i, p in enumerate(parts_str) if p.startswith(EXPORT_MARKER) or p.endswith(EXPORT_MARKER)), None)
+        export_idx = next((i for i, p in enumerate(parts_str)
+                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             continue
         if EXPORT_TIFF_SUBFOLDER:
@@ -1225,6 +1255,8 @@ def main():
                         help="Show what would be converted without converting")
     parser.add_argument("--staging",         type=str, default=None,
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
+    parser.add_argument("--export-marker",  type=str, default="_EXPORT",
+                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
     parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
                         help="Where to record encoding params: xmp (default), software, or off")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
@@ -1256,6 +1288,9 @@ def main():
         USE_RAM_FOR_PNG = args.ram
     if args.staging is not None:
         TEMP2_DIR = args.staging
+    if args.export_marker:
+        global EXPORT_MARKER
+        EXPORT_MARKER = args.export_marker
     if args.encode_tag is not None:
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
@@ -1296,6 +1331,7 @@ def main():
         # Mode 2: recursive, all files to output_root
         tiffs = find_tiffs_recursive(args.input)
         output_root = args.output or args.input
+        output_root.mkdir(parents=True, exist_ok=True)
     elif args.mode == 6:
         tiffs = find_tiffs_mode6(args.input)
         output_root = args.input
@@ -1393,19 +1429,19 @@ def main():
     d50_skipped = _d50_patch_count["skipped"]
     already_correct = _d50_patch_count["already_correct"]
     skipped_needed = _d50_patch_count["skipped_needed"]
-    
+
     # Total files analyzed for D50 = those where patch was applied + those skipped
     total_analyzed = applied + d50_skipped
     # Total that actually needed the patch (were corrected + would have needed but were skipped)
     total_needed_patch = applied + skipped_needed
-    
+
     if total_analyzed > 0:
         if D50_PATCH_MODE == "off":
             # For mode off, we still tracked correctness so user knows how many would have needed patch
             logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
         else:
-            # Show: applied | skipped | needed patch vs already correct
-            logger.info(f"D50 patch: {applied} applied | {d50_skipped} skipped | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
+            # Show: applied | skipped (not needed) | needed patch vs already correct
+            logger.info(f"D50 patch: {applied} applied | {d50_skipped - skipped_needed} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
 

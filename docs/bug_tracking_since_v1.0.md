@@ -5,8 +5,9 @@ v1.2 Update: 2026-04-05
 v1.3 Update: 2026-04-11  
 v1.5 Update: 2026-04-12  
 v1.5 Final: 2026-04-12 (third pass)  
-v1.5.2: 2026-04-13 (critical 8-bit fix)  
-Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`  
+v1.5.2: 2026-04-13 (critical 8-bit fix)
+v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd_auto, and wrapper integration
+Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
 
 ---
@@ -92,8 +93,22 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 88 | OVERWRITE log reports "no" when default is "smart" | encoder, decoder | ✅ FIXED |
 | 89 | PIL_MAX_IMAGE_PIXELS config ignored in decoder | decoder | ✅ FIXED |
 | 90 | 8-bit PNG not scaled to 16-bit in decoder | decoder | ✅ FIXED |
+| 91 | `cmd_auto` routes JPEG folders to decode instead of encode | transcoder | ✅ FIXED (v1.5.3) |
+| 92 | Staging moves failed outputs to final destination | encoder, decoder, transcoder | ✅ FIXED (v1.5.3) |
+| 93 | `cmd_auto --delete-source` deletes without confirmation | transcoder, HDR transcoder | ✅ FIXED (v1.5.3) |
+| 94 | Basic mode PNG reader downgrades 16-bit to 8-bit | decoder | ✅ FIXED (v1.5.3) |
+| 95 | Matrix mode `--color_space` token incompatible with libjxl v0.11.x | decoder | ✅ FIXED (v1.5.3) |
+| 96 | `--export-marker` case mismatch and missing propagation | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
+| 97 | Mode 2 output folder handling inconsistent | encoder, decoder, transcoder, photo | ✅ FIXED (v1.5.3) |
+| 98 | Manifest modes 6/7 reset to 0/2 by wrapper | photo | ✅ FIXED (v1.5.3) |
+| 99 | `logger` undefined in wrapper aborts workflow | photo | ✅ FIXED (v1.5.3) |
+| 100 | Extended size box validation rejects valid JXL containers | encoder, transcoder | ✅ FIXED (v1.5.3) |
+| 101 | `--jpeg_quality` ignored in direct JXL→JPEG path | transcoder | ✅ FIXED (v1.5.3) |
+| 102 | Orphaned alternate-extension staging file left on failure | transcoder | ✅ FIXED (v1.5.3) |
+| 103 | `make_png_bytes` crashes on float/CMYK/unsupported shapes | encoder | ✅ FIXED (v1.5.3) |
+| 104 | D50 patch statistics printed wrong count | encoder | ✅ FIXED (v1.5.3) |
 
-**Total bugs fixed: 78**
+**Total bugs fixed: 93**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -1668,6 +1683,246 @@ if img.dtype == np.uint8:
 
 **Files changed:**
 - `jxl_tiff_encoder.py` lines 752-765, 898-903
+
+---
+
+### Bug #91 — `cmd_auto` Routes JPEG Folders to Decode Instead of Encode
+
+**Location:** `jxl_jpeg_transcoder.py` — `_process_file_group()`
+
+**Problem:** When `cmd_auto` received a folder containing only JPEG files, it classified them correctly as "lossless encode", but then called `process_group_transcode(..., decode=True)`. That routed every JPEG through `decode_one_transcode()`, which runs `djxl` and produces the error `can't decode to the file extension '.jxl'`. The encode path (`cjxl --lossless_jpeg=1`) was never reached.
+
+**Fix:** Split each transcode group into encode pairs (JPEG inputs) and decode pairs (JXL inputs) and call `process_group_transcode()` once per direction:
+
+```python
+encode_pairs = [...]  # .jpg/.jpeg inputs -> cjxl
+process_group_transcode(encode_pairs, ..., decode=False)
+
+decode_pairs = [...]   # .jxl inputs -> djxl
+process_group_transcode(decode_pairs, ..., decode=True)
+```
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_process_file_group()`
+
+---
+
+### Bug #92 — Staging Moves Failed Outputs to Final Destination
+
+**Location:** `process_group()` in `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+**Problem:** After worker threads finished, the staging move loop only checked that the result tuple was non-`None`. A failed conversion still returned a result tuple (e.g. `(path, "error", ...)`), so the partial or missing staging file was moved to the output directory. For example, a corrupt `.jxl` could leave a zero-byte TIFF next to valid outputs.
+
+**Fix:** Move the staging file to the final path only when the status string is in the success set (`"ok"`, `"reconvert"`, `"overwritten"`, `"skipped"`). On failure, the staging file is discarded and the final path is left untouched.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `process_group()`
+- `jxl_tiff_decoder.py` `process_group()`
+- `jxl_jpeg_transcoder.py` `process_group_transcode()`
+
+---
+
+### Bug #93 — `cmd_auto --delete-source` Deletes Without Confirmation
+
+**Location:** `cmd_auto()` in `jxl_jpeg_transcoder.py` and `jxl_jpeg_transcoder_HDR.py`
+
+**Problem:** The `cmd_auto` entry point checked `DELETE_SOURCE` and called `delete_source_files()` directly without any confirmation dialog. This made an irreversible, recursive source deletion a single flag away from running.
+
+**Fix:** Added explicit confirmation before processing:
+- Lossless JPEG↔JXL transcode uses `confirm_deletion_jpeg()` (type `yes`).
+- Lossy JXL→JPEG convert uses `confirm_deletion_lossy()` (type current HHMM).
+
+If the user does not confirm, the command exits cleanly before touching any file.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_auto()`
+- `jxl_jpeg_transcoder_HDR.py` `cmd_auto()`
+
+---
+
+### Bug #94 — Basic Mode PNG Reader Downgrades 16-bit to 8-bit
+
+**Location:** `jxl_tiff_decoder.py` — `read_png_to_numpy()`
+
+**Problem:** The fallback path used `imagecodecs.png_decode(str(png_path))`, which returned a downgraded 8-bit array (only 256 unique values) for 16-bit PNGs. This broke the promise of lossless 16-bit roundtrip in Basic mode.
+
+**Fix:** Use the bytes-based API and keep a PIL fallback:
+
+```python
+try:
+    import imagecodecs
+    return imagecodecs.png_decode(Path(png_path).read_bytes())
+except Exception:
+    pass
+
+# PIL fallback with full 16-bit support
+from PIL import Image
+...
+```
+
+`imagecodecs.png_decode(Path.read_bytes())` preserves all 65,536 levels, making Basic mode pixel-perfect.
+
+**Verification:**
+- `np.array_equal(orig, basic)` now returns `True` for 16-bit ProPhoto TIFFs.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `read_png_to_numpy()`
+
+---
+
+### Bug #95 — Matrix Mode `--color_space` Token Incompatible with libjxl v0.11.x
+
+**Location:** `jxl_tiff_decoder.py` — Matrix mode conversion
+
+**Problem:** Matrix mode used `--color_space=RGB_D65_2020_Per_Lin`, but libjxl v0.11.x expects the Rec.2020 primaries token to be written as `202`, not `2020`. This caused `Failed to set color space` errors during Matrix decode.
+
+**Fix:** Changed the Matrix mode argument to the token recognized by libjxl v0.11.x:
+
+```bash
+djxl input.jxl temp.png --color_space=RGB_D65_202_Per_Lin
+```
+
+This is confirmed compatible with `djxl v0.11.2 332feb1` and preserves Rec.2020 primaries.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` Matrix mode conversion path
+- `docs/README_jxl_tiff_decoder.md`
+
+---
+
+### Bug #96 — `--export-marker` Case Mismatch and Missing Propagation
+
+**Location:** `jxl_photo.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+**Problem:** The wrapper exposed an `--export-marker` setting, but it was not passed to any of the worker scripts. In addition, marker matching used substring checks that were case-sensitive (`if marker in name`), so "ProPhoto-g22" did not match "prophoto".
+
+**Fix:**
+1. Added `--export-marker` CLI argument to encoder, decoder, and transcoder.
+2. Propagated the configured marker from `jxl_photo.py` to each script.
+3. Made all marker comparisons case-insensitive across the pipeline.
+
+**Files changed:**
+- `jxl_tiff_encoder.py`
+- `jxl_tiff_decoder.py`
+- `jxl_jpeg_transcoder.py`
+- `jxl_photo.py`
+
+---
+
+### Bug #97 — Mode 2 Output Folder Handling Inconsistent
+
+**Location:** `jxl_photo.py` and all worker scripts
+
+**Problem:** In mode 2 (save to parent of input), the wrapper sometimes passed the parent path while the worker scripts expected a folder name or the parent itself. The result was files scattered or written to the wrong location.
+
+**Fix:** Standardized mode 2 handling: the wrapper resolves `output_dir` to the parent of the input directory and passes it explicitly. Each worker script respects the provided `--output` path, creating it if necessary.
+
+**Files changed:**
+- `jxl_tiff_encoder.py`
+- `jxl_tiff_decoder.py`
+- `jxl_jpeg_transcoder.py`
+- `jxl_photo.py`
+
+---
+
+### Bug #98 — Manifest Modes 6/7 Reset to 0/2 by Wrapper
+
+**Location:** `jxl_photo.py` — `detect_mode_for_entry()`
+
+**Problem:** When a manifest entry used modes 6 or 7, the wrapper mapped them to 0 or 2 before launching the worker. The original workflow intention (specific output naming modes) was lost.
+
+**Fix:** Preserve the original mode in an `original_mode` field and restore it when building the command-line arguments for the worker scripts.
+
+**Files changed:**
+- `jxl_photo.py` `detect_mode_for_entry()`
+
+---
+
+### Bug #99 — `logger` Undefined in Wrapper Aborts Workflow
+
+**Location:** `jxl_photo.py`
+
+**Problem:** A code path in `jxl_photo.py` referenced `logger` before the logger was initialized, raising a `NameError` and aborting the workflow.
+
+**Fix:** Ensured the logger is initialized before any code path can log, or guarded the call so the undefined variable cannot be reached.
+
+**Files changed:**
+- `jxl_photo.py`
+
+---
+
+### Bug #100 — Extended Size Box Validation Rejects Valid JXL Containers
+
+**Location:** `reorder_jxl_boxes()` in `jxl_tiff_encoder.py` and `jxl_jpeg_transcoder.py`
+
+**Problem:** The JXL box parser validated extended-size boxes with `extended_size < len(payload)`, but the correct check is `extended_size < len(payload) + 8` because the extended size field itself replaces the 8-byte size header. This caused valid containers with large boxes to fail reordering/injection.
+
+**Fix:** Corrected the comparison:
+
+```python
+if extended_size < len(payload) + 8:
+    raise ValueError("Extended size too small")
+```
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `reorder_jxl_boxes()`
+- `jxl_jpeg_transcoder.py` `reorder_jxl_boxes()`
+
+---
+
+### Bug #101 — `--jpeg_quality` Ignored in Direct JXL→JPEG Path
+
+**Location:** `jxl_jpeg_transcoder.py`
+
+**Problem:** When decoding JXL directly to JPEG in the non-jbrd/lossy path, the configured `--jpeg_quality` value was not passed to `djxl`, so the output used the decoder's default quality.
+
+**Fix:** Added `quality` parameter to the `djxl` call for JPEG output:
+
+```bash
+djxl input.jxl output.jpg --jpeg_quality=95
+```
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #102 — Orphaned Alternate-Extension Staging File Left on Failure
+
+**Location:** `jxl_jpeg_transcoder.py`
+
+**Problem:** During decode, the code renamed the staging file from `.png`/`.jpg` to the final extension. If the conversion failed after the rename, the leftover file stayed in the staging directory.
+
+**Fix:** Track the renamed staging path and remove it on error paths, keeping the staging directory clean on failure.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #103 — `make_png_bytes` Crashes on Float/CMYK/Unsupported Shapes
+
+**Location:** `jxl_tiff_encoder.py`
+
+**Problem:** `make_png_bytes()` assumed `uint8`/`uint16` RGB(A) input and used `shape[2]` without checking. Float arrays or CMYK images caused an `IndexError` or produced invalid PNG bytes.
+
+**Fix:** Added guards at the start of the function to reject unsupported dtypes, channel counts, and color spaces with a clear error message instead of crashing.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `make_png_bytes()`
+
+---
+
+### Bug #104 — D50 Patch Statistics Printed Wrong Count
+
+**Location:** `jxl_tiff_encoder.py`
+
+**Problem:** The encoder's summary reported D50-patched files using an incorrect variable, so the count did not match the number of profiles actually patched.
+
+**Fix:** Updated the summary print statement to use the correct counter variable.
+
+**Files changed:**
+- `jxl_tiff_encoder.py`
 
 ---
 
