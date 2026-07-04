@@ -200,15 +200,16 @@ Instead of memorizing modes 0-8, press **[A]** in Step 4. The wizard scans your 
 
 Generate a CSV to edit before running:
 ```csv
-Source,Destination
-F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\JXL
-F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL
-# F:\2025\Osaka\RAW,F:\2025\Osaka\JXL
+Source,Destination,Mode
+F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\TIFF,6
+F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL,7
+# F:\2025\Osaka\RAW,F:\2025\Osaka\JXL,0
 ```
 
 - Edit paths, delete rows, reorder
 - Comment with `#` to skip
 - Rerun same manifest anytime
+- **Manifest compatibility:** manifests are guaranteed to work with the version that generated them. Backward compatibility with older 2-column manifests is not guaranteed; regenerate the manifest if upgrading from a previous version.
 
 ---
 

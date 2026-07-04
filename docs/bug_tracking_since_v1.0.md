@@ -1833,14 +1833,30 @@ This is confirmed compatible with `djxl v0.11.2 332feb1` and preserves Rec.2020 
 
 ### Bug #98 — Manifest Modes 6/7 Reset to 0/2 by Wrapper
 
-**Location:** `jxl_photo.py` — `detect_mode_for_entry()`
+**Location:** `jxl_photo.py` — `detect_mode_for_entry()`, `_generate_manifest()`, `_wizard_run_from_manifest()`
 
-**Problem:** When a manifest entry used modes 6 or 7, the wrapper mapped them to 0 or 2 before launching the worker. The original workflow intention (specific output naming modes) was lost.
+**Problem:** When a manifest entry used modes 6 or 7, the wrapper mapped them to 0 or 2 before launching the worker. The original workflow intention (specific output naming modes) was lost. The root cause was that the manifest CSV only stored `Source` and `Destination`, so by the time `detect_mode_for_entry()` ran, the generation mode had been overwritten by the special manifest execution mode (99).
 
-**Fix:** Preserve the original mode in an `original_mode` field and restore it when building the command-line arguments for the worker scripts.
+**Fix (v1.5.3b):** Changed the manifest CSV schema to include a third `Mode` column:
+
+```csv
+Source,Destination,Mode
+F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\TIFF,6
+```
+
+- `generate_manifest()` now writes `(source, destination, count, mode)`.
+- `_generate_manifest()` writes the `Mode` column.
+- `_wizard_run_from_manifest()` reads the mode and passes it as `original_mode` to `detect_mode_for_entry()`.
+- `_view_manifest()` displays the mode column.
+
+**Compatibility note:** Manifests are guaranteed to work with the version that generated them. Older 2-column manifests are not supported after this change.
 
 **Files changed:**
 - `jxl_photo.py` `detect_mode_for_entry()`
+- `jxl_photo.py` `_generate_manifest()`
+- `jxl_photo.py` `_wizard_run_from_manifest()`
+- `jxl_photo.py` `_view_manifest()`
+- `README.md` manifest example
 
 ---
 

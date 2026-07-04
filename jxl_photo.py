@@ -2259,7 +2259,7 @@ class InteractiveMenu:
             elif adv.get('sync'):
                 ow_label = "sync (reconvert if newer)"
             else:
-                ow_label = "skip (no overwrite)"
+                ow_label = "sync (default)"
             table.add_row("If exists:", ow_label)
             table.add_row("Workers:", str(workflow['workers']))
 
@@ -2297,7 +2297,7 @@ class InteractiveMenu:
             elif adv.get('sync'):
                 ow_label = "sync (reconvert if newer)"
             else:
-                ow_label = "skip (no overwrite)"
+                ow_label = "sync (default)"
             print(f"Source: {origin.upper()}")
             print(f"Destination: {dest.upper() if dest else '?'}")
             print(f"Mode: {workflow['mode']} - {mode_names.get(workflow['mode'])}")
