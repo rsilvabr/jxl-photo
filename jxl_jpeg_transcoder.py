@@ -1624,8 +1624,6 @@ def cmd_auto(args):
 
 def _process_file_group(files, args, use_transcode=True):
     """Process a group of files with the same method."""
-    global _counter
-    
     # Build output pairs
     pairs = []
     for f in files:

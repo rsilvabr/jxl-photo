@@ -358,11 +358,11 @@ class FolderAnalyzer:
         result['total_files'] = len(origin_files)
         result['folder_count'] = len(all_folders)
 
-        # Check for export markers (case-insensitive, contains configured marker)
+        # Check for export markers (case-insensitive, prefix or suffix only)
         marker_lower = self.export_marker.lower()
-        export_pattern = re.compile(re.escape(marker_lower), re.IGNORECASE)
         for folder in all_folders:
-            if export_pattern.search(folder.name):
+            name_lower = folder.name.lower()
+            if name_lower.startswith(marker_lower) or name_lower.endswith(marker_lower):
                 result['has_export_marker'] = True
                 result['export_marker_paths'].append(str(folder))
 
@@ -709,7 +709,10 @@ class FolderAnalyzer:
         marker_lower = self.export_marker.lower()
         if original_mode in (6, 7):
             src_parts_lower = [p.lower() for p in src_path.parts]
-            if any(marker_lower in p for p in src_parts_lower):
+            if any(
+                p.startswith(marker_lower) or p.endswith(marker_lower)
+                for p in src_parts_lower
+            ):
                 return original_mode
 
         if src_path == dst_path:

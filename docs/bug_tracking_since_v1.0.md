@@ -113,8 +113,11 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 | 108 | Skipped files spam "KEEP in staging" warning | encoder, decoder, transcoder | ✅ FIXED (v1.5.3b) |
 | 109 | Wizard offers non-functional "skip" existing-file option | photo | ✅ FIXED (v1.5.3b) |
 | 110 | Adobe RGB / ProPhoto RGB ICC aliases fail (PIL limitation) | decoder, photo | ✅ FIXED (v1.5.3b) |
+| 111 | Wrapper detects marker as substring while scripts use prefix/suffix | photo | ✅ FIXED (v1.5.3c) |
+| 112 | CMYK TIFFs silently treated as RGBA | encoder | ✅ FIXED (v1.5.3c) |
+| 113 | Dead `global _counter` in `_process_file_group` | transcoder | ✅ FIXED (v1.5.3c) |
 
-**Total bugs fixed: 100**
+**Total bugs fixed: 103**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2052,4 +2055,61 @@ status_map = {r[0]: r[1] for r in results}
 - `jxl_photo.py` target-ICC prompts
 
 ---
+
+### Bug #111 — Wrapper Detects Marker as Substring While Scripts Use Prefix/Suffix
+
+**Location:** `jxl_photo.py` — `FolderAnalyzer.analyze()` and `detect_mode_for_entry()`
+
+**Problem:** The wrapper used `re.search()` to detect the export marker anywhere in a folder name (substring match). The worker scripts (`jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`) only match folders that **start or end** with the marker. This caused a mismatch: a folder like `MY_EXPORT_OLD` was detected by the wizard and added to the manifest, but the scripts ignored it and processed 0 files.
+
+**Fix:** Changed the wrapper to use the same prefix/suffix matching as the scripts:
+
+```python
+name_lower = folder.name.lower()
+if name_lower.startswith(marker_lower) or name_lower.endswith(marker_lower):
+    ...
+```
+
+`detect_mode_for_entry()` was updated the same way when checking whether a source path contains the marker.
+
+**Files changed:**
+- `jxl_photo.py` `FolderAnalyzer.analyze()`
+- `jxl_photo.py` `detect_mode_for_entry()`
+
+---
+
+### Bug #112 — CMYK TIFFs Silently Treated as RGBA
+
+**Location:** `jxl_tiff_encoder.py` — `convert_one()`
+
+**Problem:** A CMYK TIFF has 4 channels. `make_png_bytes()` treated any 4-channel image as RGBA (`color_type=6`), producing a silently corrupted PNG/JXL with wrong colors.
+
+**Fix:** Added an explicit check right after opening the TIFF:
+
+```python
+photometric = tif.pages[0].photometric
+if photometric == tifffile.PHOTOMETRIC.SEPARATED:
+    raise ValueError("CMYK TIFFs are not supported")
+```
+
+The encoder now aborts with a clear error message instead of producing incorrect output.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `convert_one()`
+
+---
+
+### Bug #113 — Dead `global _counter` in `_process_file_group`
+
+**Location:** `jxl_jpeg_transcoder.py` — `_process_file_group()`
+
+**Problem:** The function declared `global _counter` but never read from or wrote to the variable. It was leftover code from an earlier refactor.
+
+**Fix:** Removed the unused `global _counter` declaration.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_process_file_group()`
+
+---
+
 

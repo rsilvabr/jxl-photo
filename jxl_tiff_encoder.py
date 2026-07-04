@@ -928,6 +928,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
 
             # 4. Read TIFF pixel data (series[0] = main image, ignores thumbnails)
             with tifffile.TiffFile(str(tiff_path)) as tif:
+                # Reject CMYK early — it would otherwise be mis-detected as RGBA
+                photometric = tif.pages[0].photometric
+                if photometric == tifffile.PHOTOMETRIC.SEPARATED:
+                    raise ValueError("CMYK TIFFs are not supported")
                 img = tif.series[0].asarray()
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
                 if img.dtype == np.uint8:
