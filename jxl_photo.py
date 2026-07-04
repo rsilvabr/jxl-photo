@@ -2088,6 +2088,8 @@ class InteractiveMenu:
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
                 target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default="")
+                if target_icc == "custom":
+                    target_icc = Prompt.ask("Enter ICC profile path")
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
@@ -2104,6 +2106,8 @@ class InteractiveMenu:
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
                 target_icc = input("Target ICC (sRGB/custom/empty): ").strip()
+                if target_icc.lower() == "custom":
+                    target_icc = input("Enter ICC profile path: ").strip()
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
