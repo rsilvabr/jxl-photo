@@ -24,6 +24,24 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
 
+## What's New in v1.6
+
+### Audit-Driven Fixes
+This release fixes issues found during an independent audit of v1.5.3:
+
+- **Encoder staging concurrency fixed** — failed outputs no longer get promoted when using multiple workers
+- **Auto mode routing fixed** — JPEG folders are now encoded, not decoded; `--format jpeg` actually produces JPEGs
+- **Manifest modes preserved** — generated manifests now include a `Mode` column, so modes 6 and 7 survive execution
+- **Basic mode 16-bit fidelity** — PNG decode now preserves full 16-bit data
+- **Matrix mode for libjxl v0.11.x** — uses the correct `--color_space` token
+- **CMYK TIFFs rejected early** — no more silent RGBA mis-encoding
+- **Wizard cleanup** — removed non-functional "skip" option; custom Target ICC asks for the real file path
+
+### ICC Alias Cleanup
+Only `sRGB` remains as a built-in ICC alias. `Adobe RGB` and `ProPhoto RGB` aliases were removed because Pillow cannot generate them on the fly; use actual `.icc` profile files instead.
+
+---
+
 ## What's New in v1.5
 
 ### JXL → JPEG Auto-Detect Mode
@@ -600,4 +618,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
-- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion
