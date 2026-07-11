@@ -605,6 +605,23 @@ Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new
 
 ---
 
+## Multi-Page TIFF Reconstruction (v1.7.0+)
+
+`jxl_tiff_decoder.py` reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder.
+
+- `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
+- `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
+- `--thumbnail-handling generate` — reserved for future use; currently falls back to `include`
+- `--no-reconstruct-multipage` — disable multi-page reconstruction entirely
+
+JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
+
+### Per-Page ICC Preservation (v1.7.1+)
+
+Each reconstructed page gets its own ICC profile restored when the source page had one. Pages that inherited ICC from IFD0 (flagged `jxlphoto-icc:inherited` in `dc:Relation`) are reconstructed without an ICC tag, matching the original TIFF structure while preserving the effective color interpretation.
+
+---
+
 ## License
 
 MIT License — feel free to use, modify, and distribute.

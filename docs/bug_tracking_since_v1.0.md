@@ -36,16 +36,20 @@ Added explicit multi-page handling across the TIFF workflow:
    - Split pages carry an XMP group marker in `XMP-dc:Relation` (prefix `jxlphoto-mpg:`). Using a list field preserves any existing `dc:Relation` values the user had.
 
 2. **Decoder (`jxl_tiff_decoder.py`)**
-   - Reconstructs multi-page TIFFs only from JXLs that carry a matching group marker.
+   - Reconstructs multi-page TIFFs from pages that carry a matching group marker.
    - Files without the marker always decode as standalone TIFFs, even if their names look like pages (`scan.jxl` + `scan_page2.jxl` are never merged).
    - Markers are read in batch via exiftool to avoid one subprocess per file (performance regression fixed during audit).
-   - Reconstructs a single multi-page TIFF with `tifffile.imwrite(..., append=True)`.
+   - Reconstructs a single multi-page TIFF with `tifffile.TiffWriter` writing each page sequentially.
    - New settings/CLI:
      - `THUMBNAIL_HANDLING` / `--thumbnail-handling {ignore,include,generate}`
      - `THUMBNAIL_SUFFIX` / `--thumbnail-suffix`
      - `RECONSTRUCT_MULTIPAGE` / `--no-reconstruct-multipage` to disable reconstruction entirely
    - JPEG preview is skipped when reconstructing multi-page TIFFs.
    - `--thumbnail-handling generate` is recognized but not yet implemented; it falls back to `include` with a warning.
+
+3. **Per-page ICC preservation (v1.7.1 follow-up)**
+   - `jxl_tiff_encoder.py` extracts each page's own ICC (tag 34675) and falls back to IFD0's ICC when absent; inherited pages are flagged with `jxlphoto-icc:inherited` in `dc:Relation`.
+   - `jxl_tiff_decoder.py` restores each page's own ICC tag; pages flagged as inherited are reconstructed without an ICC tag, matching the original structure.
 
 3. **Wrapper (`jxl_photo.py`)**
    - Advanced options now ask for multi-page mode and thumbnail handling for TIFF→JXL.

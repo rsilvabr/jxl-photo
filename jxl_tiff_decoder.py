@@ -141,6 +141,11 @@ RECONSTRUCT_MULTIPAGE = True
 MULTIPAGE_MARKER_PREFIX = "jxlphoto-mpg:"
 # Must match the encoder's MULTIPAGE_XMP_MARKER. Stored in XMP-dc:Relation (a bag/list).
 
+ICC_INHERITED_FLAG = "jxlphoto-icc:inherited"
+# Must match the encoder's ICC_INHERITED_XMP_FLAG. Indicates that a page inherited
+# its effective ICC from IFD0; the reconstructed TIFF should not write an ICC tag on
+# that page, matching the original structure.
+
 TEMP_DIR = None
 # Temporary directory for intermediate files.
 # None → use system temp
@@ -911,9 +916,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir):
                 [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-dc:Relation", str(tiff_path)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
             )
-            if rr.returncode == 0 and rr.stdout and MULTIPAGE_MARKER_PREFIX in rr.stdout:
+            if rr.returncode == 0 and rr.stdout and (MULTIPAGE_MARKER_PREFIX in rr.stdout or ICC_INHERITED_FLAG in rr.stdout):
                 kept = [t.strip() for t in rr.stdout.replace(";", ",").split(",")
-                        if t.strip() and not t.strip().startswith(MULTIPAGE_MARKER_PREFIX)]
+                        if t.strip() and not t.strip().startswith(MULTIPAGE_MARKER_PREFIX)
+                        and t.strip() != ICC_INHERITED_FLAG]
                 clear_cmd = [_get_exiftool_cmd(), "-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)]
                 subprocess.run(clear_cmd, capture_output=True, timeout=5)
                 if kept:
@@ -1305,7 +1311,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     Convert a group of JXLs belonging to the same multi-page TIFF into a single
     multi-page TIFF.
 
-    page_entries: sorted list of (jxl_path, page_idx, is_thumbnail) tuples.
+    page_entries: sorted list of (jxl_path, page_idx, is_thumbnail, icc_inherited) tuples.
     """
     already_exists = final_path.exists()
 
@@ -1316,7 +1322,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             return str(main_jxl), "skipped", str(final_path)
         elif OVERWRITE == "smart":
             # Use the newest JXL mtime in the group for sync decision
-            newest_jxl_mtime = max(j.stat().st_mtime for j, _, _ in page_entries)
+            newest_jxl_mtime = max(j.stat().st_mtime for j, _, _, _ in page_entries)
             if newest_jxl_mtime <= final_path.stat().st_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
@@ -1338,9 +1344,9 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             reason = "unknown"
             strategy = "unknown"
 
-            for jxl_path, page_idx, is_thumb in page_entries:
+            for jxl_path, page_idx, is_thumb, icc_inherited in page_entries:
                 pixels, icc_data, page_reason, page_strategy = decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path)
-                page_arrays.append((pixels, page_idx, is_thumb))
+                page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited))
                 # Use ICC/strategy from the first (main) page for the whole TIFF
                 if page_idx == 0 and not is_thumb:
                     page_icc = icc_data
@@ -1369,16 +1375,18 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 except AttributeError:
                     write_method = tif_writer.save
 
-                for i, (pixels, page_idx, is_thumb) in enumerate(page_arrays):
+                for i, (pixels, page_idx, is_thumb, entry_icc, entry_inherited) in enumerate(page_arrays):
                     kwargs = {
                         'photometric': 'RGB',
                         'compression': tiff_comp,
                         'metadata': None,
                         'software': '',
                     }
-                    if page_icc and i == 0:
-                        # Attach ICC only to the first real page
-                        kwargs['iccprofile'] = page_icc
+                    # Attach ICC to page 0 always, and to other pages only if
+                    # they carried their own ICC (not inherited). Inherited pages
+                    # are reconstructed without an ICC tag, matching the original.
+                    if entry_icc and (i == 0 or not entry_inherited):
+                        kwargs['iccprofile'] = entry_icc
                     if is_thumb:
                         # Mark thumbnail pages with subfiletype=1
                         kwargs['subfiletype'] = 1
@@ -1417,7 +1425,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
-            thumb_count = sum(1 for _, _, is_thumb in page_entries if is_thumb)
+            thumb_count = sum(1 for _, _, is_thumb, _ in page_entries if is_thumb)
             real_count = len(page_entries) - thumb_count
             detail = f"{real_count} page(s)"
             if thumb_count:
@@ -1436,7 +1444,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
     Each task is a dict with keys:
       - type: 'multi'
       - main_jxl: Path to the main JXL
-      - entries: list of (jxl_path, page_idx, is_thumbnail)
+      - entries: list of (jxl_path, page_idx, is_thumbnail, icc_inherited)
       - final_tiff: Path to final TIFF destination
     """
     use_staging = TEMP2_DIR is not None
@@ -1515,7 +1523,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
             # Delete all source JXLs in this group
-            for jxl_path, _, _ in task["entries"]:
+            for jxl_path, _, _, _ in task["entries"]:
                 try:
                     jxl_path.unlink()
                     logger.info(f" DELETED source | {jxl_path.name}")
@@ -1610,17 +1618,17 @@ def _parse_jxl_page_suffix(name: str):
     return stem, page_idx, is_thumbnail
 
 def _read_multipage_markers_batch(jxls: list) -> dict:
-    """Read the multi-page marker for many JXLs in as few exiftool calls as
-    possible. Returns {jxl_path: group_id_or_None}.
+    """Read the multi-page marker and inherited-ICC flag for many JXLs in as few
+    exiftool calls as possible. Returns {jxl_path: (group_id_or_None, inherited_bool)}.
 
     Spawning one exiftool per file is far too slow for large libraries
-    (~100ms/file → tens of minutes for tens of thousands of files), so we pass
+    (~100ms/file -> tens of minutes for tens of thousands of files), so we pass
     files in large batches and parse the per-file output. exiftool prints one
     "======== <path>" header per file with -G/-s style output; we use a JSON
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): None for j in jxls}
+    markers: dict = {str(j): (None, False) for j in jxls}
     if not jxls:
         return markers
 
@@ -1646,32 +1654,31 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     values = rel
                 else:
                     values = str(rel).replace(";", ",").split(",")
+                group_id = None
+                inherited = False
                 for token in values:
                     token = str(token).strip()
                     if token.startswith(MULTIPAGE_MARKER_PREFIX):
-                        # Match back to our path key (exiftool may normalize separators)
-                        key = str(Path(src))
-                        if key in markers:
-                            markers[key] = token[len(MULTIPAGE_MARKER_PREFIX):]
-                        else:
-                            markers[src] = token[len(MULTIPAGE_MARKER_PREFIX):]
-                        break
+                        group_id = token[len(MULTIPAGE_MARKER_PREFIX):]
+                    elif token == ICC_INHERITED_FLAG:
+                        inherited = True
+                # Match back to our path key (exiftool may normalize separators)
+                key = str(Path(src))
+                if key in markers:
+                    markers[key] = (group_id, inherited)
+                else:
+                    markers[src] = (group_id, inherited)
         except Exception:
             # On any batch failure, leave those files as standalone (safe default)
             continue
     return markers
 
 
-def _read_multipage_marker(jxl_path: Path):
-    """Single-file marker read (kept for callers/tests). Prefer the batch
-    version for large sets."""
-    return _read_multipage_markers_batch([jxl_path]).get(str(jxl_path))
-
 def collect_multipage_groups(jxls: list) -> dict:
     """Group JXLs that belong to the same multi-page TIFF.
 
     Returns a dict mapping the main JXL path to a sorted list of
-    (jxl_path, page_idx, is_thumbnail) tuples.
+    (jxl_path, page_idx, is_thumbnail, icc_inherited) tuples.
 
     Grouping is driven by the encoder's XMP marker, NOT by filename. Only files
     that carry a matching group marker are merged; every unmarked file becomes
@@ -1687,7 +1694,7 @@ def collect_multipage_groups(jxls: list) -> dict:
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
-            groups[j] = [(j, 0, _is_thumbnail_jxl(j))]
+            groups[j] = [(j, 0, _is_thumbnail_jxl(j), False)]
         return groups
 
     by_group: dict = {}
@@ -1696,12 +1703,12 @@ def collect_multipage_groups(jxls: list) -> dict:
     marker_map = _read_multipage_markers_batch(jxls)
 
     for j in jxls:
-        marker = marker_map.get(str(j))
+        marker, inherited = marker_map.get(str(j), (None, False))
         _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
         if marker:
-            by_group.setdefault(marker, []).append((j, page_idx, is_thumb))
+            by_group.setdefault(marker, []).append((j, page_idx, is_thumb, inherited))
         else:
-            standalone.append((j, page_idx, is_thumb))
+            standalone.append((j, page_idx, is_thumb, inherited))
 
     # Marked groups: reconstruct multi-page TIFFs
     for _marker, entries in by_group.items():
@@ -1925,7 +1932,7 @@ Examples:
     if args.dry_run:
         for task in tasks:
             entries = task["entries"]
-            detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''})" for j, idx, th in entries)
+            detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''})" for j, idx, th, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
         return

@@ -38,7 +38,8 @@ TIFFs with more than one page are now handled explicitly instead of silently dis
 Thumbnails are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`_thumbnail` by default).
 
 **JXL → TIFF decoder:**
-- Detects `photo.jxl` + `photo_pageN.jxl` groups and reconstructs a single multi-page TIFF
+- Reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder.
+- Preserves per-page ICC profiles: each page is restored with its own ICC tag; pages that inherited ICC from IFD0 are reconstructed without an ICC tag, matching the original TIFF structure.
 - `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
 - `--thumbnail-handling generate` — not yet implemented; falls back to `include`

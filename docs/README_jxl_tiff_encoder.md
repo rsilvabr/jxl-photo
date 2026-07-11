@@ -564,6 +564,25 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 ```
 ---
 
+## Multi-Page TIFF Support (v1.7.0+)
+
+Multi-page TIFFs are handled explicitly instead of silently discarding extra pages:
+
+- `--multipage-mode ignore` — encode only page 0 (original behavior, default)
+- `--multipage-mode skip` — skip files that have more than one "real" page
+- `--multipage-mode split` — encode each real page to a separate JXL (`photo.jxl`, `photo_page2.jxl`, ...)
+- `--multipage-mode split_all` — encode every page, including thumbnails
+
+Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`).
+
+Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so `jxl_tiff_decoder.py` can reconstruct the original multi-page TIFF only from genuinely split files. Independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged.
+
+### Per-Page ICC Preservation (v1.7.1+)
+
+When splitting, each page is encoded with its own effective ICC profile (read from the page's own ICC tag 34675; if absent, page N > 0 inherits IFD0's profile for color interpretation). Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`, so the decoder can reconstruct them without an ICC tag when the original page also had none.
+
+---
+
 ## Disclaimer
 
 These tools were made for my personal workflow. 

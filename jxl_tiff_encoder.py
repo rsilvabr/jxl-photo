@@ -234,6 +234,12 @@ MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
 # are never silently merged. Files without the marker decode as standalone TIFFs.
 # dc:Relation is a list, so appending preserves any Relation the user already had.
 
+ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
+# Marker appended to dc:Relation when a page (page_idx > 0) has no own ICC and
+# inherits the ICC from IFD0. The decoder uses this to reconstruct the original
+# TIFF structure: inherited pages get no ICC tag, while the effective color is
+# still applied via the inherited profile during JXL encoding.
+
 
 # ─────────────────────────────────────────────
 # USER SETTINGS - MODES CONFIGURATION
@@ -554,53 +560,77 @@ def should_apply_d50_patch(tiff_path):
                 return True
         return False
 
+def extract_icc_bytes(tiff_path):
+    """Extract the ICC profile bytes from a TIFF using ExifTool (IFD0 by default).
+    Returns the raw ICC bytes or None if none is found."""
+    with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
+        arg_file = Path(tmp) / "icc_extract.args"
+        arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
+        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
+    if r.returncode == 0 and len(r.stdout) > 128:
+        return bytes(r.stdout)
+    return None
+
+
+def apply_d50_policy(icc_bytes, tiff_path):
+    """Apply the D50 illuminant patch (if policy says so) and update stats.
+    Accepts and returns raw ICC bytes. Safe to call with None (returns None)."""
+    if icc_bytes is None:
+        return None
+    icc = bytearray(icc_bytes)
+
+    if should_apply_d50_patch(tiff_path):
+        was_correct = _is_d50_already_correct(bytes(icc))
+        icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
+        with _d50_patch_lock:
+            _d50_patch_count["applied"] += 1
+            if was_correct:
+                _d50_patch_count["already_correct"] += 1
+        logger.debug(f"Applied D50 patch to {Path(tiff_path).name}" + (" (was already correct)" if was_correct else ""))
+    else:
+        was_correct = _is_d50_already_correct(bytes(icc))
+        with _d50_patch_lock:
+            _d50_patch_count["skipped"] += 1
+            if was_correct:
+                _d50_patch_count["already_correct"] += 1
+            else:
+                _d50_patch_count["skipped_needed"] += 1
+        logger.debug(f"D50 patch skipped for {Path(tiff_path).name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
+
+    return bytes(icc)
+
+
+def get_page_icc(tif, page_idx: int):
+    """Return (icc_bytes, inherited) for a TIFF page.
+
+    Own ICC (tag 34675 on the page's IFD) wins. If absent and page_idx > 0,
+    fall back to IFD0's ICC with inherited=True. If IFD0 also has none,
+    return (None, False). This matches how TIFF viewers resolve ICC inheritance.
+    """
+    tag = tif.pages[page_idx].tags.get(34675)
+    if tag is not None and tag.value:
+        return bytes(tag.value), False
+    if page_idx != 0:
+        tag0 = tif.pages[0].tags.get(34675)
+        if tag0 is not None and tag0.value:
+            return bytes(tag0.value), True
+    return None, False
+
+
 def extract_icc_fixed(tiff_path):
     """Extracts ICC profile and optionally patches D50 illuminant rounding error.
     The patch is applied based on D50_PATCH_MODE and D50_PATCH_SOFTWARE_LIST settings.
     Safe for any ICC profile: if bytes are already correct, the patch has no effect.
     Returns patched ICC bytes or None."""
-    with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
-        arg_file = Path(tmp) / "icc_extract.args"
-        arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
-        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
-    if r.returncode == 0 and len(r.stdout) > 128:
-        icc = bytearray(r.stdout)
+    icc = extract_icc_bytes(tiff_path)
+    return apply_d50_policy(icc, tiff_path)
 
-        # Apply D50 patch only if enabled for this file
-        if should_apply_d50_patch(tiff_path):
-            # Check if bytes were already correct BEFORE patching
-            was_correct = _is_d50_already_correct(bytes(icc))
-            icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
-            with _d50_patch_lock:
-                _d50_patch_count["applied"] += 1
-                if was_correct:
-                    _d50_patch_count["already_correct"] += 1
-            logger.debug(f"Applied D50 patch to {tiff_path.name}" + (" (was already correct)" if was_correct else ""))
-        else:
-            # Even when skipping, track correctness so user knows how many files would have needed patching
-            was_correct = _is_d50_already_correct(bytes(icc))
-            with _d50_patch_lock:
-                _d50_patch_count["skipped"] += 1
-                if was_correct:
-                    _d50_patch_count["already_correct"] += 1
-                else:
-                    _d50_patch_count["skipped_needed"] += 1
-            logger.debug(f"D50 patch skipped for {tiff_path.name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
-
-        return bytes(icc)
-    return None
 
 def extract_icc_original(tiff_path):
     """Extracts original ICC profile WITHOUT patching.
     Used for round-trip preservation (XMP CreatorTool).
     Returns original ICC bytes or None."""
-    with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
-        arg_file = Path(tmp) / "icc_extract.args"
-        arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
-        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
-    if r.returncode == 0 and len(r.stdout) > 128:
-        return bytes(r.stdout)  # Return original, unmodified ICC
-    return None
+    return extract_icc_bytes(tiff_path)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NEW FUNCTIONS FOR XMP PRESERVATION (XMP OVERWRITE BUG FIX)
@@ -990,9 +1020,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # 2. Extract ICC profiles:
             #    - icc_bytes: patched for PNG iCCP (cjxl encoding)
             #    - icc_original: unmodified for XMP CreatorTool (round-trip preservation)
-            icc_bytes = extract_icc_fixed(tiff_path)  # With D50 patch for cjxl
-            icc_original = extract_icc_original(tiff_path)  # Original for preservation
-
+            #    Per-page: the page's own ICC tag (34675) wins; if absent, page N>0
+            #    inherits IFD0's ICC for color interpretation, but we record that
+            #    inheritance so the decoder can reproduce the original tag structure.
             # 3. Extract original XMP for preservation analysis (NEW)
             xmp_original = extract_xmp_original(tiff_path, tmp_dir)
 
@@ -1007,6 +1037,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 photometric = page.photometric
                 if photometric == tifffile.PHOTOMETRIC.SEPARATED:
                     raise ValueError("CMYK TIFFs are not supported")
+                icc_original, icc_inherited = get_page_icc(tif, page_idx)
+                icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
                 if img.dtype == np.uint8:
@@ -1182,10 +1214,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # Absence of the marker means "standalone file" even if the name has _pageN.
             if multipage_group:
                 try:
+                    relation_args = [
+                        "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
+                    ]
+                    if icc_inherited and page_idx > 0:
+                        relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
                     subprocess.run(
-                        [_get_exiftool_cmd(), "-overwrite_original",
-                         "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
-                         str(write_path)],
+                        [_get_exiftool_cmd(), "-overwrite_original"] + relation_args +
+                        [str(write_path)],
                         capture_output=True, timeout=10
                     )
                 except Exception as e_mark:

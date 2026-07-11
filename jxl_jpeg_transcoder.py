@@ -397,13 +397,6 @@ def has_jbrd_box(jxl_path: Path) -> bool:
     except Exception:
         return False
 
-def jxl_has_any_exif(jxl_path: Path) -> bool:
-    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-        arg = Path(tmp) / "check.args"
-        arg.write_text(f"-v3\n{jxl_path}\n", encoding="utf-8")
-        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-        return ("Tag 'Exif'" in r.stdout) or ("BrotliEXIF" in r.stdout)
-
 def reorder_jxl_boxes(jxl_path: Path):
     """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
     data = jxl_path.read_bytes()
@@ -483,36 +476,6 @@ def reorder_jxl_boxes(jxl_path: Path):
         out += h + p
     jxl_path.write_bytes(out)
 
-def inject_exif_to_jxl_from_jpeg(jxl_path: Path, jpeg_path: Path, tmp_dir: Path):
-    """Extract raw EXIF from JPEG and inject into JXL as a proper Exif box.
-
-    cjxl with --lossless_jpeg=1 stores EXIF as BrotliEXIF (not readable by IrfanView).
-    This function extracts the raw EXIF and re-injects it using exiftool,
-    which creates a proper Exif box that all viewers can read.
-    """
-    # Extract raw EXIF binary from JPEG
-    arg_file = tmp_dir / "exif_extract.args"
-    arg_file.write_text(f"-b\n-Exif\n{jpeg_path}\n", encoding="utf-8")
-    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
-    if r.returncode != 0 or len(r.stdout) <= 8:
-        logger.debug(f"  No EXIF to inject from {jpeg_path.name}")
-        return
-
-    exif_bin = tmp_dir / f"{jpeg_path.stem}.exif.bin"
-    exif_bin.write_bytes(r.stdout)
-
-    # Inject EXIF into JXL
-    r2 = subprocess.run(
-        [_get_exiftool_cmd(), "-overwrite_original", f"-Exif<={exif_bin}", str(jxl_path)],
-        capture_output=True, text=True, timeout=60
-    )
-    if r2.returncode != 0:
-        logger.warning(f"  EXIF injection failed for {jpeg_path.name}: {r2.stderr[:100]}")
-        return
-
-    # Reorder boxes so Exif comes before codestream (IrfanView requirement)
-    reorder_jxl_boxes(jxl_path)
-    logger.debug(f"  EXIF injected as raw Exif box for {jpeg_path.name}")
 # --------------------------------------------─
 # FILE FINDERS
 # --------------------------------------------─
