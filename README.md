@@ -44,6 +44,21 @@ Thumbnails are detected via standard TIFF `SubfileType` flags (`is_reduced` / `i
 - `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
 - `--thumbnail-handling generate` — not yet implemented; falls back to `include`
+- `--no-reconstruct-multipage` — disable multi-page reconstruction entirely
+
+```bash
+# Photos with main image + thumbnail → split JXLs
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode include --distance 0
+
+# Reconstruct the original multi-page TIFF
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include
+
+# Film scanner workflow with IR/mask page (grayscale)
+python jxl_tiff_encoder.py "E:\film_scans" "E:\film_scans_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include
+python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include
+```
+
+> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 

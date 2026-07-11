@@ -29,3 +29,6 @@ dist/
 # Arquivos de sistema
 .DS_Store
 Thumbs.db
+
+# Old release notes kept locally but not published
+docs/RELEASE_v1.6.0.md

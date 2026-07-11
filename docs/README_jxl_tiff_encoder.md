@@ -585,6 +585,27 @@ When splitting, each page is encoded with its own effective ICC profile (read fr
 
 Single-channel pages are encoded as grayscale and flagged with `jxlphoto-grayscale` in `dc:Relation`. The original `SubfileType` value (e.g. `2` for PAGE, `4` for MASK) is also recorded so the decoder can restore the page's role. Inherited RGB ICC is not applied to grayscale pages, which prevents libpng iCCP errors on scanner IR/mask pages.
 
+> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
+
+### Examples
+
+```bash
+# Default: encode only page 0, ignore extra pages
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode ignore
+
+# Skip any TIFF that has more than one real page
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode skip
+
+# Split pages and exclude thumbnails
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode exclude
+
+# Split every page, including thumbnails, with a custom suffix
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include --thumbnail-suffix "_thumb"
+
+# Film scanner workflow: encode main + preview + IR/mask pages
+python jxl_tiff_encoder.py "E:\film_scans" "E:\film_scans_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include
+```
+
 ---
 
 ## Disclaimer

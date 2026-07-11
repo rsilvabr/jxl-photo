@@ -87,6 +87,7 @@ class ToolConfig:
     last_thumbnail_mode: Optional[str] = None
     last_thumbnail_suffix: Optional[str] = None
     last_thumbnail_handling: Optional[str] = None
+    last_no_reconstruct_multipage: Optional[bool] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -142,7 +143,8 @@ class ConfigManager:
                           multipage_mode: Optional[str] = None,
                           thumbnail_mode: Optional[str] = None,
                           thumbnail_suffix: Optional[str] = None,
-                          thumbnail_handling: Optional[str] = None) -> None:
+                          thumbnail_handling: Optional[str] = None,
+                          no_reconstruct_multipage: Optional[bool] = None) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -177,6 +179,8 @@ class ConfigManager:
             self.config.last_thumbnail_suffix = thumbnail_suffix
         if thumbnail_handling is not None:
             self.config.last_thumbnail_handling = thumbnail_handling
+        if no_reconstruct_multipage is not None:
+            self.config.last_no_reconstruct_multipage = no_reconstruct_multipage
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -2053,6 +2057,10 @@ class InteractiveMenu:
                 advanced_options['multipage_mode'] = self.config.config.last_multipage_mode or 'ignore'
                 advanced_options['thumbnail_mode'] = self.config.config.last_thumbnail_mode or 'exclude'
                 advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
+            elif origin == 'jxl' and dest == 'tiff':
+                advanced_options['thumbnail_handling'] = self.config.config.last_thumbnail_handling or 'include'
+                advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
+                advanced_options['no_reconstruct_multipage'] = bool(self.config.config.last_no_reconstruct_multipage)
             # Preserve decode-mode/target-icc chosen earlier when not showing advanced
             existing = workflow.get('advanced_options', {})
             for key in ('matrix', 'basic', 'none', 'target_icc'):
@@ -2165,6 +2173,12 @@ class InteractiveMenu:
                     console.print("[yellow]generate is not yet implemented; using include[/yellow]")
                     thumbnail_handling = "include"
                 self.config.save_last_session(thumbnail_handling=thumbnail_handling)
+                ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
+                thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
+                self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
+                no_recon_default = self.config.config.last_no_reconstruct_multipage if self.config.config.last_no_reconstruct_multipage is not None else False
+                no_reconstruct_multipage = Confirm.ask("Decode every JXL to its own TIFF (no multi-page reconstruction)?", default=no_recon_default)
+                self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
@@ -2192,6 +2206,14 @@ class InteractiveMenu:
                     print("generate is not yet implemented; using include")
                     thumbnail_handling = "include"
                 self.config.save_last_session(thumbnail_handling=thumbnail_handling)
+                ts_default = getattr(self.config.config, 'last_thumbnail_suffix', None) or "_thumbnail"
+                ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
+                thumbnail_suffix = ts_input if ts_input else ts_default
+                self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
+                no_recon_default = "y" if self.config.config.last_no_reconstruct_multipage else "n"
+                no_recon_input = input(f"Decode every JXL to its own TIFF (no multi-page reconstruction)? [{no_recon_default}/n]: ").strip().lower() or no_recon_default
+                no_reconstruct_multipage = no_recon_input.startswith('y')
+                self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
@@ -2212,6 +2234,8 @@ class InteractiveMenu:
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
             advanced_options['thumbnail_handling'] = thumbnail_handling
+            advanced_options['thumbnail_suffix'] = thumbnail_suffix
+            advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
 
         else:
             if RICH_AVAILABLE and console:
@@ -2773,6 +2797,10 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('thumbnail_handling'):
                 cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
+            if advanced.get('thumbnail_suffix'):
+                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
+            if advanced.get('no_reconstruct_multipage'):
+                cmd.append('--no-reconstruct-multipage')
 
         else:
             script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')

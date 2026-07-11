@@ -624,6 +624,24 @@ Each reconstructed page gets its own ICC profile restored when the source page h
 
 Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that inherited ICC from IFD0 are reconstructed without an ICC tag. Non-zero `SubfileType` values from the original TIFF are restored; `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) because tifffile does not accept `MASK` on normal image pages, but the "additional page" semantics are preserved.
 
+> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
+
+### Examples
+
+```bash
+# Reconstruct multi-page TIFFs including thumbnail pages
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include
+
+# Reconstruct only real pages, ignore _thumbnail.jxl files
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling ignore
+
+# Decode every JXL to its own TIFF, never merge pages
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --no-reconstruct-multipage
+
+# Film scanner workflow: restore main + preview + IR/mask pages
+python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include
+```
+
 ---
 
 ## License

@@ -73,6 +73,27 @@ New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thu
 
 ---
 
+## 🚀 Quick Start
+
+```bash
+# Photos with main image + thumbnail → split JXLs
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode include --distance 0
+
+# Reconstruct the original multi-page TIFF
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include
+
+# Film scanner workflow with IR/mask page (grayscale)
+python jxl_tiff_encoder.py "E:\film_scans" "E:\film_scans_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include
+python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include
+
+# Decode every JXL to its own TIFF, never merge pages
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --no-reconstruct-multipage
+```
+
+> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Test with one file before batch-processing important film scans.
+
+---
+
 ## 🧪 Tests
 
 - Regression test: `tests/test_multipage.py` (runs from any working directory)
