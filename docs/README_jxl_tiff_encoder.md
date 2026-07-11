@@ -171,7 +171,7 @@ CLEANUP_XMP_ICC_MARKER = False
 # True  → clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
 # False → keeps existing ICC markers (default)
 
-USE_RAM_FOR_PNG = False
+USE_RAM_FOR_PNG = True
 # True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 

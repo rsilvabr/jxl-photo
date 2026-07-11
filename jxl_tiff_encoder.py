@@ -110,7 +110,7 @@ CJXL_MODULAR = False
 # Note: lossless (d=0) always uses Modular regardless of this setting.
 #       CJXL_MODULAR only affects lossy (d > 0).
 
-USE_RAM_FOR_PNG = False
+USE_RAM_FOR_PNG = True
 # True  -> PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
 # False -> PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
@@ -594,6 +594,12 @@ def apply_d50_policy(icc_bytes, tiff_path):
     icc = bytearray(icc_bytes)
 
     if should_apply_d50_patch(tiff_path):
+        if len(icc) < 80:
+            logger.warning(f"ICC profile too short ({len(icc)} bytes) for D50 patch; skipping patch for {Path(tiff_path).name}")
+            with _d50_patch_lock:
+                _d50_patch_count["skipped"] += 1
+                _d50_patch_count["skipped_needed"] += 1
+            return bytes(icc)
         was_correct = _is_d50_already_correct(bytes(icc))
         icc[68:80] = bytes.fromhex("0000f6d6000100000000d32d")  # fix D50 illuminant
         with _d50_patch_lock:
@@ -1615,10 +1621,14 @@ def main():
         tiffs = find_files_mode0(args.input)
         output_root = args.output or args.input
     elif args.mode == 2:
-        # Mode 2: recursive, all files to output_root
-        tiffs = find_tiffs_recursive(args.input)
+        # Mode 2: recursive, all files to output_root (single file also accepted)
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
         output_root = args.output or args.input
-        output_root.mkdir(parents=True, exist_ok=True)
+        if not args.input.is_file():
+            output_root.mkdir(parents=True, exist_ok=True)
     elif args.mode == 6:
         tiffs = find_tiffs_mode6(args.input)
         output_root = args.input
@@ -1626,7 +1636,11 @@ def main():
         tiffs = find_tiffs_mode7(args.input)
         output_root = args.input
     elif args.mode == 8:
-        tiffs = find_tiffs_recursive(args.input)
+        # Mode 8: in-place recursive + delete source (single file also accepted)
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
         output_root = args.input
     else:
         tiffs = find_tiffs_recursive(args.input)
@@ -1649,7 +1663,9 @@ def main():
         elif args.mode == 1:
             main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
         elif args.mode == 2:
-            if args.input.is_file():
+            if args.output is not None:
+                main_jxl = output_root / t.with_suffix(".jxl").name
+            elif args.input.is_file():
                 main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
             else:
                 main_jxl = output_root / t.with_suffix(".jxl").name

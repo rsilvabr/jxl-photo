@@ -89,6 +89,11 @@ class ToolConfig:
     last_thumbnail_handling: Optional[str] = None
     last_no_reconstruct_multipage: Optional[bool] = None
     last_depth_policy: Optional[str] = None
+    last_advanced_options: Optional[Dict] = None
+    last_use_ram: Optional[bool] = None
+    last_compression: Optional[str] = None
+    last_bit_depth: Optional[int] = None
+    last_add_preview: Optional[bool] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -146,7 +151,12 @@ class ConfigManager:
                           thumbnail_suffix: Optional[str] = None,
                           thumbnail_handling: Optional[str] = None,
                           no_reconstruct_multipage: Optional[bool] = None,
-                          depth_policy: Optional[str] = None) -> None:
+                          depth_policy: Optional[str] = None,
+                          advanced_options: Optional[Dict] = None,
+                          use_ram: Optional[bool] = None,
+                          compression: Optional[str] = None,
+                          bit_depth: Optional[int] = None,
+                          add_preview: Optional[bool] = None) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -185,6 +195,17 @@ class ConfigManager:
             self.config.last_no_reconstruct_multipage = no_reconstruct_multipage
         if depth_policy is not None:
             self.config.last_depth_policy = depth_policy
+        if advanced_options is not None:
+            # Persist a copy of the advanced options dict for repeat workflow.
+            self.config.last_advanced_options = dict(advanced_options)
+        if use_ram is not None:
+            self.config.last_use_ram = use_ram
+        if compression is not None:
+            self.config.last_compression = compression
+        if bit_depth is not None:
+            self.config.last_bit_depth = bit_depth
+        if add_preview is not None:
+            self.config.last_add_preview = add_preview
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -790,7 +811,12 @@ class InteractiveMenu:
         if has_last_session:
             last_info = f"({self.config.config.last_output_mode or 'unknown'})"
             options.append(("1", "New workflow", True))
-            options.append(("2", f"Repeat last workflow {last_info}", True))
+            # Manifest workflows (mode 99) cannot be repeated because the manifest
+            # file path and entries are not persisted.
+            if self.config.config.last_output_mode == "99":
+                options.append(("2", f"Repeat last workflow {last_info} [manifest]", False))
+            else:
+                options.append(("2", f"Repeat last workflow {last_info}", True))
         else:
             options.append(("1", "New workflow", True))
             options.append(("2", "Repeat last workflow (none saved)", False))
@@ -2028,6 +2054,14 @@ class InteractiveMenu:
             ow_input = input("Existing file handling (1=overwrite, 2=sync) [2]: ").strip() or "2"
             workflow['overwrite_mode'] = ow_input
 
+        # Persist basic parameters that the repeat workflow needs to restore.
+        self.config.save_last_session(
+            use_ram=workflow.get('use_ram'),
+            compression=workflow.get('compression'),
+            bit_depth=workflow.get('bit_depth'),
+            add_preview=workflow.get('add_preview')
+        )
+
         return self._wizard_parameters_advanced(workflow, status)
 
     def _wizard_parameters_advanced(self, workflow: Dict, status: Dict[str, bool]) -> bool:
@@ -2286,6 +2320,7 @@ class InteractiveMenu:
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
+        self.config.save_last_session(advanced_options=advanced_options)
         return self._wizard_parameters_expert(workflow)
 
     def _wizard_parameters_expert(self, workflow: Dict) -> bool:
@@ -2595,6 +2630,12 @@ class InteractiveMenu:
                 cmd.append('--embed-thumbnail')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+            if advanced.get('multipage_mode'):
+                cmd.extend(['--multipage-mode', advanced['multipage_mode']])
+            if advanced.get('thumbnail_mode'):
+                cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
+            if advanced.get('thumbnail_suffix'):
+                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
 
         elif origin == 'jxl' and dest == 'tiff':
             cmd.extend(['--compression', workflow.get('compression', 'zip')])
@@ -2621,6 +2662,14 @@ class InteractiveMenu:
                 cmd.append('--delete-source')
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
+            if advanced.get('thumbnail_handling'):
+                cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
+            if advanced.get('thumbnail_suffix'):
+                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
+            if advanced.get('no_reconstruct_multipage'):
+                cmd.append('--no-reconstruct-multipage')
+            if advanced.get('depth_policy'):
+                cmd.extend(['--depth-policy', advanced['depth_policy']])
 
         else:
             # JPEG/JXL/PNG transcoder
@@ -3199,12 +3248,12 @@ def main():
             workflow['origin_format'] = origin
             workflow['dest_format'] = last_dest
             workflow['selected_files'] = []
-            workflow['use_ram'] = True
+            workflow['use_ram'] = config.config.last_use_ram if config.config.last_use_ram is not None else True
             workflow['icc_profile'] = None
-            workflow['compression'] = 'zip'
-            workflow['bit_depth'] = 16
+            workflow['compression'] = config.config.last_compression or 'zip'
+            workflow['bit_depth'] = config.config.last_bit_depth or 16
             workflow['dry_run'] = False
-            workflow['advanced_options'] = {
+            workflow['advanced_options'] = config.config.last_advanced_options or {
                 'overwrite': overwrite,
                 'sync': sync,
                 'd50_patch': last_d50_patch if origin == 'tiff' else None,

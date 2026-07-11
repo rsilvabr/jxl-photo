@@ -16,6 +16,14 @@ import numpy as np
 import tifffile
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from jxl_tiff_encoder import USE_RAM_FOR_PNG, apply_d50_policy, setup_logger
+from jxl_tiff_decoder import read_png_to_numpy
+
+
+setup_logger()
+
+
 def create_multipage_tiff(path: Path):
     """Create a TIFF with page 0 (real), page 1 (thumbnail), page 2 (real)."""
     img0 = np.random.randint(0, 65535, (100, 100, 3), dtype=np.uint16)
@@ -248,6 +256,36 @@ def main():
         assert "jxlphoto-mpg" not in rel_final, "internal marker leaked into final TIFF"
         assert "jxlphoto-icc" not in rel_final, "inherited-ICC flag leaked into final TIFF"
         assert "jxlphoto-depth" not in rel_final, "depth marker leaked into final TIFF"
+
+        # ---- single-file encoder mode 2 ----
+        sf_in = tmp / "sf_input"
+        sf_in.mkdir()
+        sf_src = sf_in / "single.tif"
+        tifffile.imwrite(str(sf_src), np.random.randint(0, 65535, (30, 30, 3), dtype=np.uint16), photometric='rgb')
+        sf_out = tmp / "sf_out"
+        r = run_encoder(str(sf_src), str(sf_out), "--mode", "2")
+        assert r.returncode == 0, f"single-file mode 2 encode failed:\n{r.stderr}"
+        assert (sf_out / "single.jxl").exists(), "single-file mode 2 did not create JXL"
+
+        # ---- invalid XMP ICC should not be attached ----
+        bad_in = tmp / "bad_input"
+        bad_in.mkdir()
+        bad_src = bad_in / "bad.tif"
+        tifffile.imwrite(str(bad_src), np.random.randint(0, 65535, (30, 30, 3), dtype=np.uint16), photometric='rgb')
+        bad_jxl = tmp / "bad_jxl"
+        r = run_encoder(bad_in, bad_jxl)
+        assert r.returncode == 0, f"bad ICC encode failed:\n{r.stderr}"
+        # Inject a fake ICC-like string into CreatorTool
+        subprocess.run(["exiftool", "-overwrite_original",
+                        "-XMP-xmp:CreatorTool=ICC:AAAAAAABBBBBBBBCCCCCCCCDDDDDDDDEEEEEEEEFFFFFFFFGGGGGGGGHHHHHHHHIIIIIIIIJJJJJJJJ",
+                        str(bad_jxl / "bad.jxl")], capture_output=True)
+        bad_out = tmp / "bad_out"
+        r = run_decoder(bad_jxl, bad_out)
+        assert r.returncode == 0, f"bad ICC decode failed:\n{r.stderr}"
+        with tifffile.TiffFile(str(bad_out / "bad.tif")) as tif:
+            # The fake payload is not a valid ICC, so no ICC tag should be written
+            assert tif.pages[0].tags.get(34675) is None, "invalid ICC should not be attached"
+
         # ---- per-page ICC preservation ----
         # Page 0 gets its own ICC, page 1 has no own ICC (inherits from IFD0),
         # page 2 gets a different ICC. After round trip the tags must match.
@@ -356,5 +394,34 @@ def main():
         print("\nAll multi-page tests passed.")
 
 
+def test_misc():
+    # ---- USE_RAM_FOR_PNG default is True ----
+    assert USE_RAM_FOR_PNG is True, "USE_RAM_FOR_PNG should default to True"
+
+    # ---- apply_d50_policy leaves tiny ICC profiles unchanged ----
+    tiny_icc = b"\x00\x00\x00\x40" + b"acsp" + b"\x00" * 52
+    tmp_tif = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
+    tmp_tif.close()
+    try:
+        tifffile.imwrite(tmp_tif.name, np.zeros((10, 10, 3), dtype=np.uint8), photometric='rgb', software="Capture One 23")
+        result = apply_d50_policy(tiny_icc, tmp_tif.name)
+        assert result == tiny_icc, "tiny ICC should be returned unchanged"
+    finally:
+        Path(tmp_tif.name).unlink(missing_ok=True)
+
+    # ---- read_png_to_numpy target_depth=8 converts 16-bit grayscale to 8-bit RGB ----
+    img16 = np.random.randint(0, 65535, (20, 20), dtype=np.uint16)
+    tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    tmp_png.close()
+    try:
+        tifffile.imwrite(tmp_png.name, img16, photometric='minisblack')
+        arr8, _ = read_png_to_numpy(tmp_png.name, target_depth=8)
+        assert arr8.dtype == np.uint8, f"expected uint8, got {arr8.dtype}"
+        assert arr8.shape == (20, 20, 3), f"expected RGB shape (20, 20, 3), got {arr8.shape}"
+    finally:
+        Path(tmp_png.name).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     main()
+    test_misc()

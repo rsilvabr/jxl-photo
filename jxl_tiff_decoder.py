@@ -334,16 +334,28 @@ def extract_icc_from_xmp(jxl_path):
             [_get_exiftool_cmd(), "-b", "-XMP-xmp:CreatorTool", str(jxl_path)],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
         )
-        if r.returncode == 0 and r.stdout:
-            # Look for ICC: prefix followed by base64 data (flexible regex)
-            # Allows for line breaks, different lengths
-            match = re.search(r'ICC:([A-Za-z0-9+/=\s]{100,})', r.stdout)
-            if match:
-                # Remove whitespace (line breaks in XML)
-                b64_data = re.sub(r'\s', '', match.group(1))
-                data = base64.b64decode(b64_data)
-                if len(data) > 128:  # Minimum valid ICC size
-                    return data
+        if r.returncode != 0 or not r.stdout:
+            return None
+
+        # CreatorTool may contain multiple tokens separated by '|'. Find the one
+        # that carries the ICC payload and validate it before returning.
+        for segment in r.stdout.split("|"):
+            segment = segment.strip()
+            if not segment.startswith("ICC:"):
+                continue
+            b64_data = segment[len("ICC:"):].strip()
+            if not b64_data:
+                continue
+            try:
+                data = base64.b64decode(b64_data, validate=True)
+            except Exception:
+                continue
+            if len(data) < 128:
+                continue
+            # Validate ICC magic number 'acsp' at header offset 36-39
+            if data[36:40] != b"acsp":
+                continue
+            return data
     except Exception as e:
         logger.debug(f"XMP ICC extraction failed: {e}")
     return None
@@ -545,7 +557,7 @@ def read_png_to_numpy(png_path, target_depth=16):
             elif target_depth == 8 and arr.dtype == np.uint16:
                 arr = np.rint(arr / 257).astype(np.uint8)
             rgb = np.stack([arr, arr, arr], axis=-1)
-            return rgb.astype(np.uint16) if (arr.dtype != np.uint16 and rgb.dtype != np.uint16) else rgb, None
+            return rgb, None
         elif arr.ndim == 3 and arr.shape[2] in (3, 4):
             rgb = arr[:, :, :3]
             alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
@@ -566,6 +578,9 @@ def read_png_to_numpy(png_path, target_depth=16):
             if arr.dtype == np.int32:
                 # PIL I mode returns int32, convert to uint16
                 arr = arr.astype(np.uint16)
+            # Downscale to 8-bit if requested
+            if target_depth == 8 and arr.dtype == np.uint16:
+                arr = np.rint(arr / 257).astype(np.uint8)
             # Convert grayscale to RGB
             rgb = np.stack([arr, arr, arr], axis=-1)
             return rgb, None
@@ -826,8 +841,12 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
                     renderingIntent=0  # Perceptual
                 )
 
-                # Workaround: LittleCMS often fails with 16-bit directly
-                # Convert to 8-bit temporary, transform, back to float
+                # Workaround: Pillow's ImageCms only accepts 8-bit RGB images,
+                # so 16-bit input is quantized to 8-bit for the transform. The result
+                # is then restored to uint16, but the effective precision is limited
+                # to 8 bits. This is a known limitation of the Pillow/LittleCMS path.
+                logger.warning("Matrix mode uses 8-bit internal precision via LittleCMS; "
+                               "16-bit values are quantized during the color transform")
                 temp_8bit = (img_array.astype(np.float32) / 257.0).astype(np.uint8)
                 pil_img = Image.fromarray(temp_8bit, mode='RGB')
 
@@ -881,8 +900,8 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
 # TIFF OUTPUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def copy_metadata(jxl_path, tiff_path, tmp_dir):
-    """Copy metadata from JXL to TIFF using exiftool"""
+def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
+    """Copy metadata from JXL to TIFF using exiftool."""
     try:
         # Copy all metadata from JXL
         subprocess.run(
@@ -895,18 +914,21 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir):
              "-xmp:all", "-iptc:all", str(tiff_path)],
             capture_output=True, timeout=10
         )
-        # Fix Software and ImageDescription in IFD1 (main image)
-        # These get set by tifffile.py and need to be cleared
-        subprocess.run(
-            [_get_exiftool_cmd(), "-overwrite_original", 
-             "-ifd1:Software=", str(tiff_path)],
-            capture_output=True, timeout=5
-        )
-        subprocess.run(
-            [_get_exiftool_cmd(), "-overwrite_original", 
-             "-ifd1:ImageDescription=", str(tiff_path)],
-            capture_output=True, timeout=5
-        )
+        # Fix Software and ImageDescription in IFD1. This is only needed for
+        # single-page TIFFs where add_jpeg_preview() reorders the main image
+        # into IFD1. In multi-page TIFFs, IFD1 is a real page and must keep its
+        # metadata.
+        if not is_multipage:
+            subprocess.run(
+                [_get_exiftool_cmd(), "-overwrite_original", 
+                 "-ifd1:Software=", str(tiff_path)],
+                capture_output=True, timeout=5
+            )
+            subprocess.run(
+                [_get_exiftool_cmd(), "-overwrite_original", 
+                 "-ifd1:ImageDescription=", str(tiff_path)],
+                capture_output=True, timeout=5
+            )
         # Clear the page-0 Software tag if it still holds tifffile's default.
         # With a JPEG preview, the real data becomes IFD1 and the preview IFD0,
         # so the tifffile.py Software can survive on page 0; only clear it when
@@ -1476,7 +1498,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
 
             if strategy != 'none':
                 # Full metadata copy (order: preview already added above)
-                copy_metadata(main_jxl, write_path, tmp_dir)
+                copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage)
                 cleanup_xmp_icc(write_path)
             else:
                 # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Also clear
