@@ -108,14 +108,24 @@ def get_page_icc(tiff_path: Path, page_idx: int) -> bytes:
         return bytes(tag.value)
 
 
-def find_system_iccs() -> list:
-    """Return a few distinct system ICC profiles for testing."""
-    candidates = [
-        Path(r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm"),
-        Path(r"C:\Windows\System32\spool\drivers\color\ProPhoto.icm"),
-        Path(r"C:\Windows\System32\spool\drivers\color\AdobeRGB1998.icc"),
-    ]
-    return [p for p in candidates if p.exists()]
+def find_test_iccs() -> tuple:
+    """Generate two distinct ICC profiles deterministically via PIL.ImageCms.
+    Returns (icc_a_bytes, icc_b_bytes)."""
+    from PIL import ImageCms
+    icc_a = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+    # Create icc_b by altering the description text of icc_a, keeping it a
+    # valid RGB-like profile so libpng/cjxl accept it during encoding.
+    icc_b = bytearray(icc_a)
+    text_a = 'sRGB built-in'.encode('utf-16-be')
+    text_b = 'sRGB test-v2 '.encode('utf-16-be')
+    idx = icc_b.find(text_a)
+    if idx != -1 and len(text_a) == len(text_b):
+        icc_b[idx:idx + len(text_b)] = text_b
+    else:
+        # Fallback: just flip a few bytes if the description text is unexpected
+        icc_b[100:104] = b'\x00\x00\x00\x01'
+    assert icc_a != bytes(icc_b), "generated ICC profiles must be distinct"
+    return icc_a, bytes(icc_b)
 
 
 def main():
@@ -228,48 +238,43 @@ def main():
         assert "UserRelationValue" in rel_final, "user's Relation not restored in TIFF"
         assert "jxlphoto-mpg" not in rel_final, "internal marker leaked into final TIFF"
         assert "jxlphoto-icc" not in rel_final, "inherited-ICC flag leaked into final TIFF"
-
         # ---- per-page ICC preservation ----
         # Page 0 gets its own ICC, page 1 has no own ICC (inherits from IFD0),
         # page 2 gets a different ICC. After round trip the tags must match.
-        system_iccs = find_system_iccs()
-        if len(system_iccs) >= 2:
-            icc_a = system_iccs[0].read_bytes()
-            icc_b = system_iccs[1].read_bytes()
-            icc_in = tmp / "icc_input"
-            icc_in.mkdir()
-            icc_src = icc_in / "icc.tif"
-            with tifffile.TiffWriter(str(icc_src)) as tif:
-                tif.write(np.random.randint(0, 65535, (60, 60, 3), dtype=np.uint16),
-                          photometric='rgb', iccprofile=icc_a)
-                tif.write(np.random.randint(0, 65535, (50, 50, 3), dtype=np.uint16),
-                          photometric='rgb')
-                tif.write(np.random.randint(0, 65535, (55, 55, 3), dtype=np.uint16),
-                          photometric='rgb', iccprofile=icc_b)
-            icc_jxl = tmp / "icc_jxl"
-            r = run_encoder(icc_in, icc_jxl, "--multipage-mode", "split")
-            assert r.returncode == 0, f"per-page ICC encode failed:\n{r.stderr}"
+        icc_a, icc_b = find_test_iccs()
 
-            # Each split JXL must carry the effective ICC (own or inherited)
-            icc0 = get_icc_bytes_from_jxl(icc_jxl / "icc.jxl")
-            icc1 = get_icc_bytes_from_jxl(icc_jxl / "icc_page1.jxl")
-            icc2 = get_icc_bytes_from_jxl(icc_jxl / "icc_page2.jxl")
-            assert icc0 == icc_a, "page 0 JXL lost its own ICC"
-            assert icc1 == icc_a, "page 1 JXL did not inherit ICC_A"
-            assert icc2 == icc_b, "page 2 JXL lost its own ICC"
-            # inherited flag should be on page 1 (zero-indexed page_idx=1; output suffix is _page1)
-            rel_p1 = read_tag(icc_jxl / "icc_page1.jxl", "XMP-dc:Relation")
-            assert "jxlphoto-icc:inherited" in rel_p1, "inherited flag missing on page 1 JXL"
+        icc_in = tmp / "icc_input"
+        icc_in.mkdir()
+        icc_src = icc_in / "icc.tif"
+        with tifffile.TiffWriter(str(icc_src)) as tif:
+            tif.write(np.random.randint(0, 65535, (60, 60, 3), dtype=np.uint16),
+                      photometric='rgb', iccprofile=icc_a)
+            tif.write(np.random.randint(0, 65535, (50, 50, 3), dtype=np.uint16),
+                      photometric='rgb')
+            tif.write(np.random.randint(0, 65535, (55, 55, 3), dtype=np.uint16),
+                      photometric='rgb', iccprofile=icc_b)
+        icc_jxl = tmp / "icc_jxl"
+        r = run_encoder(icc_in, icc_jxl, "--multipage-mode", "split")
+        assert r.returncode == 0, f"per-page ICC encode failed:\n{r.stderr}"
 
-            icc_out = tmp / "icc_out"
-            r = run_decoder(icc_jxl, icc_out)
-            assert r.returncode == 0, f"per-page ICC decode failed:\n{r.stderr}"
-            tif_out = icc_out / "icc.tif"
-            assert get_page_icc(tif_out, 0) == icc_a, "page 0 ICC not restored"
-            assert get_page_icc(tif_out, 1) == b"", "page 1 inherited ICC should be absent in reconstructed TIFF"
-            assert get_page_icc(tif_out, 2) == icc_b, "page 2 ICC not restored"
-        else:
-            print("  (skipping per-page ICC test: not enough system ICC profiles found)")
+        # Each split JXL must carry the effective ICC (own or inherited)
+        icc0 = get_icc_bytes_from_jxl(icc_jxl / "icc.jxl")
+        icc1 = get_icc_bytes_from_jxl(icc_jxl / "icc_page1.jxl")
+        icc2 = get_icc_bytes_from_jxl(icc_jxl / "icc_page2.jxl")
+        assert icc0 == icc_a, "page 0 JXL lost its own ICC"
+        assert icc1 == icc_a, "page 1 JXL did not inherit ICC_A"
+        assert icc2 == icc_b, "page 2 JXL lost its own ICC"
+        # inherited flag should be on page 1 (zero-indexed page_idx=1; output suffix is _page1)
+        rel_p1 = read_tag(icc_jxl / "icc_page1.jxl", "XMP-dc:Relation")
+        assert "jxlphoto-icc:inherited" in rel_p1, "inherited flag missing on page 1 JXL"
+
+        icc_out = tmp / "icc_out"
+        r = run_decoder(icc_jxl, icc_out)
+        assert r.returncode == 0, f"per-page ICC decode failed:\n{r.stderr}"
+        tif_out = icc_out / "icc.tif"
+        assert get_page_icc(tif_out, 0) == icc_a, "page 0 ICC not restored"
+        assert get_page_icc(tif_out, 1) == b"", "page 1 inherited ICC should be absent in reconstructed TIFF"
+        assert get_page_icc(tif_out, 2) == icc_b, "page 2 ICC not restored"
 
         print("\nAll multi-page tests passed.")
 

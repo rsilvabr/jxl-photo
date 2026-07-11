@@ -617,21 +617,6 @@ def get_page_icc(tif, page_idx: int):
     return None, False
 
 
-def extract_icc_fixed(tiff_path):
-    """Extracts ICC profile and optionally patches D50 illuminant rounding error.
-    The patch is applied based on D50_PATCH_MODE and D50_PATCH_SOFTWARE_LIST settings.
-    Safe for any ICC profile: if bytes are already correct, the patch has no effect.
-    Returns patched ICC bytes or None."""
-    icc = extract_icc_bytes(tiff_path)
-    return apply_d50_policy(icc, tiff_path)
-
-
-def extract_icc_original(tiff_path):
-    """Extracts original ICC profile WITHOUT patching.
-    Used for round-trip preservation (XMP CreatorTool).
-    Returns original ICC bytes or None."""
-    return extract_icc_bytes(tiff_path)
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # NEW FUNCTIONS FOR XMP PRESERVATION (XMP OVERWRITE BUG FIX)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1047,6 +1032,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     img = img.astype(np.uint16)
             if img.ndim == 2:
                 img = img[:, :, np.newaxis]
+            # If a page inherited its ICC from IFD0 but is actually grayscale, do not
+            # apply the inherited RGB ICC. Grayscale pages with no own ICC tag are
+            # encoded without an ICC profile, matching the original structure.
+            if icc_inherited and img.shape[2] == 1:
+                icc_original = None
+                icc_inherited = False
+                icc_bytes = None
 
             # 5. Encode PNG with ICC in iCCP chunk (for cjxl encoding)
             # --container=1 is required for lossy JXL (d>0): without it, cjxl outputs a raw

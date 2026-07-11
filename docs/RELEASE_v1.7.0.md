@@ -12,6 +12,12 @@ This release adds explicit handling for multi-page TIFFs. Previous versions read
 > therefore **never silently merged** — they decode to separate TIFFs. Pass
 > `--no-reconstruct-multipage` to disable rejoining entirely.
 
+Each split page also carries its own effective ICC profile (read from the page's own
+ICC tag 34675; if absent, page N > 0 inherits IFD0's ICC for color interpretation).
+Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`,
+so the decoder restores them **without an ICC tag**, matching the original TIFF
+structure byte-for-byte.
+
 ---
 
 ## ✨ New Features
@@ -114,7 +120,7 @@ All fixed before release:
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.7.0** | TBD | Multi-page TIFF support: split/skip/ignore modes, thumbnail handling, marker-based decoder reconstruction; audit-fixed single-page path |
+| **v1.7.0** | 2026-07-11 | Multi-page TIFF support: split/skip/ignore modes, thumbnail handling, marker-based decoder reconstruction, per-page ICC preservation; audit-fixed single-page path |
 | v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection, ICC alias cleanup (103 fixes) |
 | v1.5.3 | 2026-04-14 | Documentation & minor fixes: OVERWRITE log accuracy, PIL pixel limit, 8-bit PNG scaling, exiftool(-k).exe detection |
 | v1.5.2 | 2026-04-13 | Critical fix: 8-bit TIFF → JXL black images |

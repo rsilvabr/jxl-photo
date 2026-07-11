@@ -47,7 +47,7 @@ Added explicit multi-page handling across the TIFF workflow:
    - JPEG preview is skipped when reconstructing multi-page TIFFs.
    - `--thumbnail-handling generate` is recognized but not yet implemented; it falls back to `include` with a warning.
 
-3. **Per-page ICC preservation (v1.7.1 follow-up)**
+3. **Per-page ICC preservation**
    - `jxl_tiff_encoder.py` extracts each page's own ICC (tag 34675) and falls back to IFD0's ICC when absent; inherited pages are flagged with `jxlphoto-icc:inherited` in `dc:Relation`.
    - `jxl_tiff_decoder.py` restores each page's own ICC tag; pages flagged as inherited are reconstructed without an ICC tag, matching the original structure.
 

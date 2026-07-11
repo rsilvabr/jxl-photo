@@ -616,7 +616,7 @@ Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
-### Per-Page ICC Preservation (v1.7.1+)
+### Per-Page ICC Preservation (v1.7.0)
 
 Each reconstructed page gets its own ICC profile restored when the source page had one. Pages that inherited ICC from IFD0 (flagged `jxlphoto-icc:inherited` in `dc:Relation`) are reconstructed without an ICC tag, matching the original TIFF structure while preserving the effective color interpretation.
 
