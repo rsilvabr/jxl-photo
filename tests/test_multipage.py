@@ -305,6 +305,7 @@ def main():
             assert tif.pages[2].shape == (50, 50), "page 2 should be grayscale 2D"
             assert tif.pages[2].samplesperpixel == 1, "page 2 should have 1 sample"
             assert tif.pages[2].subfiletype == tifffile.FILETYPE.PAGE, "page 2 SubfileType not preserved"
+            assert tif.pages[2].tags.get(34675) is None, "page 2 (grayscale inherited) should not get an ICC tag"
 
         print("\nAll multi-page tests passed.")
 

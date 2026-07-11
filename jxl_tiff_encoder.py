@@ -1058,11 +1058,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 is_grayscale = True
 
             # If a page inherited its ICC from IFD0 but is actually grayscale, do not
-            # apply the inherited RGB ICC. Grayscale pages with no own ICC tag are
-            # encoded without an ICC profile, matching the original structure.
+            # apply the inherited RGB ICC. Keep icc_inherited=True so the decoder knows
+            # the original page had no own ICC tag and must not write one on restore.
             if icc_inherited and is_grayscale:
                 icc_original = None
-                icc_inherited = False
+                icc_inherited = True
                 icc_bytes = None
 
             # 5. Encode PNG with ICC in iCCP chunk (for cjxl encoding)

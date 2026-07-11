@@ -1404,10 +1404,10 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         kwargs['photometric'] = 'minisblack'
                     else:
                         kwargs['photometric'] = 'RGB'
-                    # Attach ICC to page 0 always, and to other pages only if
-                    # they carried their own ICC (not inherited). Inherited pages
-                    # are reconstructed without an ICC tag, matching the original.
-                    if entry_icc and (i == 0 or not entry_inherited):
+                    # Attach ICC only to pages that carried their own ICC.
+                    # Inherited pages are reconstructed without an ICC tag,
+                    # matching the original TIFF structure.
+                    if entry_icc and not entry_inherited:
                         kwargs['iccprofile'] = entry_icc
                     # Restore the original SubfileType when it was non-zero.
                     # Thumbnails are marked with subfiletype=1 regardless.
