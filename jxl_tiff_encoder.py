@@ -240,6 +240,15 @@ ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
 # TIFF structure: inherited pages get no ICC tag, while the effective color is
 # still applied via the inherited profile during JXL encoding.
 
+SUBFILETYPE_XMP_PREFIX = "jxlphoto-subfiletype:"
+# Prefix for the original SubfileType value stored in dc:Relation when it is
+# non-zero (e.g. 4 for transparency/IR mask pages). The decoder restores the
+# original subfiletype so scanner pages keep their semantic role.
+
+GRAYSCALE_XMP_FLAG = "jxlphoto-grayscale"
+# Marker appended to dc:Relation when a page is encoded as single-channel
+# grayscale. The decoder restores a 2D TIFF page instead of expanding it to RGB.
+
 
 # ─────────────────────────────────────────────
 # USER SETTINGS - MODES CONFIGURATION
@@ -938,16 +947,25 @@ def _is_thumbnail_page(page) -> bool:
     return bool(page.is_reduced or page.is_subifd)
 
 def _analyze_tiff_pages(tiff_path: Path):
-    """Analyze a TIFF and return lists of real-page and thumbnail-page indices."""
+    """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
+
+    Returns (real_pages, thumb_pages, page_info) where page_info is a dict
+    mapping page index to {'subfiletype': int, 'samples': int}.
+    """
+    page_info = {}
     with tifffile.TiffFile(str(tiff_path)) as tif:
         real_pages = []
         thumb_pages = []
         for i, page in enumerate(tif.pages):
+            page_info[i] = {
+                'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
+                'samples': int(page.samplesperpixel) if page.samplesperpixel else 1,
+            }
             if _is_thumbnail_page(page):
                 thumb_pages.append(i)
             else:
                 real_pages.append(i)
-    return real_pages, thumb_pages
+    return real_pages, thumb_pages, page_info
 
 def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
     """Build output filename for a given page index."""
@@ -960,13 +978,15 @@ def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
     return base + ".jxl"
 
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
-                is_thumbnail: bool = False, multipage_group: str = None):
+                is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3, multipage_group: str = None):
     """
     Converts a single TIFF page to JXL with proper XMP preservation.
     write_path: where the JXL is initially written (staging or final destination)
     final_path: the final destination path (for overwrite checking and logging)
     page_idx:   which TIFF page to encode (default 0)
     is_thumbnail: whether this page was detected as a thumbnail
+    subfiletype: original TIFF SubfileType value (e.g. 1 for thumbnail, 4 for mask)
+    samples:     samples per pixel of the source page (1 for grayscale, 3 for RGB)
     multipage_group: if set, this page is part of a split multi-page TIFF; the
                      value is a stable group id written into XMP so the decoder
                      can reconstruct ONLY genuinely-split files and never merge
@@ -1030,12 +1050,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
                 else:
                     img = img.astype(np.uint16)
+            is_grayscale = (samples == 1)
             if img.ndim == 2:
-                img = img[:, :, np.newaxis]
+                if not is_grayscale:
+                    img = img[:, :, np.newaxis]
+            elif img.ndim == 3 and img.shape[2] == 1:
+                is_grayscale = True
+
             # If a page inherited its ICC from IFD0 but is actually grayscale, do not
             # apply the inherited RGB ICC. Grayscale pages with no own ICC tag are
             # encoded without an ICC profile, matching the original structure.
-            if icc_inherited and img.shape[2] == 1:
+            if icc_inherited and is_grayscale:
                 icc_original = None
                 icc_inherited = False
                 icc_bytes = None
@@ -1211,6 +1236,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     ]
                     if icc_inherited and page_idx > 0:
                         relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
+                    if subfiletype != 0:
+                        relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
+                    if is_grayscale:
+                        relation_args.append("-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG)
                     subprocess.run(
                         [_get_exiftool_cmd(), "-overwrite_original"] + relation_args +
                         [str(write_path)],
@@ -1237,7 +1266,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     """
     Decide which pages of a TIFF to encode based on MULTIPAGE_TIFF_MODE and
     THUMBNAIL_MODE, and return a list of (tiff_path, final_jxl_path, page_idx,
-    is_thumbnail) tuples ready for process_group.
+    is_thumbnail, subfiletype, samples) tuples ready for process_group.
 
     Returns an empty list if the file is skipped.
 
@@ -1254,9 +1283,10 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     # single error — instead of aborting the whole run at planning time.
     if mp_mode == "ignore":
         final_jxl = output_dir / _page_output_name(stem, 0, False)
-        return [(tiff_path, final_jxl, 0, False)]
+        # Assume RGB for the fast path; convert_one will re-read if needed.
+        return [(tiff_path, final_jxl, 0, False, 0, 3)]
 
-    real_pages, thumb_pages = _analyze_tiff_pages(tiff_path)
+    real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
 
     pages_to_encode = []
 
@@ -1265,44 +1295,50 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             logger.warning(f"SKIP multi-page TIFF ({len(real_pages)} real pages) | {tiff_path.name}")
             return []
         # Single real page (or only thumbnails) -> encode page 0
-        pages_to_encode.append((0, 0 in thumb_pages))
+        info = page_info.get(0, {'subfiletype': 0, 'samples': 3})
+        pages_to_encode.append((0, 0 in thumb_pages, info['subfiletype'], info['samples']))
 
     elif mp_mode == "split":
         for idx in real_pages:
-            pages_to_encode.append((idx, False))
+            info = page_info.get(idx, {'subfiletype': 0, 'samples': 3})
+            pages_to_encode.append((idx, False, info['subfiletype'], info['samples']))
         if THUMBNAIL_MODE.lower() == "include":
             for idx in thumb_pages:
-                pages_to_encode.append((idx, True))
+                info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
+                pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
         if not pages_to_encode:
             logger.warning(f"SKIP TIFF with no encodable pages | {tiff_path.name}")
             return []
 
     elif mp_mode == "split_all":
         for idx in real_pages:
-            pages_to_encode.append((idx, False))
+            info = page_info.get(idx, {'subfiletype': 0, 'samples': 3})
+            pages_to_encode.append((idx, False, info['subfiletype'], info['samples']))
         for idx in thumb_pages:
-            pages_to_encode.append((idx, True))
+            info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
+            pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
         if not pages_to_encode:
             logger.warning(f"SKIP TIFF with no pages | {tiff_path.name}")
             return []
 
     else:
         # Unknown mode, fall back to ignore
-        pages_to_encode.append((0, 0 in thumb_pages))
+        info = page_info.get(0, {'subfiletype': 0, 'samples': 3})
+        pages_to_encode.append((0, 0 in thumb_pages, info['subfiletype'], info['samples']))
 
     # Resolve final output path for each page
     results = []
-    for page_idx, is_thumbnail in pages_to_encode:
+    for page_idx, is_thumbnail, subfiletype, samples in pages_to_encode:
         name = _page_output_name(stem, page_idx, is_thumbnail)
         final_jxl = output_dir / name
-        results.append((tiff_path, final_jxl, page_idx, is_thumbnail))
+        results.append((tiff_path, final_jxl, page_idx, is_thumbnail, subfiletype, samples))
 
     return results
 
 def process_group(group_items: list, workers: int, mode: int = 0):
     """
-    Converts a group of (tiff, final_jxl, page_idx, is_thumbnail) items in parallel.
-    If TEMP2_DIR is set, writes to staging first then moves in bulk.
+    Converts a group of (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples)
+    items in parallel. If TEMP2_DIR is set, writes to staging first then moves in bulk.
     """
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
@@ -1314,11 +1350,11 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # page from it gets a stable group marker so the decoder can safely rejoin
     # them. Single-output TIFFs get no marker (standalone).
     outputs_per_tiff: Dict[str, int] = {}
-    for tiff, _final_jxl, _page_idx, _is_thumbnail in group_items:
+    for tiff, _final_jxl, _page_idx, _is_thumbnail, _subfiletype, _samples in group_items:
         outputs_per_tiff[str(tiff.resolve())] = outputs_per_tiff.get(str(tiff.resolve()), 0) + 1
 
     tasks = []
-    for tiff, final_jxl, page_idx, is_thumbnail in group_items:
+    for tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples in group_items:
         if use_staging:
             # Unique staging name to avoid collisions across different source folders/pages
             write_jxl = staging_dir / f"{uuid.uuid4().hex}_{tiff.stem}_p{page_idx}.jxl"
@@ -1326,12 +1362,12 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             write_jxl = final_jxl
         tiff_key = str(tiff.resolve())
         group_id = tiff_key if outputs_per_tiff.get(tiff_key, 0) > 1 else None
-        tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, group_id))
+        tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype, samples, group_id))
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, t, w, f, p, th, g): (t, w, f, p, th, g)
-                   for t, w, f, p, th, g in tasks}
+        futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g): (t, w, f, p, th, sft, spl, g)
+                   for t, w, f, p, th, sft, spl, g in tasks}
         for fut in as_completed(futures):
             results.append(fut.result())
 
@@ -1339,7 +1375,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
-        for tiff, write_jxl, final_jxl, page_idx, _, _ in tasks:
+        for tiff, write_jxl, final_jxl, page_idx, _, _, _, _ in tasks:
             status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
@@ -1377,7 +1413,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 
             # All final JXLs must exist and pass integrity check
             can_delete = True
-            for _, _, final_jxl, _, _, _ in tasks:
+            for _, _, final_jxl, _, _, _, _, _ in tasks:
                 if str(final_jxl) not in {r[2] for r in tiff_results}:
                     continue
                 if not Path(final_jxl).exists():
@@ -1632,9 +1668,10 @@ def main():
 
     # Dry run
     if args.dry_run:
-        for t, j, page_idx, is_thumb in all_items:
+        for t, j, page_idx, is_thumb, subfiletype, samples in all_items:
             thumb_label = " [thumbnail]" if is_thumb else ""
-            logger.info(f" DRY | {t.name} page{page_idx}{thumb_label} > {j}")
+            gray_label = " [grayscale]" if samples == 1 else ""
+            logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
         return
 
@@ -1650,8 +1687,8 @@ def main():
 
     # Group by output folder (one bulk move per group)
     groups: Dict[Path, list] = {}
-    for t, j, page_idx, is_thumb in all_items:
-        groups.setdefault(j.parent, []).append((t, j, page_idx, is_thumb))
+    for t, j, page_idx, is_thumb, subfiletype, samples in all_items:
+        groups.setdefault(j.parent, []).append((t, j, page_idx, is_thumb, subfiletype, samples))
 
     logger.info(f"Output groups: {len(groups)}")
 

@@ -276,6 +276,36 @@ def main():
         assert get_page_icc(tif_out, 1) == b"", "page 1 inherited ICC should be absent in reconstructed TIFF"
         assert get_page_icc(tif_out, 2) == icc_b, "page 2 ICC not restored"
 
+        # ---- grayscale page + non-zero SubfileType preservation ----
+        # SubfileType=4 (MASK) is not writable by tifffile, so we test with the
+        # supported PAGE value (2); the encoder still records the original value
+        # and the decoder restores the PAGE semantics.
+        gray_in = tmp / "gray_input"
+        gray_in.mkdir()
+        gray_src = gray_in / "gray.tif"
+        with tifffile.TiffWriter(str(gray_src)) as tif:
+            tif.write(np.random.randint(0, 65535, (60, 60, 3), dtype=np.uint16), photometric='rgb')
+            tif.write(np.random.randint(0, 255, (30, 30, 3), dtype=np.uint8),
+                      photometric='rgb', subfiletype=tifffile.FILETYPE.REDUCEDIMAGE)
+            tif.write(np.random.randint(0, 65535, (50, 50), dtype=np.uint16),
+                      photometric='minisblack', subfiletype=tifffile.FILETYPE.PAGE)
+        gray_jxl = tmp / "gray_jxl"
+        r = run_encoder(gray_in, gray_jxl, "--multipage-mode", "split", "--thumbnail-mode", "include")
+        assert r.returncode == 0, f"grayscale encode failed:\n{r.stderr}"
+        assert (gray_jxl / "gray_page2.jxl").exists(), "grayscale page JXL missing"
+
+        gray_out = tmp / "gray_out"
+        r = run_decoder(gray_jxl, gray_out)
+        assert r.returncode == 0, f"grayscale decode failed:\n{r.stderr}"
+        tif_gray = gray_out / "gray.tif"
+        with tifffile.TiffFile(str(tif_gray)) as tif:
+            assert len(tif.pages) == 3, f"expected 3 pages, got {len(tif.pages)}"
+            assert tif.pages[0].shape == (60, 60, 3), "page 0 shape wrong"
+            assert tif.pages[1].is_reduced, "page 1 should be reduced (thumbnail)"
+            assert tif.pages[2].shape == (50, 50), "page 2 should be grayscale 2D"
+            assert tif.pages[2].samplesperpixel == 1, "page 2 should have 1 sample"
+            assert tif.pages[2].subfiletype == tifffile.FILETYPE.PAGE, "page 2 SubfileType not preserved"
+
         print("\nAll multi-page tests passed.")
 
 

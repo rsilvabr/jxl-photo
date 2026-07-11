@@ -54,6 +54,14 @@ JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
 When a multi-page TIFF is split, each page keeps its own ICC profile through the round trip. Pages without an own ICC tag inherit IFD0's profile for color interpretation, but are reconstructed without an ICC tag, matching the original TIFF structure. This is tracked via an `XMP-dc:Relation` flag (`jxlphoto-icc:inherited`).
 
+### Grayscale and SubfileType Preservation
+
+Split pages preserve their original channel count and `SubfileType` role:
+
+- Single-channel pages are encoded as grayscale and reconstructed as 2D TIFF pages (`samplesperpixel=1`).
+- Inherited RGB ICC is not applied to grayscale pages, avoiding libpng iCCP errors on scanner IR/mask pages.
+- Non-zero `SubfileType` values (e.g. `PAGE`/`MASK`) are recorded and restored. `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) on reconstruction because tifffile does not accept `MASK` on normal image pages, but the "additional page" semantics are preserved.
+
 ### Wrapper Integration
 
 `jxl_photo.py` exposes the new options in the advanced-options step:

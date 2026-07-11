@@ -620,6 +620,10 @@ JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
 Each reconstructed page gets its own ICC profile restored when the source page had one. Pages that inherited ICC from IFD0 (flagged `jxlphoto-icc:inherited` in `dc:Relation`) are reconstructed without an ICC tag, matching the original TIFF structure while preserving the effective color interpretation.
 
+### Grayscale and SubfileType Preservation (v1.7.0)
+
+Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that inherited ICC from IFD0 are reconstructed without an ICC tag. Non-zero `SubfileType` values from the original TIFF are restored; `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) because tifffile does not accept `MASK` on normal image pages, but the "additional page" semantics are preserved.
+
 ---
 
 ## License

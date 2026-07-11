@@ -51,7 +51,12 @@ Added explicit multi-page handling across the TIFF workflow:
    - `jxl_tiff_encoder.py` extracts each page's own ICC (tag 34675) and falls back to IFD0's ICC when absent; inherited pages are flagged with `jxlphoto-icc:inherited` in `dc:Relation`.
    - `jxl_tiff_decoder.py` restores each page's own ICC tag; pages flagged as inherited are reconstructed without an ICC tag, matching the original structure.
 
-3. **Wrapper (`jxl_photo.py`)**
+4. **Grayscale and SubfileType preservation**
+   - `jxl_tiff_encoder.py` records each page's original `SubfileType` and `SamplesPerPixel` and flags grayscale pages with `jxlphoto-grayscale` in `dc:Relation`.
+   - Inherited RGB ICC is not applied to grayscale pages, avoiding libpng iCCP errors on scanner IR/mask pages.
+   - `jxl_tiff_decoder.py` restores grayscale pages as 2D single-channel TIFFs and restores non-zero `SubfileType` values. `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) because tifffile does not accept `MASK` on normal image pages, preserving the "additional page" semantics.
+
+5. **Wrapper (`jxl_photo.py`)**
    - Advanced options now ask for multi-page mode and thumbnail handling for TIFF→JXL.
    - JXL→TIFF advanced options ask how to handle `_thumbnail.jxl` files.
    - New `ToolConfig` fields: `last_multipage_mode`, `last_thumbnail_mode`, `last_thumbnail_suffix`, `last_thumbnail_handling`.
