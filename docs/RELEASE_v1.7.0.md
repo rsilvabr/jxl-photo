@@ -85,6 +85,8 @@ New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thu
     to two separate TIFFs and are never merged
   - **Per-page ICC preservation** — asserts each page is restored with its own
     ICC tag, and inherited pages are restored without one
+  - **Grayscale + SubfileType preservation** — asserts single-channel pages are
+    restored as 2D grayscale and non-zero `SubfileType` values are preserved
 
 ---
 
