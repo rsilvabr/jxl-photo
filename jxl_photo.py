@@ -83,6 +83,10 @@ class ToolConfig:
     last_d50_patch: Optional[str] = None
     last_encode_tag: Optional[str] = None
     last_jpeg_thumbnail: Optional[bool] = None  # True = embed, False = don't embed, None = ask each time
+    last_multipage_mode: Optional[str] = None
+    last_thumbnail_mode: Optional[str] = None
+    last_thumbnail_suffix: Optional[str] = None
+    last_thumbnail_handling: Optional[str] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -126,15 +130,19 @@ class ConfigManager:
             print(f"Error: Failed to save config: {e}")
 
     def save_last_session(self, input_dir: Optional[str] = None, output_mode: Optional[str] = None,
-                         workers: Optional[int] = None, staging: Optional[str] = None,
-                         effort: Optional[int] = None, quality: Optional[int] = 95,
-                         distance: Optional[float] = None,
-                         origin_format: Optional[str] = None,
-                         dest_format: Optional[str] = None,
-                         conversion_type: Optional[str] = None,
-                         d50_patch: Optional[str] = None,
-                         encode_tag: Optional[str] = None,
-                         jpeg_thumbnail: Optional[bool] = None) -> None:
+                          workers: Optional[int] = None, staging: Optional[str] = None,
+                          effort: Optional[int] = None, quality: Optional[int] = 95,
+                          distance: Optional[float] = None,
+                          origin_format: Optional[str] = None,
+                          dest_format: Optional[str] = None,
+                          conversion_type: Optional[str] = None,
+                          d50_patch: Optional[str] = None,
+                          encode_tag: Optional[str] = None,
+                          jpeg_thumbnail: Optional[bool] = None,
+                          multipage_mode: Optional[str] = None,
+                          thumbnail_mode: Optional[str] = None,
+                          thumbnail_suffix: Optional[str] = None,
+                          thumbnail_handling: Optional[str] = None) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -161,6 +169,14 @@ class ConfigManager:
             self.config.last_encode_tag = encode_tag
         if jpeg_thumbnail is not None:
             self.config.last_jpeg_thumbnail = jpeg_thumbnail
+        if multipage_mode is not None:
+            self.config.last_multipage_mode = multipage_mode
+        if thumbnail_mode is not None:
+            self.config.last_thumbnail_mode = thumbnail_mode
+        if thumbnail_suffix is not None:
+            self.config.last_thumbnail_suffix = thumbnail_suffix
+        if thumbnail_handling is not None:
+            self.config.last_thumbnail_handling = thumbnail_handling
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -2034,6 +2050,9 @@ class InteractiveMenu:
             if origin == 'tiff' and dest == 'jxl':
                 advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
                 advanced_options['encode_tag'] = workflow.get('encode_tag', 'xmp')
+                advanced_options['multipage_mode'] = self.config.config.last_multipage_mode or 'ignore'
+                advanced_options['thumbnail_mode'] = self.config.config.last_thumbnail_mode or 'exclude'
+                advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
             # Preserve decode-mode/target-icc chosen earlier when not showing advanced
             existing = workflow.get('advanced_options', {})
             for key in ('matrix', 'basic', 'none', 'target_icc'):
@@ -2050,6 +2069,27 @@ class InteractiveMenu:
                 thumb_default = self.config.config.last_jpeg_thumbnail if self.config.config.last_jpeg_thumbnail is not None else False
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
                 self.config.save_last_session(jpeg_thumbnail=embed_thumb)
+                # Multi-page TIFF options
+                mp_default = self.config.config.last_multipage_mode or "ignore"
+                multipage_mode = Prompt.ask(
+                    "Multi-page TIFF handling",
+                    choices=["ignore", "skip", "split", "split_all"],
+                    default=mp_default
+                )
+                self.config.save_last_session(multipage_mode=multipage_mode)
+                thumbnail_mode = "exclude"
+                thumbnail_suffix = "_thumbnail"
+                if multipage_mode in ("split", "split_all"):
+                    tm_default = self.config.config.last_thumbnail_mode or "exclude"
+                    thumbnail_mode = Prompt.ask(
+                        "Thumbnail handling when splitting",
+                        choices=["exclude", "include"],
+                        default=tm_default
+                    )
+                    self.config.save_last_session(thumbnail_mode=thumbnail_mode)
+                    ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
+                    thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
+                    self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source TIFFs after conversion? (mode 8)", default=False)
             else:
@@ -2062,6 +2102,22 @@ class InteractiveMenu:
                 thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
                 embed_thumb = thumb_input.startswith('y')
                 self.config.save_last_session(jpeg_thumbnail=embed_thumb)
+                # Multi-page TIFF options
+                mp_default = self.config.config.last_multipage_mode or "ignore"
+                mp_input = input(f"Multi-page TIFF handling (ignore/skip/split/split_all) [{mp_default}]: ").strip().lower() or mp_default
+                multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else "ignore"
+                self.config.save_last_session(multipage_mode=multipage_mode)
+                thumbnail_mode = "exclude"
+                thumbnail_suffix = "_thumbnail"
+                if multipage_mode in ("split", "split_all"):
+                    tm_default = self.config.config.last_thumbnail_mode or "exclude"
+                    tm_input = input(f"Thumbnail handling when splitting (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
+                    thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else "exclude"
+                    self.config.save_last_session(thumbnail_mode=thumbnail_mode)
+                    ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
+                    ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
+                    thumbnail_suffix = ts_input if ts_input else ts_default
+                    self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source TIFFs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
@@ -2080,6 +2136,9 @@ class InteractiveMenu:
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
             advanced_options['embed_thumbnail'] = embed_thumb
+            advanced_options['multipage_mode'] = multipage_mode
+            advanced_options['thumbnail_mode'] = thumbnail_mode
+            advanced_options['thumbnail_suffix'] = thumbnail_suffix
 
         elif origin == 'jxl' and dest == 'tiff':
             if RICH_AVAILABLE and console:
@@ -2094,6 +2153,18 @@ class InteractiveMenu:
                 if target_icc == "custom":
                     target_icc = Prompt.ask("Enter ICC profile path")
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
+                # Thumbnail reconstruction handling
+                th_default = self.config.config.last_thumbnail_handling if hasattr(self.config.config, 'last_thumbnail_handling') else "include"
+                th_default = th_default or "include"
+                thumbnail_handling = Prompt.ask(
+                    "Thumbnail handling for multi-page TIFFs",
+                    choices=["ignore", "include", "generate"],
+                    default=th_default
+                )
+                if thumbnail_handling == "generate":
+                    console.print("[yellow]generate is not yet implemented; using include[/yellow]")
+                    thumbnail_handling = "include"
+                self.config.save_last_session(thumbnail_handling=thumbnail_handling)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
@@ -2113,6 +2184,14 @@ class InteractiveMenu:
                     target_icc = input("Enter ICC profile path: ").strip()
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
+                # Thumbnail reconstruction handling
+                th_default = getattr(self.config.config, 'last_thumbnail_handling', None) or "include"
+                th_input = input(f"Thumbnail handling for multi-page TIFFs (ignore/include/generate) [{th_default}]: ").strip().lower() or th_default
+                thumbnail_handling = th_input if th_input in ["ignore", "include", "generate"] else "include"
+                if thumbnail_handling == "generate":
+                    print("generate is not yet implemented; using include")
+                    thumbnail_handling = "include"
+                self.config.save_last_session(thumbnail_handling=thumbnail_handling)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
@@ -2132,6 +2211,7 @@ class InteractiveMenu:
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
+            advanced_options['thumbnail_handling'] = thumbnail_handling
 
         else:
             if RICH_AVAILABLE and console:
@@ -2642,6 +2722,12 @@ class InteractiveMenu:
                 cmd.extend(['--encode-tag', advanced['encode_tag']])
             if advanced.get('embed_thumbnail'):
                 cmd.append('--embed-thumbnail')
+            if advanced.get('multipage_mode'):
+                cmd.extend(['--multipage-mode', advanced['multipage_mode']])
+            if advanced.get('thumbnail_mode'):
+                cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
+            if advanced.get('thumbnail_suffix'):
+                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
 
         elif origin == 'jxl' and dest == 'tiff':
             script = str(SCRIPT_DIR / 'jxl_tiff_decoder.py')
@@ -2685,6 +2771,8 @@ class InteractiveMenu:
                 cmd.append('--sync')
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
+            if advanced.get('thumbnail_handling'):
+                cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
 
         else:
             script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')

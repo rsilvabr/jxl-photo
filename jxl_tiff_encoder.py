@@ -204,6 +204,35 @@ DELETE_SOURCE = False
 # WARNING: irreversible. Only enable after testing on a small batch first.
 # Has no effect on modes 0–7.
 
+MULTIPAGE_TIFF_MODE = "ignore"
+# How to handle TIFFs with more than one page.
+# "ignore"    -> Always encode page 0 (series[0]) and silently ignore extra pages.
+#                This is the original behavior and the default.
+# "skip"      -> If the TIFF has more than one "real" page (non-thumbnail),
+#                skip the entire file and log a warning.
+# "split"     -> Encode each real page to a separate JXL:
+#                page 0 -> photo.jxl, page N -> photo_pageN.jxl.
+#                Thumbnails are handled according to THUMBNAIL_MODE below.
+# "split_all" -> Encode every page, including thumbnails, to separate JXLs.
+#
+# A "real" page is one where is_reduced=False and is_subifd=False.
+# Thumbnails/pyramids are detected via the standard TIFF SubfileType flags.
+
+THUMBNAIL_MODE = "exclude"
+# Only used when MULTIPAGE_TIFF_MODE is "split".
+# "exclude" -> Do not encode thumbnail pages.
+# "include" -> Encode thumbnail pages too, with a _thumbnail suffix.
+
+THUMBNAIL_SUFFIX = "_thumbnail"
+# Suffix appended to the output name when THUMBNAIL_MODE="include".
+# Example: photo_page1_thumbnail.jxl
+
+MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
+# Prefix for the group id appended to the dc:Relation XMP bag on split pages.
+# The decoder only reconstructs a multi-page TIFF from files carrying a value
+# with this prefix, so independently-named files like scan.jxl + scan_page2.jxl
+# are never silently merged. Files without the marker decode as standalone TIFFs.
+# dc:Relation is a list, so appending preserves any Relation the user already had.
 
 
 # ─────────────────────────────────────────────
@@ -884,11 +913,49 @@ def reorder_jxl_boxes(jxl_path):
 
     jxl_path.write_bytes(out)
 
-def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
+def _is_thumbnail_page(page) -> bool:
+    """Return True if the TIFF page is a thumbnail or pyramid level.
+
+    Uses standard TIFF SubfileType flags exposed by tifffile:
+    - is_reduced  : reduced-resolution image (thumbnail / pyramid)
+    - is_subifd   : SubIFD of another page (pyramid / preview)
     """
-    Converts a single TIFF to JXL with proper XMP preservation.
+    return bool(page.is_reduced or page.is_subifd)
+
+def _analyze_tiff_pages(tiff_path: Path):
+    """Analyze a TIFF and return lists of real-page and thumbnail-page indices."""
+    with tifffile.TiffFile(str(tiff_path)) as tif:
+        real_pages = []
+        thumb_pages = []
+        for i, page in enumerate(tif.pages):
+            if _is_thumbnail_page(page):
+                thumb_pages.append(i)
+            else:
+                real_pages.append(i)
+    return real_pages, thumb_pages
+
+def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
+    """Build output filename for a given page index."""
+    if page_idx == 0:
+        base = stem
+    else:
+        base = f"{stem}_page{page_idx}"
+    if is_thumbnail:
+        base += THUMBNAIL_SUFFIX
+    return base + ".jxl"
+
+def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
+                is_thumbnail: bool = False, multipage_group: str = None):
+    """
+    Converts a single TIFF page to JXL with proper XMP preservation.
     write_path: where the JXL is initially written (staging or final destination)
     final_path: the final destination path (for overwrite checking and logging)
+    page_idx:   which TIFF page to encode (default 0)
+    is_thumbnail: whether this page was detected as a thumbnail
+    multipage_group: if set, this page is part of a split multi-page TIFF; the
+                     value is a stable group id written into XMP so the decoder
+                     can reconstruct ONLY genuinely-split files and never merge
+                     independently-named files that happen to look like pages.
     """
     overwritten = final_path.exists()
 
@@ -896,14 +963,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
         if OVERWRITE is False:
             n, total = next_count()
             logger.info(f"[{n}/{total}] SKIP (exists) | {tiff_path.name}")
-            return (str(tiff_path), "skipped", str(final_path), None)
+            # Key must match the ok/error returns ((path, page_idx)) so the
+            # staging status_map and mode-8 grouping resolve skipped pages
+            # correctly instead of defaulting to "error".
+            return ((str(tiff_path), page_idx), "skipped", str(final_path), None)
         elif OVERWRITE == "smart":
             tiff_mtime = tiff_path.stat().st_mtime
             jxl_mtime  = final_path.stat().st_mtime
             if tiff_mtime <= jxl_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
-                return (str(tiff_path), "skipped", str(final_path), None)
+                return ((str(tiff_path), page_idx), "skipped", str(final_path), None)
             logger.info(f"  >SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
     try:
@@ -926,13 +996,18 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
             # 3. Extract original XMP for preservation analysis (NEW)
             xmp_original = extract_xmp_original(tiff_path, tmp_dir)
 
-            # 4. Read TIFF pixel data (series[0] = main image, ignores thumbnails)
+            # 4. Read TIFF pixel data for the requested page
             with tifffile.TiffFile(str(tiff_path)) as tif:
+                if page_idx >= len(tif.pages):
+                    raise ValueError(
+                        f"Page index {page_idx} out of range ({len(tif.pages)} pages)"
+                    )
+                page = tif.pages[page_idx]
                 # Reject CMYK early — it would otherwise be mis-detected as RGBA
-                photometric = tif.pages[0].photometric
+                photometric = page.photometric
                 if photometric == tifffile.PHOTOMETRIC.SEPARATED:
                     raise ValueError("CMYK TIFFs are not supported")
-                img = tif.series[0].asarray()
+                img = page.asarray()
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
                 if img.dtype == np.uint8:
                     img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
@@ -1100,20 +1175,105 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path):
                         except Exception as e2:
                             logger.debug(f"  >Thumbnail fallback also failed: {e2}")
 
+            # Multi-page group marker: tag split pages so the decoder reconstructs
+            # only genuinely-split files. Stored as an ADDITIONAL value in the
+            # dc:Relation list (a bag), so any Relation the user already had is
+            # preserved — unlike a scalar field, appending never overwrites.
+            # Absence of the marker means "standalone file" even if the name has _pageN.
+            if multipage_group:
+                try:
+                    subprocess.run(
+                        [_get_exiftool_cmd(), "-overwrite_original",
+                         "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
+                         str(write_path)],
+                        capture_output=True, timeout=10
+                    )
+                except Exception as e_mark:
+                    logger.debug(f"  >Multi-page marker write failed (non-critical): {e_mark}")
+
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
             label  = "OVERWRITE" if overwritten else "OK"
-            logger.info(f"[{n}/{total}] {label} | {tiff_path.name} -> {final_path}")
-            return (str(tiff_path), status, str(final_path), tiff_path)
+            page_label = f" page{page_idx}" if page_idx > 0 else ""
+            thumb_label = " [thumbnail]" if is_thumbnail else ""
+            logger.info(f"[{n}/{total}] {label}{page_label}{thumb_label} | {tiff_path.name} -> {final_path}")
+            return ((str(tiff_path), page_idx), status, str(final_path), tiff_path)
 
         except Exception as e:
             n, total = next_count()
-            logger.error(f"[{n}/{total}] ERROR | {tiff_path.name} | {e}")
-            return (str(tiff_path), "error", str(e), None)
+            page_label = f" page{page_idx}" if page_idx > 0 else ""
+            logger.error(f"[{n}/{total}] ERROR{page_label} | {tiff_path.name} | {e}")
+            return ((str(tiff_path), page_idx), "error", str(e), None)
 
-def process_group(group_pairs: list, workers: int, mode: int = 0):
+def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     """
-    Converts a group of (tiff, final_jxl) pairs in parallel.
+    Decide which pages of a TIFF to encode based on MULTIPAGE_TIFF_MODE and
+    THUMBNAIL_MODE, and return a list of (tiff_path, final_jxl_path, page_idx,
+    is_thumbnail) tuples ready for process_group.
+
+    Returns an empty list if the file is skipped.
+
+    May raise if the TIFF cannot be opened/analyzed; callers are expected to
+    catch this and log a per-file error so one bad file doesn't kill the batch.
+    """
+    stem = tiff_path.stem
+    mp_mode = MULTIPAGE_TIFF_MODE.lower()
+
+    # Fast path: in ignore mode we only ever encode page 0, so there's no need
+    # to open and analyze the whole TIFF here (it's opened again during the
+    # actual conversion). This avoids a redundant per-file open across large
+    # batches, and a corrupt file then fails inside convert_one — logged as a
+    # single error — instead of aborting the whole run at planning time.
+    if mp_mode == "ignore":
+        final_jxl = output_dir / _page_output_name(stem, 0, False)
+        return [(tiff_path, final_jxl, 0, False)]
+
+    real_pages, thumb_pages = _analyze_tiff_pages(tiff_path)
+
+    pages_to_encode = []
+
+    if mp_mode == "skip":
+        if len(real_pages) > 1:
+            logger.warning(f"SKIP multi-page TIFF ({len(real_pages)} real pages) | {tiff_path.name}")
+            return []
+        # Single real page (or only thumbnails) -> encode page 0
+        pages_to_encode.append((0, 0 in thumb_pages))
+
+    elif mp_mode == "split":
+        for idx in real_pages:
+            pages_to_encode.append((idx, False))
+        if THUMBNAIL_MODE.lower() == "include":
+            for idx in thumb_pages:
+                pages_to_encode.append((idx, True))
+        if not pages_to_encode:
+            logger.warning(f"SKIP TIFF with no encodable pages | {tiff_path.name}")
+            return []
+
+    elif mp_mode == "split_all":
+        for idx in real_pages:
+            pages_to_encode.append((idx, False))
+        for idx in thumb_pages:
+            pages_to_encode.append((idx, True))
+        if not pages_to_encode:
+            logger.warning(f"SKIP TIFF with no pages | {tiff_path.name}")
+            return []
+
+    else:
+        # Unknown mode, fall back to ignore
+        pages_to_encode.append((0, 0 in thumb_pages))
+
+    # Resolve final output path for each page
+    results = []
+    for page_idx, is_thumbnail in pages_to_encode:
+        name = _page_output_name(stem, page_idx, is_thumbnail)
+        final_jxl = output_dir / name
+        results.append((tiff_path, final_jxl, page_idx, is_thumbnail))
+
+    return results
+
+def process_group(group_items: list, workers: int, mode: int = 0):
+    """
+    Converts a group of (tiff, final_jxl, page_idx, is_thumbnail) items in parallel.
     If TEMP2_DIR is set, writes to staging first then moves in bulk.
     """
     use_staging = TEMP2_DIR is not None
@@ -1122,19 +1282,28 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
     if use_staging:
         staging_dir.mkdir(parents=True, exist_ok=True)
 
-    
+    # A source TIFF that yields more than one output is a genuine split; every
+    # page from it gets a stable group marker so the decoder can safely rejoin
+    # them. Single-output TIFFs get no marker (standalone).
+    outputs_per_tiff: Dict[str, int] = {}
+    for tiff, _final_jxl, _page_idx, _is_thumbnail in group_items:
+        outputs_per_tiff[str(tiff.resolve())] = outputs_per_tiff.get(str(tiff.resolve()), 0) + 1
+
     tasks = []
-    for tiff, final_jxl in group_pairs:
+    for tiff, final_jxl, page_idx, is_thumbnail in group_items:
         if use_staging:
-            # Unique staging name to avoid collisions across different source folders
-            write_jxl = staging_dir / f"{uuid.uuid4().hex}_{tiff.stem}.jxl"
+            # Unique staging name to avoid collisions across different source folders/pages
+            write_jxl = staging_dir / f"{uuid.uuid4().hex}_{tiff.stem}_p{page_idx}.jxl"
         else:
             write_jxl = final_jxl
-        tasks.append((tiff, write_jxl, final_jxl))
+        tiff_key = str(tiff.resolve())
+        group_id = tiff_key if outputs_per_tiff.get(tiff_key, 0) > 1 else None
+        tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, group_id))
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, t, w, f): (t, w, f) for t, w, f in tasks}
+        futures = {ex.submit(convert_one, t, w, f, p, th, g): (t, w, f, p, th, g)
+                   for t, w, f, p, th, g in tasks}
         for fut in as_completed(futures):
             results.append(fut.result())
 
@@ -1142,8 +1311,8 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
-        for tiff, write_jxl, final_jxl in tasks:
-            status = status_map.get(str(tiff), "error")
+        for tiff, write_jxl, final_jxl, page_idx, _, _ in tasks:
+            status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
                     logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
@@ -1158,22 +1327,43 @@ def process_group(group_pairs: list, workers: int, mode: int = 0):
             logger.info(f"  -> Moved {moved} file(s) from staging to final destination")
 
     # Delete source TIFFs after confirmed encode — only for mode 8, only after staging.
-    # Checks: encode succeeded + JXL exists at final destination.
+    # A source TIFF is deleted only if ALL of its encoded pages succeeded and every
+    # resulting JXL exists at its final destination.
     if DELETE_SOURCE and mode == 8:
         deleted = 0
-        src_map = {str(t): (t, f) for t, _, f in tasks}
+        # Group results by source TIFF path
+        results_by_tiff: Dict[str, list] = {}
         for result in results:
-            status    = result[1]
-            src_tiff  = result[3]
-            if status not in ("ok", "overwrite") or src_tiff is None:
+            key = result[0][0]  # str(tiff_path)
+            results_by_tiff.setdefault(key, []).append(result)
+
+        for tiff_key, tiff_results in results_by_tiff.items():
+            # Every page must have freshly succeeded. Skipped pages (r[3] is None)
+            # intentionally block deletion: if a page was skipped we can't be sure
+            # this run produced/verified it, so we keep the source rather than risk
+            # deleting a TIFF whose JXLs weren't all (re)written this pass.
+            all_ok = all(r[1] in ("ok", "overwrite") and r[3] is not None for r in tiff_results)
+            if not all_ok:
+                logger.warning(f"  KEEP source (not all pages succeeded) | {Path(tiff_key).name}")
                 continue
-            _, final_jxl = src_map.get(result[0], (None, None))
-            if final_jxl is None:
-                logger.warning(f"  KEEP (JXL path not found) | {src_tiff.name}")
+
+            # All final JXLs must exist and pass integrity check
+            can_delete = True
+            for _, _, final_jxl, _, _, _ in tasks:
+                if str(final_jxl) not in {r[2] for r in tiff_results}:
+                    continue
+                if not Path(final_jxl).exists():
+                    can_delete = False
+                    break
+                if not _verify_jxl_integrity(Path(final_jxl)):
+                    can_delete = False
+                    break
+
+            if not can_delete:
+                logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
                 continue
-            if not _verify_jxl_integrity(final_jxl):
-                logger.warning(f"  KEEP (JXL failed integrity check) | {src_tiff.name}")
-                continue
+
+            src_tiff = Path(tiff_key)
             src_tiff.unlink()
             deleted += 1
             logger.info(f"  DELETED source | {src_tiff.name}")
@@ -1256,6 +1446,14 @@ def main():
                         help="Write PNG intermediate to disk (slower, less memory)")
     parser.add_argument("--delete-source",   action="store_true",
                         help="Delete source TIFFs after successful encode (mode 8 only)")
+    parser.add_argument("--multipage-mode",  type=str, default=None,
+                        choices=["ignore", "skip", "split", "split_all"],
+                        help="How to handle multi-page TIFFs: ignore (default), skip, split, split_all")
+    parser.add_argument("--thumbnail-mode",  type=str, default=None,
+                        choices=["exclude", "include"],
+                        help="When splitting: exclude thumbnails (default) or include them")
+    parser.add_argument("--thumbnail-suffix", type=str, default=None,
+                        help="Suffix for thumbnail outputs when --thumbnail-mode=include (default: _thumbnail)")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Show what would be converted without converting")
     parser.add_argument("--staging",         type=str, default=None,
@@ -1272,7 +1470,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -1304,6 +1502,13 @@ def main():
     if args.embed_thumbnail:
         EMBED_JPEG_THUMBNAIL = True
 
+    if args.multipage_mode is not None:
+        MULTIPAGE_TIFF_MODE = args.multipage_mode
+    if args.thumbnail_mode is not None:
+        THUMBNAIL_MODE = args.thumbnail_mode
+    if args.thumbnail_suffix is not None:
+        THUMBNAIL_SUFFIX = args.thumbnail_suffix
+
     # Handle --strip flag - store in global for use in convert_one
     global STRIP_METADATA
     if args.strip:
@@ -1318,7 +1523,8 @@ def main():
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
         f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
-        f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | D50 patch: {D50_PATCH_MODE} | {_delete_label} | Workers: {args.workers}"
+        f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | D50 patch: {D50_PATCH_MODE} | {_delete_label} | "
+        f"Multi-page: {MULTIPAGE_TIFF_MODE} | Thumbnail: {THUMBNAIL_MODE} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
 
@@ -1351,38 +1557,57 @@ def main():
         output_root = args.input
 
     logger.info(f"Files found: {len(tiffs)}")
-    _counter["total"] = len(tiffs)
 
-    # Build (tiff, jxl_destination) pairs
-    pairs = []
+    # Build (tiff, final_jxl, page_idx, is_thumbnail) items.
+    # Each TIFF may produce one or more JXLs depending on MULTIPAGE_TIFF_MODE.
+    all_items = []
+    skipped_files = 0
+    analyze_errors = 0
     for t in tiffs:
+        # Resolve the main JXL path just to know the output directory
         if args.mode == 0:
-            # File or directory: if output_root differs from source parent, use it
             if output_root != args.input:
-                jxl = output_root / t.with_suffix(".jxl").name
+                main_jxl = output_root / t.with_suffix(".jxl").name
             else:
-                jxl = t.parent / t.with_suffix(".jxl").name
+                main_jxl = t.parent / t.with_suffix(".jxl").name
         elif args.mode == 1:
-            # Mode 1: Create converted_jxl/ subfolder next to source (file or directory)
-            jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+            main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
         elif args.mode == 2:
             if args.input.is_file():
-                # Single file -> converted_jxl/ subfolder
-                jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
+                main_jxl = t.parent / CONVERTED_JXL_FOLDER / t.with_suffix(".jxl").name
             else:
-                # Directory -> flat to output_root
-                jxl = output_root / t.with_suffix(".jxl").name
+                main_jxl = output_root / t.with_suffix(".jxl").name
         else:
-            jxl = resolve_output(t, args.mode, args.input)
-        if jxl is None:
+            main_jxl = resolve_output(t, args.mode, args.input)
+
+        if main_jxl is None:
+            skipped_files += 1
             continue  # Skip files that don't match mode criteria (e.g., outside _EXPORT)
-        pairs.append((t, jxl))
+
+        try:
+            items = convert_multipage(t, main_jxl.parent, args.mode)
+        except Exception as e:
+            # A corrupt/unreadable TIFF must not abort the whole batch at
+            # planning time — log one error and move on, matching pre-multipage
+            # behavior where such files failed individually during conversion.
+            logger.error(f"SKIP (cannot analyze TIFF) | {t.name} | {e}")
+            analyze_errors += 1
+            continue
+        all_items.extend(items)
+
+    planned_msg = f"JXL outputs planned: {len(all_items)} (from {len(tiffs)} TIFFs, {skipped_files} skipped by mode"
+    if analyze_errors:
+        planned_msg += f", {analyze_errors} unreadable"
+    planned_msg += ")"
+    logger.info(planned_msg)
+    _counter["total"] = len(all_items)
 
     # Dry run
     if args.dry_run:
-        for t, j in pairs:
-            logger.info(f" DRY | {t.name} >{j}")
-        logger.info(f"Dry run: {len(pairs)} file(s) would be converted.")
+        for t, j, page_idx, is_thumb in all_items:
+            thumb_label = " [thumbnail]" if is_thumb else ""
+            logger.info(f" DRY | {t.name} page{page_idx}{thumb_label} > {j}")
+        logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
         return
 
     if args.mode == 8 and DELETE_SOURCE:
@@ -1397,18 +1622,19 @@ def main():
 
     # Group by output folder (one bulk move per group)
     groups: Dict[Path, list] = {}
-    for t, j in pairs:
-        groups.setdefault(j.parent, []).append((t, j))
+    for t, j, page_idx, is_thumb in all_items:
+        groups.setdefault(j.parent, []).append((t, j, page_idx, is_thumb))
 
     logger.info(f"Output groups: {len(groups)}")
 
-    ok = err = skipped = overwritten = synced = 0
+    ok = skipped = overwritten = synced = 0
+    err = analyze_errors  # count TIFFs that couldn't be analyzed at planning time
 
-    for dest_folder, group_pairs in groups.items():
+    for dest_folder, group_items in groups.items():
         if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
+            logger.info(f"-- Group: {dest_folder} ({len(group_items)} output(s))")
 
-        results = process_group(group_pairs, args.workers, args.mode)
+        results = process_group(group_items, args.workers, args.mode)
 
         for result in results:
             status = result[1]

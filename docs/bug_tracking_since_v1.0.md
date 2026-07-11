@@ -7,8 +7,66 @@ v1.5 Update: 2026-04-12
 v1.5 Final: 2026-04-12 (third pass)  
 v1.5.2: 2026-04-13 (critical 8-bit fix)
 v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd_auto, and wrapper integration
+v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore and thumbnail handling
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.7 Multi-page TIFF Support
+
+**Scripts:** `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_photo.py`
+
+### Problem
+Previously, `jxl_tiff_encoder.py` read only `tif.series[0]` and silently discarded any additional TIFF pages. This caused data loss for scanner multi-page TIFFs, layered files, or any other multi-page source.
+
+### Solution
+Added explicit multi-page handling across the TIFF workflow:
+
+1. **Encoder (`jxl_tiff_encoder.py`)**
+   - Detects "real" pages vs thumbnails using `page.is_reduced` and `page.is_subifd`.
+   - New settings/CLI:
+     - `MULTIPAGE_TIFF_MODE` / `--multipage-mode {ignore,skip,split,split_all}`
+     - `THUMBNAIL_MODE` / `--thumbnail-mode {exclude,include}`
+     - `THUMBNAIL_SUFFIX` / `--thumbnail-suffix`
+   - Split output naming:
+     - Page 0 → `photo.jxl`
+     - Page N → `photo_pageN.jxl`
+     - Thumbnail page N → `photo_pageN_thumbnail.jxl`
+   - Split pages carry an XMP group marker in `XMP-dc:Relation` (prefix `jxlphoto-mpg:`). Using a list field preserves any existing `dc:Relation` values the user had.
+
+2. **Decoder (`jxl_tiff_decoder.py`)**
+   - Reconstructs multi-page TIFFs only from JXLs that carry a matching group marker.
+   - Files without the marker always decode as standalone TIFFs, even if their names look like pages (`scan.jxl` + `scan_page2.jxl` are never merged).
+   - Markers are read in batch via exiftool to avoid one subprocess per file (performance regression fixed during audit).
+   - Reconstructs a single multi-page TIFF with `tifffile.imwrite(..., append=True)`.
+   - New settings/CLI:
+     - `THUMBNAIL_HANDLING` / `--thumbnail-handling {ignore,include,generate}`
+     - `THUMBNAIL_SUFFIX` / `--thumbnail-suffix`
+     - `RECONSTRUCT_MULTIPAGE` / `--no-reconstruct-multipage` to disable reconstruction entirely
+   - JPEG preview is skipped when reconstructing multi-page TIFFs.
+   - `--thumbnail-handling generate` is recognized but not yet implemented; it falls back to `include` with a warning.
+
+3. **Wrapper (`jxl_photo.py`)**
+   - Advanced options now ask for multi-page mode and thumbnail handling for TIFF→JXL.
+   - JXL→TIFF advanced options ask how to handle `_thumbnail.jxl` files.
+   - New `ToolConfig` fields: `last_multipage_mode`, `last_thumbnail_mode`, `last_thumbnail_suffix`, `last_thumbnail_handling`.
+
+### Audit fixes during v1.7 development
+- Single-page metadata loss: preview step now runs **before** metadata copy, so EXIF/XMP survive.
+- Concurrent mode-8 delete: status lookup keyed by main-JXL path instead of positional `zip(tasks, results)`.
+- Corrupt TIFF at planning time: `convert_multipage` is wrapped per-file; ignore mode short-circuits without opening the file.
+- Skip-status key mismatch: encoder skipped returns now use the same `((path, page_idx), ...)` key as ok/error.
+- `tifffile.py` default tags: `Software` and shaped-JSON `ImageDescription` are cleared when the source has no EXIF/XMP to overwrite them (None mode).
+
+### Test
+New regression test: `tests/test_multipage.py`
+- Creates a synthetic 3-page TIFF (real, thumbnail, real).
+- Verifies encoder modes: ignore, skip, split exclude, split include.
+- Verifies decoder reconstruction with ignore/include.
+- Verifies single-page metadata roundtrip (Make/Software preserved).
+- Verifies independent files with page-like names are **not** merged.
+- Verifies user's existing `dc:Relation` survives split and the internal marker does not leak into the final TIFF.
 
 ---
 

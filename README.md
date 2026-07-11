@@ -24,6 +24,29 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
 
+## What's New in v1.7
+
+### Multi-Page TIFF Support
+TIFFs with more than one page are now handled explicitly instead of silently discarding extra pages.
+
+**TIFF → JXL encoder:**
+- `--multipage-mode ignore` — encode only page 0 (original behavior, default)
+- `--multipage-mode skip` — skip files that have more than one "real" page
+- `--multipage-mode split` — encode each real page to a separate JXL (`photo.jxl`, `photo_page2.jxl`, ...)
+- `--multipage-mode split_all` — encode every page, including thumbnails
+
+Thumbnails are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`_thumbnail` by default).
+
+**JXL → TIFF decoder:**
+- Detects `photo.jxl` + `photo_pageN.jxl` groups and reconstructs a single multi-page TIFF
+- `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
+- `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
+- `--thumbnail-handling generate` — not yet implemented; falls back to `include`
+
+JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
+
+---
+
 ## What's New in v1.6
 
 ### Audit-Driven Fixes
@@ -140,8 +163,8 @@ For reliable EXIF viewing regardless of source, use **XnView MP** or **digiKam**
 | Script | Purpose | Key Feature |
 |--------|---------|-------------|
 | [`jxl_photo.py`](jxl_photo.py) | Interactive wizard | Guided workflow with **Auto Mode** — analyzes folders and recommends best mode automatically |
-| [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation |
-| [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode, adds JPEG preview |
+| [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation; multi-page TIFF splitting |
+| [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode; reconstructs multi-page TIFFs |
 | [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
 
 
@@ -259,6 +282,12 @@ py jxl_tiff_encoder.py "F:\Photos\2024" --mode 7
 
 # With settings
 py jxl_tiff_encoder.py "photo.tif" --mode 0 --workers 8
+
+# Multi-page TIFF: split each real page into separate JXLs
+py jxl_tiff_encoder.py "F:\Photos\2024" --mode 2 --multipage-mode split --thumbnail-mode exclude
+
+# Multi-page TIFF: also export embedded thumbnails
+py jxl_tiff_encoder.py "F:\Photos\2024" --mode 2 --multipage-mode split --thumbnail-mode include
 ```
 
 ### JXL → TIFF
@@ -275,6 +304,9 @@ py jxl_tiff_decoder.py "F:\Photos\2024" --mode 7
 
 # 8-bit output for web
 py jxl_tiff_decoder.py "photo.jxl" --depth 8
+
+# Reconstruct multi-page TIFF and drop thumbnail pages
+py jxl_tiff_decoder.py "F:\Photos\2024" --mode 2 --thumbnail-handling ignore
 ```
 
 ### JPEG ↔ JXL / JXL → PNG

@@ -120,6 +120,27 @@ JPEG_PREVIEW_SIZE = 256
 # Maximum dimension (width or height) of the JPEG preview.
 # Default: 256 pixels (similar to Capture One's ~160px).
 
+THUMBNAIL_HANDLING = "include"
+# How to handle JXL files with a _thumbnail suffix when reconstructing multi-page TIFFs.
+# "ignore"   → Ignore _thumbnail.jxl files; the reconstructed TIFF will contain only
+#              real pages.
+# "include"  → Include _thumbnail.jxl pages in the reconstructed TIFF (default).
+# "generate" → [NOT YET IMPLEMENTED] Generate a thumbnail from page 0 if no
+#              _thumbnail.jxl exists. Currently shows a warning/fallback message.
+
+THUMBNAIL_SUFFIX = "_thumbnail"
+# Suffix used to identify thumbnail JXLs produced by the encoder.
+# Must match the encoder's THUMBNAIL_SUFFIX setting.
+
+RECONSTRUCT_MULTIPAGE = True
+# When True, JXLs carrying the encoder's multi-page marker are rejoined into a
+# single multi-page TIFF. When False, every JXL decodes to its own TIFF. Only
+# marked files are ever merged, so independently-named files are safe either way;
+# this flag exists to fully disable reconstruction if desired (--no-reconstruct-multipage).
+
+MULTIPAGE_MARKER_PREFIX = "jxlphoto-mpg:"
+# Must match the encoder's MULTIPAGE_XMP_MARKER. Stored in XMP-dc:Relation (a bag/list).
+
 TEMP_DIR = None
 # Temporary directory for intermediate files.
 # None → use system temp
@@ -830,15 +851,6 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
 # TIFF OUTPUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def write_tiff(img_array, path, icc_data, compression="zip"):
-    """Write numpy array to TIFF file with optional ICC profile"""
-    comp_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib", "none": None}
-    comp = comp_map.get(compression, "zlib")
-    if icc_data:
-        tifffile.imwrite(str(path), img_array, compression=comp, iccprofile=icc_data, metadata=None)
-    else:
-        tifffile.imwrite(str(path), img_array, compression=comp, metadata=None)
-
 def copy_metadata(jxl_path, tiff_path, tmp_dir):
     """Copy metadata from JXL to TIFF using exiftool"""
     try:
@@ -865,6 +877,19 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir):
              "-ifd1:ImageDescription=", str(tiff_path)],
             capture_output=True, timeout=5
         )
+        # Clear the page-0 Software tag if it still holds tifffile's default.
+        # With a JPEG preview, the real data becomes IFD1 and the preview IFD0,
+        # so the tifffile.py Software can survive on page 0; only clear it when
+        # the JXL didn't supply its own Software (i.e. it still reads "tifffile").
+        r_sw = subprocess.run(
+            [_get_exiftool_cmd(), "-s", "-s", "-s", "-IFD0:Software", str(tiff_path)],
+            capture_output=True, text=True, timeout=5
+        )
+        if r_sw.returncode == 0 and r_sw.stdout and 'tifffile' in r_sw.stdout:
+            subprocess.run(
+                [_get_exiftool_cmd(), "-overwrite_original", "-IFD0:Software=", str(tiff_path)],
+                capture_output=True, timeout=5
+            )
         # Also fix ImageDescription if it contains tifffile metadata
         r = subprocess.run(
             [_get_exiftool_cmd(), "-ImageDescription", str(tiff_path)],
@@ -877,6 +902,27 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir):
                  str(tiff_path)],
                 capture_output=True, timeout=5
             )
+
+        # Strip the internal multi-page marker from dc:Relation but keep any
+        # Relation values the user had. We rewrite the bag with only the
+        # non-marker items (or clear it if the marker was the only value).
+        try:
+            rr = subprocess.run(
+                [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-dc:Relation", str(tiff_path)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+            )
+            if rr.returncode == 0 and rr.stdout and MULTIPAGE_MARKER_PREFIX in rr.stdout:
+                kept = [t.strip() for t in rr.stdout.replace(";", ",").split(",")
+                        if t.strip() and not t.strip().startswith(MULTIPAGE_MARKER_PREFIX)]
+                clear_cmd = [_get_exiftool_cmd(), "-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)]
+                subprocess.run(clear_cmd, capture_output=True, timeout=5)
+                if kept:
+                    add_cmd = [_get_exiftool_cmd(), "-overwrite_original"]
+                    add_cmd += [f"-XMP-dc:Relation+={v}" for v in kept]
+                    add_cmd.append(str(tiff_path))
+                    subprocess.run(add_cmd, capture_output=True, timeout=5)
+        except Exception as e_rel:
+            logger.debug(f"Relation marker cleanup skipped: {e_rel}")
     except Exception as e:
         logger.debug(f"Metadata copy warning: {e}")
 
@@ -1178,29 +1224,104 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
 # MAIN CONVERSION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
+def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None):
     """
-    Convert a single JXL to TIFF with smart color management.
+    Decode a single JXL to a numpy array using the same strategy logic as convert_one.
 
-    Automatically selects between three decode strategies:
-    1. Roundtrip (default with ICC): djxl auto + original ICC attachment
-       Best for files converted with jxl_tiff_encoder.py
-    2. Matrix (linear + LittleCMS): For color space conversion needs
-    3. Basic (djxl auto only): For consumer JXLs without embedded ICC
+    Returns (pixels, final_icc_bytes, reason, strategy) where:
+      - pixels is a numpy array ready for TIFF writing
+      - final_icc_bytes is the ICC profile to embed (may be None)
+      - reason is a human-readable decode strategy description
+      - strategy is one of 'roundtrip', 'matrix', 'none', 'basic'
+    """
+    ppm_path = tmp_dir / "decoded.ppm"
+    djxl_icc_path = tmp_dir / "djxl.icc"
+
+    # Extract ICC first to decide strategy
+    original_icc, icc_source = get_source_icc(jxl_path, tmp_dir)
+
+    # Analyze ICC to get hint for logging
+    if original_icc:
+        original_icc_hint = analyze_icc_profile(original_icc)
+        logger.debug(f" >ICC extracted from {icc_source} ({original_icc_hint})")
+
+    # Select decode strategy based on ICC presence
+    mode, reason = select_decode_strategy(has_original_icc=original_icc is not None)
+    logger.debug(f" >{reason}")
+
+    if mode == 'roundtrip':
+        decode_auto(jxl_path, ppm_path)
+        pixels = read_ppm_to_numpy(ppm_path)
+        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
+            pixels = (pixels >> 8).astype(np.uint8)
+        return pixels, original_icc, reason, mode
+
+    elif mode == 'matrix':
+        decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
+        pixels = read_ppm_to_numpy(ppm_path)
+        djxl_icc = djxl_icc_path.read_bytes() if djxl_icc_path.exists() else None
+
+        if target_icc_path:
+            target_icc = load_target_icc(target_icc_path)
+            final_pixels = apply_icc_transform(pixels, djxl_icc, target_icc, tmp_dir)
+            final_icc = target_icc
+        elif original_icc:
+            final_pixels = apply_icc_transform(pixels, djxl_icc, original_icc, tmp_dir)
+            final_icc = original_icc
+        else:
+            final_pixels = pixels
+            final_icc = djxl_icc
+
+        if DJXL_OUTPUT_DEPTH == 8 and final_pixels.dtype == np.uint16:
+            final_pixels = (final_pixels >> 8).astype(np.uint8)
+
+        return final_pixels, final_icc, reason, mode
+
+    elif mode == 'none':
+        decode_auto(jxl_path, ppm_path)
+        pixels = read_ppm_to_numpy(ppm_path)
+        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
+            pixels = (pixels >> 8).astype(np.uint8)
+        return pixels, None, reason, mode
+
+    else:  # basic
+        png_path = tmp_dir / f"{jxl_path.stem}_basic.png"
+        decode_auto_png(jxl_path, png_path)
+        pixels, _ = read_png_to_numpy(png_path, target_depth=DJXL_OUTPUT_DEPTH)
+        djxl_icc = extract_icc_from_png(png_path)
+        if djxl_icc:
+            logger.debug(" >ICC extracted from djxl output")
+        else:
+            logger.debug(" >No ICC in djxl output")
+
+        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
+            pixels = (pixels >> 8).astype(np.uint8)
+
+        return pixels, djxl_icc, reason, mode
+
+
+def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, target_icc_path=None):
+    """
+    Convert a group of JXLs belonging to the same multi-page TIFF into a single
+    multi-page TIFF.
+
+    page_entries: sorted list of (jxl_path, page_idx, is_thumbnail) tuples.
     """
     already_exists = final_path.exists()
 
     if already_exists:
         if OVERWRITE is False:
             n, total = next_count()
-            logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
-            return str(jxl_path), "skipped", str(final_path)
+            logger.info(f"[{n}/{total}] SKIP (exists) | {main_jxl.name}")
+            return str(main_jxl), "skipped", str(final_path)
         elif OVERWRITE == "smart":
-            if jxl_path.stat().st_mtime <= final_path.stat().st_mtime:
+            # Use the newest JXL mtime in the group for sync decision
+            newest_jxl_mtime = max(j.stat().st_mtime for j, _, _ in page_entries)
+            if newest_jxl_mtime <= final_path.stat().st_mtime:
                 n, total = next_count()
-                logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {jxl_path.name}")
-                return str(jxl_path), "skipped", str(final_path)
-            logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {jxl_path.name}")
+                logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
+                return str(main_jxl), "skipped", str(final_path)
+            logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
 
     overwritten = already_exists
 
@@ -1212,133 +1333,112 @@ def convert_one(jxl_path, write_path, final_path, target_icc_path=None):
     with tempfile.TemporaryDirectory(prefix="tiff_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
         try:
-            ppm_path = tmp_dir / "decoded.ppm"
-            djxl_icc_path = tmp_dir / "djxl.icc"
+            page_arrays = []
+            page_icc = None
+            reason = "unknown"
+            strategy = "unknown"
 
-            # Extract ICC first to decide strategy
-            original_icc, icc_source = get_source_icc(jxl_path, tmp_dir)
+            for jxl_path, page_idx, is_thumb in page_entries:
+                pixels, icc_data, page_reason, page_strategy = decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path)
+                page_arrays.append((pixels, page_idx, is_thumb))
+                # Use ICC/strategy from the first (main) page for the whole TIFF
+                if page_idx == 0 and not is_thumb:
+                    page_icc = icc_data
+                    reason = page_reason
+                    strategy = page_strategy
 
-            # Analyze ICC to get hint for logging
-            original_icc_hint = None
-            if original_icc:
-                original_icc_hint = analyze_icc_profile(original_icc)
-                logger.debug(f" >ICC extracted from {icc_source} ({original_icc_hint})")
+            if not page_arrays:
+                raise RuntimeError("No pages to write")
 
-            # Select decode strategy based on ICC presence
-            mode, reason = select_decode_strategy(has_original_icc=original_icc is not None)
-            logger.debug(f" >{reason}")
+            # Sort by page index just in case
+            page_arrays.sort(key=lambda x: x[1])
 
-            if mode == 'roundtrip':
-                # === ROUNDTRIP MODE (DEFAULT WITH ICC) ===
-                # Best for files converted with jxl_tiff_encoder.py
-                # djxl auto handles display optimization, we attach the original ICC
-                logger.debug(" >Using Roundtrip decode (djxl auto + original ICC)")
+            is_multipage = len(page_arrays) > 1
 
-                decode_auto(jxl_path, ppm_path)
-                pixels = read_ppm_to_numpy(ppm_path)
-                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-                    pixels = (pixels >> 8).astype(np.uint8)
-                write_tiff(pixels, write_path, original_icc, TIFF_COMPRESSION)
-                # Order matters: add preview first (recreates file), then copy metadata
-                add_jpeg_preview(write_path, tmp_dir, original_icc)
-                copy_metadata(jxl_path, write_path, tmp_dir)
+            compression_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib", "none": None}
+            tiff_comp = compression_map.get(TIFF_COMPRESSION, "zlib")
+
+            # Write TIFF (single or multi-page).
+            # metadata=None suppresses tifffile's shaped-JSON ImageDescription;
+            # software='' suppresses the default "tifffile.py" Software tag.
+            # Both otherwise leak into the final TIFF when the source JXL has no
+            # EXIF/XMP to overwrite them (e.g. consumer JXLs, None mode).
+            with tifffile.TiffWriter(str(write_path)) as tif_writer:
+                try:
+                    write_method = tif_writer.write
+                except AttributeError:
+                    write_method = tif_writer.save
+
+                for i, (pixels, page_idx, is_thumb) in enumerate(page_arrays):
+                    kwargs = {
+                        'photometric': 'RGB',
+                        'compression': tiff_comp,
+                        'metadata': None,
+                        'software': '',
+                    }
+                    if page_icc and i == 0:
+                        # Attach ICC only to the first real page
+                        kwargs['iccprofile'] = page_icc
+                    if is_thumb:
+                        # Mark thumbnail pages with subfiletype=1
+                        kwargs['subfiletype'] = 1
+
+                    write_method(pixels, **kwargs)
+
+            # JPEG preview: only for single-page, non-None groups.
+            # add_jpeg_preview recreates the file via tifffile (pixels + ICC only),
+            # so it must run BEFORE copy_metadata or all EXIF/XMP would be wiped.
+            # Multi-page TIFFs skip it (add_jpeg_preview operates on series[0]),
+            # and None mode skips it to preserve the v1.6.0 minimal-output contract.
+            if ADD_JPEG_PREVIEW and not is_multipage and strategy != 'none':
+                add_jpeg_preview(write_path, tmp_dir, page_icc)
+            elif ADD_JPEG_PREVIEW and is_multipage:
+                logger.info(f" >Skipping JPEG preview for multi-page TIFF ({len(page_arrays)} pages)")
+
+            if strategy != 'none':
+                # Full metadata copy (order: preview already added above)
+                copy_metadata(main_jxl, write_path, tmp_dir)
                 cleanup_xmp_icc(write_path)
-
-            elif mode == 'matrix':
-                # === MATRIX MODE (LINEAR + LITTLECMS) ===
-                # For color space conversion or when precise transformation needed
-                # Decodes to Rec.2020 linear, then transforms to target ICC
-                logger.info(" >Using Matrix decode (linear + LittleCMS)")
-
-                decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
-                pixels = read_ppm_to_numpy(ppm_path)
-                djxl_icc = djxl_icc_path.read_bytes() if djxl_icc_path.exists() else None
-
-                if target_icc_path:
-                    # Convert to specific target ICC
-                    target_icc = load_target_icc(target_icc_path)
-                    final_pixels = apply_icc_transform(pixels, djxl_icc, target_icc, tmp_dir)
-                    final_icc = target_icc
-                elif original_icc:
-                    # Transform to original ICC profile
-                    final_pixels = apply_icc_transform(pixels, djxl_icc, original_icc, tmp_dir)
-                    final_icc = original_icc
-                else:
-                    # No transform, keep Rec.2020
-                    final_pixels = pixels
-                    final_icc = djxl_icc
-
-                if DJXL_OUTPUT_DEPTH == 8 and final_pixels.dtype == np.uint16:
-                    final_pixels = (final_pixels >> 8).astype(np.uint8)
-
-                write_tiff(final_pixels, write_path, final_icc, TIFF_COMPRESSION)
-                # Order matters: add preview first (recreates file), then copy metadata
-                add_jpeg_preview(write_path, tmp_dir, final_icc)
-                copy_metadata(jxl_path, write_path, tmp_dir)
-                cleanup_xmp_icc(write_path)
-
-            elif mode == 'none':
-                # === NONE MODE (NO ICC HANDLING) ===
-                # For consumer JXLs without embedded ICC, output has no ICC
-                logger.debug(" >Using None decode (djxl auto, no ICC)")
-
-                decode_auto(jxl_path, ppm_path)
-                pixels = read_ppm_to_numpy(ppm_path)
-                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-                    pixels = (pixels >> 8).astype(np.uint8)
-                write_tiff(pixels, write_path, None, TIFF_COMPRESSION)
-
-                # Minimal metadata copy
+            else:
+                # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Also clear
+                # the tifffile-injected Software/ImageDescription tags so they don't
+                # leak when the source JXL has nothing to overwrite them with.
                 subprocess.run(
-                    [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(jxl_path),
+                    [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(main_jxl),
                      "-exif:all", str(write_path)],
                     capture_output=True, timeout=10
                 )
-
-                # Clear ImageDescription that may have been added by tifffile
                 subprocess.run(
-                    [_get_exiftool_cmd(), "-overwrite_original", "-IFD1:ImageDescription=",
-                     "-ImageDescription=", str(write_path)],
+                    [_get_exiftool_cmd(), "-overwrite_original",
+                     "-IFD1:ImageDescription=", "-ImageDescription=",
+                     "-IFD0:Software=", "-Software=", str(write_path)],
                     capture_output=True, timeout=10
                 )
 
-            else:  # mode == 'basic'
-                # === BASIC MODE (ICC FROM DJXL OUTPUT) ===
-                # djxl auto to PNG + extract ICC from PNG generated by djxl
-                logger.debug(" >Using Basic decode (djxl auto + ICC from output)")
-
-                # Use PNG intermediate to capture ICC profile from djxl
-                png_path = tmp_dir / f"{jxl_path.stem}_basic.png"
-                decode_auto_png(jxl_path, png_path)
-                pixels, _ = read_png_to_numpy(png_path, target_depth=DJXL_OUTPUT_DEPTH)
-                
-                # Extract ICC from the PNG that djxl generated
-                djxl_icc = extract_icc_from_png(png_path)
-                if djxl_icc:
-                    logger.debug(" >ICC extracted from djxl output")
-                else:
-                    logger.debug(" >No ICC in djxl output")
-
-                if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-                    pixels = (pixels >> 8).astype(np.uint8)
-
-                write_tiff(pixels, write_path, djxl_icc, TIFF_COMPRESSION)
-                # Order matters: add preview first (recreates file), then copy metadata
-                add_jpeg_preview(write_path, tmp_dir, djxl_icc)
-                copy_metadata(jxl_path, write_path, tmp_dir)
-
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
-            logger.info(f"[{n}/{total}] {status.upper()} | {jxl_path.name} ({reason})")
-            return str(jxl_path), status, str(final_path)
+            thumb_count = sum(1 for _, _, is_thumb in page_entries if is_thumb)
+            real_count = len(page_entries) - thumb_count
+            detail = f"{real_count} page(s)"
+            if thumb_count:
+                detail += f", {thumb_count} thumbnail(s)"
+            logger.info(f"[{n}/{total}] {status.upper()} | {main_jxl.name} ({detail})")
+            return str(main_jxl), status, str(final_path)
 
         except Exception as e:
             n, total = next_count()
-            logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
-            return str(jxl_path), "error", str(e)
+            logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
+            return str(main_jxl), "error", str(e)
 
-def process_group(group_pairs, workers, mode, target_icc=None):
-    """Process a group of (jxl, tiff) pairs in parallel"""
+def process_group(group_tasks, workers, mode, target_icc=None):
+    """Process a group of tasks in parallel.
+
+    Each task is a dict with keys:
+      - type: 'multi'
+      - main_jxl: Path to the main JXL
+      - entries: list of (jxl_path, page_idx, is_thumbnail)
+      - final_tiff: Path to final TIFF destination
+    """
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
 
@@ -1346,55 +1446,82 @@ def process_group(group_pairs, workers, mode, target_icc=None):
         staging_dir.mkdir(parents=True, exist_ok=True)
 
     tasks = []
-    for jxl, final_tiff in group_pairs:
+    for task in group_tasks:
+        main_jxl = task["main_jxl"]
+        final_tiff = task["final_tiff"]
         if use_staging:
-            write_tiff_path = staging_dir / f"{uuid.uuid4().hex}_{jxl.stem}.tif"
+            write_tiff_path = staging_dir / f"{uuid.uuid4().hex}_{main_jxl.stem}.tif"
         else:
             write_tiff_path = final_tiff
-        tasks.append((jxl, write_tiff_path, final_tiff))
+        tasks.append({
+            "main_jxl": main_jxl,
+            "entries": task["entries"],
+            "write_path": write_tiff_path,
+            "final_tiff": final_tiff,
+        })
 
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, j, w, f, target_icc): (j, w, f)
-                   for j, w, f in tasks}
+        futures = {}
+        for task in tasks:
+            fut = ex.submit(
+                convert_multipage_jxl_group,
+                task["main_jxl"],
+                task["entries"],
+                task["write_path"],
+                task["final_tiff"],
+                target_icc,
+            )
+            futures[fut] = task
         for fut in as_completed(futures):
             results.append(fut.result())
 
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
-        for jxl_src, write_tiff, final_tiff in tasks:
-            status = status_map.get(str(jxl_src), "error")
+        for task in tasks:
+            main_jxl = task["main_jxl"]
+            write_path = task["write_path"]
+            final_tiff = task["final_tiff"]
+            status = status_map.get(str(main_jxl), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
-                    logger.warning(f"  KEEP in staging ({status}) | {write_tiff.name}")
+                    logger.warning(f"  KEEP in staging ({status}) | {write_path.name}")
                 continue
-            if not write_tiff.exists():
-                logger.warning(f"  KEEP (staging file missing) | {write_tiff.name}")
+            if not write_path.exists():
+                logger.warning(f"  KEEP (staging file missing) | {write_path.name}")
                 continue
             final_tiff.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(write_tiff), str(final_tiff))
+            shutil.move(str(write_path), str(final_tiff))
             moved += 1
         if moved:
             logger.info(f" >Moved {moved} file(s) from staging to final")
 
     if DELETE_SOURCE and mode == 8:
         deleted = 0
-        src_map = {str(j): (j, f) for j, _, f in tasks}
-        for result in results:
-            status = result[1]
-            src_jxl = src_map.get(result[0], (None, None))[0]
-            if status not in ("ok", "overwrite") or src_jxl is None:
+        # Map status by main_jxl path — results arrive in completion order
+        # (as_completed), NOT submission order, so a positional zip with `tasks`
+        # would cross statuses under concurrency and could delete sources of
+        # failed conversions. Key explicitly on the returned identifier.
+        status_by_main = {r[0]: r[1] for r in results}
+        for task in tasks:
+            status = status_by_main.get(str(task["main_jxl"]), "error")
+            if status not in ("ok", "overwrite"):
                 continue
-            final_tiff = src_map.get(result[0], (None, None))[1]
-            if final_tiff is None or not final_tiff.exists():
+            final_tiff = task["final_tiff"]
+            if not final_tiff.exists():
                 continue
             if not _verify_tiff_integrity(final_tiff):
-                logger.warning(f" KEEP (TIFF failed integrity check) | {src_jxl.name}")
+                logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
-            src_jxl.unlink()
-            deleted += 1
-            logger.info(f" DELETED source | {src_jxl.name}")
+            # Delete all source JXLs in this group
+            for jxl_path, _, _ in task["entries"]:
+                try:
+                    jxl_path.unlink()
+                    logger.info(f" DELETED source | {jxl_path.name}")
+                    deleted += 1
+                except Exception as e:
+                    logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
         if deleted:
             logger.info(f" >Deleted {deleted} source JXL(s)")
 
@@ -1455,6 +1582,148 @@ def find_jxls_mode7(input_path):
         else:
             filtered.append(j)
     return filtered
+
+def _is_thumbnail_jxl(jxl_path: Path) -> bool:
+    """Return True if the JXL filename ends with the configured thumbnail suffix."""
+    return jxl_path.stem.endswith(THUMBNAIL_SUFFIX)
+
+def _parse_jxl_page_suffix(name: str):
+    """Parse a JXL filename and return (stem, page_idx, is_thumbnail).
+
+    Examples:
+        "photo.jxl"              -> ("photo", 0, False)
+        "photo_page2.jxl"        -> ("photo", 2, False)
+        "photo_page1_thumbnail"  -> ("photo", 1, True)
+    """
+    stem = name
+    is_thumbnail = False
+    if stem.endswith(THUMBNAIL_SUFFIX):
+        is_thumbnail = True
+        stem = stem[:-len(THUMBNAIL_SUFFIX)]
+
+    page_idx = 0
+    m = re.search(r'_page(\d+)$', stem)
+    if m:
+        page_idx = int(m.group(1))
+        stem = stem[:m.start()]
+
+    return stem, page_idx, is_thumbnail
+
+def _read_multipage_markers_batch(jxls: list) -> dict:
+    """Read the multi-page marker for many JXLs in as few exiftool calls as
+    possible. Returns {jxl_path: group_id_or_None}.
+
+    Spawning one exiftool per file is far too slow for large libraries
+    (~100ms/file → tens of minutes for tens of thousands of files), so we pass
+    files in large batches and parse the per-file output. exiftool prints one
+    "======== <path>" header per file with -G/-s style output; we use a JSON
+    output which is unambiguous and easy to parse.
+    """
+    import json as _json
+    markers: dict = {str(j): None for j in jxls}
+    if not jxls:
+        return markers
+
+    BATCH = 400
+    exe = _get_exiftool_cmd()
+    for i in range(0, len(jxls), BATCH):
+        chunk = jxls[i:i + BATCH]
+        try:
+            r = subprocess.run(
+                [exe, "-j", "-s", "-s", "-XMP-dc:Relation", *[str(j) for j in chunk]],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
+            )
+            if r.returncode != 0 or not r.stdout:
+                continue
+            data = _json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                # Relation may be a string or a list depending on cardinality
+                if isinstance(rel, list):
+                    values = rel
+                else:
+                    values = str(rel).replace(";", ",").split(",")
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(MULTIPAGE_MARKER_PREFIX):
+                        # Match back to our path key (exiftool may normalize separators)
+                        key = str(Path(src))
+                        if key in markers:
+                            markers[key] = token[len(MULTIPAGE_MARKER_PREFIX):]
+                        else:
+                            markers[src] = token[len(MULTIPAGE_MARKER_PREFIX):]
+                        break
+        except Exception:
+            # On any batch failure, leave those files as standalone (safe default)
+            continue
+    return markers
+
+
+def _read_multipage_marker(jxl_path: Path):
+    """Single-file marker read (kept for callers/tests). Prefer the batch
+    version for large sets."""
+    return _read_multipage_markers_batch([jxl_path]).get(str(jxl_path))
+
+def collect_multipage_groups(jxls: list) -> dict:
+    """Group JXLs that belong to the same multi-page TIFF.
+
+    Returns a dict mapping the main JXL path to a sorted list of
+    (jxl_path, page_idx, is_thumbnail) tuples.
+
+    Grouping is driven by the encoder's XMP marker, NOT by filename. Only files
+    that carry a matching group marker are merged; every unmarked file becomes
+    its own single-page group. This prevents independently-named files such as
+    scan.jxl + scan_page2.jxl from being silently merged and, with --mode 8,
+    from having a source deleted after an unintended merge.
+
+    When RECONSTRUCT_MULTIPAGE is False, grouping is disabled entirely and each
+    JXL is treated as a standalone page (page suffix still parsed only to keep
+    output filenames stable).
+    """
+    groups: dict = {}
+
+    if not RECONSTRUCT_MULTIPAGE:
+        for j in jxls:
+            groups[j] = [(j, 0, _is_thumbnail_jxl(j))]
+        return groups
+
+    by_group: dict = {}
+    standalone: list = []
+
+    marker_map = _read_multipage_markers_batch(jxls)
+
+    for j in jxls:
+        marker = marker_map.get(str(j))
+        _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
+        if marker:
+            by_group.setdefault(marker, []).append((j, page_idx, is_thumb))
+        else:
+            standalone.append((j, page_idx, is_thumb))
+
+    # Marked groups: reconstruct multi-page TIFFs
+    for _marker, entries in by_group.items():
+        # Prefer a real page 0 as the main/anchor; fall back to lowest real page,
+        # then lowest page overall. Thumbnails are never chosen as main.
+        real_page0 = [e for e in entries if e[1] == 0 and not e[2]]
+        if real_page0:
+            main_entry = real_page0[0]
+        else:
+            real_entries = [e for e in entries if not e[2]]
+            if real_entries:
+                main_entry = min(real_entries, key=lambda e: e[1])
+            else:
+                main_entry = min(entries, key=lambda e: e[1])
+        main_jxl = main_entry[0]
+        groups[main_jxl] = sorted(entries, key=lambda e: e[1])
+
+    # Standalone files: one single-page group each
+    for entry in standalone:
+        groups[entry[0]] = [entry]
+
+    return groups
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARGUMENT PARSING AND MAIN
@@ -1530,12 +1799,20 @@ Examples:
                       help="Preview operations without converting")
     parser.add_argument("--no-preview", action="store_true",
                       help="Skip JPEG preview generation (smaller TIFF files)")
+    parser.add_argument("--thumbnail-handling", type=str, default=None,
+                        choices=["ignore", "include", "generate"],
+                        help="How to handle _thumbnail.jxl files when reconstructing multi-page TIFFs (default: include)")
+    parser.add_argument("--thumbnail-suffix", type=str, default=None,
+                        help="Suffix used to identify thumbnail JXLs (default: _thumbnail)")
+    parser.add_argument("--no-reconstruct-multipage", action="store_true",
+                        help="Disable multi-page reconstruction; decode every JXL to its own TIFF. "
+                             "(Only marker-tagged split files are ever merged; this fully disables even that.)")
 
     args = parser.parse_args()
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, ADD_JPEG_PREVIEW
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE
 
     if args.sync:
         OVERWRITE = "smart"
@@ -1566,6 +1843,15 @@ Examples:
         EXPORT_MARKER = args.export_marker
     if args.no_preview:
         ADD_JPEG_PREVIEW = False
+    if args.thumbnail_handling is not None:
+        THUMBNAIL_HANDLING = args.thumbnail_handling
+        if THUMBNAIL_HANDLING == "generate":
+            logger.warning("--thumbnail-handling=generate is not yet implemented; falling back to include behavior")
+            THUMBNAIL_HANDLING = "include"
+    if args.thumbnail_suffix is not None:
+        THUMBNAIL_SUFFIX = args.thumbnail_suffix
+    if getattr(args, "no_reconstruct_multipage", False):
+        RECONSTRUCT_MULTIPAGE = False
 
     log_file = setup_logger()
 
@@ -1581,7 +1867,7 @@ Examples:
     logger.info(f"Mode: {args.mode} | Depth: {DJXL_OUTPUT_DEPTH} | "
                 f"Compression: {TIFF_COMPRESSION} | Workers: {args.workers}")
     logger.info(f"Matrix: {USE_MATRIX_MODE} | Basic: {FORCE_BASIC_MODE} | None: {FORCE_NONE_MODE} | "
-                f"Overwrite: {_overwrite_str}")
+                f"Overwrite: {_overwrite_str} | Thumbnail: {THUMBNAIL_HANDLING}")
     logger.info(f"Input: {args.input}")
 
     # Collect files
@@ -1604,42 +1890,61 @@ Examples:
             output_root = args.output or args.input
 
     logger.info(f"Files found: {len(jxls)}")
-    _counter["total"] = len(jxls)
 
     if len(jxls) == 0:
         logger.warning("No JXL files found")
         return
 
-    # Build pairs
-    pairs = []
-    for j in jxls:
-        tiff = resolve_output(j, args.mode, output_root)
+    # Group JXLs into multi-page TIFF sets
+    mp_groups = collect_multipage_groups(jxls)
+
+    # Build tasks: each task represents one output TIFF
+    tasks = []
+    for main_jxl, entries in mp_groups.items():
+        # Filter thumbnail pages if requested
+        if THUMBNAIL_HANDLING == "ignore":
+            entries = [e for e in entries if not e[2]]
+            if not entries:
+                logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
+                continue
+
+        tiff = resolve_output(main_jxl, args.mode, output_root)
         if tiff is None:
-            continue  # Skip files that don't match mode criteria
-        pairs.append((j, tiff))
+            continue
+        tasks.append({
+            "type": "multi",
+            "main_jxl": main_jxl,
+            "entries": entries,
+            "final_tiff": tiff,
+        })
+
+    logger.info(f"TIFF outputs planned: {len(tasks)} (from {len(jxls)} JXLs, {len(mp_groups)} group(s))")
+    _counter["total"] = len(tasks)
 
     # Dry run
     if args.dry_run:
-        for j, t in pairs:
-            logger.info(f" DRY | {j.name} >{t}")
-        logger.info(f"Dry run: {len(pairs)} file(s) would be converted.")
+        for task in tasks:
+            entries = task["entries"]
+            detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''})" for j, idx, th in entries)
+            logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
+        logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
         return
 
     # Group by output folder
     groups = {}
-    for j, t in pairs:
-        groups.setdefault(t.parent, []).append((j, t))
+    for task in tasks:
+        groups.setdefault(task["final_tiff"].parent, []).append(task)
 
     logger.info(f"Output groups: {len(groups)}")
 
     # Process
     ok = err = skipped = overwritten = 0
 
-    for dest_folder, group_pairs in groups.items():
+    for dest_folder, group_tasks in groups.items():
         if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
+            logger.info(f"-- Group: {dest_folder} ({len(group_tasks)} file(s))")
 
-        results = process_group(group_pairs, args.workers, args.mode,
+        results = process_group(group_tasks, args.workers, args.mode,
                                target_icc=args.target_icc)
 
         for result in results:
