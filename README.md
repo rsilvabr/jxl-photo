@@ -41,6 +41,7 @@ Thumbnails are detected via standard TIFF `SubfileType` flags (`is_reduced` / `i
 - Reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder.
 - Preserves per-page ICC profiles: each page is restored with its own ICC tag; pages that inherited ICC from IFD0 are reconstructed without an ICC tag, matching the original TIFF structure.
 - Preserves grayscale pages and `SubfileType` role: single-channel pages are reconstructed as 2D grayscale, and inherited RGB ICC is not forced onto them. Non-standard `SubfileType` values (e.g. scanner IR/mask pages) are restored as `PAGE` semantics.
+- Per-page bit depth policy: main pages stay 16-bit while 8-bit thumbnails are restored as 8-bit by default (`--depth-policy preserve_thumbnails`). Use `force16` for all 16-bit output or `preserve_original` to keep every page at its original bit depth.
 - `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
 - `--thumbnail-handling generate` — not yet implemented; falls back to `include`

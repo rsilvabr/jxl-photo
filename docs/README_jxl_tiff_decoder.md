@@ -626,10 +626,20 @@ Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that in
 
 > **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
 
+### Per-Page Bit Depth Policy (v1.7.0)
+
+When a TIFF is split into separate JXLs, the encoder records the original `BitsPerSample` (8 or 16) of each page in `XMP-dc:Relation`. The decoder can then restore each page at its original depth:
+
+- `--depth-policy force16` — output every page as 16-bit.
+- `--depth-policy preserve_thumbnails` — keep real pages at 16-bit, but restore thumbnail pages as 8-bit if the original thumbnail was 8-bit (default).
+- `--depth-policy preserve_original` — restore every page at its original bit depth.
+
+JXL files without a `jxlphoto-depth` marker (for example, files created before v1.7.0) fall back to 16-bit for all pages.
+
 ### Examples
 
 ```bash
-# Reconstruct multi-page TIFFs including thumbnail pages
+# Reconstruct multi-page TIFFs including thumbnail pages (default depth policy)
 python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include
 
 # Reconstruct only real pages, ignore _thumbnail.jxl files
@@ -637,6 +647,9 @@ python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --
 
 # Decode every JXL to its own TIFF, never merge pages
 python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --no-reconstruct-multipage
+
+# Keep thumbnails 8-bit if they were originally 8-bit (explicit default)
+python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include --depth-policy preserve_thumbnails
 
 # Film scanner workflow: restore main + preview + IR/mask pages
 python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include

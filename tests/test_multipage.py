@@ -307,6 +307,42 @@ def main():
             assert tif.pages[2].subfiletype == tifffile.FILETYPE.PAGE, "page 2 SubfileType not preserved"
             assert tif.pages[2].tags.get(34675) is None, "page 2 (grayscale inherited) should not get an ICC tag"
 
+        # ---- bit depth policy per page ----
+        depth_in = tmp / "depth_input"
+        depth_in.mkdir()
+        depth_src = depth_in / "depth.tif"
+        with tifffile.TiffWriter(str(depth_src)) as tif:
+            tif.write(np.random.randint(0, 65535, (40, 40, 3), dtype=np.uint16), photometric='rgb')
+            tif.write(np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8),
+                      photometric='rgb', subfiletype=tifffile.FILETYPE.REDUCEDIMAGE)
+        depth_jxl = tmp / "depth_jxl"
+        r = run_encoder(depth_in, depth_jxl, "--multipage-mode", "split", "--thumbnail-mode", "include")
+        assert r.returncode == 0, f"depth encode failed:\n{r.stderr}"
+
+        # force16: both pages 16-bit
+        depth_out = tmp / "depth_out_force16"
+        r = run_decoder(depth_jxl, depth_out, "--depth-policy", "force16")
+        assert r.returncode == 0, f"depth decode force16 failed:\n{r.stderr}"
+        with tifffile.TiffFile(str(depth_out / "depth.tif")) as tif:
+            assert tif.pages[0].bitspersample == 16, "force16: page 0 should be 16-bit"
+            assert tif.pages[1].bitspersample == 16, "force16: thumbnail page should be 16-bit"
+
+        # preserve_thumbnails: main 16-bit, thumbnail 8-bit
+        depth_out = tmp / "depth_out_preserve_thumbnails"
+        r = run_decoder(depth_jxl, depth_out, "--depth-policy", "preserve_thumbnails")
+        assert r.returncode == 0, f"depth decode preserve_thumbnails failed:\n{r.stderr}"
+        with tifffile.TiffFile(str(depth_out / "depth.tif")) as tif:
+            assert tif.pages[0].bitspersample == 16, "preserve_thumbnails: page 0 should be 16-bit"
+            assert tif.pages[1].bitspersample == 8, "preserve_thumbnails: thumbnail page should be 8-bit"
+
+        # preserve_original: keep each page's original depth
+        depth_out = tmp / "depth_out_preserve_original"
+        r = run_decoder(depth_jxl, depth_out, "--depth-policy", "preserve_original")
+        assert r.returncode == 0, f"depth decode preserve_original failed:\n{r.stderr}"
+        with tifffile.TiffFile(str(depth_out / "depth.tif")) as tif:
+            assert tif.pages[0].bitspersample == 16, "preserve_original: page 0 should be 16-bit"
+            assert tif.pages[1].bitspersample == 8, "preserve_original: thumbnail page should be 8-bit"
+
         print("\nAll multi-page tests passed.")
 
 

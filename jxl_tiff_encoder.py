@@ -249,6 +249,11 @@ GRAYSCALE_XMP_FLAG = "jxlphoto-grayscale"
 # Marker appended to dc:Relation when a page is encoded as single-channel
 # grayscale. The decoder restores a 2D TIFF page instead of expanding it to RGB.
 
+DEPTH_XMP_PREFIX = "jxlphoto-depth:"
+# Prefix for the original BitsPerSample value stored in dc:Relation. The decoder
+# uses this to restore the original bit depth per page according to the user's
+# --depth-policy (force16 / preserve_thumbnails / preserve_original).
+
 
 # ─────────────────────────────────────────────
 # USER SETTINGS - MODES CONFIGURATION
@@ -696,7 +701,7 @@ def read_existing_creator_tool(xmp_path):
             return stdout.split(":", 1)[1].strip()
     return ""
 
-def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, strip_metadata=False):
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False):
     """Build exiftool arguments for metadata injection with proper XMP preservation.
     
     Strategy:
@@ -768,6 +773,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
         new_sw = f"{original_sw} | {encoding_desc}"
         args_lines.append(f"-Software={new_sw}")
+    
+    # Always store original bit depth in dc:Relation so the decoder can restore
+    # the original BitsPerSample per page according to --depth-policy.
+    args_lines.append(f"-XMP-dc:Relation+={DEPTH_XMP_PREFIX}{original_depth}")
     
     # 4. Embed ICC in XMP CreatorTool if enabled (for round-trip preservation)
     # This operates independently of ENCODE_TAG_MODE
@@ -1045,6 +1054,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
+                # Capture original bit depth before converting to 16-bit for the JXL pipeline.
+                original_depth = 8 if img.dtype == np.uint8 else 16
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
                 if img.dtype == np.uint8:
                     img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
@@ -1100,7 +1111,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # This preserves original XMP, adds encoding tags, and embeds ICC if configured
             # Uses icc_original (unmodified) for round-trip preservation
             inject_args = build_metadata_injection_args(
-                tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original, 
+                tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original,
+                original_depth=original_depth,
                 strip_metadata=STRIP_METADATA
             )
             

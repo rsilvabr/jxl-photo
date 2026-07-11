@@ -88,6 +88,7 @@ class ToolConfig:
     last_thumbnail_suffix: Optional[str] = None
     last_thumbnail_handling: Optional[str] = None
     last_no_reconstruct_multipage: Optional[bool] = None
+    last_depth_policy: Optional[str] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -144,7 +145,8 @@ class ConfigManager:
                           thumbnail_mode: Optional[str] = None,
                           thumbnail_suffix: Optional[str] = None,
                           thumbnail_handling: Optional[str] = None,
-                          no_reconstruct_multipage: Optional[bool] = None) -> None:
+                          no_reconstruct_multipage: Optional[bool] = None,
+                          depth_policy: Optional[str] = None) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -181,6 +183,8 @@ class ConfigManager:
             self.config.last_thumbnail_handling = thumbnail_handling
         if no_reconstruct_multipage is not None:
             self.config.last_no_reconstruct_multipage = no_reconstruct_multipage
+        if depth_policy is not None:
+            self.config.last_depth_policy = depth_policy
         self.save_config()
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
@@ -2061,6 +2065,7 @@ class InteractiveMenu:
                 advanced_options['thumbnail_handling'] = self.config.config.last_thumbnail_handling or 'include'
                 advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
                 advanced_options['no_reconstruct_multipage'] = bool(self.config.config.last_no_reconstruct_multipage)
+                advanced_options['depth_policy'] = self.config.config.last_depth_policy or 'preserve_thumbnails'
             # Preserve decode-mode/target-icc chosen earlier when not showing advanced
             existing = workflow.get('advanced_options', {})
             for key in ('matrix', 'basic', 'none', 'target_icc'):
@@ -2179,6 +2184,13 @@ class InteractiveMenu:
                 no_recon_default = self.config.config.last_no_reconstruct_multipage if self.config.config.last_no_reconstruct_multipage is not None else False
                 no_reconstruct_multipage = Confirm.ask("Decode every JXL to its own TIFF (no multi-page reconstruction)?", default=no_recon_default)
                 self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
+                dp_default = self.config.config.last_depth_policy or "preserve_thumbnails"
+                depth_policy = Prompt.ask(
+                    "Bit depth policy",
+                    choices=["force16", "preserve_thumbnails", "preserve_original"],
+                    default=dp_default
+                )
+                self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
@@ -2214,6 +2226,10 @@ class InteractiveMenu:
                 no_recon_input = input(f"Decode every JXL to its own TIFF (no multi-page reconstruction)? [{no_recon_default}/n]: ").strip().lower() or no_recon_default
                 no_reconstruct_multipage = no_recon_input.startswith('y')
                 self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
+                dp_default = getattr(self.config.config, 'last_depth_policy', None) or "preserve_thumbnails"
+                dp_input = input(f"Bit depth policy (force16/preserve_thumbnails/preserve_original) [{dp_default}]: ").strip().lower() or dp_default
+                depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
+                self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
                 delete_src = delete_src_input.startswith('y')
@@ -2236,6 +2252,7 @@ class InteractiveMenu:
             advanced_options['thumbnail_handling'] = thumbnail_handling
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
             advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
+            advanced_options['depth_policy'] = depth_policy
 
         else:
             if RICH_AVAILABLE and console:
@@ -2801,6 +2818,8 @@ class InteractiveMenu:
                 cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
             if advanced.get('no_reconstruct_multipage'):
                 cmd.append('--no-reconstruct-multipage')
+            if advanced.get('depth_policy'):
+                cmd.extend(['--depth-policy', advanced['depth_policy']])
 
         else:
             script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')

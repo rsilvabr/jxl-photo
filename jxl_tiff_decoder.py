@@ -138,6 +138,12 @@ RECONSTRUCT_MULTIPAGE = True
 # marked files are ever merged, so independently-named files are safe either way;
 # this flag exists to fully disable reconstruction if desired (--no-reconstruct-multipage).
 
+DEPTH_POLICY = "preserve_thumbnails"
+# Bit depth policy per page. "force16" always outputs 16-bit. "preserve_thumbnails"
+# keeps real pages at 16-bit but restores 8-bit thumbnails if the original was 8-bit
+# (default). "preserve_original" keeps each page's original bit depth. Pages without
+# a jxlphoto-depth marker fall back to 16-bit.
+
 MULTIPAGE_MARKER_PREFIX = "jxlphoto-mpg:"
 # Must match the encoder's MULTIPAGE_XMP_MARKER. Stored in XMP-dc:Relation (a bag/list).
 
@@ -153,6 +159,10 @@ SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
 GRAYSCALE_FLAG = "jxlphoto-grayscale"
 # Must match the encoder's GRAYSCALE_XMP_FLAG. Indicates the page was encoded as
 # single-channel grayscale and should be restored as a 2D TIFF page.
+
+DEPTH_FLAG = "jxlphoto-depth:"
+# Must match the encoder's DEPTH_XMP_PREFIX. Carries the original BitsPerSample
+# value (8 or 16) for the page so the decoder can honor --depth-policy.
 
 TEMP_DIR = None
 # Temporary directory for intermediate files.
@@ -532,6 +542,8 @@ def read_png_to_numpy(png_path, target_depth=16):
             # Grayscale
             if target_depth == 16 and arr.dtype == np.uint8:
                 arr = arr.astype(np.uint16) * 257
+            elif target_depth == 8 and arr.dtype == np.uint16:
+                arr = np.rint(arr / 257).astype(np.uint8)
             rgb = np.stack([arr, arr, arr], axis=-1)
             return rgb.astype(np.uint16) if (arr.dtype != np.uint16 and rgb.dtype != np.uint16) else rgb, None
         elif arr.ndim == 3 and arr.shape[2] in (3, 4):
@@ -539,6 +551,8 @@ def read_png_to_numpy(png_path, target_depth=16):
             alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
             if target_depth == 16 and rgb.dtype == np.uint8:
                 rgb = rgb.astype(np.uint16) * 257
+            elif target_depth == 8 and rgb.dtype == np.uint16:
+                rgb = np.rint(rgb / 257).astype(np.uint8)
             return rgb, alpha
     except Exception:
         # imagecodecs not available or failed; fall through to PIL.
@@ -567,9 +581,12 @@ def read_png_to_numpy(png_path, target_depth=16):
             rgb = np.array(rgb_img)
             alpha = None
 
-        # Scale 8-bit → 16-bit when writing 16-bit TIFF
+        # Scale 8-bit → 16-bit when writing 16-bit TIFF, or 16-bit → 8-bit when
+        # writing 8-bit TIFF.
         if target_depth == 16 and rgb.dtype == np.uint8:
             rgb = rgb.astype(np.uint16) * 257  # 0-255 → 0-65535
+        elif target_depth == 8 and rgb.dtype == np.uint16:
+            rgb = np.rint(rgb / 257).astype(np.uint8)
 
         return rgb, alpha
 
@@ -1245,7 +1262,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
 # MAIN CONVERSION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None):
+def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=None):
     """
     Decode a single JXL to a numpy array using the same strategy logic as convert_one.
 
@@ -1254,7 +1271,12 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None):
       - final_icc_bytes is the ICC profile to embed (may be None)
       - reason is a human-readable decode strategy description
       - strategy is one of 'roundtrip', 'matrix', 'none', 'basic'
+
+    target_depth: 8 or 16. Defaults to the global DJXL_OUTPUT_DEPTH.
     """
+    if target_depth is None:
+        target_depth = DJXL_OUTPUT_DEPTH
+
     ppm_path = tmp_dir / "decoded.ppm"
     djxl_icc_path = tmp_dir / "djxl.icc"
 
@@ -1273,8 +1295,10 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None):
     if mode == 'roundtrip':
         decode_auto(jxl_path, ppm_path)
         pixels = read_ppm_to_numpy(ppm_path)
-        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-            pixels = (pixels >> 8).astype(np.uint8)
+        if target_depth == 8 and pixels.dtype == np.uint16:
+            pixels = np.rint(pixels / 257).astype(np.uint8)
+        elif target_depth == 16 and pixels.dtype == np.uint8:
+            pixels = pixels.astype(np.uint16) * 257
         return pixels, original_icc, reason, mode
 
     elif mode == 'matrix':
@@ -1293,30 +1317,31 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None):
             final_pixels = pixels
             final_icc = djxl_icc
 
-        if DJXL_OUTPUT_DEPTH == 8 and final_pixels.dtype == np.uint16:
-            final_pixels = (final_pixels >> 8).astype(np.uint8)
+        if target_depth == 8 and final_pixels.dtype == np.uint16:
+            final_pixels = np.rint(final_pixels / 257).astype(np.uint8)
+        elif target_depth == 16 and final_pixels.dtype == np.uint8:
+            final_pixels = final_pixels.astype(np.uint16) * 257
 
         return final_pixels, final_icc, reason, mode
 
     elif mode == 'none':
         decode_auto(jxl_path, ppm_path)
         pixels = read_ppm_to_numpy(ppm_path)
-        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-            pixels = (pixels >> 8).astype(np.uint8)
+        if target_depth == 8 and pixels.dtype == np.uint16:
+            pixels = np.rint(pixels / 257).astype(np.uint8)
+        elif target_depth == 16 and pixels.dtype == np.uint8:
+            pixels = pixels.astype(np.uint16) * 257
         return pixels, None, reason, mode
 
     else:  # basic
         png_path = tmp_dir / f"{jxl_path.stem}_basic.png"
         decode_auto_png(jxl_path, png_path)
-        pixels, _ = read_png_to_numpy(png_path, target_depth=DJXL_OUTPUT_DEPTH)
+        pixels, _ = read_png_to_numpy(png_path, target_depth=target_depth)
         djxl_icc = extract_icc_from_png(png_path)
         if djxl_icc:
             logger.debug(" >ICC extracted from djxl output")
         else:
             logger.debug(" >No ICC in djxl output")
-
-        if DJXL_OUTPUT_DEPTH == 8 and pixels.dtype == np.uint16:
-            pixels = (pixels >> 8).astype(np.uint8)
 
         return pixels, djxl_icc, reason, mode
 
@@ -1327,7 +1352,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     multi-page TIFF.
 
     page_entries: sorted list of (jxl_path, page_idx, is_thumbnail, icc_inherited,
-                                  subfiletype, grayscale) tuples.
+                                  subfiletype, grayscale, depth) tuples.
     """
     already_exists = final_path.exists()
 
@@ -1338,7 +1363,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             return str(main_jxl), "skipped", str(final_path)
         elif OVERWRITE == "smart":
             # Use the newest JXL mtime in the group for sync decision
-            newest_jxl_mtime = max(j.stat().st_mtime for j, _, _, _, _, _ in page_entries)
+            newest_jxl_mtime = max(j.stat().st_mtime for j, _, _, _, _, _, _ in page_entries)
             if newest_jxl_mtime <= final_path.stat().st_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
@@ -1360,9 +1385,20 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             reason = "unknown"
             strategy = "unknown"
 
-            for jxl_path, page_idx, is_thumb, icc_inherited, subfiletype, grayscale in page_entries:
-                pixels, icc_data, page_reason, page_strategy = decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path)
-                page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited, subfiletype, grayscale))
+            for jxl_path, page_idx, is_thumb, icc_inherited, subfiletype, grayscale, depth in page_entries:
+                # Decide target depth according to policy and original depth marker.
+                original_depth = depth  # may be None for old JXLs
+                if DEPTH_POLICY == "force16" or original_depth is None:
+                    target_depth = 16
+                elif DEPTH_POLICY == "preserve_original":
+                    target_depth = original_depth
+                else:  # preserve_thumbnails (default)
+                    target_depth = 8 if (is_thumb and original_depth == 8) else 16
+
+                pixels, icc_data, page_reason, page_strategy = decode_jxl_to_numpy(
+                    jxl_path, tmp_dir, target_icc_path, target_depth=target_depth
+                )
+                page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited, subfiletype, grayscale, target_depth))
                 # Use ICC/strategy from the first (main) page for the whole TIFF
                 if page_idx == 0 and not is_thumb:
                     page_icc = icc_data
@@ -1391,7 +1427,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 except AttributeError:
                     write_method = tif_writer.save
 
-                for i, (pixels, page_idx, is_thumb, entry_icc, entry_inherited, entry_subfiletype, entry_grayscale) in enumerate(page_arrays):
+                for i, (pixels, page_idx, is_thumb, entry_icc, entry_inherited, entry_subfiletype, entry_grayscale, target_depth) in enumerate(page_arrays):
                     kwargs = {
                         'compression': tiff_comp,
                         'metadata': None,
@@ -1456,7 +1492,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
-            thumb_count = sum(1 for _, _, is_thumb, _, _, _ in page_entries if is_thumb)
+            thumb_count = sum(1 for _, _, is_thumb, _, _, _, _ in page_entries if is_thumb)
             real_count = len(page_entries) - thumb_count
             detail = f"{real_count} page(s)"
             if thumb_count:
@@ -1475,7 +1511,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
     Each task is a dict with keys:
       - type: 'multi'
       - main_jxl: Path to the main JXL
-      - entries: list of (jxl_path, page_idx, is_thumbnail, icc_inherited, subfiletype, grayscale)
+      - entries: list of (jxl_path, page_idx, is_thumbnail, icc_inherited, subfiletype, grayscale, depth)
       - final_tiff: Path to final TIFF destination
     """
     use_staging = TEMP2_DIR is not None
@@ -1554,7 +1590,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
             # Delete all source JXLs in this group
-            for jxl_path, _, _, _, _, _ in task["entries"]:
+            for jxl_path, _, _, _, _, _, _ in task["entries"]:
                 try:
                     jxl_path.unlink()
                     logger.info(f" DELETED source | {jxl_path.name}")
@@ -1660,7 +1696,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None} for j in jxls}
     if not jxls:
         return markers
 
@@ -1686,7 +1722,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     values = rel
                 else:
                     values = str(rel).replace(";", ",").split(",")
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None}
                 for token in values:
                     token = str(token).strip()
                     if token.startswith(MULTIPAGE_MARKER_PREFIX):
@@ -1700,6 +1736,11 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                             pass
                     elif token == GRAYSCALE_FLAG:
                         info['grayscale'] = True
+                    elif token.startswith(DEPTH_FLAG):
+                        try:
+                            info['depth'] = int(token[len(DEPTH_FLAG):])
+                        except ValueError:
+                            pass
                 # Match back to our path key (exiftool may normalize separators)
                 key = str(Path(src))
                 if key in markers:
@@ -1717,7 +1758,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     """Group JXLs that belong to the same multi-page TIFF.
 
     Returns a dict mapping the main JXL path to a sorted list of
-    (jxl_path, page_idx, is_thumbnail, icc_inherited, subfiletype, grayscale) tuples.
+    (jxl_path, page_idx, is_thumbnail, icc_inherited, subfiletype, grayscale, depth) tuples.
 
     Grouping is driven by the encoder's XMP marker, NOT by filename. Only files
     that carry a matching group marker are merged; every unmarked file becomes
@@ -1733,7 +1774,7 @@ def collect_multipage_groups(jxls: list) -> dict:
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
-            groups[j] = [(j, 0, _is_thumbnail_jxl(j), False, 0, False)]
+            groups[j] = [(j, 0, _is_thumbnail_jxl(j), False, 0, False, None)]
         return groups
 
     by_group: dict = {}
@@ -1742,12 +1783,12 @@ def collect_multipage_groups(jxls: list) -> dict:
     marker_map = _read_multipage_markers_batch(jxls)
 
     for j in jxls:
-        info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False})
+        info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
         _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
         if info['group']:
-            by_group.setdefault(info['group'], []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale']))
+            by_group.setdefault(info['group'], []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
         else:
-            standalone.append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale']))
+            standalone.append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
 
     # Marked groups: reconstruct multi-page TIFFs
     for _marker, entries in by_group.items():
@@ -1853,12 +1894,18 @@ Examples:
     parser.add_argument("--no-reconstruct-multipage", action="store_true",
                         help="Disable multi-page reconstruction; decode every JXL to its own TIFF. "
                              "(Only marker-tagged split files are ever merged; this fully disables even that.)")
+    parser.add_argument("--depth-policy", type=str, default="preserve_thumbnails",
+                        choices=["force16", "preserve_thumbnails", "preserve_original"],
+                        help="Bit depth policy per page: force16 = always 16-bit; "
+                             "preserve_thumbnails = 8-bit only for thumbnails originally 8-bit (default); "
+                             "preserve_original = keep each page's original bit depth. "
+                             "Pages without a depth marker fall back to 16-bit.")
 
     args = parser.parse_args()
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY
 
     if args.sync:
         OVERWRITE = "smart"
@@ -1867,6 +1914,9 @@ Examples:
 
     if args.delete_source:
         DELETE_SOURCE = True
+
+    if args.depth_policy:
+        DEPTH_POLICY = args.depth_policy
 
     USE_MATRIX_MODE = args.use_matrix
     FORCE_BASIC_MODE = args.force_basic
@@ -1971,7 +2021,7 @@ Examples:
     if args.dry_run:
         for task in tasks:
             entries = task["entries"]
-            detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray in entries)
+            detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
         return

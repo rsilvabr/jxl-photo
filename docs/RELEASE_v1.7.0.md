@@ -62,14 +62,24 @@ Split pages preserve their original channel count and `SubfileType` role:
 - Inherited RGB ICC is not applied to grayscale pages, avoiding libpng iCCP errors on scanner IR/mask pages.
 - Non-zero `SubfileType` values (e.g. `PAGE`/`MASK`) are recorded and restored. `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) on reconstruction because tifffile does not accept `MASK` on normal image pages, but the "additional page" semantics are preserved.
 
+### Per-Page Bit Depth Policy
+
+The encoder records each page's original `BitsPerSample` (8 or 16) in `XMP-dc:Relation` (`jxlphoto-depth:`). The decoder's `--depth-policy` option controls how that depth is restored:
+
+- `force16` — every page is output as 16-bit.
+- `preserve_thumbnails` (default) — real pages stay 16-bit, but thumbnail pages originally encoded as 8-bit are restored as 8-bit.
+- `preserve_original` — each page is restored at its original bit depth.
+
+Pages without a `jxlphoto-depth` marker (pre-v1.7.0 JXLs) fall back to 16-bit.
+
 ### Wrapper Integration
 
 `jxl_photo.py` exposes the new options in the advanced-options step:
 
 - TIFF → JXL: choose multi-page mode, thumbnail mode, and thumbnail suffix
-- JXL → TIFF: choose how `_thumbnail.jxl` files are handled
+- JXL → TIFF: choose how `_thumbnail.jxl` files are handled, plus the `--depth-policy` for per-page bit depth restoration
 
-New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thumbnail_suffix`, `last_thumbnail_handling`.
+New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thumbnail_suffix`, `last_thumbnail_handling`, `last_no_reconstruct_multipage`, `last_depth_policy`.
 
 ---
 
@@ -108,6 +118,8 @@ python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --
     ICC tag, and inherited pages are restored without one
   - **Grayscale + SubfileType preservation** — asserts single-channel pages are
     restored as 2D grayscale and non-zero `SubfileType` values are preserved
+  - **Per-page bit depth policy** — asserts `force16`, `preserve_thumbnails`,
+    and `preserve_original` restore the expected `BitsPerSample` per page
 
 ---
 
