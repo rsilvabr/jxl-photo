@@ -197,6 +197,15 @@ def main():
         software = read_tag(sp_tif / "single.tif", "Software")
         assert make == "TESTMAKE", f"Make not preserved through roundtrip: got {make!r}"
         assert software.startswith("TestSoftware"), f"Software not preserved: got {software!r}"
+        rel_sp = read_tag(sp_tif / "single.tif", "XMP-dc:Relation")
+        assert "jxlphoto-depth" not in rel_sp, f"depth marker leaked into single-page TIFF Relation: {rel_sp!r}"
+
+        # --depth 8 must still work for single-page files
+        sp_tif_8 = tmp / "sp_tif_8"
+        r = run_decoder(sp_jxl, sp_tif_8, "--depth", "8")
+        assert r.returncode == 0, f"single-page depth 8 decode failed:\n{r.stderr}"
+        with tifffile.TiffFile(str(sp_tif_8 / "single.tif")) as tif:
+            assert tif.pages[0].bitspersample == 8, "--depth 8 should produce 8-bit output"
 
         # ---- independent files must NOT be merged (no marker => standalone) ----
         ind_in = tmp / "ind_input"
@@ -238,6 +247,7 @@ def main():
         assert "UserRelationValue" in rel_final, "user's Relation not restored in TIFF"
         assert "jxlphoto-mpg" not in rel_final, "internal marker leaked into final TIFF"
         assert "jxlphoto-icc" not in rel_final, "inherited-ICC flag leaked into final TIFF"
+        assert "jxlphoto-depth" not in rel_final, "depth marker leaked into final TIFF"
         # ---- per-page ICC preservation ----
         # Page 0 gets its own ICC, page 1 has no own ICC (inherits from IFD0),
         # page 2 gets a different ICC. After round trip the tags must match.

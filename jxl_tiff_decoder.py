@@ -941,12 +941,13 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir):
                 [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-dc:Relation", str(tiff_path)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
             )
-            if rr.returncode == 0 and rr.stdout and (MULTIPAGE_MARKER_PREFIX in rr.stdout or ICC_INHERITED_FLAG in rr.stdout or SUBFILETYPE_PREFIX in rr.stdout or GRAYSCALE_FLAG in rr.stdout):
+            if rr.returncode == 0 and rr.stdout and (MULTIPAGE_MARKER_PREFIX in rr.stdout or ICC_INHERITED_FLAG in rr.stdout or SUBFILETYPE_PREFIX in rr.stdout or GRAYSCALE_FLAG in rr.stdout or DEPTH_FLAG in rr.stdout):
                 def _is_internal_marker(token: str) -> bool:
                     t = token.strip()
                     return (
                         t.startswith(MULTIPAGE_MARKER_PREFIX)
                         or t.startswith(SUBFILETYPE_PREFIX)
+                        or t.startswith(DEPTH_FLAG)
                         or t == ICC_INHERITED_FLAG
                         or t == GRAYSCALE_FLAG
                     )
@@ -1387,8 +1388,11 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
 
             for jxl_path, page_idx, is_thumb, icc_inherited, subfiletype, grayscale, depth in page_entries:
                 # Decide target depth according to policy and original depth marker.
+                # Explicit --depth 8 forces 8-bit output for backward compatibility.
                 original_depth = depth  # may be None for old JXLs
-                if DEPTH_POLICY == "force16" or original_depth is None:
+                if DJXL_OUTPUT_DEPTH == 8:
+                    target_depth = 8
+                elif DEPTH_POLICY == "force16" or original_depth is None:
                     target_depth = 16
                 elif DEPTH_POLICY == "preserve_original":
                     target_depth = original_depth
