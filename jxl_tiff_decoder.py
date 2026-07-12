@@ -651,22 +651,23 @@ def read_ppm_to_numpy(ppm_path):
         if magic not in (b'P6', b'P5'):
             raise ValueError(f"Unsupported PPM/PGM format: {magic}")
 
-        # Skip comments
-        line = f.readline()
-        while line.startswith(b'#'):
+        # Read header tokens, skipping comment-only lines/inline comments, until
+        # we have magic, width, height and maxval. This handles PPMs that split
+        # dimensions across multiple lines or include comments.
+        tokens = [magic]
+        while len(tokens) < 4:
             line = f.readline()
-
-        # Parse dimensions
-        dimensions = line.strip()
-        while dimensions.startswith(b'#'):
-            dimensions = f.readline().strip()
-        width, height = map(int, dimensions.split())
-
-        # Parse max value
-        maxval_line = f.readline().strip()
-        while maxval_line.startswith(b'#'):
-            maxval_line = f.readline().strip()
-        maxval = int(maxval_line)
+            if not line:
+                break
+            for part in line.strip().split():
+                if part.startswith(b'#'):
+                    break
+                tokens.append(part)
+        if len(tokens) < 4:
+            raise ValueError(f"Invalid PPM header: could not read magic/width/height/maxval from {ppm_path}")
+        width = int(tokens[1])
+        height = int(tokens[2])
+        maxval = int(tokens[3])
 
         raw = f.read()
 
@@ -1137,10 +1138,6 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         # Write new TIFF with main image as page 0 and JPEG preview as page 1
         # Using tifffile's ability to write multipage TIFFs with different configurations per page
 
-        # Read JPEG data
-        with open(jpeg_path, 'rb') as f:
-            jpeg_bytes = f.read()
-
         # Create the multipage TIFF properly
         # Page 0: 16-bit main image with ICC (primary image)
         # Page 1: JPEG data with NEWSubfileType=1 (thumbnail/reduced resolution)
@@ -1162,11 +1159,11 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 except Exception:
                     icc_data = None
 
-        # Write TIFF with JPEG as page 0 (with thumbnail flag) and main image as page 1
-        # Using photometric interpretation for page 0 (JPEG data is YCbCr or RGB)
-        # and page 1 (main image is RGB, grayscale, or RGBA).
+        # Write TIFF with main image as page 0 and JPEG preview as page 1
+        # Using photometric interpretation for page 0 (RGB, grayscale, or RGBA)
+        # and page 1 (JPEG data is YCbCr or RGB).
 
-        # Save JPEG page 0 with NEWSubfileType=1
+        # Save JPEG preview; load it as an array via PIL
         with Image.open(jpeg_path) as jpeg_preview:
             jpeg_arr = np.array(jpeg_preview)
 

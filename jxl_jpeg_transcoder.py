@@ -1226,15 +1226,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 else:
                     magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
                     logger.debug(f"Using ICC profile: {output_icc}")
-                if use_ram:
-                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
-                    magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
-                else:
-                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-                        tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
+                # djxl does not support --output_format; write a temporary PNG (format by
+                # extension) and then convert with ImageMagick. Same as the --no-ram path.
+                with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+                    tmp_png = Path(tmp) / "tmp.png"
+                    subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
+                    subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
             else:
                 # Direct djxl to PNG
                 r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
@@ -1254,15 +1251,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     # Use ICC profile file
                     magick_output = ["-profile", output_icc, "-quality", str(quality)]
                     logger.debug(f"Using ICC profile: {output_icc}")
-                if use_ram:
-                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
-                    magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
-                else:
-                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-                        tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
+                # djxl does not support --output_format; decode to a temporary PNG (format by
+                # extension) and let ImageMagick convert to the final JPEG.
+                with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+                    tmp_png = Path(tmp) / "tmp.png"
+                    subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
+                    subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
             else:
                 # Direct djxl to JPG (preserves embedded ICC)
                 quality_flag = f"--jpeg_quality={quality}"
@@ -1403,6 +1397,12 @@ def cmd_convert(args, from_jxl: bool = True):
     if not files:
         logger.warning("No input files found.")
         return
+
+    # JPEG does not support 16-bit. Switch format to PNG before building output
+    # pairs so that staging files and final paths use the correct extension.
+    if direction == "from_jxl" and args.format == "jpeg" and args.bit_depth == 16:
+        logger.warning("JPEG output does not support 16-bit; switching to PNG")
+        args.format = "png"
 
     _counter["total"] = len(files)
 

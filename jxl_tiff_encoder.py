@@ -1195,16 +1195,20 @@ def make_png_bytes(img, icc_bytes=None):
         p = name + data
         return struct.pack(">I", len(data)) + p + struct.pack(">I", zlib.crc32(p) & 0xFFFFFFFF)
 
-    # Scale 8-bit to 16-bit correctly (multiply by 257: 65535/255)
+    # Write PNG at the input bit depth. The main encode path passes uint16 data;
+    # the cautious ICC test passes uint8 data and needs a true 8-bit PNG to test
+    # the 8-bit path.
     if img.dtype == np.uint8:
-        img_16 = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
-        img_be = img_16.astype(">u2")
+        bit_depth = 8
+        img_be = img
+        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
     else:
+        bit_depth = 16
         img_be = img.astype(">u2")
-    raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
+        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
 
     out = b"\x89PNG\r\n\x1a\n"
-    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 16, color_type, 0, 0, 0))
+    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))
     if icc_bytes:
         out += chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes))
     out += chunk(b"IDAT", zlib.compress(raw, 1))
