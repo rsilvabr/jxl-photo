@@ -575,6 +575,10 @@ def read_png_to_numpy(png_path, target_depth=16):
             return rgb, alpha
     except Exception:
         # imagecodecs not available or failed; fall through to PIL.
+        # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
+        if target_depth == 16:
+            logger.warning("imagecodecs not available or failed; falling back to PIL. "
+                           "16-bit RGB/RGBA PNG precision will be degraded to 8-bit.")
         pass
 
     with Image.open(png_path) as img:
@@ -1163,8 +1167,8 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         # and page 1 (main image is RGB, grayscale, or RGBA).
 
         # Save JPEG page 0 with NEWSubfileType=1
-        jpeg_preview = Image.open(jpeg_path)
-        jpeg_arr = np.array(jpeg_preview)
+        with Image.open(jpeg_path) as jpeg_preview:
+            jpeg_arr = np.array(jpeg_preview)
 
         # Write multipage TIFF following Capture One structure:
         # Page 0: main image (primary image for Windows Explorer)
@@ -1843,6 +1847,10 @@ def collect_multipage_groups(jxls: list) -> dict:
     """
     groups: dict = {}
 
+    # Read markers first; they are needed even when reconstruction is disabled
+    # so that per-file metadata (inheritance, grayscale, depth) is available.
+    marker_map = _read_multipage_markers_batch(jxls)
+
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
             info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
@@ -1852,8 +1860,6 @@ def collect_multipage_groups(jxls: list) -> dict:
     by_group: dict = {}
     standalone: list = []
 
-    marker_map = _read_multipage_markers_batch(jxls)
-
     for j in jxls:
         info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
         _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
@@ -1861,6 +1867,7 @@ def collect_multipage_groups(jxls: list) -> dict:
             by_group.setdefault(info['group'], []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
         else:
             standalone.append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+
 
     # Marked groups: reconstruct multi-page TIFFs
     for _marker, entries in by_group.items():
@@ -2003,8 +2010,8 @@ Examples:
     if USE_MATRIX_MODE and not ImageCms:
         print("WARNING: Matrix mode requested but ImageCms unavailable. Install with: pip install Pillow --upgrade")
 
-    if args.target_icc and not USE_MATRIX_MODE:
-        logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
+    if args.no_icc_clean:
+        CLEANUP_XMP_ICC_MARKER = False
 
     if args.depth:
         DJXL_OUTPUT_DEPTH = args.depth
@@ -2020,7 +2027,6 @@ Examples:
     if args.thumbnail_handling is not None:
         THUMBNAIL_HANDLING = args.thumbnail_handling
         if THUMBNAIL_HANDLING == "generate":
-            logger.warning("--thumbnail-handling=generate is not yet implemented; falling back to include behavior")
             THUMBNAIL_HANDLING = "include"
     if args.thumbnail_suffix is not None:
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
@@ -2028,6 +2034,12 @@ Examples:
         RECONSTRUCT_MULTIPAGE = False
 
     log_file = setup_logger()
+
+    # Warnings that must go to the configured log file
+    if args.target_icc and not USE_MATRIX_MODE:
+        logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
+    if args.thumbnail_handling == "generate":
+        logger.warning("--thumbnail-handling=generate is not yet implemented; falling back to include behavior")
 
     # Mode 8 confirmation
     if args.mode == 8 and DELETE_SOURCE:

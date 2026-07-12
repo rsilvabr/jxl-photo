@@ -3156,7 +3156,20 @@ def main():
                     workflow['dest_format'],
                     workflow['conversion_type'],
                     workflow.get('advanced_options', {}).get('d50_patch'),
-                    workflow.get('advanced_options', {}).get('encode_tag')
+                    workflow.get('advanced_options', {}).get('encode_tag'),
+                    workflow.get('advanced_options', {}).get('jpeg_thumbnail'),
+                    workflow.get('advanced_options', {}).get('multipage_mode'),
+                    workflow.get('advanced_options', {}).get('thumbnail_mode'),
+                    workflow.get('advanced_options', {}).get('thumbnail_suffix'),
+                    workflow.get('advanced_options', {}).get('thumbnail_handling'),
+                    workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
+                    workflow.get('advanced_options', {}).get('depth_policy'),
+                    workflow.get('advanced_options'),
+                    workflow.get('use_ram'),
+                    workflow.get('compression'),
+                    workflow.get('bit_depth'),
+                    workflow.get('add_preview', True),
+                    workflow.get('mode_config')
                 )
 
                 if RICH_AVAILABLE and console:
@@ -3325,6 +3338,7 @@ def main():
             workflow['compression'] = config.config.last_compression or 'zip'
             workflow['bit_depth'] = config.config.last_bit_depth or 16
             workflow['dry_run'] = False
+            workflow['add_preview'] = config.config.last_add_preview if config.config.last_add_preview is not None else True
             fallback_advanced = {
                 'overwrite': overwrite,
                 'sync': sync,

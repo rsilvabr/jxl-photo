@@ -397,11 +397,14 @@ def has_jbrd_box(jxl_path: Path) -> bool:
                     if len(ext_size) < 8:
                         return False
                     size = int.from_bytes(ext_size, 'big')
+                    if size < 16:
+                        return False
+                    payload = size - 16
+                else:
+                    if size < 8:
+                        return False
+                    payload = size - 8
 
-                if size < 8:
-                    return False
-
-                payload = size - 8
                 if payload > 0:
                     f.seek(payload, 1)
     except Exception:
@@ -1574,8 +1577,8 @@ def cmd_auto(args):
     _counter["total"] = total_files
     
     # Confirm source deletion BEFORE any processing. Lossy conversion requires
-    # stricter confirmation than lossless transcode.
-    if args.delete_source:
+    # stricter confirmation than lossless transcode. Only meaningful in mode 8.
+    if args.delete_source and args.mode == 8:
         has_lossy = bool(jxl_convert_files)
         has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
         if has_lossy:
@@ -1673,7 +1676,28 @@ def _process_file_group(files, args, use_transcode=True):
                 effort=args.effort, reconvert_val=args.overwrite,
                 use_internal_srgb=False, smart=args.sync
             )
+            # Handle DELETE_SOURCE for lossy convert (auto mode), only in mode 8
+            if DELETE_SOURCE and args.mode == 8:
+                deleted = 0
+                src_map = {str(s): (s, out) for s, out in group_pairs}
+                for result in results:
+                    status = result[1]
+                    if status not in ("ok", "reconvert"):
+                        continue
+                    src_path, final_file = src_map.get(result[0], (None, None))
+                    if src_path is None:
+                        continue
+                    if final_file is None or not _verify_file_integrity(final_file):
+                        logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                        continue
+                    src_path.unlink()
+                    deleted += 1
+                    logger.info(f" DELETED source | {src_path.name}")
+                if deleted:
+                    logger.info(f" -> Deleted {deleted} source file(s)")
 
+# --------------------------------------------─
+# AUTO MODE (Per-file detection for directories)
 # --------------------------------------------─
 # MAIN ENTRY POINT (Auto-routing)
 # --------------------------------------------─

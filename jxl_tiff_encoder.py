@@ -1671,10 +1671,19 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     # actual conversion). This avoids a redundant per-file open across large
     # batches, and a corrupt file then fails inside convert_one — logged as a
     # single error — instead of aborting the whole run at planning time.
+    #
+    # We still need to determine the real samples-per-pixel of page 0 so that
+    # single-channel TIFFs are encoded as grayscale rather than RGB.
     if mp_mode == "ignore":
         final_jxl = output_dir / _page_output_name(stem, 0, False)
-        # Assume RGB for the fast path; convert_one will re-read if needed.
-        return [(tiff_path, final_jxl, 0, False, 0, 3)]
+        try:
+            with tifffile.TiffFile(str(tiff_path)) as tif:
+                samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
+        except Exception:
+            # If we cannot read the page, let convert_one report the error later
+            # and fall back to RGB to avoid a planning-time crash.
+            samples = 3
+        return [(tiff_path, final_jxl, 0, False, 0, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
 
