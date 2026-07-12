@@ -175,7 +175,7 @@ EMBED_ICC_IN_JXL = True
 # True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
 # False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
-ICC_PNG_STRATEGY = "heuristic"
+ICC_PNG_STRATEGY = "cautious"
 # Controls whether the ICC profile is embedded in the intermediate PNG's iCCP chunk
 # when feeding the image to cjxl in lossy mode (d > 0). Lossless (d = 0) always
 # embeds the ICC so the JXL stores the profile as a native blob.
@@ -188,18 +188,19 @@ ICC_PNG_STRATEGY = "heuristic"
 # For scanner workflows, the JXL is a backup container and the round-trip TIFF is the
 # final image.
 #
+# "cautious"  -> Default. Run a small round-trip test on each unseen ICC and cache
+#                the result. The first time a profile is seen it is tested with a
+#                64x64 8/16-bit image; safe profiles are embedded, problematic ones
+#                are skipped. Results are cached per-user so later runs are instant.
+#                Safest choice for mixed workflows (camera + scanner).
 # "heuristic" -> Skip iCCP for profiles that look problematic:
 #                (a) ICC size > ICC_PROBLEMATIC_SIZE_THRESHOLD, OR
 #                (b) ICC profile class is "scnr" (scanner input device).
-#                Safe default for mixed workflows (camera + scanner).
+#                Faster rule-based fallback.
 # "always"    -> Always embed ICC in the PNG. Best for normal camera images; produces
 #                JXLs with correct colors in most viewers.
 # "skip"      -> Never embed ICC in the PNG. Produces correct pixel data for every
 #                source, but JXL colors may look wrong in viewers until decoded to TIFF.
-# "cautious"  -> Run a small round-trip test on each unseen ICC and cache the
-#                result. The first time a profile is seen it is tested with a 64x64
-#                8/16-bit image; safe profiles are embedded, problematic ones are
-#                skipped. Results are cached per-user so later runs are instant.
 
 ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200
 # Size threshold (bytes) used by the "heuristic" strategy.
@@ -1960,9 +1961,9 @@ def main():
     parser.add_argument("--icc-png-strategy", type=str, default=None,
                         choices=["heuristic", "always", "skip", "cautious"],
                         help="How to handle ICC in the PNG intermediate for lossy encoding: "
-                             "heuristic (default: skip for large/scanner profiles), "
-                             "always (embed always), skip (never embed), "
-                             "cautious (test each unseen ICC with a round-trip and cache the result).")
+                             "cautious (default: test each unseen ICC with a round-trip and cache the result), "
+                             "heuristic (skip for large/scanner profiles), "
+                             "always (embed always), skip (never embed).")
     parser.add_argument("--icc-cache-dir", type=str, default=None,
                         help="Directory for the ICC cautious-strategy cache "
                              "(default: APPDATA/jxl-photo/icc-cache on Windows, "

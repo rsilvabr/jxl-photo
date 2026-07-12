@@ -76,4 +76,4 @@ python jxl_tiff_encoder.py --clear-icc-cache
 
 - The `cautious` test uses `effort=1` internally for speed; the final encode still uses the configured `--effort`.
 - First run on a large library with many different profiles may be slower while tests run. Subsequent runs are instant because the cache is used.
-- The `heuristic` strategy remains the default for backwards compatibility.
+- The `cautious` strategy is now the default; `heuristic` remains available as a faster fallback.

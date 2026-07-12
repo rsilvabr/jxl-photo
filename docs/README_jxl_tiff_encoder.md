@@ -280,8 +280,8 @@ Options:
   --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
   --encode-tag      Where to record encoding params: xmp (default), software, off
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
-  --icc-png-strategy heuristic|always|skip
-                    How to embed ICC in the PNG intermediate for lossy encoding (default: heuristic)
+  --icc-png-strategy cautious|heuristic|always|skip
+                    How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
   --strip           Strip all metadata from output (no EXIF/XMP preservation)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
@@ -434,10 +434,10 @@ The workaround is to **not embed the ICC profile in the intermediate PNG's `iCCP
 
 | Strategy | Behavior | When to use |
 |---|---|---|
-| `heuristic` (default) | Skip `iCCP` for profiles ≥ 50 KB **or** with ICC class `scnr` (scanner). Otherwise embed normally. | Mixed camera + scanner workflows. |
+| `cautious` (default) | Test each unseen ICC with a small 8/16-bit round-trip and cache the result. Avoids false positives from the size heuristic. | Mixed camera + scanner workflows; recommended default. |
+| `heuristic` | Skip `iCCP` for profiles ≥ 50 KB **or** with ICC class `scnr` (scanner). Otherwise embed normally. | Mixed camera + scanner workflows when you need a faster rule-based fallback. |
 | `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
 | `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
-| `cautious` | Test each unseen ICC with a small 8/16-bit round-trip and cache the result. Avoids false positives from the size heuristic. | Libraries with many different profiles; slowest first pass, instant afterwards. |
 
 > **Note:** the `skip` strategy here means "do not embed the ICC in the PNG intermediate". It does **not** mean "skip the JXL conversion". A future release may add a separate option to copy the original TIFF instead of converting when the ICC is problematic.
 
