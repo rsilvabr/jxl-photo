@@ -219,6 +219,23 @@ def _get_exiftool_cmd():
             _exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
     return _exiftool_cmd
 
+def _copy_metadata(src_path: Path, dst_path: Path) -> None:
+    """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
+
+    Used for lossy convert paths where cjxl/djxl may not preserve metadata.
+    Failures are ignored so the conversion itself always succeeds.
+    """
+    if shutil.which(_get_exiftool_cmd()) is None:
+        return
+    try:
+        subprocess.run(
+            [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(src_path),
+             "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
+            capture_output=True, timeout=30
+        )
+    except Exception:
+        pass
+
 # --------------------------------------------─
 # USER SETTINGS - TRANSCODE MODE CONFIGURATION
 # --------------------------------------------─
@@ -500,7 +517,7 @@ def reorder_jxl_boxes(jxl_path: Path):
 
 def find_jpegs_flat(input_path: Path):
     seen, files = set(), []
-    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG"):
+    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
         for f in input_path.glob(ext):
             key = f.resolve()
             if key not in seen:
@@ -510,7 +527,7 @@ def find_jpegs_flat(input_path: Path):
 
 def find_jpegs_recursive(input_path: Path):
     seen, files = set(), []
-    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG"):
+    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
         for f in input_path.rglob(ext):
             key = f.resolve()
             if key not in seen:
@@ -807,17 +824,18 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     # recovery. Without jbrd, djxl would re-encode lossy and silently label it as
     # lossless, risking data loss (especially with --delete-source). Reject these
     # files early and log them for review.
-    if is_jxl_decode and not has_jbrd_box(jxl_path):
-        _log_rejected_file(str(jxl_path), "force-transcode decode requires jbrd box")
-        raise RuntimeError(
-            f"{jxl_path.name}: force-transcode decode requires jbrd box. "
-            "Use auto mode or --force-convert for lossy decode."
-        )
-
     overwritten = final_path.exists()
-    write_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        if is_jxl_decode and not has_jbrd_box(jxl_path):
+            _log_rejected_file(str(jxl_path), "force-transcode decode requires jbrd box")
+            raise RuntimeError(
+                f"{jxl_path.name}: force-transcode decode requires jbrd box. "
+                "Use auto mode or --force-convert for lossy decode."
+            )
+
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+
         stored_md5 = read_md5_db(jxl_path) if verify and is_jxl_decode else None
 
         r = subprocess.run(
@@ -842,7 +860,8 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         else:
             logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
 
-        return (str(jxl_path), "ok", str(final_path), None)
+        status = "reconvert" if overwritten else "ok"
+        return (str(jxl_path), status, str(final_path), None)
     except Exception as e:
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
@@ -1178,6 +1197,9 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # Reorder boxes for IrfanView compatibility
         reorder_jxl_boxes(write_path)
 
+        # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode
+        _copy_metadata(src_path, write_path)
+
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
@@ -1263,6 +1285,9 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+
+        # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop
+        _copy_metadata(jxl_path, actual_out)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"

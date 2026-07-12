@@ -46,6 +46,15 @@ This release implements the `cautious` mode of `--icc-png-strategy` and includes
 - **`make_png_bytes()` always wrote 16-bit PNGs**, so the cautious ICC "8-bit" test was actually a 16-bit test. It now writes 8-bit PNGs for uint8 input and 16-bit PNGs for uint16 input.
 - **`read_ppm_to_numpy()` failed when PPM width/height were on separate lines** or had comments mixed with tokens. The parser now reads tokens until magic, width, height, and maxval are all available.
 
+### Additional v1.7.1 audit fixes
+
+- **Transcoder `--force-transcode --decode` crashed the whole batch on JXL files without `jbrd` box** — the check was outside the per-file `try` block and raised in the worker. The check is now inside the function's `try` and returns a per-file error.
+- **Wrapper `--delete-source` confirmation could be invisible/trapped** when the child process output was buffered. The wrapper now runs child scripts with `PYTHONUNBUFFERED=1`.
+- **Lossy convert paths lost EXIF/XMP/IPTC metadata** — added best-effort exiftool copy in `encode_to_jxl` and `decode_to_image`.
+- **`decode_one_transcode` never reported `reconvert`** on overwrite; it now returns the correct status.
+- **`--multipage-mode skip` always encoded page 0**, even when the only real page was at a different index. It now uses the detected real page index.
+- **`find_jpegs_*` and the wrapper extension mapping ignored `.jfif`/`.jpe` files**; those extensions are now included.
+
 ### Earlier v1.7.1 beta fixes
 
 - Fixed `UnboundLocalError` in `collect_multipage_groups()` when `--no-reconstruct-multipage` is used.

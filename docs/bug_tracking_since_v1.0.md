@@ -2375,3 +2375,83 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 ---
 
+### Bug #128 — Transcoder `--force-transcode --decode` Crashes on Missing `jbrd` Box
+
+**Location:** `jxl_jpeg_transcoder.py` — `decode_one_transcode()` / `process_group_transcode()`
+
+**Problem:** When a JXL file had no `jbrd` box, the function raised `RuntimeError` **outside** the `try` block. The exception propagated out of the `ThreadPoolExecutor` worker and aborted the entire batch with a traceback instead of logging a per-file error.
+
+**Fix:** Moved the `jbrd` check inside the function's `try` block so the existing `except` handler returns a `("error", ...)` tuple for that file. The `write_path.parent.mkdir()` call was also moved inside the `try`.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `decode_one_transcode()`
+
+---
+
+### Bug #129 — Wrapper `--delete-source` Confirmation Can Be Invisible / Blocked
+
+**Location:** `jxl_photo.py` — `_run_subprocess()`
+
+**Problem:** The wrapper runs the backend scripts with `stdout=PIPE`. When the backend asked for `--delete-source` confirmation with `print()` + `input()`, the child Python process could buffer the prompt and never flush it to the pipe, so the user saw nothing while the process blocked waiting for input.
+
+**Fix:** The subprocess environment now includes `PYTHONUNBUFFERED=1`, forcing the child Python process to flush stdout line-by-line.
+
+**Files changed:**
+- `jxl_photo.py` `_run_subprocess()`
+
+---
+
+### Bug #130 — Lossy Convert Paths Drop EXIF/XMP/IPTC Metadata
+
+**Location:** `jxl_jpeg_transcoder.py` — `encode_to_jxl()` and `decode_to_image()`
+
+**Problem:** The lossy `convert` paths (`--force-convert`, JPEG lossy, PNG) relied on `cjxl`/`djxl` to preserve metadata, but those paths often drop EXIF/XMP/IPTC because the image is re-encoded rather than losslessly wrapped.
+
+**Fix:** Added a best-effort `_copy_metadata()` helper that uses exiftool to copy metadata from the source file to the output file. Called after `encode_to_jxl()` (JPEG/PNG → JXL) and after `decode_to_image()` (JXL → JPEG/PNG). Failures are silently ignored so the conversion itself always succeeds.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_get_exiftool_cmd()`, `_copy_metadata()`, `encode_to_jxl()`, `decode_to_image()`
+
+---
+
+### Bug #131 — `decode_one_transcode()` Never Reports `reconvert` on Overwrite
+
+**Location:** `jxl_jpeg_transcoder.py` — `decode_one_transcode()`
+
+**Problem:** The function computed `overwritten = final_path.exists()` but always returned `"ok"`, so overwrite/reconvert counters in the JXL→JPEG direction stayed at zero.
+
+**Fix:** Return `"reconvert"` when the destination file already exists, matching the encoder behaviour.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `decode_one_transcode()`
+
+---
+
+### Bug #132 — `--multipage-mode skip` Always Encodes Page 0
+
+**Location:** `jxl_tiff_encoder.py` — `_plan_multipage()`
+
+**Problem:** When `--multipage-mode skip` found exactly one real page, it always encoded page 0. If the real image was on a different page and page 0 was only a thumbnail, the thumbnail was encoded as the main output.
+
+**Fix:** Use the detected real page index when there is exactly one real page; fall back to page 0 only if there are no real pages at all.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `_plan_multipage()`
+
+---
+
+### Bug #133 — JPEG Scanners Ignore `.jfif` / `.jpe` Files
+
+**Location:** `jxl_jpeg_transcoder.py` — `find_jpegs_flat()` / `find_jpegs_recursive()`; `jxl_photo.py` — `_get_extensions()`
+
+**Problem:** `determine_command()` already accepted `.jfif` and `.jpe` for single files, but directory scans only looked for `.jpg`/`.jpeg`, so those files were silently ignored in batch modes. The wrapper's extension mapping also omitted them.
+
+**Fix:** Added `*.jfif`, `*.JFIF`, `*.jpe`, and `*.JPE` to both recursive/flat scanners and to the wrapper's `jpeg` extension set.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `find_jpegs_flat()`, `find_jpegs_recursive()`
+- `jxl_photo.py` `_get_extensions()`
+
+---
+
+

@@ -1718,9 +1718,15 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         if len(real_pages) > 1:
             logger.warning(f"SKIP multi-page TIFF ({len(real_pages)} real pages) | {tiff_path.name}")
             return []
-        # Single real page (or only thumbnails) -> encode page 0
-        info = page_info.get(0, {'subfiletype': 0, 'samples': 3})
-        pages_to_encode.append((0, 0 in thumb_pages, info['subfiletype'], info['samples']))
+        # Single real page (or only thumbnails) -> encode the correct page
+        if len(real_pages) == 1:
+            idx = real_pages[0]
+            is_thumb = idx in thumb_pages
+        else:
+            idx = 0
+            is_thumb = 0 in thumb_pages
+        info = page_info.get(idx, {'subfiletype': 0, 'samples': 3})
+        pages_to_encode.append((idx, is_thumb, info['subfiletype'], info['samples']))
 
     elif mp_mode == "split":
         for idx in real_pages:

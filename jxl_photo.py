@@ -459,7 +459,7 @@ class FolderAnalyzer:
     def _get_extensions(self, fmt: str) -> set:
         """Get file extensions for a format."""
         mapping = {
-            'jpeg': {'.jpg', '.jpeg'},
+            'jpeg': {'.jpg', '.jpeg', '.jfif', '.jpe'},
             'tiff': {'.tif', '.tiff'},
             'jxl': {'.jxl'},
             'png': {'.png'},
@@ -2773,7 +2773,8 @@ class InteractiveMenu:
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
-                errors="replace"
+                errors="replace",
+                env={**os.environ, "PYTHONUNBUFFERED": "1"}
             )
 
             for line in process.stdout:
