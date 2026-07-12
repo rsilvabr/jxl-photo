@@ -83,7 +83,7 @@ New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thu
 
 ---
 
-## 🎨 ICC / PNG Strategy (v1.7.0_beta)
+## 🎨 ICC / PNG Strategy (v1.7.0)
 
 A new `--icc-png-strategy` option controls how the ICC profile is passed to `cjxl` during lossy encoding. This addresses a problem found after the initial v1.7.0 tests: **large scanner ICC profiles** (e.g. SilverFast `SFprofT`, ~217 KB) cause `cjxl` to produce extremely dark or black images when the profile is embedded in the intermediate PNG's `iCCP` chunk.
 
@@ -189,7 +189,7 @@ All fixed before release:
 - Dead code removed (`convert_one`, `write_tiff` in the decoder;
   `_count_outputs_for_tiff` in the encoder).
 
-### v1.7.0_beta fixes
+### v1.7.0 final fixes
 
 - **Scanner ICC darkening:** large scanner profiles (SilverFast, VueScan) no longer
   black out images in lossy mode thanks to `--icc-png-strategy heuristic`.
@@ -221,8 +221,7 @@ All fixed before release:
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.7.0_beta** | 2026-07-12 | Multi-page TIFF support with scanner ICC workaround (heuristic PNG strategy); audit fixes from v1.7.0 + beta fixes |
-| **v1.7.0** | 2026-07-11 | Multi-page TIFF support: split/skip/ignore modes, thumbnail handling, marker-based decoder reconstruction, per-page ICC preservation; audit-fixed single-page path |
+| **v1.7.0** | 2026-07-12 | Multi-page TIFF support: split/skip/ignore modes, thumbnail handling, marker-based decoder reconstruction, per-page ICC preservation, scanner ICC heuristic PNG strategy; audit + pre-release fixes |
 | v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection, ICC alias cleanup (103 fixes) |
 | v1.5.3 | 2026-04-14 | Documentation & minor fixes: OVERWRITE log accuracy, PIL pixel limit, 8-bit PNG scaling, exiftool(-k).exe detection |
 | v1.5.2 | 2026-04-13 | Critical fix: 8-bit TIFF → JXL black images |

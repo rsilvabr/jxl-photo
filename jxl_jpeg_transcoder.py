@@ -301,6 +301,20 @@ def setup_logger():
     logger.info(f"Log: {log_file}")
     return log_file
 
+
+def _log_rejected_file(file_path, reason):
+    """Log rejected files to Logs/jxl_jpeg_transcoder/rejected_files.log for easy review."""
+    try:
+        rej_dir = SCRIPT_DIR / "Logs" / "jxl_jpeg_transcoder"
+        rej_dir.mkdir(parents=True, exist_ok=True)
+        rej_file = rej_dir / "rejected_files.log"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(rej_file, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} | {reason} | {file_path}\n")
+    except Exception:
+        pass
+
+
 def next_count():
     with counter_lock:
         _counter["done"] += 1
@@ -690,8 +704,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         export_idx = next((i for i, p in enumerate(parts)
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
-            logger.warning(f"'{EXPORT_MARKER}' not found in {src_path}, using local folder")
-            return src_path.parent / exp_out / src_path.with_suffix(out_ext).name
+            # Files outside the export marker must be ignored in modes 6/7.
+            return None
         export_dir = Path(*parts[:export_idx + 1])
         if mode == 6:
             if _is_relative_to(src_path, export_dir):
@@ -702,6 +716,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         else:
             if EXPORT_JPEG_SUBFOLDER:
                 anchor = export_dir / EXPORT_JPEG_SUBFOLDER
+                if not _is_relative_to(src_path, anchor):
+                    return None
                 rel = src_path.relative_to(anchor)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
@@ -786,6 +802,17 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         return (str(jxl_path), "skipped", str(final_path), None)
+
+    # Force-transcode decode is documented as requiring a jbrd box for lossless
+    # recovery. Without jbrd, djxl would re-encode lossy and silently label it as
+    # lossless, risking data loss (especially with --delete-source). Reject these
+    # files early and log them for review.
+    if is_jxl_decode and not has_jbrd_box(jxl_path):
+        _log_rejected_file(str(jxl_path), "force-transcode decode requires jbrd box")
+        raise RuntimeError(
+            f"{jxl_path.name}: force-transcode decode requires jbrd box. "
+            "Use auto mode or --force-convert for lossy decode."
+        )
 
     overwritten = final_path.exists()
     write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1180,13 +1207,40 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         actual_out = write_path
         original_final_path = final_path
 
-        if fmt == "jpeg":
-            if bit_depth == 16:
-                logger.warning(f" JPEG doesn't support 16-bit, switching to PNG | {jxl_path.name}")
-                fmt = "png"
-                actual_out = write_path.with_suffix(".png")
-                final_path = final_path.with_suffix(".png")
+        is_png = (fmt == "png")
+        if fmt == "jpeg" and bit_depth == 16:
+            logger.warning(f" JPEG doesn't support 16-bit, switching to PNG | {jxl_path.name}")
+            is_png = True
+            actual_out = write_path.with_suffix(".png")
+            final_path = final_path.with_suffix(".png")
 
+        if is_png:
+            # PNG output
+            if output_icc and MAGICK_AVAILABLE:
+                # Handle built-in color spaces vs ICC file paths
+                builtins = ('sRGB', 'Adobe RGB', 'ProPhoto RGB')
+                if output_icc in builtins:
+                    cs_name = output_icc.replace(' ', '')
+                    magick_output = ["-colorspace", cs_name, "-depth", str(bit_depth)]
+                    logger.debug(f"Using colorspace conversion: {cs_name}")
+                else:
+                    magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
+                    logger.debug(f"Using ICC profile: {output_icc}")
+                if use_ram:
+                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
+                    magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
+                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
+                else:
+                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+                        tmp_png = Path(tmp) / "tmp.png"
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
+            else:
+                # Direct djxl to PNG
+                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
+                if r.returncode != 0:
+                    raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+        else:
             # JPEG output via djxl directly (no magick needed unless ICC conversion)
             if output_icc and MAGICK_AVAILABLE:
                 # Handle built-in color spaces vs ICC file paths
@@ -1213,32 +1267,6 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 # Direct djxl to JPG (preserves embedded ICC)
                 quality_flag = f"--jpeg_quality={quality}"
                 r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
-                if r.returncode != 0:
-                    raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
-
-        else:  # PNG output
-            if output_icc and MAGICK_AVAILABLE:
-                # Handle built-in color spaces vs ICC file paths
-                builtins = ('sRGB', 'Adobe RGB', 'ProPhoto RGB')
-                if output_icc in builtins:
-                    cs_name = output_icc.replace(' ', '')
-                    magick_output = ["-colorspace", cs_name, "-depth", str(bit_depth)]
-                    logger.debug(f"Using colorspace conversion: {cs_name}")
-                else:
-                    magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
-                    logger.debug(f"Using ICC profile: {output_icc}")
-                if use_ram:
-                    djxl_cmd = ["djxl", str(jxl_path), "-", "--output_format=png"]
-                    magick_cmd = ["magick", "-"] + magick_output + [str(actual_out)]
-                    _run_pipeline_safe(djxl_cmd, magick_cmd, timeout=300)
-                else:
-                    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-                        tmp_png = Path(tmp) / "tmp.png"
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
-            else:
-                # Direct djxl to PNG
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1587,23 +1615,25 @@ def cmd_auto(args):
 
 def _process_file_group(files, args, use_transcode=True):
     """Process a group of files with the same method."""
+    # Use explicit output directory if provided, otherwise fall back to input root
+    output_root = args.output if args.output is not None else args.input
+
     # Build output pairs
     pairs = []
     for f in files:
         if use_transcode:
             # Lossless transcode: direction depends on input extension
             is_jpeg_input = f.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
-            out = resolve_output_transcode(f, args.mode, args.input, decode=not is_jpeg_input)
+            out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input)
         else:
-            # Lossy convert: output format depends on --format flag
-            # Determine output extension based on format (without leading dot)
-            out_ext = "jpg" if args.format == "jpeg" else "png"
+            # Lossy convert: output format defaults to JPEG if not specified
+            out_ext = "jpg" if (args.format or "jpeg") in ("jpeg", "jpg") else "png"
             # Default bit depth per format, matching cmd_convert behavior
             default_depth = 8 if (args.format or "jpeg") in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
             out = resolve_output_convert(
                 f, args.mode, args.output_name, args.output_suffix,
                 out_ext, args.rename_from, args.rename_to,
-                Path(args.input) if args.input else None, decode=True
+                output_root, decode=True
             )
         if out:
             pairs.append((f, out))
@@ -1710,7 +1740,7 @@ Examples:
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
                         help="Output folder name for modes 0,1")
-    parser.add_argument("output", nargs="?", type=str, default=None,
+    parser.add_argument("output", nargs="?", type=Path, default=None,
                         help="Output directory (mode 0 single file)")
     parser.add_argument("--output-suffix", type=str, default=CONVERT_OUTPUT_SUFFIX,
                         help="Suffix for mode 2")

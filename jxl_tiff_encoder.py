@@ -11,7 +11,7 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid
+import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -78,6 +78,18 @@ def _get_exiftool_cmd():
         else:
             _exiftool_cmd = "exiftool"
     return _exiftool_cmd
+
+# cjxl detection - early exit with a clear message if the encoder is missing
+_cjxl_cmd = None
+def _get_cjxl_cmd():
+    global _cjxl_cmd
+    if _cjxl_cmd is None:
+        candidates = ["cjxl", "cjxl.exe"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                _cjxl_cmd = cmd
+                break
+    return _cjxl_cmd
 
 # ─────────────────────────────────────────────
 # USER SETTINGS - GENERAL
@@ -412,6 +424,20 @@ def setup_logger():
     logger.addHandler(ch)
     logger.info(f"Log saved to: {log_file}")
     return log_file
+
+
+def _log_rejected_file(file_path, reason):
+    """Log rejected files to Logs/jxl_tiff_encoder/rejected_files.log for easy review."""
+    try:
+        rej_dir = SCRIPT_DIR / "Logs" / "jxl_tiff_encoder"
+        rej_dir.mkdir(parents=True, exist_ok=True)
+        rej_file = rej_dir / "rejected_files.log"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(rej_file, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} | {reason} | {file_path}\n")
+    except Exception:
+        pass
+
 
 def next_count():
     with counter_lock:
@@ -1130,13 +1156,24 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         f"Page index {page_idx} out of range ({len(tif.pages)} pages)"
                     )
                 page = tif.pages[page_idx]
-                # Reject CMYK early — it would otherwise be mis-detected as RGBA
+                # Reject unsupported TIFFs early with clear messages.
                 photometric = page.photometric
                 if photometric == tifffile.PHOTOMETRIC.SEPARATED:
+                    _log_rejected_file(str(tiff_path), "CMYK not supported")
                     raise ValueError("CMYK TIFFs are not supported")
+                if page.samplesperpixel == 4:
+                    _log_rejected_file(str(tiff_path), "RGBA not supported")
+                    raise ValueError("RGBA TIFFs are not supported (alpha channel would be lost)")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
+                # Reject float/double and other unsupported integer dtypes before casting.
+                if img.dtype.kind == 'f':
+                    _log_rejected_file(str(tiff_path), f"float dtype {img.dtype} not supported")
+                    raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Float TIFFs are not supported.")
+                if img.dtype not in (np.uint8, np.uint16):
+                    _log_rejected_file(str(tiff_path), f"dtype {img.dtype} not supported")
+                    raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
                 # Capture original bit depth before converting to 16-bit for the JXL pipeline.
                 original_depth = 8 if img.dtype == np.uint8 else 16
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
@@ -1460,9 +1497,15 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # A source TIFF that yields more than one output is a genuine split; every
     # page from it gets a stable group marker so the decoder can safely rejoin
     # them. Single-output TIFFs get no marker (standalone).
+    # The group id is a hash of the absolute path to avoid leaking folder
+    # structure / user names into distributed JXL files.
     outputs_per_tiff: Dict[str, int] = {}
     for tiff, _final_jxl, _page_idx, _is_thumbnail, _subfiletype, _samples in group_items:
         outputs_per_tiff[str(tiff.resolve())] = outputs_per_tiff.get(str(tiff.resolve()), 0) + 1
+
+    def _make_group_id(tiff_path: Path) -> str:
+        key = str(tiff_path.resolve()).encode("utf-8")
+        return hashlib.sha256(key).hexdigest()[:16]
 
     tasks = []
     for tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples in group_items:
@@ -1472,7 +1515,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         else:
             write_jxl = final_jxl
         tiff_key = str(tiff.resolve())
-        group_id = tiff_key if outputs_per_tiff.get(tiff_key, 0) > 1 else None
+        group_id = _make_group_id(tiff) if outputs_per_tiff.get(tiff_key, 0) > 1 else None
         tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype, samples, group_id))
 
     results = []
@@ -1696,8 +1739,12 @@ def main():
     global STRIP_METADATA
     if args.strip:
         STRIP_METADATA = True
-
     log_file = setup_logger()
+
+    if _get_cjxl_cmd() is None:
+        logger.error("cjxl not found in PATH. Install libjxl and add cjxl to PATH.")
+        sys.exit(1)
+
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
     _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else "no"))

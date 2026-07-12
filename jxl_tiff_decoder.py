@@ -33,6 +33,8 @@ except ImportError:
     ImageCms = None
 import tifffile
 
+logger = logging.getLogger(__name__)
+
 # ExifTool detection - try multiple name variants
 _exiftool_cmd = None
 def _get_exiftool_cmd():
@@ -1082,7 +1084,9 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         preview = pil_img.resize((new_w, new_h), resample)
 
         # Convert preview to sRGB for Windows Explorer compatibility
-        # (similar to Capture One behavior)
+        # (similar to Capture One behavior).  Preserve grayscale inputs
+        # as single-channel instead of forcing them to RGB.
+        original_mode = preview.mode
         if icc_data and ImageCms:
             try:
                 # Create sRGB profile
@@ -1094,6 +1098,8 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 # Convert from source ICC to sRGB
                 preview_srgb = ImageCms.profileToProfile(preview, src_profile, srgb_profile)
                 preview = preview_srgb
+                if original_mode == 'L' and preview.mode == 'RGB':
+                    preview = preview.convert('L')
                 logger.debug(f" >Preview converted to sRGB")
             except Exception as e:
                 logger.debug(f" >Preview color conversion failed: {e}, using original")
@@ -1946,9 +1952,12 @@ Examples:
     if args.depth_policy:
         DEPTH_POLICY = args.depth_policy
 
-    USE_MATRIX_MODE = args.use_matrix
-    FORCE_BASIC_MODE = args.force_basic
-    FORCE_NONE_MODE = args.force_none
+    if args.use_matrix:
+        USE_MATRIX_MODE = True
+    if args.force_basic:
+        FORCE_BASIC_MODE = True
+    if args.force_none:
+        FORCE_NONE_MODE = True
 
     if args.no_icc_clean:
         CLEANUP_XMP_ICC_MARKER = False
