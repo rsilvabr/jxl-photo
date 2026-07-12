@@ -273,6 +273,17 @@ available (`-x icc_pathname=...` produces the same darkening).
 In practice, the workaround preserves both the numeric pixel values and the ICC
 profile, so the round-trip is visually identical to the original.
 
+**Important consequence for viewing the JXL directly:**
+Because the ICC is not embedded in the JXL codestream natively, some JXL viewers
+will display the file as if it were in an unknown/sRGB-like space. The colors may
+look wrong in those viewers until the file is decoded back to TIFF and the original
+ICC is restored. For scanner workflows, this means the JXL is primarily a long-term
+backup container; the intended final image is the reconstructed TIFF.
+
+For normal camera TIFFs (ProPhoto, AdobeRGB, sRGB), the round-trip TIFF is also
+faithful, and the intermediate JXL may show slightly different colors in viewers
+that rely on the embedded ICC blob rather than the JXL's native color primaries.
+
 
 ```powershell
 # Shows internal JXL box structure and order

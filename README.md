@@ -63,6 +63,8 @@ python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --t
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
+> **Scanner color profile note:** Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF. The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat JXL as the backup container and the reconstructed TIFF as the final image.
+
 ---
 
 ## What's New in v1.6
