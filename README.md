@@ -387,6 +387,23 @@ pip install tifffile numpy pillow rich imagecodecs
 | **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
 | **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
 
+### Tested dependency versions
+
+Versions used before and after the dependency update on 2026-07-12 (last tested commit: `f390463`):
+
+| Component | Tested until commit `f390463` (2026-07-12) | Current (recommended) |
+|---|---|---|
+| libjxl (`cjxl`/`djxl`) | v0.11.2 | v0.12.0 |
+| numpy | 2.4.3 | 2.5.1 |
+| tifffile | 2026.3.3 | 2026.6.1 |
+| Pillow | 12.1.1 | 12.3.0 |
+| imagecodecs | 2026.3.6 | 2026.6.26 |
+| rich | 14.3.3 | 15.0.0 |
+| exiftool | 13.52 | 13.59 |
+| ImageMagick | 7.1.2-17 | 7.1.2-27 |
+
+Older versions may still work, but the current versions are what we test against.
+
 ####  Common Download Mistakes
 
 | Wrong Download | Why It Fails | Correct Download |

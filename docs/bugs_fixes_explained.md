@@ -213,7 +213,66 @@ for ext in ("*.tif", "*.tiff"):
 
 ---
 
-## Diagnostic tools that helped
+## Bug 7 — Lossy JXL encoding darkens images with large scanner ICC profiles
+
+**Symptom:**
+Multi-page scanner TIFFs converted to JXL with `d > 0` decode to almost black images
+when reconstructed to TIFF. The lossless path (`d = 0`) preserves the image correctly.
+
+**Measured data (Epson V700 / SilverFast `SFprofT` profile):**
+
+| Path | Pixel max | Pixel mean | Visual |
+|---|---|---|---|
+| Original TIFF | 24.974 | 8.355 | normal |
+| Lossy JXL with ICC in PNG | 4.889 | 653 | almost black |
+| Lossy JXL without ICC in PNG | 24.974 | 8.355 | normal |
+| Lossless JXL with ICC in PNG | 24.974 | 8.355 | normal |
+
+**What happened:**
+The scanner's ICC profile is a `scnr` (input device) profile with a huge `A2B0` LUT
+(`mft2` type, ~217 KB). When `cjxl` encodes in lossy mode, it converts the input to the
+XYB colorspace. To do this it must first interpret the RGB pixels through the ICC
+profile. For this particular scanner profile, `cjxl` applies the `A2B0` LUT in a way
+that collapses the dynamic range, producing pixel values around 20% of the original.
+
+Key observations from the investigation:
+- The same problem occurs with **libjxl 0.11.2**, so it is not a regression in 0.12.0.
+- Modifying the TRC gamma values in the profile (from 0.00859 to 2.2) does **not** fix
+  the darkening, which confirms the `A2B0` LUT is the cause, not the TRC curves.
+- LittleCMS (used by Pillow) handles the same profile without visible darkening, so
+  the profile is not fundamentally broken — it is a `cjxl` / libjxl interaction.
+- The `djxl` decoder does not darken the image on its own: if the ICC is injected into
+  a JXL that was encoded without ICC, the decoded pixels remain normal. The darkening
+  is introduced during **encoding**, not decoding.
+
+**Why lossy is affected but lossless is not:**
+Lossless (`d = 0`) uses the Modular encoder and does not convert to XYB. It stores the
+raw pixels and the ICC as metadata. Lossy (`d > 0`) uses VarDCT and must convert to
+XYB, triggering the ICC → XYZ conversion.
+
+**Fix:**
+For lossy encoding, do not embed the ICC in the intermediate PNG's `iCCP` chunk. The
+`cjxl` encoder then treats the pixels as RGB values in an unknown/sRGB-like space and
+codes them without applying the scanner's `A2B0` LUT. The original ICC is still injected
+into the JXL container afterwards using ExifTool, and the decoder restores it to the
+output TIFF. The numeric pixels are preserved and the color profile is preserved as
+metadata.
+
+```python
+# In jxl_tiff_encoder.py, PNG iCCP is only used for lossless encoding
+png_icc_bytes = icc_bytes if CJXL_DISTANCE == 0 else None
+png_input = make_png_bytes(img, png_icc_bytes)
+```
+
+**Trade-off:**
+This is a workaround around a `cjxl` behavior, not a theoretically perfect solution. The
+ideal fix would be for `cjxl` to handle scanner input profiles correctly, or to expose a
+flag that disables the `A2B0` LUT conversion. As of libjxl 0.12.0, no such flag is
+available (`-x icc_pathname=...` produces the same darkening).
+
+In practice, the workaround preserves both the numeric pixel values and the ICC
+profile, so the round-trip is visually identical to the original.
+
 
 ```powershell
 # Shows internal JXL box structure and order

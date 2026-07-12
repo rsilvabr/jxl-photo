@@ -183,8 +183,19 @@ New regression test: `tests/test_multipage.py`
 | 111 | Wrapper detects marker as substring while scripts use prefix/suffix | photo | ✅ FIXED (v1.5.3c) |
 | 112 | CMYK TIFFs silently treated as RGBA | encoder | ✅ FIXED (v1.5.3c) |
 | 113 | Dead `global _counter` in `_process_file_group` | transcoder | ✅ FIXED (v1.5.3c) |
+| 114 | D50 patch corrupts ICC profiles shorter than 80 bytes | encoder | ✅ FIXED |
+| 115 | Encoder modes 2 and 8 fail on single file input | encoder | ✅ FIXED |
+| 116 | Multi-page TIFF loses IFD1 metadata during decode | decoder | ✅ FIXED |
+| 117 | XMP ICC extraction accepts invalid base64 / fake ICC | decoder | ✅ FIXED |
+| 118 | PNG `target_depth=8` grayscale conversion broken | decoder | ✅ FIXED |
+| 119 | Matrix mode silently quantizes 16-bit to 8-bit via LittleCMS | decoder | ✅ FIXED (limitation documented) |
+| 120 | Wrapper repeat workflow loses advanced options and basic parameters | photo | ✅ FIXED |
+| 121 | Wrapper manifest mode ignores advanced options | photo | ✅ FIXED |
+| 122 | Repeat workflow offered for manifest mode 99 | photo | ✅ FIXED |
+| 123 | `jxl_jpeg_transcoder.encode_to_jxl` returns 3-element tuples instead of 4 | transcoder | ✅ FIXED |
+| 124 | Lossy JXL encoding darkens images with large scanner ICCs in PNG iCCP | encoder | ✅ FIXED |
 
-**Total bugs fixed: 103**
+**Total bugs fixed: 113**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes

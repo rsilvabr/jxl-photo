@@ -1087,6 +1087,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # codestream and exiftool cannot inject EXIF. Do NOT use for lossless (d=0):
             # it changes how the ICC is stored (blob instead of native primaries) and
             # breaks color display in IrfanView.
+            #
+            # Lossy caveat: cjxl can darken/scramble images when the PNG iCCP chunk
+            # carries large scanner profiles (e.g. SilverFast SFprofT). For lossy
+            # encoding, skip the iCCP chunk and rely on exiftool to inject the ICC
+            # into the JXL container. The original pixels are preserved visually,
+            # and the ICC is restored into the output TIFF by the decoder.
             container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
 
             # --modular=1 forces the Modular encoder for lossy output.
@@ -1094,15 +1100,18 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # Modular lossy produces 2-3x larger files than VarDCT for photos.
             modular_flag = ["--modular=1"] if (CJXL_MODULAR and CJXL_DISTANCE > 0) else []
 
+            # PNG iCCP only for lossless; see caveat above.
+            png_icc_bytes = icc_bytes if CJXL_DISTANCE == 0 else None
+
             if USE_RAM_FOR_PNG:
-                png_input = make_png_bytes(img, icc_bytes)
+                png_input = make_png_bytes(img, png_icc_bytes)
                 del img
                 cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
                 r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
                 del png_input
             else:
                 png_path = tmp_dir / f"{tiff_path.stem}.png"
-                png_bytes = make_png_bytes(img, icc_bytes)
+                png_bytes = make_png_bytes(img, png_icc_bytes)
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes

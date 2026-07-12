@@ -1128,7 +1128,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
             logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {src_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {src_path.name}")
-        return (str(src_path), "skipped", str(final_path))
+        return (str(src_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
     write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1154,11 +1154,11 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
-        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path))
+        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), None)
     except Exception as e:
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
-        return (str(src_path), "error", str(e))
+        return (str(src_path), "error", str(e), None)
 
 def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     quality: int, fmt: str, bit_depth: int,
