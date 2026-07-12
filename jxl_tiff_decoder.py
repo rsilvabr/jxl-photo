@@ -914,10 +914,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
              "-xmp:all", "-iptc:all", str(tiff_path)],
             capture_output=True, timeout=10
         )
-        # Fix Software and ImageDescription in IFD1. This is only needed for
-        # single-page TIFFs where add_jpeg_preview() reorders the main image
-        # into IFD1. In multi-page TIFFs, IFD1 is a real page and must keep its
-        # metadata.
+        # Fix Software and ImageDescription tags that tifffile may have written
+        # on IFD0 or IFD1. For single-page TIFFs with a JPEG preview, only the
+        # preview page (IFD1) needs these defaults cleared; the main image keeps
+        # its metadata from the JXL. For multi-page TIFFs, IFD1 is a real page
+        # and must keep its metadata, so we only clear on single-page files.
         if not is_multipage:
             subprocess.run(
                 [_get_exiftool_cmd(), "-overwrite_original", 
@@ -993,7 +994,7 @@ def cleanup_xmp_icc(tiff_path):
         return
     try:
         r = subprocess.run(
-        [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(tiff_path)],
+            [_get_exiftool_cmd(), "-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(tiff_path)],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
@@ -1012,15 +1013,16 @@ def cleanup_xmp_icc(tiff_path):
         logger.debug(f"XMP cleanup skipped: {e}")
 
 def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
-    """Add JPEG preview as first page of TIFF with proper thumbnail structure.
+    """Add JPEG preview as second page of TIFF with proper thumbnail structure.
 
     v2 changes:
-    - ICC is embedded in the JPEG preview (correct colors in preview)
-    - JPEG is written as page 0 with NEWSubfileType=1 (thumbnail flag)
-    - 16-bit data becomes page 1
-    - Windows Explorer uses the first page as thumbnail, showing correct colors
+    - ICC is embedded in the main 16-bit image (page 0) for color-managed viewers
+    - 16-bit main image is kept as page 0 (primary image for Windows Explorer)
+    - 8-bit JPEG preview is written as page 1 with subfiletype=1 (thumbnail/reduced flag)
+    - Windows Explorer uses page 0's ICC for thumbnails, showing correct colors
 
-    This replaces the old approach of appending JPEG as page 1.
+    This replaces the old approach of appending JPEG as page 1 while keeping the
+    main image as the primary page.
     """
     if not ADD_JPEG_PREVIEW:
         return

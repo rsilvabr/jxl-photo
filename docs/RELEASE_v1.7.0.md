@@ -100,12 +100,14 @@ Because the ICC is not in the JXL codestream natively, some JXL viewers may disp
 | `heuristic` (default) | Skip `iCCP` for profiles that are large (≥ 50 KB) or have class `scnr` (scanner). Otherwise embed normally. | Mixed workflows (camera + scanner). Default. |
 | `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
 | `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
-| `cautious` | [BETA] Test each unseen ICC with a small round-trip and cache the result. | Coming in a later release; currently falls back to heuristic. |
+| `cautious` | **[PLANNED]** Test each unseen ICC with a small round-trip and cache the result. Currently falls back to heuristic. | Future release. |
+
+**Note:** the `skip` strategy here means "skip embedding the ICC in the PNG". It does not mean "skip the JXL conversion". A future release may add a separate option to copy the original TIFF instead of converting when the ICC is problematic.
 
 Configure in code:
 
 ```python
-ICC_PNG_STRATEGY = "heuristic"          # heuristic | always | skip | cautious
+ICC_PNG_STRATEGY = "heuristic"          # heuristic | always | skip (cautious planned)
 ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200    # bytes (50 KB)
 ```
 

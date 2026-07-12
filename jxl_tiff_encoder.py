@@ -180,9 +180,8 @@ ICC_PNG_STRATEGY = "heuristic"
 #                JXLs with correct colors in most viewers.
 # "skip"      -> Never embed ICC in the PNG. Produces correct pixel data for every
 #                source, but JXL colors may look wrong in viewers until decoded to TIFF.
-# "cautious"  -> [BETA] Run a small round-trip test on each unseen ICC and cache the
-#                result. Falls back to heuristic if the test image is too dark.
-#                See docs for cache location and cleanup.
+# "cautious"  -> [PLANNED] Run a small round-trip test on each unseen ICC and cache the
+#                result. Currently falls back to heuristic. Not yet implemented.
 
 ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200
 # Size threshold (bytes) used by the "heuristic" strategy.
@@ -679,7 +678,7 @@ def should_embed_icc_in_png(icc_bytes, lossy=True):
     if strategy == "skip":
         return False
     if strategy == "cautious":
-        # Cautious mode is implemented separately (Beta); falls back to heuristic
+        # Cautious mode is planned for a future release; falls back to heuristic
         # here when the per-ICC cache lookup has not been wired yet.
         strategy = "heuristic"
 
@@ -1644,7 +1643,8 @@ def main():
                         choices=["heuristic", "always", "skip", "cautious"],
                         help="How to handle ICC in the PNG intermediate for lossy encoding: "
                              "heuristic (default: skip for large/scanner profiles), "
-                             "always (embed always), skip (never embed), cautious (Beta: round-trip test + cache)")
+                             "always (embed always), skip (never embed). "
+                             "cautious is planned for a future release (currently falls back to heuristic).")
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
     parser.add_argument("--embed-thumbnail", action="store_true",
