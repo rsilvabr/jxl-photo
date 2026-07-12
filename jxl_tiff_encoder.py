@@ -11,14 +11,18 @@ Requirements:
   exiftool     ->  https://exiftool.org
 """
 
-import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib
+import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib, json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import Dict
+from typing import Any, Dict, Optional
 import argparse
 import numpy as np
 import tifffile
+from PIL import Image
+
+# Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
+logger = logging.getLogger("jxl_convert")
 
 
 def _verify_jxl_integrity(jxl_path: Path) -> bool:
@@ -192,8 +196,10 @@ ICC_PNG_STRATEGY = "heuristic"
 #                JXLs with correct colors in most viewers.
 # "skip"      -> Never embed ICC in the PNG. Produces correct pixel data for every
 #                source, but JXL colors may look wrong in viewers until decoded to TIFF.
-# "cautious"  -> [PLANNED] Run a small round-trip test on each unseen ICC and cache the
-#                result. Currently falls back to heuristic. Not yet implemented.
+# "cautious"  -> Run a small round-trip test on each unseen ICC and cache the
+#                result. The first time a profile is seen it is tested with a 64x64
+#                8/16-bit image; safe profiles are embedded, problematic ones are
+#                skipped. Results are cached per-user so later runs are instant.
 
 ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200
 # Size threshold (bytes) used by the "heuristic" strategy.
@@ -201,6 +207,10 @@ ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200
 # embedded in the intermediate PNG. The value is exposed because some workflows may
 # use unusually large RGB profiles. 50 KB covers known scanner profiles while
 # leaving normal camera profiles (typically 1-4 KB) untouched.
+
+ICC_CACHE_DIR_OVERRIDE: Optional[Path] = None
+# Override the default cross-platform ICC cache directory. None -> use the default
+# (%APPDATA%/jxl-photo/icc-cache on Windows, ~/.config/jxl-photo/icc-cache on Linux).
 
 D50_PATCH_MODE = "auto"
 # Controls the D50 illuminant patch for Capture One compatibility.
@@ -390,7 +400,6 @@ STRIP_METADATA = False
 
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
-logger     = None
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0}
@@ -684,7 +693,258 @@ def _get_icc_profile_class(icc_bytes):
     return icc_bytes[12:16]
 
 
-def should_embed_icc_in_png(icc_bytes, lossy=True):
+# ─────────────────────────────────────────────
+# CAUTIOUS ICC STRATEGY — Fase 2
+# ─────────────────────────────────────────────
+# Some ICC profiles make cjxl darken the image when they are embedded in the
+# intermediate PNG (lossy mode). The "cautious" strategy runs a tiny round-
+# trip for each unseen profile, caches the result, and uses that decision.
+# Cache is stored per-user so the test only runs once per profile.
+
+_CAU_MIN_MEAN = 10.0
+_CAU_MIN_RATIO = 0.7
+_CAU_TEST_SIZE = 64
+
+
+def _icc_cache_dir() -> Path:
+    if ICC_CACHE_DIR_OVERRIDE is not None:
+        return ICC_CACHE_DIR_OVERRIDE
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA")
+        if base:
+            return Path(base) / "jxl-photo" / "icc-cache"
+        return Path.home() / "AppData" / "Roaming" / "jxl-photo" / "icc-cache"
+    elif system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "jxl-photo" / "icc-cache"
+    else:
+        return Path.home() / ".config" / "jxl-photo" / "icc-cache"
+
+
+def _icc_cache_path() -> Path:
+    return _icc_cache_dir() / "icc_cache.json"
+
+
+def _load_icc_cache() -> Dict[str, Any]:
+    path = _icc_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception as e:
+        logger.warning(f"ICC cache unreadable, resetting: {e}")
+        return {}
+
+
+def _save_icc_cache(cache: Dict[str, Any]) -> None:
+    path = _icc_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save ICC cache: {e}")
+
+
+def _clear_icc_cache() -> bool:
+    """Remove the ICC cache file and return whether something was deleted."""
+    path = _icc_cache_path()
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to clear ICC cache: {e}")
+        return False
+
+
+def _read_ppm(path: Path) -> np.ndarray:
+    """Read a binary P5/P6 PPM/PGM file."""
+    with open(path, "rb") as f:
+        tokens = []
+        while len(tokens) < 4:
+            tok = b""
+            while True:
+                b = f.read(1)
+                if not b:
+                    raise ValueError("PPM header truncated")
+                if b == b"#":
+                    # skip comment
+                    while f.read(1) not in (b"\n", b""):
+                        pass
+                    continue
+                if b.isspace():
+                    if tok:
+                        tokens.append(tok)
+                        break
+                else:
+                    tok += b
+        magic = tokens[0].decode("ascii")
+        width = int(tokens[1])
+        height = int(tokens[2])
+        maxval = int(tokens[3])
+        if magic == "P6":
+            channels = 3
+        elif magic == "P5":
+            channels = 1
+        else:
+            raise ValueError(f"Unsupported PPM magic {magic}")
+        bytes_per_channel = 2 if maxval > 255 else 1
+        dtype = np.uint16 if bytes_per_channel == 2 else np.uint8
+        total = width * height * channels * bytes_per_channel
+        buf = f.read(total)
+        if len(buf) < total:
+            raise ValueError("PPM data truncated")
+        arr = np.frombuffer(buf, dtype=dtype).reshape((height, width, channels))
+        return arr
+
+
+def _write_ppm(path: Path, arr: np.ndarray) -> None:
+    """Write a binary P6 RGB PPM file. 8-bit or 16-bit depending on dtype."""
+    if arr.dtype == np.uint8:
+        maxval = 255
+    elif arr.dtype == np.uint16:
+        maxval = 65535
+    else:
+        raise ValueError(f"Unsupported PPM dtype {arr.dtype}")
+    h, w, c = arr.shape
+    if c != 3:
+        raise ValueError("Only RGB PPM supported")
+    header = f"P6\n{w} {h}\n{maxval}\n".encode("ascii")
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(arr.tobytes())
+
+
+def _synthetic_image_for_icc(depth: int) -> np.ndarray:
+    """Create a small neutral RGB gradient image with no true black values.
+
+    All channels are identical so that a well-behaved ICC round-trip preserves
+    the mean value.  Color shifts caused by the ICC would otherwise make the
+    simple mean-ratio check unreliable.
+    """
+    size = _CAU_TEST_SIZE
+    if depth == 8:
+        # 8-bit values from 128 to 255
+        base = np.linspace(128, 255, size * size, dtype=np.uint8).reshape(size, size)
+    else:
+        # 16-bit values from 0x8000 to 0xFFFF
+        base = np.linspace(0x8000, 0xFFFF, size * size, dtype=np.uint16).reshape(size, size)
+    img = np.stack([base, base, base], axis=2)
+    return img
+
+
+def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
+    """Run one round-trip test at the given bit depth. Returns True if safe."""
+    img = _synthetic_image_for_icc(depth)
+    if depth == 8:
+        original_norm = float(img.mean()) / 255.0
+    else:
+        original_norm = float(img.mean()) / 65535.0
+
+    tmp = Path(tempfile.mkdtemp(prefix="jxl_icc_test_"))
+    try:
+        # Build a PNG with the ICC embedded in iCCP, matching the real encoder path.
+        png_path = tmp / "test.png"
+        png_bytes = make_png_bytes(img, icc_bytes=icc_bytes)
+        png_path.write_bytes(png_bytes)
+
+        jxl_path = tmp / "test.jxl"
+        # Use effort=1 for the test: the goal is to detect severe darkening, not to
+        # match the final quality/size.  The current distance is still used because
+        # lossy behaviour varies with distance.
+        cmd = [
+            "cjxl",
+            str(png_path),
+            str(jxl_path),
+            "-d", str(CJXL_DISTANCE),
+            "--effort", "1",
+            "--container=1",
+        ]
+        if CJXL_MODULAR and CJXL_DISTANCE > 0:
+            cmd.append("--modular=1")
+
+        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        if r.returncode != 0:
+            logger.debug(f"Cautious ICC test encode failed at {depth}-bit: {r.stderr.decode(errors='replace')[:200]}")
+            return False
+
+        out_png = tmp / "out.png"
+        r = subprocess.run(["djxl", str(jxl_path), str(out_png)], capture_output=True, timeout=120)
+        if r.returncode != 0 or not out_png.exists():
+            logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {r.stderr.decode(errors='replace')[:200]}")
+            return False
+
+        decoded = np.array(Image.open(out_png).convert("RGB"))
+        decoded_norm = float(decoded.mean()) / 255.0
+        ratio = decoded_norm / original_norm if original_norm > 0 else 0.0
+        safe = decoded_norm >= (_CAU_MIN_MEAN / 255.0) and ratio >= _CAU_MIN_RATIO
+        logger.debug(
+            f"Cautious ICC test {depth}-bit: original_norm={original_norm:.3f}, "
+            f"decoded_norm={decoded_norm:.3f}, ratio={ratio:.3f}, safe={safe}"
+        )
+        return safe
+    except Exception as e:
+        logger.debug(f"Cautious ICC test failed at {depth}-bit: {e}")
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
+    """Test an ICC profile with a small round-trip before trusting it."""
+    cache = _load_icc_cache()
+    key = hashlib.sha256(icc_bytes).hexdigest()
+    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}"
+    cached = cache.get(versioned_key)
+    if cached is not None:
+        if isinstance(cached, dict):
+            embed = bool(cached.get("embed"))
+        else:
+            embed = bool(cached)
+        logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
+        return embed
+
+    if not shutil.which("cjxl") or not shutil.which("djxl"):
+        logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
+        return _should_embed_icc_heuristic(icc_bytes)
+
+    safe = True
+    for depth in (8, 16):
+        if not _cautious_test_icc_depth(icc_bytes, depth):
+            safe = False
+            break
+
+    cache[versioned_key] = {"embed": safe, "ts": datetime.now().isoformat()}
+    _save_icc_cache(cache)
+    logger.info(
+        f"Cautious ICC: {'embed' if safe else 'skip'} for {tiff_path.name} "
+        f"({len(icc_bytes)} bytes, profile class {_get_icc_profile_class(icc_bytes) or b'?'})"
+    )
+    return safe
+
+
+# ─────────────────────────────────────────────
+# HEURISTIC ICC STRATEGY
+# ─────────────────────────────────────────────
+
+def _should_embed_icc_heuristic(icc_bytes: bytes) -> bool:
+    if len(icc_bytes) > ICC_PROBLEMATIC_SIZE_THRESHOLD:
+        logger.debug(f"ICC profile ({len(icc_bytes)} bytes) exceeds size threshold; skipping iCCP")
+        return False
+    profile_class = _get_icc_profile_class(icc_bytes)
+    if profile_class == b"scnr":
+        logger.debug("ICC profile class is 'scnr' (scanner); skipping iCCP")
+        return False
+    return True
+
+
+def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None):
     """Decide whether the ICC profile should be embedded in the PNG iCCP chunk.
 
     For lossless encoding the ICC is always embedded because the JXL stores the
@@ -693,7 +953,7 @@ def should_embed_icc_in_png(icc_bytes, lossy=True):
 
     Returns True  -> embed ICC in PNG (cjxl will use it for XYB conversion)
     Returns False -> skip iCCP (cjxl treats pixels as generic RGB; ICC is injected
-                     into the JXL container via exiftool afterwards)
+                      into the JXL container via exiftool afterwards)
     """
     if not lossy or not icc_bytes:
         return True
@@ -704,23 +964,15 @@ def should_embed_icc_in_png(icc_bytes, lossy=True):
     if strategy == "skip":
         return False
     if strategy == "cautious":
-        # Cautious mode is planned for a future release; falls back to heuristic
-        # here when the per-ICC cache lookup has not been wired yet.
-        strategy = "heuristic"
+        return _cautious_should_embed_icc(icc_bytes, tiff_path or Path("unknown"))
 
     if strategy == "heuristic":
-        if len(icc_bytes) > ICC_PROBLEMATIC_SIZE_THRESHOLD:
-            logger.debug(f"ICC profile ({len(icc_bytes)} bytes) exceeds size threshold; skipping iCCP")
-            return False
-        profile_class = _get_icc_profile_class(icc_bytes)
-        if profile_class == b"scnr":
-            logger.debug("ICC profile class is 'scnr' (scanner); skipping iCCP")
-            return False
-        return True
+        return _should_embed_icc_heuristic(icc_bytes)
 
     # Unknown strategy -> default to safe behavior (embed)
     logger.warning(f"Unknown ICC_PNG_STRATEGY '{ICC_PNG_STRATEGY}', defaulting to embed")
     return True
+
 
 
 def get_page_icc(tif, page_idx: int):
@@ -1219,7 +1471,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if not lossy:
                 png_icc_bytes = icc_bytes  # lossless: always embed ICC natively
             else:
-                embed = should_embed_icc_in_png(icc_bytes, lossy=True)
+                embed = should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=tiff_path)
                 png_icc_bytes = icc_bytes if embed else None
                 if not embed and icc_bytes:
                     logger.info(f"  >Skipping ICC in PNG iCCP for {tiff_path.name} (page {page_idx}); profile will be preserved via XMP")
@@ -1646,7 +1898,7 @@ def find_tiffs_mode7(input_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
-    parser.add_argument("input",             type=Path, help="Input root folder")
+    parser.add_argument("input",             type=Path, nargs="?", help="Input root folder")
     parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
     parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
     parser.add_argument("--workers",         type=int, default=min(os.cpu_count(), 16))
@@ -1686,15 +1938,33 @@ def main():
                         choices=["heuristic", "always", "skip", "cautious"],
                         help="How to handle ICC in the PNG intermediate for lossy encoding: "
                              "heuristic (default: skip for large/scanner profiles), "
-                             "always (embed always), skip (never embed). "
-                             "cautious is planned for a future release (currently falls back to heuristic).")
+                             "always (embed always), skip (never embed), "
+                             "cautious (test each unseen ICC with a round-trip and cache the result).")
+    parser.add_argument("--icc-cache-dir", type=str, default=None,
+                        help="Directory for the ICC cautious-strategy cache "
+                             "(default: APPDATA/jxl-photo/icc-cache on Windows, "
+                             "~/.config/jxl-photo/icc-cache elsewhere).")
+    parser.add_argument("--clear-icc-cache", action="store_true",
+                        help="Clear the ICC cautious-strategy cache and exit.")
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
     parser.add_argument("--embed-thumbnail", action="store_true",
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
+
+    # ICC cache override and clearing must be processed before any logging or conversion.
+    if args.icc_cache_dir is not None:
+        ICC_CACHE_DIR_OVERRIDE = Path(args.icc_cache_dir)
+    if args.clear_icc_cache:
+        cleared = _clear_icc_cache()
+        print(f"ICC cache {'cleared' if cleared else 'was already empty'}: {_icc_cache_dir()}")
+        return
+
+    if args.input is None:
+        parser.error("the following arguments are required: input")
+
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:

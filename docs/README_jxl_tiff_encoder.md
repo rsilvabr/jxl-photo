@@ -433,11 +433,11 @@ Some scanner ICC profiles (e.g. SilverFast `SFprofT`, VueScan) are very large (`
 The workaround is to **not embed the ICC profile in the intermediate PNG's `iCCP` chunk** during lossy encoding. The pixel data is then treated as plain RGB, the JXL encodes correctly, and the original ICC is still preserved as base64 metadata in the JXL (`XMP-xmp:CreatorTool`). The decoder re-attaches the original ICC when it restores the TIFF, so the round-trip file is visually identical to the original.
 
 | Strategy | Behavior | When to use |
-|---|---|---|---|
+|---|---|---|
 | `heuristic` (default) | Skip `iCCP` for profiles ≥ 50 KB **or** with ICC class `scnr` (scanner). Otherwise embed normally. | Mixed camera + scanner workflows. |
 | `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
 | `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
-| `cautious` | **[PLANNED]** Round-trip test each unseen ICC and cache the result. | Future release; currently falls back to heuristic. |
+| `cautious` | Test each unseen ICC with a small 8/16-bit round-trip and cache the result. Avoids false positives from the size heuristic. | Libraries with many different profiles; slowest first pass, instant afterwards. |
 
 > **Note:** the `skip` strategy here means "do not embed the ICC in the PNG intermediate". It does **not** mean "skip the JXL conversion". A future release may add a separate option to copy the original TIFF instead of converting when the ICC is problematic.
 
@@ -454,6 +454,9 @@ py jxl_tiff_encoder.py "F:\Photos" --mode 7 --distance 0.1 --icc-png-strategy al
 
 # Never embed the ICC (safest for any source, but JXL colors may look wrong until decoded)
 py jxl_tiff_encoder.py "F:\Scanner_Archive" --mode 7 --distance 0.1 --icc-png-strategy skip
+
+# Cautious: round-trip test each unseen ICC and cache the result (recommended for mixed libraries)
+py jxl_tiff_encoder.py "F:\Photos" --mode 7 --distance 0.1 --icc-png-strategy cautious
 ```
 
 For more details, see the v1.7.0 release notes and `docs/bugs_fixes_explained.md`.
