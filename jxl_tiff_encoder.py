@@ -640,18 +640,6 @@ def should_apply_d50_patch(tiff_path):
                 return True
         return False
 
-def extract_icc_bytes(tiff_path):
-    """Extract the ICC profile bytes from a TIFF using ExifTool (IFD0 by default).
-    Returns the raw ICC bytes or None if none is found."""
-    with tempfile.TemporaryDirectory(prefix="icc_", dir=TEMP_DIR) as tmp:
-        arg_file = Path(tmp) / "icc_extract.args"
-        arg_file.write_text(f"-b\n-ICC_Profile\n{tiff_path}\n", encoding="utf-8")
-        r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
-    if r.returncode == 0 and len(r.stdout) > 128:
-        return bytes(r.stdout)
-    return None
-
-
 def apply_d50_policy(icc_bytes, tiff_path):
     """Apply the D50 illuminant patch (if policy says so) and update stats.
     Accepts and returns raw ICC bytes. Safe to call with None (returns None)."""
@@ -1510,10 +1498,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
 
-            # 7. Reorder JXL boxes so Exif comes before the codestream
-            reorder_jxl_boxes(write_path)
-
-            # 8. Embed JPEG thumbnail if enabled
+            # 7. Embed JPEG thumbnail if enabled
             if EMBED_JPEG_THUMBNAIL:
                 try:
                     from PIL import Image, ImageCms
@@ -1647,6 +1632,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     )
                 except Exception as e_mark:
                     logger.debug(f"  >Multi-page marker write failed (non-critical): {e_mark}")
+
+            # Reorder JXL boxes so Exif/XMP come before the codestream. This must
+            # run after all exiftool operations (metadata, thumbnail, markers)
+            # because each exiftool edit can re-append boxes after the codestream.
+            reorder_jxl_boxes(write_path)
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"

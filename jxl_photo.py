@@ -3285,13 +3285,25 @@ def main():
             workflow['compression'] = config.config.last_compression or 'zip'
             workflow['bit_depth'] = config.config.last_bit_depth or 16
             workflow['dry_run'] = False
-            workflow['advanced_options'] = config.config.last_advanced_options or {
+            fallback_advanced = {
                 'overwrite': overwrite,
                 'sync': sync,
                 'd50_patch': last_d50_patch if origin == 'tiff' else None,
                 'encode_tag': last_encode_tag if origin == 'tiff' else None,
                 'embed_thumbnail': config.config.last_jpeg_thumbnail if origin == 'tiff' else None,
+                'multipage_mode': config.config.last_multipage_mode or 'ignore',
+                'thumbnail_mode': config.config.last_thumbnail_mode or 'exclude',
+                'thumbnail_suffix': config.config.last_thumbnail_suffix or '_thumbnail',
+                'thumbnail_handling': config.config.last_thumbnail_handling or 'include',
+                'no_reconstruct_multipage': bool(config.config.last_no_reconstruct_multipage),
+                'depth_policy': config.config.last_depth_policy or 'preserve_thumbnails',
+                'matrix': False,
+                'basic': False,
+                'none': False,
+                'target_icc': None,
+                'no_icc_cleanup': False,
             }
+            workflow['advanced_options'] = config.config.last_advanced_options or fallback_advanced
             # Ensure overwrite/sync reflect the choice just made in this dialog,
             # not a stale value from a previous session's last_advanced_options.
             workflow['advanced_options']['overwrite'] = overwrite

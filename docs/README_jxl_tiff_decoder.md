@@ -188,6 +188,8 @@ TIFF with transformed ICC
 
 **Note**: Matrix mode is slower and may show slight differences in extreme shadow detail due to rounding. Roundtrip mode is recommended for normal use.
 
+> **Limitation**: Pillow's LittleCMS path currently processes the transform in 8-bit precision, so 16-bit output in Matrix mode is created by scaling 8-bit data. This is a known limitation of the Pillow/LittleCMS route; use Roundtrip mode for full 16-bit fidelity.
+
 ---
 
 ## Key settings

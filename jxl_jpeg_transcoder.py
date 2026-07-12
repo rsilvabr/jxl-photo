@@ -367,47 +367,43 @@ def read_md5_db(jxl_path: Path) -> Optional[str]:
 def has_jbrd_box(jxl_path: Path) -> bool:
     """Check if JXL has jbrd (JPEG Bitstream Reconstruction Data) box.
     Returns True if this JXL can be losslessly transcoded back to JPEG.
-    Reads up to 16KB to handle files with large metadata headers.
-    Uses ISOBMFF box parsing for reliable detection (not naive substring search)."""
+    Parses ISOBMFF boxes sequentially until jbrd is found or EOF, so files
+    with large metadata headers before jbrd are detected correctly.
+    """
     try:
         with open(jxl_path, 'rb') as f:
-            data = f.read(16384)
-        
-        # Skip JXL signature (12 bytes) if present
-        offset = 0
-        if data[:2] == b'\xff\x0a':  # Bare codestream
-            return False  # No boxes = no jbrd
-        elif data[:12] == b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':
-            offset = 12  # Container signature
-        
-        # Parse ISOBMFF boxes
-        while offset < len(data) - 8:
-            # Read box size (4 bytes, big-endian)
-            size = int.from_bytes(data[offset:offset+4], 'big')
-            # Read box type (4 bytes)
-            box_type = data[offset+4:offset+8]
-            
-            # Check for jbrd box
-            if box_type == b'jbrd':
-                return True
-            
-            # Move to next box
-            if size == 0:  # Until end of file
-                break
-            elif size == 1:  # Extended size (64-bit)
-                if offset + 16 > len(data):
-                    break
-                size = int.from_bytes(data[offset+8:offset+16], 'big')
-            
-            if size < 8:  # Invalid box
-                break
-            offset = min(offset + size, len(data))
-            
-            # Safety limit
-            if offset > 16384:
-                break
-        
-        return False
+            header = f.read(12)
+
+            if header[:2] == b'\xff\x0a':  # Bare codestream
+                return False
+            if header[:12] != b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':
+                return False
+
+            while True:
+                box_header = f.read(8)
+                if len(box_header) < 8:
+                    return False
+
+                size = int.from_bytes(box_header[:4], 'big')
+                box_type = box_header[4:8]
+
+                if box_type == b'jbrd':
+                    return True
+
+                if size == 0:  # Box extends to end of file
+                    return False
+                elif size == 1:  # Extended 64-bit size
+                    ext_size = f.read(8)
+                    if len(ext_size) < 8:
+                        return False
+                    size = int.from_bytes(ext_size, 'big')
+
+                if size < 8:
+                    return False
+
+                payload = size - 8
+                if payload > 0:
+                    f.seek(payload, 1)
     except Exception:
         return False
 
@@ -735,8 +731,6 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         if smart:
             logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {src_path.name}")
-        elif reconvert_val:
-            logger.info(f"[{n}/{total}] SKIP (exists) | {src_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {src_path.name}")
         return (str(src_path), "skipped", str(final_path), None)
@@ -797,8 +791,6 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         if smart:
             logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {jxl_path.name}")
-        elif reconvert_val:
-            logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         return (str(jxl_path), "skipped", str(final_path), None)
@@ -1218,7 +1210,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             # PNG output
             if output_icc and MAGICK_AVAILABLE:
                 # Handle built-in color spaces vs ICC file paths
-                builtins = ('sRGB', 'Adobe RGB', 'ProPhoto RGB')
+                builtins = ('sRGB',)
                 if output_icc in builtins:
                     cs_name = output_icc.replace(' ', '')
                     magick_output = ["-colorspace", cs_name, "-depth", str(bit_depth)]
@@ -1244,7 +1236,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             # JPEG output via djxl directly (no magick needed unless ICC conversion)
             if output_icc and MAGICK_AVAILABLE:
                 # Handle built-in color spaces vs ICC file paths
-                builtins = ('sRGB', 'Adobe RGB', 'ProPhoto RGB')
+                builtins = ('sRGB',)
                 if output_icc in builtins:
                     # Use colorspace conversion (no ICC file needed)
                     cs_name = output_icc.replace(' ', '')  # 'Adobe RGB' -> 'AdobeRGB'
@@ -1318,11 +1310,17 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
 
     if use_staging:
         moved = 0
-        for _, write_out, final_out in tasks:
-            if write_out.exists():
+        status_map = {r[0]: r[1] for r in results}
+        for src, write_out, final_out in tasks:
+            status = status_map.get(str(src), "error")
+            if status in ("ok", "reconvert", "overwrite") and write_out.exists():
                 final_out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(write_out), str(final_out))
                 moved += 1
+            elif write_out.exists():
+                # Failed conversion: do not promote a partial/corrupt file to the
+                # final destination. Leave it in staging so the user can inspect.
+                logger.warning(f"Staging: not promoting {write_out.name} (status={status})")
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to destination")
 
@@ -1722,7 +1720,7 @@ Examples:
                         help="Output bit depth (PNG only, default: 16)")
     parser.add_argument("--icc-profile", type=str, default=None,
                         help="ICC profile for color conversion (requires ImageMagick). "
-                             "Can be a file path or built-in name: sRGB, Adobe RGB, ProPhoto RGB")
+                             "Can be a file path or the built-in name: sRGB")
     parser.add_argument("--to-srgb", action="store_true",
                         help="Shortcut: convert to sRGB using ImageMagick built-in color space")
 

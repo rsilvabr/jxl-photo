@@ -567,6 +567,11 @@ def read_png_to_numpy(png_path, target_depth=16):
                 rgb = rgb.astype(np.uint16) * 257
             elif target_depth == 8 and rgb.dtype == np.uint16:
                 rgb = np.rint(rgb / 257).astype(np.uint8)
+            if alpha is not None:
+                if target_depth == 16 and alpha.dtype == np.uint8:
+                    alpha = alpha.astype(np.uint16) * 257
+                elif target_depth == 8 and alpha.dtype == np.uint16:
+                    alpha = np.rint(alpha / 257).astype(np.uint8)
             return rgb, alpha
     except Exception:
         # imagecodecs not available or failed; fall through to PIL.
@@ -604,6 +609,11 @@ def read_png_to_numpy(png_path, target_depth=16):
             rgb = rgb.astype(np.uint16) * 257  # 0-255 → 0-65535
         elif target_depth == 8 and rgb.dtype == np.uint16:
             rgb = np.rint(rgb / 257).astype(np.uint8)
+        if alpha is not None:
+            if target_depth == 16 and alpha.dtype == np.uint8:
+                alpha = alpha.astype(np.uint16) * 257
+            elif target_depth == 8 and alpha.dtype == np.uint16:
+                alpha = np.rint(alpha / 257).astype(np.uint8)
 
         return rgb, alpha
 
@@ -1042,6 +1052,11 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 except Exception:
                     icc_data = None
 
+        if img_data.ndim == 3 and img_data.shape[2] == 4:
+            # JPEG preview cannot carry alpha; drop the alpha channel before
+            # generating the preview. The main image retains alpha in the TIFF.
+            img_data = img_data[:, :, :3]
+
         if img_data.ndim == 2:
             h, w = img_data.shape
         else:
@@ -1143,16 +1158,16 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 except Exception:
                     icc_data = None
 
-        # Write TIFF with JPEG as page 0 (with thumbnail flag) and 16-bit as page 1
+        # Write TIFF with JPEG as page 0 (with thumbnail flag) and main image as page 1
         # Using photometric interpretation for page 0 (JPEG data is YCbCr or RGB)
-        # and page 1 (16-bit is RGB or grayscale)
+        # and page 1 (main image is RGB, grayscale, or RGBA).
 
         # Save JPEG page 0 with NEWSubfileType=1
         jpeg_preview = Image.open(jpeg_path)
         jpeg_arr = np.array(jpeg_preview)
 
         # Write multipage TIFF following Capture One structure:
-        # Page 0: 16-bit main image (primary image for Windows Explorer)
+        # Page 0: main image (primary image for Windows Explorer)
         # Page 1: 8-bit preview with subfiletype=1 (thumbnail flag)
         # This ensures Windows Explorer uses the correct ICC from page 0
 
@@ -1162,12 +1177,14 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             except AttributeError:
                 write_method = tif_writer.save
             
-            # Page 0: 16-bit main image (primary)
+            # Page 0: main image (primary)
             # Windows Explorer uses this page for thumbnail with ICC
             kwargs_main = {
                 'photometric': 'RGB',
                 'compression': tiff_comp,
             }
+            if main_data.ndim == 3 and main_data.shape[2] == 4:
+                kwargs_main['extrasamples'] = 'UNASSALPHA'
             if icc_data:
                 kwargs_main['iccprofile'] = icc_data
             
@@ -1324,12 +1341,13 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
     logger.debug(f" >{reason}")
 
     if mode == 'roundtrip':
-        decode_auto(jxl_path, ppm_path)
-        pixels = read_ppm_to_numpy(ppm_path)
-        if target_depth == 8 and pixels.dtype == np.uint16:
-            pixels = np.rint(pixels / 257).astype(np.uint8)
-        elif target_depth == 16 and pixels.dtype == np.uint8:
-            pixels = pixels.astype(np.uint16) * 257
+        png_path = tmp_dir / "decoded_roundtrip.png"
+        decode_auto_png(jxl_path, png_path)
+        rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+        if alpha is not None:
+            pixels = np.dstack([rgb, alpha])
+        else:
+            pixels = rgb
         return pixels, original_icc, reason, mode
 
     elif mode == 'matrix':
@@ -1356,18 +1374,23 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
         return final_pixels, final_icc, reason, mode
 
     elif mode == 'none':
-        decode_auto(jxl_path, ppm_path)
-        pixels = read_ppm_to_numpy(ppm_path)
-        if target_depth == 8 and pixels.dtype == np.uint16:
-            pixels = np.rint(pixels / 257).astype(np.uint8)
-        elif target_depth == 16 and pixels.dtype == np.uint8:
-            pixels = pixels.astype(np.uint16) * 257
+        png_path = tmp_dir / "decoded_none.png"
+        decode_auto_png(jxl_path, png_path)
+        rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+        if alpha is not None:
+            pixels = np.dstack([rgb, alpha])
+        else:
+            pixels = rgb
         return pixels, None, reason, mode
 
     else:  # basic
         png_path = tmp_dir / f"{jxl_path.stem}_basic.png"
         decode_auto_png(jxl_path, png_path)
-        pixels, _ = read_png_to_numpy(png_path, target_depth=target_depth)
+        rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+        if alpha is not None:
+            pixels = np.dstack([rgb, alpha])
+        else:
+            pixels = rgb
         djxl_icc = extract_icc_from_png(png_path)
         if djxl_icc:
             logger.debug(" >ICC extracted from djxl output")
@@ -1472,6 +1495,10 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         if pixels.ndim == 3:
                             pixels = pixels[:, :, 0]
                         kwargs['photometric'] = 'minisblack'
+                    elif pixels.ndim == 3 and pixels.shape[2] == 4:
+                        # Preserve RGBA (alpha channel) in the output TIFF
+                        kwargs['photometric'] = 'RGB'
+                        kwargs['extrasamples'] = 'UNASSALPHA'
                     else:
                         kwargs['photometric'] = 'RGB'
                     # Attach ICC only to pages that carried their own ICC.
@@ -1808,7 +1835,8 @@ def collect_multipage_groups(jxls: list) -> dict:
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
-            groups[j] = [(j, 0, _is_thumbnail_jxl(j), False, 0, False, None)]
+            info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
+            groups[j] = [(j, 0, _is_thumbnail_jxl(j), info['inherited'], info['subfiletype'], info['grayscale'], info['depth'])]
         return groups
 
     by_group: dict = {}
@@ -1964,6 +1992,9 @@ Examples:
 
     if USE_MATRIX_MODE and not ImageCms:
         print("WARNING: Matrix mode requested but ImageCms unavailable. Install with: pip install Pillow --upgrade")
+
+    if args.target_icc and not USE_MATRIX_MODE:
+        logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
 
     if args.depth:
         DJXL_OUTPUT_DEPTH = args.depth
