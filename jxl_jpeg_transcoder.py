@@ -1601,7 +1601,13 @@ def cmd_auto(args):
     logger.info(f"JXL with jbrd (lossless decode): {len(jxl_transcode_files)}")
     logger.info(f"JXL without jbrd (lossy): {len(jxl_convert_files)}")
     logger.info(f"Mode: {args.mode} | Workers: {args.workers} | Staging: {TEMP2_DIR or 'disabled'}")
-    
+
+    # JPEG does not support 16-bit. Switch format to PNG before any group is
+    # processed so that staging files and final paths use the correct extension.
+    if args.format == "jpeg" and args.bit_depth == 16:
+        logger.warning("JPEG output does not support 16-bit; switching to PNG")
+        args.format = "png"
+
     # Process JPEG files (lossless encode to JXL)
     if jpeg_files:
         logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
@@ -1764,7 +1770,7 @@ Examples:
                         help="cjxl effort 1-10")
 
     # Convert specific
-    parser.add_argument("--ram", action="store_true", default=True, help="Use RAM pipeline")
+    parser.add_argument("--ram", action="store_true", default=True, help="Use RAM pipeline when possible (ICC conversions always use a temporary PNG)")
     parser.add_argument("--no-ram", dest="ram", action="store_false", help="Use disk")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
