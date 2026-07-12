@@ -2310,3 +2310,68 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 ---
 
+### Bug #123 — `jxl_jpeg_transcoder.py` Uses Invalid `--output_format=png` Flag
+
+**Location:** `jxl_jpeg_transcoder.py` — `decode_to_image()`
+
+**Problem:** When `output_icc` was set and `use_ram=True` (default), the `djxl` command included `"--output_format=png"`. `djxl` does not support this flag and fails with "Unknown flag". This broke `--to-srgb` and `--icc-profile` for JXL→JPEG/PNG conversions in RAM mode, which is the default.
+
+**Fix:** Replaced the RAM pipeline for ICC conversions with the same temp-PNG path used by `--no-ram`: `djxl input tmp.png` (format inferred by extension), then `magick tmp.png ... output`.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `decode_to_image()`
+
+---
+
+### Bug #124 — Staging Orphan with `--format jpeg --bit-depth 16`
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_convert()` and `decode_to_image()`
+
+**Problem:** JPEG does not support 16-bit, so `decode_to_image()` silently switched the output to PNG (`actual_out`). In staging mode, the staging file had already been created with `.jpg`, so the final `.png` was never moved from staging and the `.jpg` staging file was orphaned.
+
+**Fix:** Moved the JPEG+16-bit detection to `cmd_convert()` before building output pairs. The format is switched to PNG early, so staging files and final paths get the correct `.png` extension.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_convert()`
+
+---
+
+### Bug #125 — `make_png_bytes()` Always Writes 16-Bit PNGs
+
+**Location:** `jxl_tiff_encoder.py` — `make_png_bytes()` / `_cautious_test_icc_depth()`
+
+**Problem:** `make_png_bytes()` always converted uint8 input to uint16 and wrote a 16-bit PNG. The "cautious" ICC test therefore ran two 16-bit round-trips instead of the documented 8-bit and 16-bit tests.
+
+**Fix:** Made `make_png_bytes()` preserve the input bit depth: uint8 input now writes a true 8-bit PNG, and uint16 input writes a 16-bit PNG.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `make_png_bytes()`
+
+---
+
+### Bug #126 — `add_jpeg_preview()` Still Has Obsolete Comment and Dead Code
+
+**Location:** `jxl_tiff_decoder.py` — `add_jpeg_preview()`
+
+**Problem:** One leftover comment still described page 0 as the JPEG preview and page 1 as the main image, and the JPEG bytes were read into `jpeg_bytes` but never used.
+
+**Fix:** Corrected the comment and removed the unused `jpeg_bytes` read.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `add_jpeg_preview()`
+
+---
+
+### Bug #127 — `read_ppm_to_numpy()` Fails When Dimensions Are on Separate Lines
+
+**Location:** `jxl_tiff_decoder.py` — `read_ppm_to_numpy()`
+
+**Problem:** The parser expected width and height on the same line. Valid PPM headers that split dimensions across lines or include comments would fail.
+
+**Fix:** Read header tokens (skipping comments) until magic, width, height, and maxval are all available, regardless of line breaks.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `read_ppm_to_numpy()`
+
+---
+

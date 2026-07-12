@@ -41,6 +41,10 @@ This release implements the `cautious` mode of `--icc-png-strategy` and includes
 - **Embedded JPEG thumbnail was always generated from page 0** — when encoding a multi-page page with `page_idx > 0`, the thumbnail came from the first page. Both the PIL and tifffile fallback paths now use the page being encoded.
 - **`reorder_jxl_boxes()` failed on bare codestreams** (`0xFF 0x0A`). Both the encoder and the JPEG transcoder now return early for bare codestreams.
 - **Obsolete comments in `add_jpeg_preview()`** described the page order backwards. Comments updated to match the actual Capture One-like structure (main image on page 0, preview on page 1).
+- **Transcoder used invalid `--output_format=png` flag with `djxl`** in the ICC/RAM conversion path. `djxl` rejects that flag, so `--to-srgb` and `--icc-profile` were broken in the default RAM mode. Fixed by decoding to a temporary PNG (format by extension) and then converting with ImageMagick.
+- **Staging orphan with `--format jpeg --bit-depth 16`** — JPEG does not support 16-bit, so the output switched to PNG, but the staging file kept a `.jpg` extension and was never moved. Format is now switched to PNG before staging files are created.
+- **`make_png_bytes()` always wrote 16-bit PNGs**, so the cautious ICC "8-bit" test was actually a 16-bit test. It now writes 8-bit PNGs for uint8 input and 16-bit PNGs for uint16 input.
+- **`read_ppm_to_numpy()` failed when PPM width/height were on separate lines** or had comments mixed with tokens. The parser now reads tokens until magic, width, height, and maxval are all available.
 
 ### Earlier v1.7.1 beta fixes
 
