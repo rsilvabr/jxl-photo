@@ -1,9 +1,9 @@
-# v1.7.1 — Cautious ICC Strategy Cache
+# v1.7.1 — Cautious ICC Strategy Cache + Audit Fixes
 
 **Release date:** 2026-07-12  
 **Status:** Released
 
-This release implements the `cautious` mode of `--icc-png-strategy`. Instead of relying only on the size/class heuristic, `cautious` runs a small 8-bit and 16-bit round-trip test for each unseen ICC profile and caches the result. Profiles that survive the round-trip are embedded in the PNG `iCCP` chunk; profiles that cause severe darkening are skipped.
+This release implements the `cautious` mode of `--icc-png-strategy` and includes a large set of audit-driven fixes for the TIFF/JXL round-trip, auto mode, and robustness.
 
 ## What's new
 
@@ -18,7 +18,7 @@ This release implements the `cautious` mode of `--icc-png-strategy`. Instead of 
 
 - Default location:
   - Windows: `%APPDATA%\jxl-photo\icc-cache\icc_cache.json`
-  - Linux/macOS: `~/.config/jxl-photo/icc-cache/icc_cache.json`
+  - Linux/macOS: `~/.config/jxl-photo\icc-cache\icc_cache.json`
 - Override with `--icc-cache-dir <dir>`.
 - Clear with `--clear-icc-cache`.
 
@@ -28,7 +28,34 @@ This release implements the `cautious` mode of `--icc-png-strategy`. Instead of 
 - The ICC cache key includes `distance` and `modular` flag, so changing lossy parameters invalidates prior cautious results.
 - The encoder now verifies that `cjxl` is present in `PATH` before starting conversion.
 
+## Bug fixes
+
+### v1.7.1 final audit fixes
+
+- **Grayscale standalone TIFFs were reconstructed as RGB** — the `jxlphoto-grayscale` marker was only written for split multi-page pages; single-page grayscale TIFFs were restored as 3-channel RGB. The marker is now written for every grayscale page, including standalone files.
+- **`--none` mode was ignored for standalone files with `_pageN`/`_thumbnail` suffixes** — the decoder derived its strategy only from `page_idx == 0`; standalone files with a non-zero page suffix kept the default strategy and added preview + full metadata. Strategy is now taken from the first non-thumbnail page in the group.
+- **`os.cpu_count()` returning `None` crashed argument parsing** in `jxl_jpeg_transcoder.py`, `jxl_tiff_decoder.py`, and `jxl_tiff_encoder.py`. Defaults now fall back to 4.
+- **RGBA TIFFs were rejected by the encoder** even though the decoder and `make_png_bytes()` fully support alpha. The rejection was removed, so RGBA TIFFs round-trip correctly with `extrasamples=UNASSALPHA`.
+- **D50 patch summary under-counted actually-patched files** because `already_correct` mixed applied-correct files with skipped-correct files. Counters are now split into `applied_already_correct` and `skipped_already_correct`.
+- **Manifest auto-mode routed any folder containing the substring `jxl` as mode 6/7** — e.g. `JXL_archive`. The substring check was removed; only the configured export marker is used for that heuristic.
+- **Embedded JPEG thumbnail was always generated from page 0** — when encoding a multi-page page with `page_idx > 0`, the thumbnail came from the first page. Both the PIL and tifffile fallback paths now use the page being encoded.
+- **`reorder_jxl_boxes()` failed on bare codestreams** (`0xFF 0x0A`). Both the encoder and the JPEG transcoder now return early for bare codestreams.
+- **Obsolete comments in `add_jpeg_preview()`** described the page order backwards. Comments updated to match the actual Capture One-like structure (main image on page 0, preview on page 1).
+
+### Earlier v1.7.1 beta fixes
+
+- Fixed `UnboundLocalError` in `collect_multipage_groups()` when `--no-reconstruct-multipage` is used.
+- Auto mode + `--delete-source` now correctly deletes sources converted lossily, not just losslessly transcoded files.
+- `has_jbrd_box()` now parses extended (64-bit) ISOBMFF sizes correctly.
+- Added a warning when the decoder falls back to PIL for 16-bit RGB/RGBA PNGs, since PIL degrades precision.
+- `--delete-source` confirmation in auto mode is now gated to mode 8, matching the actual deletion logic.
+- `--target-icc` / `--thumbnail-handling=generate` warnings are emitted after the logger is configured.
+- The TIFF encoder’s `ignore` multi-page mode now reads the real samples-per-pixel of page 0 instead of assuming RGB, so grayscale single-page TIFFs are encoded as grayscale.
+- `jxl_photo.py` repeat workflow now restores `add_preview` and other advanced settings.
+- `add_jpeg_preview()` no longer leaks an open `Image.open()` handle.
+
 ## CLI examples
+
 
 ```bash
 # Cautious mode: test and cache each unseen ICC profile

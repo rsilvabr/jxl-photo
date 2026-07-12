@@ -2190,4 +2190,123 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 ---
 
+### Bug #114 — Grayscale Standalone TIFFs Reconstructed as RGB
+
+**Location:** `jxl_tiff_encoder.py` — `convert_one()`
+
+**Problem:** The `jxlphoto-grayscale` XMP marker was only written when `multipage_group` was set. Single-page grayscale TIFFs were therefore encoded as grayscale but decoded without the marker, and `read_png_to_numpy()` always returns a 3-channel RGB array, so the reconstructed TIFF came out as RGB instead of 2D grayscale.
+
+**Fix:** Write the grayscale marker outside the `if multipage_group:` block, so every grayscale page gets the flag.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `convert_one()`
+
+---
+
+### Bug #115 — `--none` Mode Ignored for Standalone Files with `_pageN`/`_thumbnail` Suffix
+
+**Location:** `jxl_tiff_decoder.py` — `write_multipage_tiff()`
+
+**Problem:** `reason` and `strategy` were only captured when `page_idx == 0 and not is_thumb`. A standalone file named `photo_page2.jxl` (no group marker) was parsed with `page_idx = 2`, so `strategy` stayed `"unknown"` and the `--none` contract was violated: preview JPEG was added and full XMP/IPTC metadata was copied.
+
+**Fix:** Use the first non-thumbnail page of the group as the anchor, regardless of its page index: `if not is_thumb and page_icc is None:`.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `write_multipage_tiff()`
+
+---
+
+### Bug #116 — `min(os.cpu_count(), 16)` Crashes When `cpu_count()` is `None`
+
+**Location:** `jxl_jpeg_transcoder.py`, `jxl_tiff_decoder.py`, `jxl_tiff_encoder.py` — argument parsers
+
+**Problem:** In some containers/sandboxes `os.cpu_count()` returns `None`, making `min(None, 16)` raise `TypeError` during argument parsing.
+
+**Fix:** Use `min(os.cpu_count() or 4, 16)` in all three scripts.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `--workers` default
+- `jxl_tiff_decoder.py` `--workers` default
+- `jxl_tiff_encoder.py` `--workers` default
+
+---
+
+### Bug #117 — RGBA TIFFs Rejected by the Encoder
+
+**Location:** `jxl_tiff_encoder.py` — `convert_one()`
+
+**Problem:** The encoder raised `ValueError` for `page.samplesperpixel == 4` even though `make_png_bytes()` supports 4-channel PNGs and the decoder reconstructs alpha with `extrasamples=UNASSALPHA`. This broke the round-trip for any TIFF with an alpha channel.
+
+**Fix:** Removed the RGBA rejection. The encoder now passes the 4-channel page through the existing PNG/JXL pipeline.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `convert_one()`
+
+---
+
+### Bug #118 — D50 Patch Summary Under-Counts Actually-Patched Files
+
+**Location:** `jxl_tiff_encoder.py` — D50 summary
+
+**Problem:** `actually_patched = applied - already_correct` mixed applied-correct files with skipped-correct files, so the summary could under-report (or report zero) actually-patched files.
+
+**Fix:** Split the counter into `applied_already_correct` and `skipped_already_correct`. Summary now uses `actually_patched = applied - applied_already_correct`.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `_d50_patch_count` initialization, `apply_d50_policy()`, D50 summary
+
+---
+
+### Bug #119 — Manifest Auto-Mode Routes Any Folder Containing Substring `jxl` as Mode 6/7
+
+**Location:** `jxl_photo.py` — `detect_mode_for_entry()`
+
+**Problem:** The check `'jxl' in dest_str_lower` meant that a folder like `JXL_archive` was treated as an export-style destination, forcing mode 6 or 7 for manifest entries that were really mode 0.
+
+**Fix:** Removed the `jxl` substring check; only the configured export marker is used for this heuristic.
+
+**Files changed:**
+- `jxl_photo.py` `detect_mode_for_entry()`
+
+---
+
+### Bug #120 — Embedded JPEG Thumbnail Always Generated from Page 0
+
+**Location:** `jxl_tiff_encoder.py` — `convert_one()`
+
+**Problem:** When `EMBED_JPEG_THUMBNAIL` was enabled and a multi-page page with `page_idx > 0` was encoded, the thumbnail was read from `tif.pages[0]` (or `img` pointing to page 0) instead of the page being encoded.
+
+**Fix:** Both the PIL path (`img.seek(page_idx)`) and the tifffile fallback (`tif.pages[page_idx]`) now use the page being encoded.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `convert_one()`
+
+---
+
+### Bug #121 — `reorder_jxl_boxes()` Fails on Bare Codestreams
+
+**Location:** `jxl_tiff_encoder.py` and `jxl_jpeg_transcoder.py` — `reorder_jxl_boxes()`
+
+**Problem:** A bare JXL codestream (`0xFF 0x0A`) has no ISOBMFF boxes. The function tried to parse boxes from the raw codestream and raised `RuntimeError`.
+
+**Fix:** Added an early return when `data[:2] == b'\xff\x0a'`.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `reorder_jxl_boxes()`
+- `jxl_jpeg_transcoder.py` `reorder_jxl_boxes()`
+
+---
+
+### Bug #122 — Obsolete Comments in `add_jpeg_preview()`
+
+**Location:** `jxl_tiff_decoder.py` — `add_jpeg_preview()`
+
+**Problem:** Comments described page 0 as the JPEG preview and page 1 as the main image, while the code writes the main image on page 0 and the preview on page 1 (matching the Capture One structure).
+
+**Fix:** Updated comments to match the actual page order.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `add_jpeg_preview()`
+
+---
 
