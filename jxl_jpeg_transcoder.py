@@ -1360,7 +1360,9 @@ def cmd_convert(args, from_jxl: bool = True):
             args.bit_depth = 8
     else:
         direction = "to_jxl"
-        args.bit_depth = 8  # Irrelevant for JXL output
+        if args.bit_depth is None:
+            args.bit_depth = 8  # Irrelevant for JXL output, but keep a sane default
+
 
     # Collect files (ICC label, op_type, and mode_str are set after this)
     if args.input.is_file():
@@ -1686,15 +1688,15 @@ Auto-detection (no subcommand needed for single files):
   photo.jxl       -> transcode decode if jbrd present, else convert
   photo.png       -> convert to JXL
 
-Explicit subcommands (for directories or override):
-  %(prog)s transcode <input> [options]   # lossless JPEG<->JXL
-  %(prog)s convert <input> [options]     # lossy with ICC support
+Explicit flags (for directories or override):
+  %(prog)s <input> --force-transcode [options]   # lossless JPEG<->JXL
+  %(prog)s <input> --force-convert  [options]     # lossy with ICC support
 
 Examples:
-  %(prog)s photo.jpg --mode 1            # auto: transcode to converted_jxl/
-  %(prog)s photo.jxl --format png        # auto: to PNG (16-bit default)
-  %(prog)s transcode ./folder --mode 8   # explicit: batch transcoding
-  %(prog)s convert photo.jxl --to-jpeg --quality 95
+  %(prog)s photo.jpg --mode 1                      # auto: transcode to converted_jxl/
+  %(prog)s photo.jxl --format png                  # auto: to PNG (16-bit default)
+  %(prog)s ./folder --force-transcode --mode 8     # explicit: batch transcoding
+  %(prog)s photo.jxl --force-convert --format jpeg --quality 95
         """
     )
 

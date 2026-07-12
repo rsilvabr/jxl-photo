@@ -499,7 +499,7 @@ class FolderAnalyzer:
             result['recommended_mode'] = 3
             confidence = 'high'
             reasoning.append(f"Recursive structure detected — {len(result['file_distribution'])} subfolders with files")
-            reasoning.append(f"Mode 3 recommended — creates '{dest}_files' subfolder in each location")
+            reasoning.append(f"Mode 3 recommended — creates '{self.dest}_files' subfolder in each location")
 
         # Mode 2: flat output folder
         elif result['has_subfolders'] and result['total_files'] > 5:
@@ -513,7 +513,7 @@ class FolderAnalyzer:
             result['recommended_mode'] = 1
             confidence = 'medium'
             reasoning.append("Single subfolder structure detected")
-            reasoning.append("Mode 1 recommended — creates 'converted_{dest}' subfolder")
+            reasoning.append(f"Mode 1 recommended — creates 'converted_{self.dest}' subfolder")
 
         # Mode 0: flat (files in root)
         elif result['has_flat_structure'] and result['total_files'] > 0:
@@ -1152,7 +1152,12 @@ class InteractiveMenu:
             print("(This may take a moment for large folders...)")
 
         analyzer = FolderAnalyzer(input_dir, origin, dest, export_marker)
-        analysis = analyzer.analyze()
+        try:
+            analysis = analyzer.analyze()
+        except Exception as e:
+            self._print_error(f"Auto Mode analysis failed: {e}")
+            logger.error(f"Auto Mode analysis failed: {e}")
+            return False
 
         # Print analysis report
         report = analyzer.format_report(analysis)
@@ -2689,9 +2694,33 @@ class InteractiveMenu:
 
         else:
             # JPEG/JXL/PNG transcoder
-            if workflow.get('conversion_type') == 'transcode_lossless':
+            conv_type = workflow.get('conversion_type', '')
+
+            if conv_type == 'transcode_lossless':
+                # JPEG->JXL lossless
                 cmd.append('--force-transcode')
-            elif 'lossy' in workflow.get('conversion_type', ''):
+            elif conv_type == 'convert_lossy':
+                # JPEG->JXL lossy
+                cmd.append('--force-convert')
+                cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            elif conv_type == 'jxl_to_jpeg_auto':
+                # JXL->JPEG: auto-detect per-file (no extra flag needed)
+                pass
+            elif conv_type == 'jxl_to_jpeg_lossless':
+                # JXL->JPEG: force lossless transcode (requires jbrd)
+                cmd.append('--force-transcode')
+                cmd.append('--decode')
+            elif conv_type == 'jxl_to_jpeg_force':
+                # JXL->JPEG: force lossy
+                cmd.append('--force-convert')
+                cmd.append('--decode')
+            elif conv_type == 'jxl_to_png':
+                # JXL->PNG: force convert (don't transcode even if jbrd present)
+                cmd.append('--force-convert')
+                cmd.append('--decode')
+
+            # Add quality for JXL->JPEG/PNG (used in convert mode)
+            if origin == 'jxl' and dest in ['jpeg', 'png']:
                 cmd.extend(['--quality', str(workflow.get('quality', 95))])
 
             cmd.extend(['--effort', str(workflow.get('effort', 7))])
@@ -2710,6 +2739,17 @@ class InteractiveMenu:
                 cmd.append('--sync')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+            if advanced.get('output_suffix'):
+                cmd.extend(['--output-suffix', advanced['output_suffix']])
+
+            if dest == 'png':
+                cmd.extend(['--format', 'png'])
+            elif dest in ['jpeg', 'jpg']:
+                cmd.extend(['--format', 'jpeg'])
+
+            if dest == 'png' and workflow.get('bit_depth'):
+                cmd.extend(['--bit-depth', str(workflow['bit_depth'])])
+
 
         if workflow.get('dry_run'):
             cmd.append('--dry-run')

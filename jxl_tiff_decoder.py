@@ -1179,8 +1179,14 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             
             # Page 0: main image (primary)
             # Windows Explorer uses this page for thumbnail with ICC
+            if main_data.ndim == 2 or (main_data.ndim == 3 and main_data.shape[2] == 1):
+                main_photometric = 'MINISBLACK'
+            elif main_data.ndim == 3 and main_data.shape[2] == 4:
+                main_photometric = 'RGB'
+            else:
+                main_photometric = 'RGB'
             kwargs_main = {
-                'photometric': 'RGB',
+                'photometric': main_photometric,
                 'compression': tiff_comp,
             }
             if main_data.ndim == 3 and main_data.shape[2] == 4:
@@ -1192,8 +1198,12 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
 
             # Page 1: 8-bit preview as thumbnail (subfiletype=1)
             # This marks it as a reduced-resolution image
+            if jpeg_arr.ndim == 2 or (jpeg_arr.ndim == 3 and jpeg_arr.shape[2] == 1):
+                preview_photometric = 'MINISBLACK'
+            else:
+                preview_photometric = 'RGB'
             kwargs_preview = {
-                'photometric': 'RGB',
+                'photometric': preview_photometric,
                 'compression': 'jpeg',
                 'subfiletype': 1,  # Marks as thumbnail/reduced resolution
             }
