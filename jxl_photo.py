@@ -768,10 +768,9 @@ class FolderAnalyzer:
             dest_str_lower = str(dst_path).lower()
             marker_lower = self.export_marker.lower()
             marker_in_dest = marker_lower in dest_str_lower
-            jxl_in_dest = 'jxl' in dest_str_lower
-            if marker_in_dest or jxl_in_dest:
+            if marker_in_dest:
                 # Distinguish mode 7 (subfolder) from mode 6 (same export folder).
-                if src_path == dst_path.parent and (marker_in_dest or jxl_in_dest):
+                if src_path == dst_path.parent:
                     return 7
                 return 6
         except ValueError:

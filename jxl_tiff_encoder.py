@@ -402,7 +402,8 @@ SCRIPT_DIR = Path(__file__).parent
 LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
-_d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0}
+_d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0,
+                    "applied_already_correct": 0, "skipped_already_correct": 0}
 _d50_patch_lock = threading.Lock()
 
 def setup_logger():
@@ -660,6 +661,7 @@ def apply_d50_policy(icc_bytes, tiff_path):
             _d50_patch_count["applied"] += 1
             if was_correct:
                 _d50_patch_count["already_correct"] += 1
+                _d50_patch_count["applied_already_correct"] += 1
         logger.debug(f"Applied D50 patch to {Path(tiff_path).name}" + (" (was already correct)" if was_correct else ""))
     else:
         was_correct = _is_d50_already_correct(bytes(icc))
@@ -667,6 +669,7 @@ def apply_d50_policy(icc_bytes, tiff_path):
             _d50_patch_count["skipped"] += 1
             if was_correct:
                 _d50_patch_count["already_correct"] += 1
+                _d50_patch_count["skipped_already_correct"] += 1
             else:
                 _d50_patch_count["skipped_needed"] += 1
         logger.debug(f"D50 patch skipped for {Path(tiff_path).name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
@@ -1221,8 +1224,13 @@ def reorder_jxl_boxes(jxl_path):
         raise RuntimeError(f"JXL file too large ({file_size} bytes), skipping box reorder")
     if file_size < 12:  # Minimum valid JXL: 12-byte signature
         return  # Too small to have boxes, leave as-is
-    
+
+    # Bare codestream has no boxes to reorder; leave as-is.
+    if data[:2] == b'\xff\x0a':
+        return
+
     boxes = []
+
     i = 0
     MAX_BOX_SIZE = min(file_size, MAX_JXL_SIZE)
     
@@ -1401,9 +1409,6 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if photometric == tifffile.PHOTOMETRIC.SEPARATED:
                     _log_rejected_file(str(tiff_path), "CMYK not supported")
                     raise ValueError("CMYK TIFFs are not supported")
-                if page.samplesperpixel == 4:
-                    _log_rejected_file(str(tiff_path), "RGBA not supported")
-                    raise ValueError("RGBA TIFFs are not supported (alpha channel would be lost)")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
@@ -1505,8 +1510,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     import io
                     # Apply user's PIL pixel limit setting (for large panoramas)
                     Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
-                    # Read the original TIFF to generate thumbnail
+                    # Read the original TIFF to generate thumbnail (use the page being encoded)
                     with Image.open(str(tiff_path)) as img:
+                        if page_idx > 0 and page_idx < getattr(img, 'n_frames', 1):
+                            img.seek(page_idx)
                         # Extract ICC profile BEFORE any conversion
                         icc_profile = img.info.get('icc_profile')
                         
@@ -1554,30 +1561,31 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         try:
                             # Read TIFF with tifffile (preserves ICC and bit depth)
                             with tifffile.TiffFile(str(tiff_path)) as tif:
-                                # Read main image data as numpy array
-                                img_array = tif.pages[0].asarray()
+                                # Read the page being encoded
+                                page = tif.pages[page_idx] if page_idx < len(tif.pages) else tif.pages[0]
+                                img_array = page.asarray()
                                 # Extract ICC profile
                                 icc_profile = None
                                 try:
-                                    icc_profile = tif.pages[0].icc_profile
+                                    icc_profile = page.icc_profile
                                 except Exception:
                                     pass
-                            
+
                             # Convert 16-bit to 8-bit if necessary
                             if img_array.dtype == np.uint16:
                                 img_8bit = (img_array / 257).astype(np.uint8)  # 65535/255 = 257
                             else:
                                 img_8bit = img_array
-                            
+
                             # Ensure RGB
                             if img_8bit.ndim == 2:
                                 img_8bit = np.stack([img_8bit] * 3, axis=-1)
                             elif img_8bit.shape[2] == 4:
                                 img_8bit = img_8bit[:, :, :3]  # Remove alpha
-                            
+
                             # Create PIL Image from array
                             pil_img = Image.fromarray(img_8bit)
-                            
+
                             # Convert to sRGB using ICC profile (same as decoder)
                             if icc_profile:
                                 try:
@@ -1586,17 +1594,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                                     pil_img = ImageCms.profileToProfile(pil_img, src_profile, rgb_profile)
                                 except Exception as e:
                                     logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
-                            
+
                             # Calculate thumbnail size (max 256px)
                             max_size = 256
                             ratio = min(max_size / pil_img.width, max_size / pil_img.height)
                             new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
                             thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
-                            
+
                             # Save as JPEG temporary (sRGB, no ICC embedded)
                             thumb_path = tmp_dir / "thumbnail.jpg"
                             thumb.save(str(thumb_path), "JPEG", quality=85)
-                            
+
                             # Inject thumbnail into JXL
                             r_thumb = subprocess.run(
                                 [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
@@ -1608,6 +1616,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                                 logger.debug(f"  >Thumbnail embedding failed (non-critical)")
                         except Exception as e2:
                             logger.debug(f"  >Thumbnail fallback also failed: {e2}")
+
 
             # Multi-page group marker: tag split pages so the decoder reconstructs
             # only genuinely-split files. Stored as an ADDITIONAL value in the
@@ -1623,8 +1632,6 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
                     if subfiletype != 0:
                         relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
-                    if is_grayscale:
-                        relation_args.append("-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG)
                     subprocess.run(
                         [_get_exiftool_cmd(), "-overwrite_original"] + relation_args +
                         [str(write_path)],
@@ -1632,6 +1639,19 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     )
                 except Exception as e_mark:
                     logger.debug(f"  >Multi-page marker write failed (non-critical): {e_mark}")
+
+            # Grayscale marker: must be written for standalone files too, otherwise
+            # read_png_to_numpy returns a 3-channel RGB array and the decoder cannot
+            # restore the original single-channel TIFF page.
+            if is_grayscale:
+                try:
+                    subprocess.run(
+                        [_get_exiftool_cmd(), "-overwrite_original",
+                         "-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG, str(write_path)],
+                        capture_output=True, timeout=10
+                    )
+                except Exception as e_mark:
+                    logger.debug(f"  >Grayscale marker write failed (non-critical): {e_mark}")
 
             # Reorder JXL boxes so Exif/XMP come before the codestream. This must
             # run after all exiftool operations (metadata, thumbnail, markers)
@@ -1900,7 +1920,7 @@ def main():
     parser.add_argument("input",             type=Path, nargs="?", help="Input root folder")
     parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
     parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
-    parser.add_argument("--workers",         type=int, default=min(os.cpu_count(), 16))
+    parser.add_argument("--workers",         type=int, default=min(os.cpu_count() or 4, 16))
     parser.add_argument("--overwrite",       action="store_true",
                         help="Always overwrite existing JXLs")
     parser.add_argument("--sync",            action="store_true",
@@ -2170,11 +2190,11 @@ def main():
     d50_skipped = _d50_patch_count["skipped"]
     already_correct = _d50_patch_count["already_correct"]
     skipped_needed = _d50_patch_count["skipped_needed"]
+    applied_already_correct = _d50_patch_count["applied_already_correct"]
+    skipped_already_correct = _d50_patch_count["skipped_already_correct"]
 
     # Total files analyzed for D50 = those where patch was applied + those skipped
     total_analyzed = applied + d50_skipped
-    # Total that actually needed the patch (were corrected + would have needed but were skipped)
-    total_needed_patch = applied + skipped_needed
 
     if total_analyzed > 0:
         if D50_PATCH_MODE == "off":
@@ -2182,9 +2202,7 @@ def main():
             logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
         else:
             # Files that were actually patched (had wrong D50)
-            actually_patched = applied - already_correct
-            # Files that were skipped because they were already correct
-            skipped_already_correct = d50_skipped - skipped_needed
+            actually_patched = applied - applied_already_correct
             # Total files that needed patching vs total that were already correct
             total_needed_patch = actually_patched + skipped_needed
             logger.info(f"D50 patch: {actually_patched} applied | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")

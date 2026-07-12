@@ -421,8 +421,13 @@ def reorder_jxl_boxes(jxl_path: Path):
         raise RuntimeError(f"JXL file too large ({file_size} bytes), skipping box reorder")
     if file_size < 12:  # Minimum valid JXL: 12-byte signature
         return  # Too small to have boxes, leave as-is
-    
+
+    # Bare codestream has no boxes to reorder; leave as-is.
+    if data[:2] == b'\xff\x0a':
+        return
+
     boxes = []
+
     i = 0
     MAX_BOX_SIZE = min(file_size, MAX_JXL_SIZE)
     
@@ -1728,7 +1733,7 @@ Examples:
     parser.add_argument("input", type=Path, help="Input file or folder")
     parser.add_argument("--mode", type=int, default=None,
                         help="Output mode (0=in-place, 1=subfolder, etc)")
-    parser.add_argument("--workers", type=int, default=min(os.cpu_count(), 16),
+    parser.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 16),
                         help="Parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--sync", action="store_true",

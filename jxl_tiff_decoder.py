@@ -1128,13 +1128,13 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         preview.save(str(jpeg_path), format='JPEG', quality=90)
 
         # Now rewrite the TIFF with proper structure:
-        # Page 0: JPEG preview with thumbnail flag (NEWSubfileType=1)
-        # Page 1: 16-bit main image with ICC
+        # Page 0: 16-bit main image with ICC (primary image for Windows Explorer)
+        # Page 1: JPEG preview with thumbnail flag (NEWSubfileType=1)
 
         # TIFFTAG_NEWSubfileType = 254 (0xFE) — set to 1 for thumbnail
         # TIFFTAG_IMAGEWIDTH, etc. for each page
 
-        # Write new TIFF with JPEG as page 0 (thumbnail) and 16-bit as page 1
+        # Write new TIFF with main image as page 0 and JPEG preview as page 1
         # Using tifffile's ability to write multipage TIFFs with different configurations per page
 
         # Read JPEG data
@@ -1142,8 +1142,8 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             jpeg_bytes = f.read()
 
         # Create the multipage TIFF properly
-        # Page 0: JPEG data with NEWSubfileType=1 (thumbnail)
-        # Page 1: 16-bit data with ICC
+        # Page 0: 16-bit main image with ICC (primary image)
+        # Page 1: JPEG data with NEWSubfileType=1 (thumbnail/reduced resolution)
 
         # tifffile multipage writing with explicit page config
         compression_map = {"uncompressed": None, "lzw": "lzw", "zip": "zlib", "none": None}
@@ -1470,8 +1470,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                     jxl_path, tmp_dir, target_icc_path, target_depth=target_depth
                 )
                 page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited, subfiletype, grayscale, target_depth))
-                # Use ICC/strategy from the first (main) page for the whole TIFF
-                if page_idx == 0 and not is_thumb:
+                # Use ICC/strategy from the first (main/anchor) page for the whole TIFF
+                if not is_thumb and page_icc is None:
                     page_icc = icc_data
                     reason = page_reason
                     strategy = page_strategy
@@ -1929,7 +1929,7 @@ Examples:
                       help="Output directory (mode 0, 2)")
     parser.add_argument("--mode", type=int, default=0, choices=range(9),
                       help="Output path mode (0-8)")
-    parser.add_argument("--workers", type=int, default=min(os.cpu_count(), 16),
+    parser.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 16),
                       help="Number of parallel workers")
     parser.add_argument("--overwrite", action="store_true",
                       help="Overwrite existing files")
