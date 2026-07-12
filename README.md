@@ -22,7 +22,7 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 | JXL 16-bit lossy `d=0.1` | ~34 MB |
 | JXL 16-bit lossy `d=1.0` (visually lossless) | ~8 MB |
 
-I have tested with different settings and posted on reddit, [click here to check](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/). 
+I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) and [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) to check. 
 
 ## What's New in v1.7
 

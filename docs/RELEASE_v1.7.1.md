@@ -1,6 +1,6 @@
 # v1.7.1 — Cautious ICC Strategy Cache + Audit Fixes
 
-**Release date:** 2026-07-12  
+**Release date:** 2026-07-13  
 **Status:** Released
 
 This release implements the `cautious` mode of `--icc-png-strategy` and includes a large set of audit-driven fixes for the TIFF/JXL round-trip, auto mode, and robustness.
