@@ -1,7 +1,7 @@
 # v1.7.0 — Multi-Page TIFF Support
 
 **Release date:** 2026-07-12  
-**Status:** v1.7.0_beta
+**Status:** Released
 
 This release adds explicit handling for multi-page TIFFs. Previous versions read only the first page (`tif.series[0]`) and silently discarded additional pages. v1.7.0 detects real pages vs thumbnails and gives the user full control over splitting, skipping, or reconstructing multi-page files.
 
