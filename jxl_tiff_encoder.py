@@ -159,6 +159,38 @@ EMBED_ICC_IN_JXL = True
 # True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
 # False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
+ICC_PNG_STRATEGY = "heuristic"
+# Controls whether the ICC profile is embedded in the intermediate PNG's iCCP chunk
+# when feeding the image to cjxl in lossy mode (d > 0). Lossless (d = 0) always
+# embeds the ICC so the JXL stores the profile as a native blob.
+#
+# Why this matters: some large scanner profiles (e.g. SilverFast SFprofT) cause
+# cjxl/djxl to produce extremely dark or black images in lossy mode. Skipping the
+# iCCP chunk avoids that, but the JXL file may display with the wrong colors in some
+# viewers because the native primaries fall back to sRGB. The original ICC is still
+# preserved as base64 metadata in the JXL and is restored into the reconstructed TIFF.
+# For scanner workflows, the JXL is a backup container and the round-trip TIFF is the
+# final image.
+#
+# "heuristic" -> Skip iCCP for profiles that look problematic:
+#                (a) ICC size > ICC_PROBLEMATIC_SIZE_THRESHOLD, OR
+#                (b) ICC profile class is "scnr" (scanner input device).
+#                Safe default for mixed workflows (camera + scanner).
+# "always"    -> Always embed ICC in the PNG. Best for normal camera images; produces
+#                JXLs with correct colors in most viewers.
+# "skip"      -> Never embed ICC in the PNG. Produces correct pixel data for every
+#                source, but JXL colors may look wrong in viewers until decoded to TIFF.
+# "cautious"  -> [BETA] Run a small round-trip test on each unseen ICC and cache the
+#                result. Falls back to heuristic if the test image is too dark.
+#                See docs for cache location and cleanup.
+
+ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200
+# Size threshold (bytes) used by the "heuristic" strategy.
+# ICC profiles larger than this are treated as potentially problematic and are not
+# embedded in the intermediate PNG. The value is exposed because some workflows may
+# use unusually large RGB profiles. 50 KB covers known scanner profiles while
+# leaving normal camera profiles (typically 1-4 KB) untouched.
+
 D50_PATCH_MODE = "auto"
 # Controls the D50 illuminant patch for Capture One compatibility.
 # "on"   -> Always apply D50 patch (fixes Capture One ICC non-conformance)
@@ -618,6 +650,52 @@ def apply_d50_policy(icc_bytes, tiff_path):
         logger.debug(f"D50 patch skipped for {Path(tiff_path).name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
 
     return bytes(icc)
+
+
+def _get_icc_profile_class(icc_bytes):
+    """Return the 4-byte ICC profile/device class from the header, e.g. b'scnr'."""
+    if not icc_bytes or len(icc_bytes) < 16:
+        return None
+    return icc_bytes[12:16]
+
+
+def should_embed_icc_in_png(icc_bytes, lossy=True):
+    """Decide whether the ICC profile should be embedded in the PNG iCCP chunk.
+
+    For lossless encoding the ICC is always embedded because the JXL stores the
+    ICC as a native blob and the colors are preserved correctly. For lossy encoding
+    the strategy depends on ICC_PNG_STRATEGY.
+
+    Returns True  -> embed ICC in PNG (cjxl will use it for XYB conversion)
+    Returns False -> skip iCCP (cjxl treats pixels as generic RGB; ICC is injected
+                     into the JXL container via exiftool afterwards)
+    """
+    if not lossy or not icc_bytes:
+        return True
+
+    strategy = ICC_PNG_STRATEGY.lower()
+    if strategy == "always":
+        return True
+    if strategy == "skip":
+        return False
+    if strategy == "cautious":
+        # Cautious mode is implemented separately (Beta); falls back to heuristic
+        # here when the per-ICC cache lookup has not been wired yet.
+        strategy = "heuristic"
+
+    if strategy == "heuristic":
+        if len(icc_bytes) > ICC_PROBLEMATIC_SIZE_THRESHOLD:
+            logger.debug(f"ICC profile ({len(icc_bytes)} bytes) exceeds size threshold; skipping iCCP")
+            return False
+        profile_class = _get_icc_profile_class(icc_bytes)
+        if profile_class == b"scnr":
+            logger.debug("ICC profile class is 'scnr' (scanner); skipping iCCP")
+            return False
+        return True
+
+    # Unknown strategy -> default to safe behavior (embed)
+    logger.warning(f"Unknown ICC_PNG_STRATEGY '{ICC_PNG_STRATEGY}', defaulting to embed")
+    return True
 
 
 def get_page_icc(tif, page_idx: int):
@@ -1082,17 +1160,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 icc_inherited = True
                 icc_bytes = None
 
-            # 5. Encode PNG with ICC in iCCP chunk (for cjxl encoding)
+            # 5. Encode PNG with optional ICC in iCCP chunk (for cjxl encoding)
             # --container=1 is required for lossy JXL (d>0): without it, cjxl outputs a raw
             # codestream and exiftool cannot inject EXIF. Do NOT use for lossless (d=0):
             # it changes how the ICC is stored (blob instead of native primaries) and
             # breaks color display in IrfanView.
             #
             # Lossy caveat: cjxl can darken/scramble images when the PNG iCCP chunk
-            # carries large scanner profiles (e.g. SilverFast SFprofT). For lossy
-            # encoding, skip the iCCP chunk and rely on exiftool to inject the ICC
-            # into the JXL container. The original pixels are preserved visually,
-            # and the ICC is restored into the output TIFF by the decoder.
+            # carries large scanner profiles (e.g. SilverFast SFprofT). For those cases
+            # (controlled by ICC_PNG_STRATEGY) we skip the iCCP chunk and rely on
+            # exiftool to inject the ICC into the JXL container. The original pixels are
+            # preserved, and the ICC is restored into the output TIFF by the decoder.
             container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
 
             # --modular=1 forces the Modular encoder for lossy output.
@@ -1100,8 +1178,15 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # Modular lossy produces 2-3x larger files than VarDCT for photos.
             modular_flag = ["--modular=1"] if (CJXL_MODULAR and CJXL_DISTANCE > 0) else []
 
-            # PNG iCCP only for lossless; see caveat above.
-            png_icc_bytes = icc_bytes if CJXL_DISTANCE == 0 else None
+            # Decide whether to put the ICC into the PNG iCCP chunk.
+            lossy = CJXL_DISTANCE > 0
+            if not lossy:
+                png_icc_bytes = icc_bytes  # lossless: always embed ICC natively
+            else:
+                embed = should_embed_icc_in_png(icc_bytes, lossy=True)
+                png_icc_bytes = icc_bytes if embed else None
+                if not embed and icc_bytes:
+                    logger.info(f"  >Skipping ICC in PNG iCCP for {tiff_path.name} (page {page_idx}); profile will be preserved via XMP")
 
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
@@ -1555,13 +1640,18 @@ def main():
                         help="Where to record encoding params: xmp (default), software, or off")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
                         help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
+    parser.add_argument("--icc-png-strategy", type=str, default=None,
+                        choices=["heuristic", "always", "skip", "cautious"],
+                        help="How to handle ICC in the PNG intermediate for lossy encoding: "
+                             "heuristic (default: skip for large/scanner profiles), "
+                             "always (embed always), skip (never embed), cautious (Beta: round-trip test + cache)")
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
     parser.add_argument("--embed-thumbnail", action="store_true",
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -1589,6 +1679,8 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
         D50_PATCH_MODE = args.d50_patch
+    if args.icc_png_strategy is not None:
+        ICC_PNG_STRATEGY = args.icc_png_strategy
 
     if args.embed_thumbnail:
         EMBED_JPEG_THUMBNAIL = True

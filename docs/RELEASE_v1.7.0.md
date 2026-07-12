@@ -1,7 +1,7 @@
 # v1.7.0 — Multi-Page TIFF Support
 
-**Release date:** 2026-07-11  
-**Status:** Released
+**Release date:** 2026-07-12  
+**Status:** v1.7.0_beta
 
 This release adds explicit handling for multi-page TIFFs. Previous versions read only the first page (`tif.series[0]`) and silently discarded additional pages. v1.7.0 detects real pages vs thumbnails and gives the user full control over splitting, skipping, or reconstructing multi-page files.
 
@@ -83,6 +83,40 @@ New persistent settings: `last_multipage_mode`, `last_thumbnail_mode`, `last_thu
 
 ---
 
+## 🎨 ICC / PNG Strategy (v1.7.0_beta)
+
+A new `--icc-png-strategy` option controls how the ICC profile is passed to `cjxl` during lossy encoding. This addresses a problem found after the initial v1.7.0 tests: **large scanner ICC profiles** (e.g. SilverFast `SFprofT`, ~217 KB) cause `cjxl` to produce extremely dark or black images when the profile is embedded in the intermediate PNG's `iCCP` chunk.
+
+Why this happens: in lossy mode `cjxl` converts the image to the XYB colorspace. To do that it must interpret the RGB pixels through the ICC profile. Some scanner profiles contain very large `A2B0` LUTs that compress the dynamic range during that conversion, so the decoded image is unusable. LittleCMS (Pillow) handles the same profiles without visible darkening, so the profile is not broken — it is a `cjxl` / libjxl interaction.
+
+The workaround: for problematic profiles, **do not embed the ICC in the PNG**. The pixel data is encoded as raw RGB, and the original ICC is preserved as base64 metadata in the JXL (via `XMP-xmp:CreatorTool`). When the decoder reconstructs the TIFF, it re-attaches the original ICC. The round-trip TIFF is visually identical to the original.
+
+Because the ICC is not in the JXL codestream natively, some JXL viewers may display the file with the wrong colors (usually as sRGB). For scanner workflows, the JXL should be treated as a long-term backup container; the reconstructed TIFF is the final image.
+
+### Available strategies
+
+| Strategy | Behavior | When to use |
+|---|---|---|
+| `heuristic` (default) | Skip `iCCP` for profiles that are large (≥ 50 KB) or have class `scnr` (scanner). Otherwise embed normally. | Mixed workflows (camera + scanner). Default. |
+| `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
+| `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
+| `cautious` | [BETA] Test each unseen ICC with a small round-trip and cache the result. | Coming in a later release; currently falls back to heuristic. |
+
+Configure in code:
+
+```python
+ICC_PNG_STRATEGY = "heuristic"          # heuristic | always | skip | cautious
+ICC_PROBLEMATIC_SIZE_THRESHOLD = 51200    # bytes (50 KB)
+```
+
+Or via CLI:
+
+```bash
+python jxl_tiff_encoder.py input/ output/ --mode 2 --distance 0.1 --icc-png-strategy heuristic
+```
+
+---
+
 ## 🚀 Quick Start
 
 ```bash
@@ -101,6 +135,8 @@ python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --
 ```
 
 > **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Test with one file before batch-processing important film scans.
+
+> **⚠️ Scanner color profile warning:** Scanner ICC profiles can cause `cjxl` to produce very dark images in lossy mode. The default `--icc-png-strategy heuristic` avoids this by skipping the ICC in the PNG for large/scanner profiles. The original ICC is restored into the reconstructed TIFF, but the JXL itself may display with shifted colors in some viewers.
 
 ---
 
@@ -151,6 +187,26 @@ All fixed before release:
 - Dead code removed (`convert_one`, `write_tiff` in the decoder;
   `_count_outputs_for_tiff` in the encoder).
 
+### v1.7.0_beta fixes
+
+- **Scanner ICC darkening:** large scanner profiles (SilverFast, VueScan) no longer
+  black out images in lossy mode thanks to `--icc-png-strategy heuristic`.
+- **D50 small-ICC guard:** `apply_d50_policy` skips profiles shorter than 80 bytes
+  instead of corrupting them.
+- **Single-file encoder modes:** modes 2 and 8 now accept a single input file.
+- **Multi-page IFD1 metadata:** `copy_metadata` no longer clears IFD1 on
+  multi-page TIFFs, preserving page-level metadata.
+- **XMP ICC validation:** `extract_icc_from_xmp` validates base64 and the ICC
+  magic signature before using a payload.
+- **PNG depth-8 conversion:** grayscale 16-bit PNGs are correctly downscaled to
+  8-bit when requested.
+- **Matrix mode warning:** documents the 8-bit LittleCMS quantization limitation.
+- **Wrapper workflow persistence:** repeat workflow and manifest mode now preserve
+  advanced options, RAM/compression/depth/preview settings, and disable repeat
+  for manifest mode 99.
+- **JPEG transcoder tuple mismatch:** `encode_to_jxl` returns 4-element tuples
+  consistently with `decode_to_image`.
+
 ---
 
 ## 📈 Stats
@@ -163,6 +219,7 @@ All fixed before release:
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **v1.7.0_beta** | 2026-07-12 | Multi-page TIFF support with scanner ICC workaround (heuristic PNG strategy); audit fixes from v1.7.0 + beta fixes |
 | **v1.7.0** | 2026-07-11 | Multi-page TIFF support: split/skip/ignore modes, thumbnail handling, marker-based decoder reconstruction, per-page ICC preservation; audit-fixed single-page path |
 | v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection, ICC alias cleanup (103 fixes) |
 | v1.5.3 | 2026-04-14 | Documentation & minor fixes: OVERWRITE log accuracy, PIL pixel limit, 8-bit PNG scaling, exiftool(-k).exe detection |

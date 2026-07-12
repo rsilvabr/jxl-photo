@@ -280,6 +280,8 @@ Options:
   --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
   --encode-tag      Where to record encoding params: xmp (default), software, off
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
+  --icc-png-strategy heuristic|always|skip|cautious
+                    How to embed ICC in the PNG intermediate for lossy encoding (default: heuristic)
   --strip           Strip all metadata from output (no EXIF/XMP preservation)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
@@ -421,6 +423,38 @@ D50 patch: 15 applied | 27 skipped (mode: auto)
 ```
 
 This helps you verify that the auto-detection is working correctly for your files.
+
+---
+
+## Scanner ICC / Lossy Encoding Workaround
+
+Some scanner ICC profiles (e.g. SilverFast `SFprofT`, VueScan) are very large (`> 50 KB`) and contain huge LUTs. When `cjxl` encodes a lossy JXL (`d > 0`) it must convert the pixels to XYB through the ICC profile. With these scanner profiles the conversion can produce extremely dark or almost-black images, even though the same profile works fine in Photoshop / Lightroom / IrfanView.
+
+The workaround is to **not embed the ICC profile in the intermediate PNG's `iCCP` chunk** during lossy encoding. The pixel data is then treated as plain RGB, the JXL encodes correctly, and the original ICC is still preserved as base64 metadata in the JXL (`XMP-xmp:CreatorTool`). The decoder re-attaches the original ICC when it restores the TIFF, so the round-trip file is visually identical to the original.
+
+| Strategy | Behavior | When to use |
+|---|---|---|
+| `heuristic` (default) | Skip `iCCP` for profiles ≥ 50 KB **or** with ICC class `scnr` (scanner). Otherwise embed normally. | Mixed camera + scanner workflows. |
+| `always` | Always embed the ICC in the PNG. | Normal camera images where you want the JXL to display correctly in viewers. |
+| `skip` | Never embed the ICC in the PNG. | Maximum safety for any source; JXL colors may look wrong until decoded. |
+| `cautious` | [Beta] Round-trip test each unseen ICC and cache the result. | Currently falls back to heuristic. |
+
+> **Note:** the JXL file itself may display with shifted colors in some viewers when the ICC is skipped, because the JXL falls back to native/sRGB primaries. For scanner workflows the JXL is treated as a long-term backup container; the reconstructed TIFF is the final image.
+
+### Example CLI usage
+
+```powershell
+# Heuristic: skip iCCP for large/scanner profiles (default)
+py jxl_tiff_encoder.py "F:\Photos" --mode 7 --distance 0.1 --icc-png-strategy heuristic
+
+# Always embed the ICC (best for normal camera images; JXL displays correctly in viewers)
+py jxl_tiff_encoder.py "F:\Photos" --mode 7 --distance 0.1 --icc-png-strategy always
+
+# Never embed the ICC (safest for any source, but JXL colors may look wrong until decoded)
+py jxl_tiff_encoder.py "F:\Scanner_Archive" --mode 7 --distance 0.1 --icc-png-strategy skip
+```
+
+For more details, see the v1.7.0 release notes and `docs/bugs_fixes_explained.md`.
 
 ---
 
