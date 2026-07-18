@@ -12,6 +12,8 @@ Requirements:
 """
 
 import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib, json
+import re
+import functools
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -95,6 +97,30 @@ def _get_cjxl_cmd():
                 break
     return _cjxl_cmd
 
+# libjxl version detection - used to gate flags that only exist in newer
+# cjxl/djxl builds. Unknown versions are treated as "old" (safe fallback:
+# no new flags are ever appended).
+@functools.lru_cache(maxsize=None)
+def _tool_version(exe: str):
+    """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "") + " " + (r.stderr or "")
+    except Exception:
+        return None
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+def _tool_at_least(exe: str, major: int, minor: int) -> bool:
+    v = _tool_version(exe)
+    return v is not None and v[:2] >= (major, minor)
+
+def _cjxl_buffering_flag():
+    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there)."""
+    if CJXL_BUFFERING is not None and _tool_at_least(_get_cjxl_cmd() or "cjxl", 0, 12):
+        return [f"--buffering={CJXL_BUFFERING}"]
+    return []
+
 # ─────────────────────────────────────────────
 # USER SETTINGS - GENERAL
 # ─────────────────────────────────────────────
@@ -111,6 +137,16 @@ CJXL_DISTANCE = 0.1
 # 0.1 = near-lossless (~25MB for 36MP), imperceptible difference
 # 0.5 = high quality lossy — recommended starting point (libjxl authors)
 # 1.0 = "visually lossless" per libjxl documentation
+
+CJXL_BUFFERING = None
+# [libjxl >= 0.12 only] Encoder buffering level passed to cjxl.
+# None (default) = do not pass the flag; cjxl uses its own default (2), which is
+#   the fast path — ~6x faster than 0 on large lossless TIFFs (45MP) with only
+#   ~1.2% larger files (measured on real 16-bit Capture One exports).
+# 0 = buffer entire image = best compression / most RAM (restores pre-0.12
+#     behavior; use for maximum density when encode time doesn't matter).
+# 2 = cjxl's v0.12 default. Ignored automatically when cjxl is < 0.12
+#     (flag doesn't exist there).
 
 CJXL_MODULAR = False
 # False (default) — lossy uses VarDCT encoder + XYB colorspace.
@@ -1477,7 +1513,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
-                cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
+                cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
                 del png_input
             else:
@@ -1486,7 +1522,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag
+                cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 r = subprocess.run(cjxl_cmd, capture_output=True, timeout=600)
 
             if r.returncode != 0:
@@ -1940,6 +1976,10 @@ def main():
                         help="JXL distance (0=lossless, 0.1=near-lossless, higher=more lossy)")
     parser.add_argument("--effort",          type=int, default=None, choices=range(1,11),
                         help="Compression effort 1-10 (default: 7)")
+    parser.add_argument("--buffering",       type=int, default=None, choices=[0,1,2,3],
+                        help="[libjxl >= 0.12] cjxl buffering level 0-3 (default: off = "
+                             "use cjxl's own default; 0 = best compression, much slower "
+                             "on large lossless images; ignored on older cjxl).")
     parser.add_argument("--ram",            action="store_true", default=None,
                         help="Keep PNG intermediate in RAM (faster, more memory)")
     parser.add_argument("--no-ram",         action="store_true", default=None,
@@ -1982,7 +2022,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -2009,6 +2049,8 @@ def main():
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort
+    if args.buffering is not None:
+        CJXL_BUFFERING = args.buffering
     if args.no_ram:
         USE_RAM_FOR_PNG = False
     elif args.ram is not None:

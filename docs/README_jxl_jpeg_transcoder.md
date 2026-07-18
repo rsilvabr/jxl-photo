@@ -150,6 +150,13 @@ FORCE_CONTAINER_FOR_LOSSY = True
 # False → skip container flag (may break EXIF visibility in some viewers)
 # Required for lossy (d>0) to allow exiftool to inject metadata
 
+CJXL_BUFFERING = None
+# [libjxl >= 0.12 only] Encoder buffering level passed to cjxl on pixel-encode
+# paths (lossy convert). None = use cjxl's own default (2) — the fast path
+# (default). 0 = best compression, but ~6x slower on large images for only
+# ~1.2% smaller files (see docs/RELEASE_v1.8.0.md benchmark).
+# Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
+
 # ── Paths ─────────────────────────────────────────────────────────
 TEMP2_DIR = None
 # Staging directory for output files during conversion.
@@ -421,6 +428,8 @@ Log output:
 ```
 
 **Note:** MD5 verification only applies to lossless transcoding. Lossy conversion (`--force-convert`) intentionally changes pixel data, so MD5 verification is skipped.
+
+**Note (libjxl ≥ 0.12):** on decode, `djxl` is invoked with `--reconstruct_jpeg`, which fails cleanly if the original JPEG cannot be reconstructed losslessly. Together with the `jbrd` check, this gives two independent guarantees that a recovered JPEG is bit-exact (a failure becomes a per-file error; the batch continues). On older `djxl` the flag is not passed and behavior is unchanged.
 
 * * *
 

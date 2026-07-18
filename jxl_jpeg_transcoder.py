@@ -29,6 +29,7 @@ import tempfile
 import threading
 import hashlib
 import argparse
+import functools
 import re
 import uuid
 from pathlib import Path
@@ -184,6 +185,13 @@ CJXL_EFFORT = 7
 # Compression effort (1-10). 7 = sweet spot for photos.
 # Does NOT affect quality in lossless mode.
 
+CJXL_BUFFERING = None
+# [libjxl >= 0.12 only] Encoder buffering level passed to cjxl on pixel-encode
+# paths (lossy convert). None (default) = do not pass the flag (cjxl default 2
+# is the fast path; 0 is ~1.2% smaller but ~6x slower on large images).
+# See the detailed comment in jxl_tiff_encoder.py.
+# Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
+
 STORE_MD5 = True
 # Store MD5 checksums during transcode encode (for verify during decode)
 
@@ -218,6 +226,30 @@ def _get_exiftool_cmd():
         else:
             _exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
     return _exiftool_cmd
+
+# libjxl version detection - used to gate flags that only exist in newer
+# cjxl/djxl builds. Unknown versions are treated as "old" (safe fallback:
+# no new flags are ever appended).
+@functools.lru_cache(maxsize=None)
+def _tool_version(exe: str):
+    """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "") + " " + (r.stderr or "")
+    except Exception:
+        return None
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
+    return tuple(int(x) for x in m.groups()) if m else None
+
+def _tool_at_least(exe: str, major: int, minor: int) -> bool:
+    v = _tool_version(exe)
+    return v is not None and v[:2] >= (major, minor)
+
+def _cjxl_buffering_flag():
+    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there)."""
+    if CJXL_BUFFERING is not None and _tool_at_least("cjxl", 0, 12):
+        return [f"--buffering={CJXL_BUFFERING}"]
+    return []
 
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
@@ -838,10 +870,12 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
 
         stored_md5 = read_md5_db(jxl_path) if verify and is_jxl_decode else None
 
-        r = subprocess.run(
-            ["djxl", str(jxl_path), str(write_path)],
-            capture_output=True, timeout=600
-        )
+        djxl_cmd = ["djxl", str(jxl_path), str(write_path)]
+        # libjxl >= 0.12: force lossless JPEG reconstruction and fail if impossible.
+        # Mutually exclusive with --jpeg_quality / --pixels_to_jpeg (not used on this path).
+        if is_jxl_decode and _tool_at_least("djxl", 0, 12):
+            djxl_cmd.insert(1, "--reconstruct_jpeg")
+        r = subprocess.run(djxl_cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1189,6 +1223,9 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # Add container flag for metadata support (needed for EXIF in IrfanView)
         if FORCE_CONTAINER_FOR_LOSSY:
             cmd.append("--container=1")
+
+        # [libjxl >= 0.12] optional --buffering (off by default; see CJXL_BUFFERING)
+        cmd += _cjxl_buffering_flag()
 
         r = subprocess.run(cmd, capture_output=True, timeout=600)
         if r.returncode != 0:

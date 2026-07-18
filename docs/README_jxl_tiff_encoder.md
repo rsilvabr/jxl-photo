@@ -120,6 +120,13 @@ CJXL_EFFORT = 7
 # 7 is the sweet spot for camera photos.
 # Effort 8-10 is much slower and can produce larger files for high-ISO images.
 
+CJXL_BUFFERING = None
+# [libjxl >= 0.12 only] Encoder buffering level passed to cjxl (also --buffering CLI).
+# None = use cjxl's own default (2) — the fast path (default).
+# 0    = best compression, but ~6x slower on large lossless TIFFs for only
+#        ~1.2% smaller files (see docs/RELEASE_v1.8.0.md benchmark).
+# Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
+
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
 # The ICC is NOT used by the JXL decoder (JXL uses native primaries),
@@ -274,6 +281,8 @@ Options:
   --sync          Reconvert only TIFFs newer than their JXL
   --distance N    JXL distance (0=lossless, 0.1=near-lossless, default: from script)
   --effort 1-10  Compression effort (default: from script setting)
+  --buffering 0-3 [libjxl >= 0.12] cjxl buffering level (default: off = use cjxl default;
+                  0 = best compression, much slower on large lossless images)
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after successful encode (mode 8 only)

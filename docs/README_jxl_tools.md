@@ -312,6 +312,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record d=/e= (now also via `--encode-tag`) |
 | `EMBED_JPEG_THUMBNAIL` | `False` | Embed 256px JPEG thumbnail in JXL (also `--embed-thumbnail`) |
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
+| `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](RELEASE_v1.8.0.md)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
 | `DELETE_CONFIRM` | `True` | Require HHMMSS confirmation for mode 8 delete |
 
@@ -341,6 +342,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `STORE_MD5` | `True` | Store MD5 for losslessness verification |
 | `DELETE_CONFIRM` | `True` | Require confirmation for mode 8 delete |
 | `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy encode |
+| `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for lossy pixel encodes (setting only, no CLI flag); `None` = use cjxl default (fast); `0` = best compression, slower |
 
 * * *
 

@@ -406,6 +406,8 @@ Versions used before and after the dependency update on 2026-07-12 (last tested 
 
 Older versions may still work, but the current versions are what we test against.
 
+> **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](docs/RELEASE_v1.8.0.md#benchmarks--why---buffering-stays-off-by-default)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
+
 ####  Common Download Mistakes
 
 | Wrong Download | Why It Fails | Correct Download |
