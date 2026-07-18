@@ -24,6 +24,19 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) and [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) to check. 
 
+## What's New in v1.8
+
+### libjxl v0.12 Support (auto-detected)
+The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.
+
+- **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
+- **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](docs/RELEASE_v1.8.0.md#benchmarks--why---buffering-stays-off-by-default)).
+- **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
+
+Full release notes: [v1.8.0](docs/RELEASE_v1.8.0.md)
+
+---
+
 ## What's New in v1.7
 
 ### Multi-Page TIFF Support
@@ -64,6 +77,14 @@ python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --t
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
 > **Scanner color profile note:** Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF. The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat JXL as the backup container and the reconstructed TIFF as the final image.
+
+### v1.7.1 / v1.7.2
+
+- **Cautious ICC strategy (v1.7.1)** — the default `--icc-png-strategy cautious` round-trip-tests each unseen ICC profile through cjxl+djxl and caches the verdict, so scanner profiles that darken lossy encodes are skipped automatically.
+- **Audit fixes (v1.7.1)** — a batch crash on JXLs without `jbrd` became a per-file error, lossy convert preserves EXIF/XMP/IPTC via exiftool, `.jfif`/`.jpe` support, `--multipage-mode skip` uses the detected real page.
+- **v1.7.2** — the wrapper's `--delete-source` confirmation no longer gets stuck on the main wizard path, and lossy convert keeps Exif/XMP before the codestream after the metadata copy (IrfanView-compatible).
+
+Full release notes: [v1.7.1](docs/RELEASE_v1.7.1.md) · [v1.7.2](docs/RELEASE_v1.7.2.md)
 
 ---
 
@@ -643,6 +664,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
+- Release notes: [v1.8.0](docs/RELEASE_v1.8.0.md) · [v1.7.2](docs/RELEASE_v1.7.2.md) · [v1.7.1](docs/RELEASE_v1.7.1.md) · [v1.7.0](docs/RELEASE_v1.7.0.md)
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
 - [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code

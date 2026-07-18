@@ -1,5 +1,18 @@
 # New Features Since v1.0
 
+## v1.8.0
+
+Date: 2026-07-18
+
+### libjxl v0.12 Support with Automatic Version Detection
+
+The scripts query `cjxl`/`djxl --version` once per process (cached) and only pass v0.12-only flags when the binary supports them. Older libjxl (or undetectable versions) behave exactly as before — no v0.12 flag is ever appended.
+
+- **`djxl --reconstruct_jpeg` on lossless recovery** — transcode decode (JXL → JPEG) now asks djxl ≥ 0.12 for an authoritative lossless reconstruction that fails cleanly if impossible. Second guard alongside the `jbrd` box check; failures become per-file errors and the batch continues.
+- **`--buffering` option (opt-in)** — new `CJXL_BUFFERING` setting in the TIFF encoder and JPEG transcoder, plus a `--buffering 0|1|2|3` CLI flag on the encoder. Default `None` (flag not passed; cjxl uses its fast default). `0` restores pre-0.12 maximum compression, but measured on real 45 MP lossless TIFFs it is only ~1.2% smaller for ~6× slower encodes — see the [v1.8.0 benchmark](RELEASE_v1.8.0.md).
+
+---
+
 ## v1.5.1
 
 Date: 2026-04-13
