@@ -937,7 +937,7 @@ class InteractiveMenu:
             console.print(f"Confirm deletes: {current.confirm_delete}")
             console.print(f"Export marker: {current.export_marker}")
 
-            new_staging = Prompt.ask("Staging dir (empty=system default)", default=current.staging_dir or "")
+            new_staging = Prompt.ask("Staging dir (empty=keep current, 'none'=system default)", default=current.staging_dir or "")
             new_workers = IntPrompt.ask("Workers", default=current.default_workers)
             new_quality = IntPrompt.ask("Quality (1-100)", default=current.default_quality)
             new_effort = IntPrompt.ask("Effort (1-10)", default=current.default_effort)
@@ -1449,6 +1449,38 @@ class InteractiveMenu:
             return None
         return str(sorted(manifests, key=lambda p: p.stat().st_mtime, reverse=True)[0])
 
+    def _pick_manifest(self) -> Optional[str]:
+        """Pick a manifest from manifests/ (newest first). With several files
+        the user chooses; with one it is used directly. Previously only the
+        newest manifest was reachable, making older ones unusable from the UI.
+        """
+        manifest_dir = SCRIPT_DIR / "manifests"
+        if not manifest_dir.exists():
+            return None
+        manifests = sorted(manifest_dir.glob("manifest_*.csv"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        if not manifests:
+            return None
+        if len(manifests) == 1:
+            return str(manifests[0])
+        shown = manifests[:10]
+        if RICH_AVAILABLE and console:
+            console.print("[bold]Available manifests (newest first):[/bold]")
+            for i, m in enumerate(shown, 1):
+                console.print(f"  [{i}] {m.name}")
+            choice = Prompt.ask("Which manifest?",
+                                choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
+            return str(shown[int(choice) - 1])
+        print("Available manifests (newest first):")
+        for i, m in enumerate(shown, 1):
+            print(f"  [{i}] {m.name}")
+        raw = input("Which manifest? [1]: ").strip() or "1"
+        try:
+            idx = max(1, min(int(raw), len(shown))) - 1
+        except ValueError:
+            idx = 0
+        return str(shown[idx])
+
     def _view_manifest(self, manifest_path: str, input_dir: Path) -> None:
         """View manifest contents in a table."""
         import csv
@@ -1505,7 +1537,7 @@ class InteractiveMenu:
 
     def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
         """Run workflow from manifest file."""
-        manifest_path = self._get_latest_manifest()
+        manifest_path = self._pick_manifest()
         if not manifest_path or not Path(manifest_path).exists():
             if RICH_AVAILABLE and console:
                 console.print("[red]No manifest found![/red]")
@@ -2906,8 +2938,10 @@ class InteractiveMenu:
                 # JPEG->JXL lossless
                 cmd.append('--force-transcode')
             elif conv_type == 'convert_lossy':
-                # JPEG->JXL lossy
+                # JPEG->JXL lossy (--from-jpeg keeps PNGs in the folder safe;
+                # see the wizard path for why)
                 cmd.append('--force-convert')
+                cmd.append('--from-jpeg')
                 cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
             elif conv_type == 'jxl_to_jpeg_auto':
                 # JXL->JPEG: auto-detect per-file, restricted to .jxl inputs
@@ -3203,8 +3237,11 @@ class InteractiveMenu:
                 # JPEG->JXL lossless
                 cmd.append('--force-transcode')
             elif conv_type == 'convert_lossy':
-                # JPEG->JXL lossy
+                # JPEG->JXL lossy. --from-jpeg restricts to .jpg inputs:
+                # otherwise cmd_convert would also convert (and in mode 8,
+                # delete) PNG files found in the folder.
                 cmd.append('--force-convert')
+                cmd.append('--from-jpeg')
                 cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
             elif conv_type == 'jxl_to_jpeg_auto':
                 # JXL->JPEG: auto-detect per-file. MUST pass --from-jxl so the
@@ -3626,8 +3663,10 @@ def main():
             elif origin == 'jxl' and last_dest == 'tiff':
                 workflow['conversion_type'] = 'jxl_tiff_decoder'
             elif origin == 'jxl' and last_dest == 'jpeg':
-                # Default to lossy if no previous conversion type saved
-                workflow['conversion_type'] = 'jxl_to_jpeg_force'
+                # No conversion type saved (old config): default to auto, which
+                # recovers losslessly via jbrd when possible, instead of force
+                # lossy, which would recompress everything.
+                workflow['conversion_type'] = 'jxl_to_jpeg_auto'
             elif origin == 'jxl' and last_dest == 'png':
                 workflow['conversion_type'] = 'jxl_to_png'
             else:

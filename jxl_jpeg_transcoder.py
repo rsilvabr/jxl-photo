@@ -85,8 +85,9 @@ def _verify_file_integrity(file_path: Path) -> bool:
                 return False
             return header[2:4] in (b'\x2a\x00', b'\x00\x2a')
         
-        # Unknown extension - allow deletion (conservative)
-        return True
+        # Unknown extension — refuse deletion. The old "conservative allow"
+        # was inverted: an unverifiable output must keep its source.
+        return False
         
     except (OSError, IOError):
         return False
@@ -1527,8 +1528,9 @@ def cmd_convert(args, from_jxl: bool = True):
             args.bit_depth = 8
     else:
         direction = "to_jxl"
-        if args.bit_depth is None:
-            args.bit_depth = 8  # Irrelevant for JXL output, but keep a sane default
+        # Leave args.bit_depth as None: it is irrelevant for JXL output, and a
+        # later direction fallback (JXL folder detected) must still apply the
+        # per-format defaults (PNG 16-bit / JPEG 8-bit).
 
 
     # Collect files (ICC label, op_type, and mode_str are set after this)
@@ -1538,9 +1540,17 @@ def cmd_convert(args, from_jxl: bool = True):
     elif direction == "to_jxl":
         jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
         pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
+        # --from-jpeg: restrict to JPEG inputs only. The wrapper's
+        # "JPEG -> JXL lossy" workflow uses this so PNGs in the folder are
+        # never converted (or deleted in mode 8) behind the user's back.
+        if getattr(args, "from_jpeg", False):
+            if pngs:
+                logger.info(f"--from-jpeg: ignoring {len(pngs)} PNG file(s)")
+            pngs = []
         files = jpegs + pngs
-        # If no JPEGs/PNGs found, fall back to JXLs (auto-detect direction)
-        if not files:
+        # If no JPEGs/PNGs found, fall back to JXLs (auto-detect direction).
+        # Suppressed under --from-jpeg (the direction was explicit).
+        if not files and not getattr(args, "from_jpeg", False):
             jxls = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
             if jxls:
                 files = jxls
@@ -2070,6 +2080,9 @@ Examples:
     parser.add_argument("--from-jxl", action="store_true",
                         help="[Auto mode] Restrict processing to .jxl files only "
                              "(JPEG/PNG files in the folder are left untouched).")
+    parser.add_argument("--from-jpeg", action="store_true",
+                        help="[Convert mode] Restrict JPEG->JXL conversion to JPEG "
+                             "files only (PNGs in the folder are left untouched).")
     parser.add_argument("--effort", type=int, default=CJXL_EFFORT, choices=range(1, 11),
                         help="cjxl effort 1-10")
 

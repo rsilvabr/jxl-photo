@@ -351,7 +351,7 @@ session/_EXPORT/sRGB/photo.jxl     → ignored
 | `0` | File or directory | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) or → output_dir | `photo.tif` / `output_dir/photo.tif` |
 | `1` | File or directory | Flat (non-recursive) — only files in the given folder | `converted_tiff/` subfolder next to source | `.../converted_tiff/photo.tif` |
 | `2` | Directory | Recursive — all subfolders | Recursive → output_dir | `output_dir/photo.tif` |
-| `3` | Directory | Recursive — all subfolders | `converted_tiff/` inside each JXL folder | `.../JXL/converted_tiff/photo.tif` |
+| `3` | Directory | Recursive — all subfolders | `TIFF_16bits/` inside each JXL folder | `.../JXL/TIFF_16bits/photo.tif` |
 | `4` | Directory | Recursive — all subfolders | Rename folder `JXL` → `TIFF` | `.../Export_TIFF/photo.tif` |
 | `5` | Directory | Recursive — all subfolders | Sibling folder `TIFF_16bits/` | `.../TIFF_16bits/photo.tif` |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY JXLs INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/16B_TIFF/photo.tif` |

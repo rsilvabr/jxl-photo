@@ -310,3 +310,93 @@ def test_encoder_exits_nonzero_on_error(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         enc.main()
     assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# second-pass fixes (from external review of 33c1cc8)
+# ---------------------------------------------------------------------------
+
+def test_convert_from_jpeg_ignores_pngs(monkeypatch, tmp_path):
+    """Wrapper's JPEG->JXL lossy path must never touch PNGs (and never delete
+    them in mode 8) — --from-jpeg restricts the to_jxl direction."""
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8fake")
+    (tmp_path / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    tr.setup_logger()
+    seen = []
+
+    def fake_pgc(group_pairs, workers, *a, **kw):
+        seen.extend(str(s) for s, _ in group_pairs)
+        return []
+
+    monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
+    tr.cmd_convert(_args(tmp_path, from_jpeg=True), from_jxl=False)
+    assert seen == [str(tmp_path / "a.jpg")], f"PNG was not ignored: {seen}"
+
+
+def test_convert_without_from_jpeg_still_processes_pngs(monkeypatch, tmp_path):
+    """Default behavior (no --from-jpeg) keeps processing PNGs (PNG->JXL is a
+    documented feature) — the restriction is opt-in only."""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    tr.setup_logger()
+    seen = []
+
+    def fake_pgc(group_pairs, workers, *a, **kw):
+        seen.extend(str(s) for s, _ in group_pairs)
+        return []
+
+    monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
+    tr.cmd_convert(_args(tmp_path), from_jxl=False)
+    assert seen == [str(tmp_path / "a.png")]
+
+
+def test_png_fallback_on_jxl_folder_keeps_16bit(monkeypatch, tmp_path):
+    """--force-convert --format png on a JXL-only folder must produce 16-bit
+    PNGs (the to_jxl bit-depth default must not poison the direction fallback)."""
+    (tmp_path / "a.jxl").write_bytes(b"\x00" * 32)
+    tr.setup_logger()
+    captured = {}
+
+    def fake_pgc(group_pairs, workers, *a, **kw):
+        # bit_depth is the 6th positional after group_pairs/workers:
+        # (direction, quality, distance, fmt, bit_depth, ...)
+        captured["bit_depth"] = kw.get("bit_depth", a[4] if len(a) > 4 else None)
+        return []
+
+    monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
+    tr.cmd_convert(_args(tmp_path, format="png"), from_jxl=False)
+    assert captured["bit_depth"] == tr.PNG_DEFAULT_BIT_DEPTH
+
+
+def test_encoder_mode2_dry_run_creates_no_folder(monkeypatch, tmp_path):
+    src = tmp_path / "in"
+    src.mkdir()
+    out = tmp_path / "out"
+    enc.setup_logger()
+    monkeypatch.setattr(sys, "argv",
+                        ["jxl_tiff_encoder.py", str(src), str(out), "--mode", "2", "--dry-run"])
+    enc.main()
+    assert not out.exists(), "dry-run created the mode-2 output folder"
+
+
+def test_decoder_ignores_jif_extension(tmp_path):
+    (tmp_path / "photo.jif").write_bytes(b"\xff\xd8fake-jpeg")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 16)
+    assert [f.name for f in dec.find_jxls_flat(tmp_path)] == ["photo.jxl"]
+    assert [f.name for f in dec.find_jxls_recursive(tmp_path)] == ["photo.jxl"]
+
+
+def test_verify_file_integrity_unknown_extension_refused(tmp_path):
+    f = tmp_path / "output.xyz"
+    f.write_bytes(b"whatever")
+    assert tr._verify_file_integrity(f) is False
+
+
+def test_orientation_cleared_from_exif_blob(tmp_path):
+    """The raw EXIF blob injected before -tagsfromfile already carries
+    Orientation; the injection args must clear it explicitly afterwards."""
+    args_file = enc.build_metadata_injection_args(
+        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        exif_bin=None, icc_bytes=None, xmp_original=None,
+    )
+    content = args_file.read_text(encoding="utf-8")
+    assert "-Orientation=" in content

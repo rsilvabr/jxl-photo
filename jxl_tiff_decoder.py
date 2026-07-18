@@ -1758,7 +1758,7 @@ def find_jxls_flat(path):
     """Find JXL files in the top-level directory only (no subfolders) — modes 0 and 1."""
     seen = set()
     files = []
-    for ext in ("*.jxl", "*.jif", "*.JXL", "*.JIF"):
+    for ext in ("*.jxl", "*.JXL"):
         for f in path.glob(ext):
             key = f.resolve()
             if key not in seen:
@@ -1770,7 +1770,7 @@ def find_jxls_recursive(path):
     """Find all JXL files recursively"""
     seen = set()
     files = []
-    for ext in ("*.jxl", "*.jif", "*.JXL", "*.JIF"):
+    for ext in ("*.jxl", "*.JXL"):
         for f in path.rglob(ext):
             key = f.resolve()
             if key not in seen:

@@ -331,6 +331,8 @@ Options:
                       wrappers/automation that already asked the user)
   --from-jxl         [Auto mode] Restrict processing to .jxl files only;
                       JPEG/PNG files in the folder are left untouched
+  --from-jpeg        [Convert mode] Restrict JPEG->JXL conversion to JPEG
+                      files only (PNGs in the folder are left untouched)
   --export-subfolder NAME  [Mode 7] Only process files inside this subfolder
                       of the export marker (default: empty = all subfolders)
 

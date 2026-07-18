@@ -1236,6 +1236,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     args_lines.append("-exif:all")
     args_lines.append("-xmp:all")
     args_lines.append("--Orientation")  # Strip orientation to prevent double-rotation issues
+    # The exclusion above only prevents re-copying Orientation from the source;
+    # the raw EXIF blob injected in step 1 already contains it. Clear it
+    # explicitly, otherwise the JXL would keep the rotation tag.
+    args_lines.append("-Orientation=")
     
     # 3. Handle encoding parameters and ICC embedding in XMP
     encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
@@ -2314,8 +2318,8 @@ def main():
         else:
             tiffs = find_tiffs_recursive(args.input)
         output_root = args.output or args.input
-        if not args.input.is_file():
-            output_root.mkdir(parents=True, exist_ok=True)
+        # mkdir deferred until after the dry-run check — a simulation must
+        # not create folders on disk.
     elif args.mode == 6:
         tiffs = find_tiffs_mode6(args.input)
         output_root = args.input
@@ -2391,6 +2395,10 @@ def main():
             logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
         return
+
+    # Create the mode-2 output dir only for real runs (dry-run must not write)
+    if args.mode == 2 and not args.input.is_file():
+        output_root.mkdir(parents=True, exist_ok=True)
 
     if args.mode == 8 and DELETE_SOURCE:
         logger.info("Mode 8 -- in-place recursive | DELETE_SOURCE=True: source TIFFs will be deleted after successful encode")
