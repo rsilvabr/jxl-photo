@@ -411,8 +411,6 @@ def load_target_icc(path):
         try:
             profile_name = aliases[key]
             profile = ImageCms.createProfile(profile_name)
-            # Default intent is used by createProfile; use perceptual for sRGB photo work
-            intent = ImageCms.Intent.PERCEPTUAL if profile_name == 'sRGB' else ImageCms.Intent.RELATIVE_COLORIMETRIC
             return ImageCms.getOpenProfile(profile).tobytes()
         except Exception as e:
             logger.error(f"Failed to create built-in ICC profile '{path}': {e}")
@@ -948,9 +946,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
                 capture_output=True, timeout=5
             )
         # Clear the page-0 Software tag if it still holds tifffile's default.
-        # With a JPEG preview, the real data becomes IFD1 and the preview IFD0,
-        # so the tifffile.py Software can survive on page 0; only clear it when
-        # the JXL didn't supply its own Software (i.e. it still reads "tifffile").
+        # The main image is IFD0 (a JPEG preview, when present, is IFD1);
+        # tifffile's default Software string can survive on IFD0, so only clear
+        # it when the JXL didn't supply its own (i.e. it still reads "tifffile").
         r_sw = subprocess.run(
             [_get_exiftool_cmd(), "-s", "-s", "-s", "-IFD0:Software", str(tiff_path)],
             capture_output=True, text=True, timeout=5
@@ -2006,9 +2004,6 @@ Examples:
 
     if USE_MATRIX_MODE and not ImageCms:
         print("WARNING: Matrix mode requested but ImageCms unavailable. Install with: pip install Pillow --upgrade")
-
-    if args.no_icc_clean:
-        CLEANUP_XMP_ICC_MARKER = False
 
     if args.depth:
         DJXL_OUTPUT_DEPTH = args.depth

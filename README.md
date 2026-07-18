@@ -33,6 +33,17 @@ The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 featu
 - **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](docs/RELEASE_v1.8.0.md#benchmarks--why---buffering-stays-off-by-default)).
 - **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
 
+### Audit fixes (second pass)
+
+> **⚠️ Breaking change:** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder**. If you have saved commands/manifests using transcoder modes 4 or 5, swap them.
+
+- **`--dry-run` now simulates on all transcoder paths** (transcode/auto converted for real before)
+- **Wizard mode 8 `--delete-source` now propagates** through every path (it was silently dropped)
+- **Auto mode + staging + 16-bit** no longer strands outputs in the staging folder
+- **Transcoder mode 1 is flat again** (matching its README and the TIFF decoder)
+- **Auto mode processes PNG-only folders** (convert encode to JXL)
+- Wizard: decode mode no longer asked twice; target ICC only for matrix mode; repeat workflow preserves lossy `distance`; lossless transcode decode asks only the simple "yes" confirmation
+
 Full release notes: [v1.8.0](docs/RELEASE_v1.8.0.md)
 
 ---

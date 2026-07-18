@@ -270,8 +270,8 @@ Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.
 | `1` | File or folder | Flat (non-recursive) — only files in the given folder | `converted_jxl/` subfolder | `.../converted_jxl/photo.jxl` |
 | `2` | Directory | Recursive — all subfolders | Recursive to output_root | `output_root/photo.jxl` |
 | `3` | Directory | Recursive — all subfolders | `converted_jxl/` inside each folder | `.../JPEG/converted_jxl/photo.jxl` |
-| `4` | Directory | Recursive — all subfolders | Sibling folder `JXL_jpeg/` | `.../JXL_jpeg/photo.jxl` |
-| `5` | Directory | Recursive — all subfolders | Rename folder (JPEG→JXL) | `.../Export_JXL/photo.jxl` |
+| `4` | Directory | Recursive — all subfolders | Rename folder (JPEG→JXL) | `.../Export_JXL/photo.jxl` |
+| `5` | Directory | Recursive — all subfolders | Sibling folder `JXL_jpeg/` | `.../JXL_jpeg/photo.jxl` |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/JXL_jpeg/...` |
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../session/_EXPORT/JXL_jpeg/...` |
 | `8` | File or folder | Recursive — walks all subfolders | In-place **recursive** | `.../session/photo.jxl` (next to each JPEG) |
@@ -284,8 +284,8 @@ Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.
 | `1` | File or folder | Flat (non-recursive) — only files in the given folder | `recovered_jpeg/` subfolder | `.../recovered_jpeg/photo.jpg` |
 | `2` | Directory | Recursive — all subfolders | Recursive to output_root | `output_root/photo.jpg` |
 | `3` | Directory | Recursive — all subfolders | `recovered_jpeg/` inside each folder | `.../JXL/recovered_jpeg/photo.jpg` |
-| `4` | Directory | Recursive — all subfolders | Sibling folder `JPEG_recovered/` | `.../JPEG_recovered/photo.jpg` |
-| `5` | Directory | Recursive — all subfolders | Rename folder (JXL→JPEG_recovered) | `.../Export_JPEG_recovered/photo.jpg` |
+| `4` | Directory | Recursive — all subfolders | Rename folder (JXL→JPEG_recovered) | `.../Export_JPEG_recovered/photo.jpg` |
+| `5` | Directory | Recursive — all subfolders | Sibling folder `JPEG_recovered/` | `.../JPEG_recovered/photo.jpg` |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../_EXPORT/JPEG_recovered/...` |
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../_EXPORT/JPEG_recovered/...` |
 | `8` | File or folder | Recursive — walks all subfolders | In-place **recursive** | `.../session/photo.jpg` (next to each JXL) |
@@ -316,8 +316,8 @@ Options:
   --bit-depth 8|16   Output bit depth (PNG only, default: 16)
 
   --icc-profile PATH Path to ICC profile for color conversion.
-                     Can be a file path (e.g., "C:\icc\AdobeRGB.icc") or a
-                     built-in name: "sRGB", "Adobe RGB", "ProPhoto RGB"
+                     Can be a file path (e.g., "C:\icc\AdobeRGB.icc") or the
+                     built-in name: "sRGB"
   --to-srgb          Shortcut: convert to sRGB using ImageMagick built-in
                      (shorthand for --icc-profile sRGB)
 
@@ -334,10 +334,10 @@ Options:
   --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)
   --no-ram           Use disk pipeline (slower, less memory)
-  --output-name NAME Output folder name for convert mode (default: "converted_jxl")
-  --output-suffix SFX Suffix for converted files (default: "")
-  --rename-from PAT  Pattern to rename files (regex)
-  --rename-to REP    Replacement pattern for renamed files
+  --output-name NAME Output folder name for convert mode (default: "converted")
+  --output-suffix SFX Suffix for converted files (default: "_converted")
+  --rename-from PAT  Literal substring to replace in filenames (not regex)
+  --rename-to REP    Replacement string for renamed files
   --dry-run          Preview operations without converting
 ```
 

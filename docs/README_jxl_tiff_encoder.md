@@ -263,6 +263,8 @@ session/_EXPORT/AdobeRGB/photo.tif → ignored
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../session/_EXPORT/16B_JXL/photo.jxl` |
 | `8` | File or directory | Recursive — walks all subfolders | In-place **recursive** — JXL next to each TIFF | `.../session/photo.jxl` |
 
+> **Mode 2 note:** with a directory input, output goes flat to `output_dir` (or the input folder itself if no output is given). With a **single file** input and no output argument, mode 2 writes to `converted_jxl/` next to the file (same as mode 1).
+
 ---
 
 ## CLI reference

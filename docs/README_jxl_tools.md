@@ -163,8 +163,8 @@ How output files are organized. Press `?` for detailed explanations with visual 
 | `1` | File or folder | Flat (non-recursive) — only files in the given folder | Subfolder | Creates `converted_jxl/` or `converted_tiff/` subfolder next to source |
 | `2` | Directory | Recursive — all subfolders | Flat → output folder | All files merged to single output folder (recursive) |
 | `3` | Directory | Recursive — all subfolders | Recursive subfolders | Each subfolder gets its own output subfolder |
-| `4` | Directory | Recursive — all subfolders | Sibling folder (rename) | Renames folder: `JXL_raw/` → `JXL_processed/` |
-| `5` | Directory | Recursive — all subfolders | Folder suffix | Appends suffix: `Raw/` → `Raw_JXL/` |
+| `4` | Directory | Recursive — all subfolders | Folder rename (suffix swap) | Renames folder: `JXL_raw/` → `TIFF_raw/` (or appends `_TIFF`) |
+| `5` | Directory | Recursive — all subfolders | Sibling folder | Creates sibling: `JXL_16bits/`, `TIFF_16bits/` (by direction) |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | Marker _EXPORT (full) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name is configurable. |
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Marker _EXPORT (subfolder) | Like mode 6 but only a specific subfolder of `EXPORT_MARKER`. Both the marker name and the subfolder are configurable. |
 | `8` | File or folder | Recursive — walks all subfolders | DELETE originals ⚠️ | In-place **recursive**. Same folder as source, walks subfolders. Deletes source files — IRREVERSIBLE |
@@ -326,7 +326,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `JXL_SUFFIX_TO_REPLACE` | `"JXL"` | Mode 4 suffix match |
 | `TIFF_SUFFIX_REPLACE` | `"TIFF"` | Mode 4 suffix replacement |
 | `ADD_JPEG_PREVIEW` | `True` | Embed JPEG preview in output TIFF |
-| `JPEG_PREVIEW_SIZE` | `1024` | Max preview dimension |
+| `JPEG_PREVIEW_SIZE` | `256` | Max preview dimension |
 | `USE_MATRIX_MODE` | `False` | Force ICC matrix conversion |
 | `CLEANUP_XMP_ICC_MARKER` | `True` | Remove ICC base64 from XMP after extraction |
 

@@ -522,11 +522,11 @@ class FolderAnalyzer:
             reasoning.append("Files found in root folder — in-place mode works well")
             reasoning.append("Mode 0 recommended — files stay side by side")
 
-        # Mode 5: folder suffix when source type is in folder name
+        # Mode 4: folder rename when source type is in folder name
         elif any(self.origin.lower() in Path(p).name.lower() for p in result['subfolders'][:3]):
-            result['recommended_mode'] = 5
+            result['recommended_mode'] = 4
             confidence = 'medium'
-            reasoning.append(f"Folder names contain '{self.origin}' — Mode 5 (suffix) recommended")
+            reasoning.append(f"Folder names contain '{self.origin}' — Mode 4 (rename/suffix) recommended")
 
         else:
             result['recommended_mode'] = 0
@@ -571,8 +571,8 @@ class FolderAnalyzer:
             1: "Subfolder (converted_{dest})",
             2: "Flat (all to one folder)",
             3: "Recursive subfolders ({dest}_files)",
-            4: "Sibling folder (rename)",
-            5: "Folder suffix",
+            4: "Folder rename (suffix swap)",
+            5: "Sibling folder",
             6: f"Marker export (full)",
             7: f"Marker export (specific subfolder)",
         }
@@ -674,7 +674,13 @@ class FolderAnalyzer:
                     mappings.append((src, dest, count))
 
         elif mode in [4, 5]:
-            # Sibling/suffix: folder rename
+            # Mode 4: rename (replace origin with dest in folder name)
+            # Mode 5: sibling folder next to each source folder
+            sibling_name = {
+                'tiff': 'TIFF_16bits',
+                'jpeg': 'JPEG_recovered',
+                'png': 'JPEG_recovered',
+            }.get(self.dest, 'JXL_16bits' if self.origin == 'tiff' else 'JXL_jpeg')
             for folder, count in analysis['file_distribution'].items():
                 if count > 0 and folder != '.':
                     src = str(self.root / folder)
@@ -683,7 +689,7 @@ class FolderAnalyzer:
                         new_name = re.sub(re.escape(self.origin), self.dest, folder, flags=re.IGNORECASE)
                         dest = str(self.root / new_name)
                     else:
-                        dest = str(self.root / f"{folder}_{self.dest}")
+                        dest = str(Path(src).parent / sibling_name)
                     mappings.append((src, dest, count))
 
         return mappings
@@ -1178,7 +1184,7 @@ class InteractiveMenu:
         # Build recommendation options
         mode_names = {
             0: "In-place", 1: "Subfolder", 2: "Flat", 3: "Recursive subfolders",
-            4: "Sibling (rename)", 5: "Suffix", 6: f"Export (full)", 7: f"Export (specific subfolder)"
+            4: "Rename (suffix)", 5: "Sibling", 6: f"Export (full)", 7: f"Export (specific subfolder)"
         }
 
         rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
@@ -1513,10 +1519,10 @@ class InteractiveMenu:
              f"All files from subfolders merged to single output folder (recursive)"),
             ("3", "Recursive subfolders",
              f"Creates [green]'{dest.upper()}_files'[/green] in each subfolder"),
-            ("4", "Sibling folder (rename)",
+            ("4", "Folder rename (suffix swap)",
              f"Replaces {origin.upper()} with {dest.upper()} in folder name"),
-            ("5", "Folder suffix",
-             f"Appends [green]_{dest.upper()}[/green] to folder name"),
+            ("5", "Sibling folder",
+             f"Creates a sibling folder (e.g. [green]JXL_16bits[/green]) next to each source folder"),
             ("6", f"Marker [green]export[/green] (full)",
              f"ONLY files INSIDE folders with 'export' in name — ignores everything outside"),
             ("7", f"Marker [green]export[/green] (specific subfolder)",
@@ -1642,8 +1648,8 @@ class InteractiveMenu:
             ("1", "Subfolder", f"Creates 'converted_{dest}' subfolder"),
             ("2", "Flat", "All to one folder (recursive)"),
             ("3", "Recursive", f"'{dest}_files' in each subfolder"),
-            ("4", "Sibling", f"Renames folder {origin}→{dest}"),
-            ("5", "Suffix", f"Adds _{dest} to folder name"),
+            ("4", "Rename", f"Renames folder {origin}→{dest}"),
+            ("5", "Sibling", f"Creates sibling folder next to source"),
             ("6", f"Marker export (full)", f"Only inside folders with 'export' in name"),
             ("7", f"Marker export (subfolder)", f"Only .../Export/JXL style subfolder"),
             ("8", "DELETE originals ⚠️", "DELETES source files!"),
@@ -1704,14 +1710,14 @@ class InteractiveMenu:
              f"Each subfolder gets its own [green]'{dest.upper()}_files'[/green] subfolder.\n"
              f"Preserves folder structure: [cyan]F:/Photos/2024/A/[/cyan] -> [cyan]F:/Photos/2024/A/{dest.upper()}_files/[/cyan]"),
 
-            ("4", "Sibling folder (rename)",
+            ("4", "Folder rename (suffix swap)",
              f"Renames the folder, replacing [green]{origin.upper()}[/green] with [green]{dest.upper()}[/green] in the folder name.\n"
              f"[cyan]F:/Photos/JXL_raw/[/cyan] -> [cyan]F:/Photos/{dest.upper()}_raw/[/cyan]\n"
              f"If {origin.upper()} is not found, appends {dest.upper()} and logs a warning."),
 
-            ("5", "Folder suffix",
-             f"Adds [green]_{dest.upper()}[/green] suffix to the folder name.\n"
-             f"[cyan]F:/Photos/Raw/[/cyan] -> [cyan]F:/Photos/Raw_{dest.upper()}/[/cyan]"),
+            ("5", "Sibling folder",
+             f"Creates a sibling folder next to each source folder, without renaming it.\n"
+             f"[cyan]F:/Photos/Raw/[/cyan] -> [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
 
             ("6", f"Marker export (full)",
              f"ONLY processes files INSIDE folders containing 'export' in the name.\n"
@@ -1963,17 +1969,17 @@ class InteractiveMenu:
                     advanced_options = workflow.setdefault('advanced_options', {})
                     if decode_mode == "matrix":
                         advanced_options['matrix'] = True
+                        # Target ICC only applies to matrix mode
+                        target_icc = Prompt.ask(
+                            "Target ICC (file path or sRGB)",
+                            default=""
+                        )
+                        if target_icc and target_icc.strip():
+                            advanced_options['target_icc'] = target_icc.strip()
                     elif decode_mode == "basic":
                         advanced_options['basic'] = True
                     elif decode_mode == "none":
                         advanced_options['none'] = True
-
-                    target_icc = Prompt.ask(
-                        "Target ICC (file path or sRGB)",
-                        default=""
-                    )
-                    if target_icc and target_icc.strip():
-                        advanced_options['target_icc'] = target_icc.strip()
 
             dry_run = Confirm.ask("Dry run? (simulate without converting)", default=False)
             workflow['dry_run'] = dry_run
@@ -2121,6 +2127,9 @@ class InteractiveMenu:
             for key in ('matrix', 'basic', 'none', 'target_icc'):
                 if key in existing:
                     advanced_options[key] = existing[key]
+            # Preserve mode-8 delete_source chosen in Step 4
+            if workflow.get('delete_source'):
+                advanced_options['delete_source'] = True
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -2208,17 +2217,28 @@ class InteractiveMenu:
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
 
         elif origin == 'jxl' and dest == 'tiff':
+            _prev = workflow.get('advanced_options', {})
             if RICH_AVAILABLE and console:
-                use_matrix = Confirm.ask("Use ICC matrix conversion?", default=False)
+                use_matrix = Confirm.ask("Use ICC matrix conversion?", default=bool(_prev.get('matrix')))
                 use_none = False
                 use_basic = False
                 if not use_matrix:
-                    icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default="auto")
+                    _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
+                    icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default=_icc_default)
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
-                target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default="")
-                if target_icc == "custom":
-                    target_icc = Prompt.ask("Enter ICC profile path")
+                # Target ICC only applies to matrix mode (decoder ignores it otherwise)
+                if use_matrix:
+                    _ticc_prev = _prev.get('target_icc') or ""
+                    _ticc_default = "sRGB" if _ticc_prev.lower() == "srgb" else ("custom" if _ticc_prev else "")
+                    target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default=_ticc_default)
+                    if target_icc == "custom":
+                        if _ticc_prev and _ticc_prev.lower() != "srgb":
+                            target_icc = Prompt.ask("Enter ICC profile path", default=_ticc_prev)
+                        else:
+                            target_icc = Prompt.ask("Enter ICC profile path")
+                else:
+                    target_icc = ""
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 # Thumbnail reconstruction handling
                 th_default = self.config.config.last_thumbnail_handling if hasattr(self.config.config, 'last_thumbnail_handling') else "include"
@@ -2246,9 +2266,13 @@ class InteractiveMenu:
                 )
                 self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
+                delete_src = workflow.get('delete_source', False)
+                if not delete_src:
+                    delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
-                matrix_input = input("Use ICC matrix conversion? [y/N]: ").strip().lower()
+                _prev = workflow.get('advanced_options', {})
+                _m_default = "y" if _prev.get('matrix') else "n"
+                matrix_input = input(f"Use ICC matrix conversion? [{_m_default}/n]: ").strip().lower() or _m_default
                 use_matrix = matrix_input.startswith('y')
                 use_none = False
                 use_basic = False
@@ -2256,12 +2280,18 @@ class InteractiveMenu:
                     print("ICC mode: auto = use ICC from XMP or djxl (default)")
                     print("          basic = force Basic mode (djxl ICC)")
                     print("          none  = no ICC handling")
-                    icc_mode = input("ICC mode [auto/basic/none]: ").strip().lower()
+                    _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
+                    icc_mode = input(f"ICC mode [auto/basic/none] [{_icc_default}]: ").strip().lower() or _icc_default
                     use_basic = (icc_mode == "basic")
                     use_none = (icc_mode == "none")
-                target_icc = input("Target ICC (sRGB/custom/empty): ").strip()
-                if target_icc.lower() == "custom":
-                    target_icc = input("Enter ICC profile path: ").strip()
+                # Target ICC only applies to matrix mode (decoder ignores it otherwise)
+                if use_matrix:
+                    _ticc_prev = _prev.get('target_icc') or ""
+                    target_icc = input(f"Target ICC (sRGB/custom/empty) [{_ticc_prev}]: ").strip() or _ticc_prev
+                    if target_icc.lower() == "custom":
+                        target_icc = input("Enter ICC profile path: ").strip()
+                else:
+                    target_icc = ""
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
                 # Thumbnail reconstruction handling
@@ -2285,8 +2315,10 @@ class InteractiveMenu:
                 depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
                 self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
-                delete_src = delete_src_input.startswith('y')
+                delete_src = workflow.get('delete_source', False)
+                if not delete_src:
+                    delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
+                    delete_src = delete_src_input.startswith('y')
 
             if overwrite_mode == "1":
                 overwrite, sync = True, False
@@ -2313,7 +2345,9 @@ class InteractiveMenu:
                 no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
                 no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = Confirm.ask("Delete source after conversion?", default=False)
+                delete_src = workflow.get('delete_source', False)
+                if not delete_src:
+                    delete_src = Confirm.ask("Delete source after conversion?", default=False)
                 output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
             else:
                 md5_input = input("Skip MD5 verification? [y/N]: ").strip().lower()
@@ -2321,8 +2355,10 @@ class InteractiveMenu:
                 verify_input = input("Skip validation? [y/N]: ").strip().lower()
                 no_verify = verify_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
-                del_input = input("Delete source after? [y/N]: ").strip().lower()
-                delete_src = del_input.startswith('y')
+                delete_src = workflow.get('delete_source', False)
+                if not delete_src:
+                    del_input = input("Delete source after? [y/N]: ").strip().lower()
+                    delete_src = del_input.startswith('y')
                 output_suffix = input("Output suffix (e.g., _converted): ").strip()
 
             if overwrite_mode == "1":
@@ -2370,7 +2406,7 @@ class InteractiveMenu:
         """Step 7: Final Confirmation"""
         mode_names = {
             0: "In-place", 1: "Subfolder", 2: "Flat", 3: "Recursive subfolders",
-            4: "Sibling (rename)", 5: "Suffix", 6: "EXPORT full", 7: "EXPORT only", 8: "DELETE originals"
+            4: "Rename (suffix)", 5: "Sibling", 6: "EXPORT full", 7: "EXPORT only", 8: "DELETE originals"
         }
 
         extra_info = []
@@ -3140,7 +3176,8 @@ def main():
                     saved_quality = None
                 elif 'lossy' in workflow['conversion_type']:
                     saved_quality = workflow.get('quality') if workflow.get('quality') is not None else 95
-                    saved_distance = None
+                    # Lossy JXL encode also uses distance; preserve it for repeat
+                    saved_distance = workflow.get('distance')
                 else:
                     saved_quality = config.config.default_quality
                     saved_distance = None
@@ -3321,6 +3358,8 @@ def main():
                     'quality': last_quality or 95,
                     'overwrite_mode': ow_choice,
                 }
+                if last_distance is not None:
+                    workflow['distance'] = last_distance
 
             if workflow['mode'] == 2:
                 output_dir = config.config.last_mode_config.get('output_dir') if config.config.last_mode_config else None

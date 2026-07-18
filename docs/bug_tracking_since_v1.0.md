@@ -210,8 +210,18 @@ New regression test: `tests/test_multipage.py`
 | 133 | JPEG scanners ignore `.jfif` / `.jpe` files | transcoder, photo | ✅ FIXED (v1.7.1) |
 | 134 | `_copy_metadata()` runs after `reorder_jxl_boxes()`, undoing the reorder | transcoder | ✅ FIXED (v1.7.2) |
 | 135 | `execute_workflow()` missing `PYTHONUNBUFFERED` (main wizard path) | photo | ✅ FIXED (v1.7.2) |
+| 136 | `--dry-run` ignored on transcode/auto paths (converts for real) | transcoder | ✅ FIXED (v1.8.0) |
+| 137 | Wizard mode 8 `--delete-source` dropped on most paths | photo | ✅ FIXED (v1.8.0) |
+| 138 | Auto mode + staging + 16-bit: output stranded in staging as UUID | transcoder | ✅ FIXED (v1.8.0) |
+| 139 | Transcoder mode 1 recursive (docs/decoder say flat) | transcoder | ✅ FIXED (v1.8.0) |
+| 140 | Transcoder modes 4/5 inverted vs encoder/decoder (+ wrong wrapper labels) | transcoder, photo | ✅ FIXED (v1.8.0) |
+| 141 | Auto mode does nothing on PNG-only folders | transcoder | ✅ FIXED (v1.8.0) |
+| 142 | Wizard asks decode mode twice; second pass discards the first | photo | ✅ FIXED (v1.8.0) |
+| 143 | Repeat workflow loses `distance` for lossy conversions | photo | ✅ FIXED (v1.8.0) |
+| 144 | HHMM lossy confirmation required for lossless transcode decode | transcoder | ✅ FIXED (v1.8.0) |
+| 145 | Progress total counts files filtered out by modes 6/7 | transcoder | ✅ FIXED (v1.8.0) |
 
-**Total bugs fixed: 129**
+**Total bugs fixed: 140**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2493,6 +2503,137 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 **Files changed:**
 - `jxl_photo.py` `execute_workflow()`
+
+---
+
+### Bug #136 — `--dry-run` Ignored on Transcode/Auto Paths
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_transcode()`, `cmd_auto()` / `_process_file_group()`
+
+**Problem:** `args.dry_run` was only checked in `cmd_convert()`. The transcode (`--force-transcode`) and auto paths performed real conversions even with `--dry-run`. Since the wrapper offers "Dry run?" for every workflow and forwards the flag to all scripts, a user simulating a JPEG↔JXL lossless batch got real conversions.
+
+**Fix:** Added the same `DRY | src -> dst` listing + early return to `cmd_transcode()` and `_process_file_group()` (used by `cmd_auto`), and skipped the mode-8 deletion confirmation on dry runs. Verified: zero files created, no conversion subprocess runs (covered by `tests/test_transcoder_fixes.py`).
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_transcode()`, `_process_file_group()`, `cmd_auto()`
+
+---
+
+### Bug #137 — Wizard Mode 8 `--delete-source` Dropped on Most Paths
+
+**Location:** `jxl_photo.py` — wizard Step 6A (`_wizard_parameters_advanced`)
+
+**Problem:** Choosing mode 8 sets `workflow['delete_source'] = True`, but `execute_workflow()` only reads `advanced_options['delete_source']`. The no-advanced-options early return never copied the flag, and the JXL→TIFF / transcoder advanced branches re-asked the question with a "No" default, ignoring the earlier choice. Only the TIFF→JXL advanced branch read `workflow['delete_source']`. Result: the user confirmed deletion (even typing HHMM) and nothing was deleted — the advertised mode-8 behavior did not work via the wizard.
+
+**Fix:** Propagate `workflow['delete_source']` in the early return, and use it as the default (skip re-asking) in all three advanced branches, mirroring the TIFF→JXL branch.
+
+**Files changed:**
+- `jxl_photo.py` `_wizard_parameters_advanced()`
+
+---
+
+### Bug #138 — Auto Mode + Staging + 16-bit: Output Stranded in Staging
+
+**Location:** `jxl_jpeg_transcoder.py` — `_process_file_group()` / `decode_to_image()` / `process_group_convert()`
+
+**Problem:** In auto mode without an explicit `--format`, the pre-switch for 16-bit JPEG output never fired (`args.format` is `None`, not `"jpeg"`). `decode_to_image()` then switched the extension `.jpg → .png` at runtime, but the staging promotion looked for the original `.jpg` staging path — which didn't exist — and silently moved nothing (no warning either). The converted file stayed in the staging dir with a UUID name while the log said OK.
+
+**Fix:** Compute the effective bit depth and switch the output extension to `.png` when JPEG+16-bit **before** building output pairs (same pattern as the #124 fix in `cmd_convert`), so staging names, final names, and promotion all agree. Verified end-to-end: PNG promoted to destination, staging left clean.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_process_file_group()`
+
+---
+
+### Bug #139 — Transcoder Mode 1 Was Recursive (Docs and Decoder Say Flat)
+
+**Location:** `jxl_jpeg_transcoder.py` — file collection in `cmd_transcode()`, `cmd_convert()`, `cmd_auto()`
+
+**Problem:** Only mode 0 used the flat scanners; mode 1 scanned recursively. The transcoder README documents mode 1 as "Flat (non-recursive)", and the TIFF decoder treats modes 0 and 1 as flat — so sibling scripts disagreed, and outputs from nested folders were flattened into a single `converted/` dir (possible name collisions).
+
+**Fix:** Modes 0 and 1 both use the flat scanners in all collection sites, matching the docs and the decoder. Recursive collection remains available in modes 2/3/8.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_transcode()`, `cmd_convert()`, `cmd_auto()`
+
+---
+
+### Bug #140 — Transcoder Modes 4/5 Inverted vs Encoder/Decoder (+ Wrong Wrapper Labels)
+
+**Location:** `jxl_jpeg_transcoder.py` — `resolve_output_transcode()` / `resolve_output_convert()`; `jxl_photo.py` — mode labels
+
+**Problem:** The TIFF encoder/decoder use mode 4 = folder rename (suffix swap) and mode 5 = sibling folder; the transcoder had them swapped (4 = sibling, 5 = rename). The wrapper presented a single mode table that could not be correct for both — and in practice its labels described the old transcoder-only semantics for every direction. **Breaking change (accepted):** the transcoder was renumbered to match the encoder/decoder.
+
+**Fix:** Swapped mode 4/5 in both transcoder resolve functions, updated all wrapper labels/descriptions (including the auto-mode recommender, which now recommends mode 4 for folder names containing the source type), and updated the docs. Users with saved transcoder commands using modes 4/5 must swap them.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `resolve_output_transcode()`, `resolve_output_convert()`
+- `jxl_photo.py` mode tables/labels, auto-mode recommender
+
+---
+
+### Bug #141 — Auto Mode Does Nothing on PNG-Only Folders
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_auto()`
+
+**Problem:** `cmd_auto()` collected only JPEG and JXL files, so a folder of PNGs reported "No JPEG or JXL files found" — despite single-file auto-detection routing PNG → convert encode.
+
+**Fix:** `cmd_auto()` also collects PNGs and routes them through `_process_file_group(..., direction="to_jxl")` (new direction parameter). PNG→JXL is treated as lossy for deletion-confirmation purposes.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_auto()`, `_process_file_group()`
+
+---
+
+### Bug #142 — Wizard Asks Decode Mode Twice; Second Pass Discards the First
+
+**Location:** `jxl_photo.py` — wizard Step 6 vs Step 6A (JXL→TIFF)
+
+**Problem:** Step 6 asks decode mode (roundtrip/basic/matrix/none) and target ICC for JXL→TIFF. Entering advanced options (Step 6A) re-asked everything with factory defaults and rebuilt `advanced_options` from scratch, discarding the Step 6 answers (the merge preserving them existed only on the no-advanced path). Choosing "matrix" in Step 6 and accepting defaults in Step 6A silently produced roundtrip. Additionally, target ICC was asked even for non-matrix modes, where the decoder ignores it.
+
+**Fix:** Step 6A uses the Step 6 answers as prompt defaults (matrix/basic/none/target ICC), and target ICC is only asked when matrix is selected (both in Step 6 and Step 6A).
+
+**Files changed:**
+- `jxl_photo.py` `_wizard_parameters()` / `_wizard_parameters_advanced()`
+
+---
+
+### Bug #143 — Repeat Workflow Loses `distance` for Lossy Conversions
+
+**Location:** `jxl_photo.py` — session save / repeat workflow
+
+**Problem:** For conversion types containing "lossy", only `quality` was saved (`saved_distance = None`); the repeat rebuilt the workflow without `distance`, so the command used the default `d=1.0`. A lossy batch done at d=0.5 repeated at d=1.0, silently.
+
+**Fix:** Save `distance` alongside `quality` for lossy workflows and restore it when repeating (when present).
+
+**Files changed:**
+- `jxl_photo.py` session save / repeat workflow
+
+---
+
+### Bug #144 — HHMM Lossy Confirmation Required for Lossless Transcode Decode
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_transcode()`
+
+**Problem:** `is_lossy_decode = decode and not args.force_transcode` treated an auto-detected transcode decode as "lossy", requiring the HHMM time confirmation. But transcode decode requires the `jbrd` box per file (enforced in `decode_one_transcode`), so it is always lossless — the docs state lossless operations only require "yes".
+
+**Fix:** `cmd_transcode()` always uses the simple `confirm_deletion_jpeg()` confirmation; the HHMM confirmation remains for genuinely lossy paths (`cmd_convert`/`cmd_auto`).
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_transcode()`
+
+---
+
+### Bug #145 — Progress Total Counts Files Filtered Out by Modes 6/7
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_transcode()` / `cmd_convert()`
+
+**Problem:** `_counter["total"]` was set to `len(files)` before the output-pair loop filtered out files outside `EXPORT_MARKER`, so progress in modes 6/7 ended below the stated total (e.g. `[1/2]` and never reaching 2).
+
+**Fix:** `_counter["total"] = len(pairs)` after the filtering loop (both commands).
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_transcode()`, `cmd_convert()`
 
 ---
 

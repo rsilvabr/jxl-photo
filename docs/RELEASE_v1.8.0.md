@@ -44,3 +44,23 @@ Measured on real 16-bit Capture One exports (45 MP Nikon, ProPhoto), TIFF → JX
 - Passing a v0.12-only flag to an older binary would abort every encode with "Unknown flag"; the version gate prevents this by construction. Unknown/unreadable versions are treated as old (safe fallback).
 - `jxl_tiff_decoder.py` needs no changes: it passes no v0.12-only flags.
 - New regression tests: `tests/test_version_gating.py` (version parsing, flag gating on/off, missing-`jbrd` per-file error).
+
+## Audit fixes (second pass)
+
+### ⚠️ Breaking change — transcoder modes 4/5 renumbered
+
+- In `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder** (`JXL_jpeg`/`JPEG_recovered`). Update any saved scripts/manifests that used transcoder modes 4 or 5.
+- The wrapper's mode labels were also wrong (they described the old transcoder-only semantics for every direction) and now show the unified meaning.
+
+### Fixes
+
+- **`--dry-run` actually simulates now on every transcoder path** — it was only honored in `--force-convert`; the transcode and auto paths converted for real, and the wizard passes `--dry-run` to all scripts.
+- **Wizard mode 8 `--delete-source` was silently dropped** unless you entered advanced options on the TIFF→JXL path. The mode-8 deletion choice now propagates through all paths.
+- **Auto mode + staging + `--bit-depth 16`** — outputs were switched to `.png` at runtime, but staging promotion looked for the `.jpg`, silently stranding the result in the staging folder with a UUID name. The extension is now switched **before** output pairs are built (same fix pattern as bug #124).
+- **Transcoder mode 1 is flat again** (matches its README and the TIFF decoder). Use modes 2/3/8 for recursive collection.
+- **Auto mode processes PNG-only folders** (convert encode to JXL) instead of reporting "No JPEG or JXL files found".
+- **Wizard no longer asks the decode mode twice** — Step 6 answers (matrix/basic/none/target ICC) become the defaults in the advanced-options step instead of being discarded, and target ICC is only asked for matrix mode.
+- **"Repeat last workflow" preserves `distance`** for lossy conversions (it silently reverted to d=1.0).
+- **Lossless transcode decode asks only the simple `yes` confirmation** — the HHMM lossy confirmation was wrongly required, although transcode decode is always lossless (jbrd-gated).
+- Progress counter in transcoder modes 6/7 now counts only files that will actually be processed.
+- Removed dead code (`_run_pipeline_safe`, unused constants) and small decoder cleanups (unused variable, duplicated `no_icc_clean` check, stale IFD0/IFD1 comment).

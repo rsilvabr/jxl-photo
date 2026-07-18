@@ -38,62 +38,6 @@ from datetime import datetime
 from typing import Optional
 
 
-def _run_pipeline_safe(cmd1: list, cmd2: list, timeout: float = 300) -> tuple:
-    """Run two commands in a pipeline (cmd1 | cmd2) safely without deadlock.
-    
-    Returns: (returncode1, returncode2, stderr1, stderr2)
-    Raises: RuntimeError if either command fails
-    """
-    import threading
-    
-    # Start first process
-    proc1 = subprocess.Popen(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # Start second process with stdin from proc1
-    proc2 = subprocess.Popen(cmd2, stdin=proc1.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    proc1.stdout.close()  # Allow proc1 to receive SIGPIPE if proc2 exits
-    
-    # Collect stderr from both processes using threads to prevent deadlock
-    stderr1_data = [b""]
-    stderr2_data = [b""]
-    
-    def read_stderr1():
-        if proc1.stderr:
-            stderr1_data[0] = proc1.stderr.read()
-    
-    def read_stderr2():
-        if proc2.stderr:
-            stderr2_data[0] = proc2.stderr.read()
-    
-    t1 = threading.Thread(target=read_stderr1)
-    t2 = threading.Thread(target=read_stderr2)
-    t1.start()
-    t2.start()
-    
-    try:
-        # Wait for proc2 to complete (it will consume proc1's output)
-        proc2.wait(timeout=timeout)
-        t2.join(timeout=5)
-        
-        # Wait for proc1 to complete
-        proc1.wait(timeout=timeout)
-        t1.join(timeout=5)
-        
-        if proc1.returncode != 0 or proc2.returncode != 0:
-            err_msg = (stderr1_data[0] + stderr2_data[0]).decode(errors='replace')[:500]
-            raise RuntimeError(f"Pipeline failed (codes: {proc1.returncode}, {proc2.returncode}): {err_msg}")
-        
-        return proc1.returncode, proc2.returncode, stderr1_data[0], stderr2_data[0]
-        
-    except subprocess.TimeoutExpired:
-        # Cleanup on timeout
-        proc1.kill()
-        proc2.kill()
-        proc1.wait()
-        proc2.wait()
-        raise RuntimeError(f"Pipeline timeout after {timeout}s")
-
-
 def _verify_file_integrity(file_path: Path) -> bool:
     """Verify output file integrity before deleting source.
     
@@ -276,15 +220,11 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
 CONVERTED_JXL_FOLDER = "converted_jxl"
 RECOVERED_JPEG_FOLDER = "recovered_jpeg"
 
-# Mode 3
-JXL_FOLDER_NAME = "JXL_jpeg"
-JPEG_FOLDER_NAME = "JPEG_recovered"
-
-# Mode 4 (sibling)
+# Mode 5 (sibling)
 JXL_SIBLING_FOLDER = "JXL_jpeg"
 JPEG_SIBLING_FOLDER = "JPEG_recovered"
 
-# Mode 5 (suffix replacement)
+# Mode 4 (suffix replacement)
 JPEG_SUFFIX_TO_REPLACE = "JPEG"
 JXL_SUFFIX_REPLACE = "JXL"
 JXL_SUFFIX_TO_REPLACE = "JXL"
@@ -738,8 +678,7 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
     elif mode == 3:
         return src_path.parent / conv_folder / src_path.with_suffix(out_ext).name
     elif mode == 4:
-        return src_path.parent.parent / sibling_jxl / src_path.with_suffix(out_ext).name
-    elif mode == 5:
+        # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
         new_name = None
         for variant in [sfx_from, sfx_from.lower(), sfx_from.title()]:
@@ -750,6 +689,9 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
+    elif mode == 5:
+        # Sibling folder (aligned with encoder/decoder mode 5)
+        return src_path.parent.parent / sibling_jxl / src_path.with_suffix(out_ext).name
     elif mode in (6, 7):
         parts = src_path.parts
         marker_lower = EXPORT_MARKER.lower()
@@ -1041,12 +983,12 @@ def cmd_transcode(args, auto_decode: bool = False):
         files = [args.input]
         output_root = args.output or args.input.parent
     elif decode:
-        files = find_jxls_flat(args.input) if args.mode == 0 else find_jxls_recursive(args.input)
+        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
         output_root = args.output or args.input
         if args.mode == 2:
             output_root.mkdir(parents=True, exist_ok=True)
     else:
-        files = find_jpegs_flat(args.input) if args.mode == 0 else find_jpegs_recursive(args.input)
+        files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
         output_root = args.output or args.input
         if args.mode == 2:
             output_root.mkdir(parents=True, exist_ok=True)
@@ -1055,7 +997,6 @@ def cmd_transcode(args, auto_decode: bool = False):
         logger.warning("No input files found.")
         return
 
-    _counter["total"] = len(files)
     logger.info(f"Files found: {len(files)}")
 
     # Build pairs
@@ -1066,6 +1007,15 @@ def cmd_transcode(args, auto_decode: bool = False):
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
 
+    # Progress total must reflect modes 6/7 filtering, not the raw scan
+    _counter["total"] = len(pairs)
+
+    if args.dry_run:
+        for f, out in pairs:
+            logger.info(f" DRY | {f.name} -> {out}")
+        logger.info(f"Dry run: {len(pairs)} files would be processed.")
+        return
+
     # Group by output folder
     groups = {}
     for f, out in pairs:
@@ -1073,16 +1023,13 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     if args.mode == 8 and DELETE_SOURCE:
         if DELETE_CONFIRM:
-            # Check if this is lossy decode (JXL -> JPEG) or lossless transcode
-            is_lossy_decode = decode and not args.force_transcode
-            if is_lossy_decode:
-                if not confirm_deletion_lossy():
-                    logger.info("Deletion not confirmed -- exiting.")
-                    return
-            else:
-                if not confirm_deletion_jpeg():
-                    logger.info("Deletion not confirmed -- exiting.")
-                    return
+            # Transcode is lossless in both directions (decode requires the jbrd
+            # box, checked per file in decode_one_transcode), so the simple
+            # 'yes' confirmation applies — the HHMM lossy confirmation is only
+            # for lossy converts (cmd_convert/cmd_auto).
+            if not confirm_deletion_jpeg():
+                logger.info("Deletion not confirmed -- exiting.")
+                return
 
     logger.info(f"Output groups: {len(groups)}")
 
@@ -1153,10 +1100,7 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             return Path(output_root) / output_name / f"{stem}.{ext}"
         return src_path.parent / conv_folder / f"{stem}.{ext}"
     elif mode == 4:
-        # Sibling folder (e.g., JXL_jpeg/ or JPEG_recovered/)
-        return src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
-    elif mode == 5:
-        # Folder suffix replacement
+        # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
         new_name = None
         for variant in [sfx_from, sfx_from.lower(), sfx_from.title()]:
@@ -1167,6 +1111,10 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / f"{stem}.{ext}"
+    elif mode == 5:
+        # Sibling folder (e.g., JXL_jpeg/ or JPEG_recovered/) — aligned with
+        # encoder/decoder mode 5
+        return src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
     elif mode in (6, 7):
         # Export marker modes - only process files INSIDE export marker folder
         parts = src_path.parts
@@ -1434,12 +1382,12 @@ def cmd_convert(args, from_jxl: bool = True):
         files = [args.input]
         output_root = args.output or args.input.parent
     elif direction == "to_jxl":
-        jpegs = find_jpegs_flat(args.input) if args.mode == 0 else find_jpegs_recursive(args.input)
-        pngs = find_pngs_flat(args.input) if args.mode == 0 else find_pngs_recursive(args.input)
+        jpegs = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
+        pngs = find_pngs_flat(args.input) if args.mode in (0, 1) else find_pngs_recursive(args.input)
         files = jpegs + pngs
         # If no JPEGs/PNGs found, fall back to JXLs (auto-detect direction)
         if not files:
-            jxls = find_jxls_flat(args.input) if args.mode == 0 else find_jxls_recursive(args.input)
+            jxls = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
             if jxls:
                 files = jxls
                 direction = "from_jxl"
@@ -1452,7 +1400,7 @@ def cmd_convert(args, from_jxl: bool = True):
         if args.mode == 2:
             output_root.mkdir(parents=True, exist_ok=True)
     else:
-        files = find_jxls_flat(args.input) if args.mode == 0 else find_jxls_recursive(args.input)
+        files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
         output_root = args.output or args.input
         if args.mode == 2:
             output_root.mkdir(parents=True, exist_ok=True)
@@ -1466,8 +1414,6 @@ def cmd_convert(args, from_jxl: bool = True):
     if direction == "from_jxl" and args.format == "jpeg" and args.bit_depth == 16:
         logger.warning("JPEG output does not support 16-bit; switching to PNG")
         args.format = "png"
-
-    _counter["total"] = len(files)
 
     # ICC label logic (after direction may have auto-changed)
     if args.icc_profile:
@@ -1516,6 +1462,9 @@ def cmd_convert(args, from_jxl: bool = True):
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
+
+    # Progress total must reflect modes 6/7 filtering, not the raw scan
+    _counter["total"] = len(pairs)
 
     if args.dry_run:
         for f, out in pairs:
@@ -1619,35 +1568,40 @@ def cmd_auto(args):
     
     log_file = setup_logger()
     
-    # Collect JPEG files (encode direction) and JXL files (decode/convert direction)
-    if args.mode == 0:
+    # Collect JPEG files (encode direction), PNG files (convert encode direction)
+    # and JXL files (decode/convert direction). Modes 0 and 1 are flat.
+    if args.mode in (0, 1):
         jpeg_files = find_jpegs_flat(args.input)
+        png_files = find_pngs_flat(args.input)
         jxl_files = find_jxls_flat(args.input)
     else:
         jpeg_files = find_jpegs_recursive(args.input)
+        png_files = find_pngs_recursive(args.input)
         jxl_files = find_jxls_recursive(args.input)
-    
-    if not jpeg_files and not jxl_files:
-        logger.warning("No JPEG or JXL files found.")
+
+    if not jpeg_files and not png_files and not jxl_files:
+        logger.warning("No JPEG, PNG or JXL files found.")
         return
-    
+
     # Separate JXL files by jbrd presence
     jxl_transcode_files = []  # Have jbrd - can decode losslessly to JPEG
     jxl_convert_files = []    # No jbrd - must do lossy convert
-    
+
     for f in jxl_files:
         if has_jbrd_box(f):
             jxl_transcode_files.append(f)
         else:
             jxl_convert_files.append(f)
-    
-    total_files = len(jpeg_files) + len(jxl_transcode_files) + len(jxl_convert_files)
+
+    total_files = len(jpeg_files) + len(png_files) + len(jxl_transcode_files) + len(jxl_convert_files)
     _counter["total"] = total_files
-    
+
     # Confirm source deletion BEFORE any processing. Lossy conversion requires
     # stricter confirmation than lossless transcode. Only meaningful in mode 8.
-    if args.delete_source and args.mode == 8:
-        has_lossy = bool(jxl_convert_files)
+    # Skipped on dry runs (nothing is converted, so nothing would be deleted).
+    if args.delete_source and args.mode == 8 and not args.dry_run:
+        # PNG -> JXL convert re-encodes pixels (not bit-recoverable): treat as lossy.
+        has_lossy = bool(jxl_convert_files) or bool(png_files)
         has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
         if has_lossy:
             if not confirm_deletion_lossy():
@@ -1658,9 +1612,10 @@ def cmd_auto(args):
                 logger.info("Deletion not confirmed -- exiting.")
                 return
         DELETE_SOURCE = True
-    
+
     logger.info(f"AUTO MODE | Directory: {args.input}")
     logger.info(f"JPEG files (lossless encode): {len(jpeg_files)}")
+    logger.info(f"PNG files (convert encode): {len(png_files)}")
     logger.info(f"JXL with jbrd (lossless decode): {len(jxl_transcode_files)}")
     logger.info(f"JXL without jbrd (lossy): {len(jxl_convert_files)}")
     logger.info(f"Mode: {args.mode} | Workers: {args.workers} | Staging: {TEMP2_DIR or 'disabled'}")
@@ -1675,7 +1630,12 @@ def cmd_auto(args):
     if jpeg_files:
         logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
         _process_file_group(jpeg_files, args, use_transcode=True)
-    
+
+    # Process PNG files (convert encode to JXL; no lossless transcode for PNG)
+    if png_files:
+        logger.info(f"\n--- Processing {len(png_files)} PNG files (convert encode) ---")
+        _process_file_group(png_files, args, use_transcode=False, direction="to_jxl")
+
     # Process JXL transcode files (lossless decode to JPEG)
     if jxl_transcode_files:
         logger.info(f"\n--- Processing {len(jxl_transcode_files)} JXL files with jbrd (lossless) ---")
@@ -1690,31 +1650,54 @@ def cmd_auto(args):
     logger.info(f"AUTO MODE complete | Total: {total_files} files")
     logger.info(f"Log: {log_file}")
 
-def _process_file_group(files, args, use_transcode=True):
-    """Process a group of files with the same method."""
+def _process_file_group(files, args, use_transcode=True, direction="from_jxl"):
+    """Process a group of files with the same method.
+    use_transcode=True: lossless JPEG<->JXL (direction per extension).
+    use_transcode=False: convert; direction='from_jxl' (decode to image) or
+    'to_jxl' (encode image to JXL, e.g. PNG inputs in auto mode)."""
     # Use explicit output directory if provided, otherwise fall back to input root
     output_root = args.output if args.output is not None else args.input
 
     # Build output pairs
     pairs = []
+    if not use_transcode:
+        if direction == "to_jxl":
+            out_ext = "jxl"
+        else:
+            # Lossy convert: output format defaults to JPEG if not specified.
+            # Compute once (loop-invariant).
+            fmt_eff = args.format or "jpeg"
+            # Default bit depth per format, matching cmd_convert behavior
+            default_depth = 8 if fmt_eff in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
+            bit_depth_eff = args.bit_depth or default_depth
+            # JPEG does not support 16-bit: switch to PNG *here* so staging files
+            # and final paths agree (same fix as cmd_convert #124). Otherwise
+            # decode_to_image switches extension at runtime and the staged file is
+            # orphaned (never promoted to the destination).
+            if fmt_eff in ("jpeg", "jpg") and bit_depth_eff == 16:
+                logger.warning("JPEG output does not support 16-bit; switching to PNG")
+                out_ext = "png"
+            else:
+                out_ext = "jpg" if fmt_eff in ("jpeg", "jpg") else "png"
     for f in files:
         if use_transcode:
             # Lossless transcode: direction depends on input extension
             is_jpeg_input = f.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
             out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input)
         else:
-            # Lossy convert: output format defaults to JPEG if not specified
-            out_ext = "jpg" if (args.format or "jpeg") in ("jpeg", "jpg") else "png"
-            # Default bit depth per format, matching cmd_convert behavior
-            default_depth = 8 if (args.format or "jpeg") in ("jpeg", "jpg") else PNG_DEFAULT_BIT_DEPTH
             out = resolve_output_convert(
                 f, args.mode, args.output_name, args.output_suffix,
                 out_ext, args.rename_from, args.rename_to,
-                output_root, decode=True
+                output_root, decode=(direction == "from_jxl")
             )
         if out:
             pairs.append((f, out))
-    
+
+    if args.dry_run:
+        for f, out in pairs:
+            logger.info(f" DRY | {f.name} -> {out}")
+        return
+
     if not pairs:
         return
     
@@ -1743,9 +1726,10 @@ def _process_file_group(files, args, use_transcode=True):
                 )
         else:
             results = process_group_convert(
-                group_pairs, args.workers, direction="from_jxl",
+                group_pairs, args.workers, direction=direction,
                 quality=args.quality, distance=args.distance,
-                fmt=args.format or "jpeg", bit_depth=args.bit_depth or default_depth,
+                fmt=args.format or "jpeg",
+                bit_depth=args.bit_depth or (default_depth if direction == "from_jxl" else 8),
                 output_icc=args.icc_profile, use_ram=args.ram,
                 effort=args.effort, reconvert_val=args.overwrite,
                 use_internal_srgb=False, smart=args.sync
