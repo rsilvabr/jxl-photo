@@ -220,8 +220,9 @@ New regression test: `tests/test_multipage.py`
 | 143 | Repeat workflow loses `distance` for lossy conversions | photo | ✅ FIXED (v1.8.0) |
 | 144 | HHMM lossy confirmation required for lossless transcode decode | transcoder | ✅ FIXED (v1.8.0) |
 | 145 | Progress total counts files filtered out by modes 6/7 | transcoder | ✅ FIXED (v1.8.0) |
+| 146 | Wizard mode 2 output positional after flags breaks argparse on Python < 3.12.7 | photo | ✅ FIXED (v1.8.0) |
 
-**Total bugs fixed: 140**
+**Total bugs fixed: 141**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2634,6 +2635,19 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 **Files changed:**
 - `jxl_jpeg_transcoder.py` `cmd_transcode()`, `cmd_convert()`
+
+---
+
+### Bug #146 — Wizard Mode 2 Output Positional After Flags Breaks Argparse on Python < 3.12.7
+
+**Location:** `jxl_photo.py` — `execute_workflow()` (encoder/decoder/transcoder branches)
+
+**Problem:** In mode 2 the wrapper appended the output directory **after** the flags (`script input --mode 2 --workers 4 output`). That intermixed-positional pattern hit the 12-year-old argparse bug gh-59317 on CPython < 3.13.1 / < 3.12.7 (never backported to 3.9–3.11 or 3.12.0–3.12.6): `error: unrecognized arguments: <output>`, killing every wizard mode-2 workflow on those versions. On Python 3.12.7+/3.13.1+ the same command parses fine, so the failure depends on the interpreter version — the README promises Python 3.9+.
+
+**Fix:** Insert the output positional right after the input (`cmd.insert(3, output_dir)`), giving the classic `[input, output, ...flags]` ordering that parses on every Python version — the same ordering the manifest path already used.
+
+**Files changed:**
+- `jxl_photo.py` `execute_workflow()`
 
 ---
 

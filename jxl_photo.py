@@ -2881,7 +2881,10 @@ class InteractiveMenu:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    cmd.append(output_dir)
+                    # Insert right after the input positional: appending the output
+                    # positional after flags breaks argparse on Python < 3.12.7
+                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
+                    cmd.insert(3, output_dir)
 
             distance = workflow.get('distance', 0.1)
             cmd.extend(['--distance', str(distance)])
@@ -2933,7 +2936,10 @@ class InteractiveMenu:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    cmd.append(output_dir)
+                    # Insert right after the input positional: appending the output
+                    # positional after flags breaks argparse on Python < 3.12.7
+                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
+                    cmd.insert(3, output_dir)
 
             cmd.extend(['--compression', workflow['compression']])
             cmd.extend(['--depth', str(workflow['bit_depth'])])
@@ -2991,7 +2997,10 @@ class InteractiveMenu:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
                     Path(output_dir).mkdir(parents=True, exist_ok=True)
-                    cmd.append(output_dir)
+                    # Insert right after the input positional: appending the output
+                    # positional after flags breaks argparse on Python < 3.12.7
+                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
+                    cmd.insert(3, output_dir)
 
             # Handle conversion type flags
             # Note: transcoder auto-detects direction based on file extensions

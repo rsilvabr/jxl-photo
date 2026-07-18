@@ -63,4 +63,5 @@ Measured on real 16-bit Capture One exports (45 MP Nikon, ProPhoto), TIFF → JX
 - **"Repeat last workflow" preserves `distance`** for lossy conversions (it silently reverted to d=1.0).
 - **Lossless transcode decode asks only the simple `yes` confirmation** — the HHMM lossy confirmation was wrongly required, although transcode decode is always lossless (jbrd-gated).
 - Progress counter in transcoder modes 6/7 now counts only files that will actually be processed.
+- **Wizard mode 2 works on every supported Python** — the output directory is now placed right after the input positional; appending it after the flags broke argparse on Python < 3.12.7/3.13.1 (`unrecognized arguments`, gh-59317).
 - Removed dead code (`_run_pipeline_safe`, unused constants) and small decoder cleanups (unused variable, duplicated `no_icc_clean` check, stale IFD0/IFD1 comment).
