@@ -250,6 +250,7 @@ class ConfigManager:
 class DependencyChecker:
     def __init__(self, config_manager: ConfigManager):
         self.config = config_manager
+        self._deps_status = None  # cached result; force=True bypasses
 
     def _check_pillow(self) -> bool:
         try:
@@ -270,6 +271,10 @@ class DependencyChecker:
             return False
 
     def check_dependencies(self, force: bool = False) -> Dict[str, bool]:
+        # Honor `force`: without it, return the cached result when available
+        # (detection spawns one subprocess per tool).
+        if not force and self._deps_status is not None:
+            return self._deps_status
         tools_to_check = {
             'cjxl': ['cjxl', '--version'],
             'djxl': ['djxl', '--version'],
@@ -301,6 +306,7 @@ class DependencyChecker:
         self.config.config.available_features = status
         self.config.save_config()
 
+        self._deps_status = status
         return status
 
     def _detect_tool(self, cmd: str) -> Optional[str]:

@@ -441,6 +441,9 @@ counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0,
                     "applied_already_correct": 0, "skipped_already_correct": 0}
+# Unique ICC profiles patched (by md5 of the original ICC bytes). The counters
+# above increment per page in multipage splits; this set deduplicates profiles.
+_d50_patched_hashes = set()
 _d50_patch_lock = threading.Lock()
 
 def setup_logger():
@@ -699,6 +702,8 @@ def apply_d50_policy(icc_bytes, tiff_path):
             if was_correct:
                 _d50_patch_count["already_correct"] += 1
                 _d50_patch_count["applied_already_correct"] += 1
+            else:
+                _d50_patched_hashes.add(hashlib.md5(icc_bytes).hexdigest())
         logger.debug(f"Applied D50 patch to {Path(tiff_path).name}" + (" (was already correct)" if was_correct else ""))
     else:
         was_correct = _is_d50_already_correct(bytes(icc))
@@ -2258,7 +2263,11 @@ def main():
             actually_patched = applied - applied_already_correct
             # Total files that needed patching vs total that were already correct
             total_needed_patch = actually_patched + skipped_needed
-            logger.info(f"D50 patch: {actually_patched} applied | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
+            # Counters increment per page in multipage splits; unique profiles
+            # deduplicates pages that share the same ICC.
+            unique_profiles = len(_d50_patched_hashes)
+            unique_label = f" ({unique_profiles} unique profiles)" if unique_profiles != actually_patched else ""
+            logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
 

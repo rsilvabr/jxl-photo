@@ -221,8 +221,10 @@ New regression test: `tests/test_multipage.py`
 | 144 | HHMM lossy confirmation required for lossless transcode decode | transcoder | ✅ FIXED (v1.8.0) |
 | 145 | Progress total counts files filtered out by modes 6/7 | transcoder | ✅ FIXED (v1.8.0) |
 | 146 | Wizard mode 2 output positional after flags breaks argparse on Python < 3.12.7 | photo | ✅ FIXED (v1.8.0) |
+| 147 | D50 patch stats count per page in multipage splits | encoder | ✅ FIXED (v1.8.1) |
+| 148 | `check_dependencies(force=...)` ignores the `force` parameter | photo | ✅ FIXED (v1.8.1) |
 
-**Total bugs fixed: 141**
+**Total bugs fixed: 143**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2648,6 +2650,32 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 **Files changed:**
 - `jxl_photo.py` `execute_workflow()`
+
+---
+
+### Bug #147 — D50 Patch Stats Count Per Page in Multipage Splits
+
+**Location:** `jxl_tiff_encoder.py` — `apply_d50_policy()` + D50 summary
+
+**Problem:** The `_d50_patch_count` counters increment per `apply_d50_policy()` call, which runs once per page in multipage split mode. A 3-page TIFF sharing one ICC profile counted 3 "applied" in the summary, which reads as a file count. Cosmetic (log only).
+
+**Fix:** Added `_d50_patched_hashes`, a set of md5 hashes of original ICC bytes that actually needed the patch, updated under the same lock. The summary now appends "(N unique profiles)" when the unique count differs from the per-page applied count.
+
+**Files changed:**
+- `jxl_tiff_encoder.py` `apply_d50_policy()`, D50 summary
+
+---
+
+### Bug #148 — `check_dependencies(force=...)` Ignores the `force` Parameter
+
+**Location:** `jxl_photo.py` — `DependencyChecker.check_dependencies()`
+
+**Problem:** The `force` parameter was accepted but never read — the method always ran full detection (one subprocess per tool) and rewrote the config. Callers pass `force=True` for the menu "re-check" option, so behavior was safe, but the parameter was misleading.
+
+**Fix:** Implemented the intended semantics: the result is cached on the instance; `force=False` returns the cache when present, `force=True` bypasses it and re-detects.
+
+**Files changed:**
+- `jxl_photo.py` `DependencyChecker`
 
 ---
 
