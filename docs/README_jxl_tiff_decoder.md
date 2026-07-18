@@ -316,7 +316,7 @@ it takes 3 seconds and is much safer.
 
 ## Modes 6 and 7 — ONLY files inside `_EXPORT`
 
-**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+**Modes 6 and 7 ONLY process files inside folders whose names start with or end with `_EXPORT` (case-insensitive). Everything outside is IGNORED.**
 
 ```
 E:\sessao\
@@ -388,8 +388,22 @@ Options:
   --no-preview        Skip JPEG preview generation (smaller TIFF files)
   --staging PATH     Staging directory for output files
   --delete-source    Delete source JXLs after successful decode (mode 8 only)
+  --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
+                     automation that already asked the user)
+  --export-subfolder NAME
+                     [Mode 7] Only process JXLs inside this subfolder of the
+                     export marker (default: script setting, empty = all)
   --dry-run          Preview operations without converting
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (all files decoded or legitimately skipped) |
+| `1` | One or more files failed |
+| `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
+| `3` | User declined the delete-source confirmation |
 
 ---
 

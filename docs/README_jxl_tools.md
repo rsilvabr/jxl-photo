@@ -152,7 +152,7 @@ Choose the output format based on the source:
 - TIFF — Lossless master with optional JPEG preview
 
 ### Step 3 — Source Directory
-Enter the folder path containing the files. Shows a preview of found files before proceeding.
+Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).
 
 ### Step 4 — Organization Mode
 How output files are organized. Press `?` for detailed explanations with visual examples.
@@ -191,7 +191,7 @@ E:\sessao\
 **Mode 6** — processes ALL files under ALL `_EXPORT` folders found recursively.
 
 **Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT`.
-Default: empty (`EXPORT_JXL_SUBFOLDER` / `EXPORT_JPEG_SUBFOLDER` unset) = processes all subfolders, same as mode 6.
+The wizard asks for the subfolder name in Step 5 (passed to the scripts as `--export-subfolder`). Empty (default) = processes all subfolders, same as mode 6.
 
 ```
 _EXPORT/
@@ -267,7 +267,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Quality / Distance | Step 6 | Context-aware |
 | Effort | Step 6 | All workflows |
 | Staging directory | Step 6 | TIFF→JXL, JXL→TIFF |
-| Overwrite mode (0/1/2) | Step 6 | Always asked |
+| Overwrite mode (1/2) | Step 6 | Always asked (1=overwrite, 2=sync) |
 | ICC conversion (sRGB) | Step 6 | JXL→JPEG/PNG |
 | TIFF compression | Step 6 | zip/lzw/none |
 | Bit depth | Step 6 | 8 or 16 for TIFF output |

@@ -138,10 +138,10 @@ DELETE_SOURCE = False
 # SAFETY: Lossy operations require HHMM confirmation (see below).
 
 # ── Convert settings (lossy JXL → JPEG/PNG) ───────────────────────
-JPEG_QUALITY = 95
+JPEG_DEFAULT_QUALITY = 95
 # 1-100. 95 = high quality archival. Ignored for PNG output.
 
-PNG_BIT_DEPTH = 16
+PNG_DEFAULT_BIT_DEPTH = 16
 # 8 or 16. Default 16-bit for PNG preserves full tonal range.
 # Automatically switches to PNG if 16-bit requested with JPEG format.
 
@@ -165,10 +165,9 @@ TEMP2_DIR = None
 # Useful to separate read I/O (HDD with source) from write I/O.
 
 # ── Behavior ─────────────────────────────────────────────────────
-OVERWRITE = "smart"
-# False → skip if output exists (safe for resuming)
-# True → always overwrite
-# "smart" → only overwrite if source is newer than destination (default)
+# There is no OVERWRITE setting in this script: existing outputs are
+# skipped by default; use --overwrite (always) or --sync (source newer)
+# to change that per run.
 ```
 
 #### Safety confirmation (mode 8 + DELETE_SOURCE)
@@ -205,7 +204,7 @@ The script analyzes the input file extension and content to determine the optima
 | Input | Detection | Operation | Output |
 | --- | --- | --- | --- |
 | `.jpg` / `.jpeg` | File extension | **TRANSCODE** encode | JXL (lossless, ~20% smaller) |
-| `.jxl` with `jbrd` box | Box scan (16KB header) | **TRANSCODE** decode | Original JPEG (bit-perfect recovery) |
+| `.jxl` with `jbrd` box | Full box-chain scan | **TRANSCODE** decode | Original JPEG (bit-perfect recovery) |
 | `.jxl` without `jbrd` | Box scan | **CONVERT** decode | New JPEG/PNG (lossy recompression) |
 | `.png` | File extension | **CONVERT** encode | JXL (modular or VarDCT) |
 
@@ -229,7 +228,7 @@ This allows mixed archives (some lossless-transcodable, some not) to be processe
 
 ##  Modes 6 and 7 — ONLY files inside `_EXPORT`
 
-**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+**Modes 6 and 7 ONLY process files inside folders whose names start with or end with `_EXPORT` (case-insensitive). Everything outside is IGNORED.**
 
 ```
 E:\sessao\
@@ -328,6 +327,12 @@ Options:
   --no-md5           Skip MD5 storage (encode only)
   --no-verify        Skip MD5 verification (decode only)
   --delete-source    Delete source after mode 8 encode (requires confirmation)
+  --delete-confirm-off Skip the interactive delete confirmation (for
+                      wrappers/automation that already asked the user)
+  --from-jxl         [Auto mode] Restrict processing to .jxl files only;
+                      JPEG/PNG files in the folder are left untouched
+  --export-subfolder NAME  [Mode 7] Only process files inside this subfolder
+                      of the export marker (default: empty = all subfolders)
 
   --staging PATH     Staging directory for output files
   --effort 1-10      cjxl effort (default: 7)
@@ -340,6 +345,15 @@ Options:
   --rename-to REP    Replacement string for renamed files
   --dry-run          Preview operations without converting
 ```
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success (all files processed or legitimately skipped) |
+| `1` | One or more files failed, or invalid input |
+| `2` | Aborted (e.g. duplicate output destinations) |
+| `3` | User declined the delete-source confirmation |
 
 * * *
 
@@ -437,13 +451,11 @@ Log output:
 
 ### jbrd Detection (JPEG Bitstream Reconstruction Data)
 
-The script scans the first **16KB** of JXL files to detect the `jbrd` box, which indicates the file can be losslessly transcoded back to the original JPEG. 
+The script walks the full ISOBMFF box chain of JXL files (to EOF) to detect the `jbrd` box, which indicates the file can be losslessly transcoded back to the original JPEG.
 
-- **16KB coverage**: Handles 99.9% of real-world files, including those with large Exif/XMP metadata headers
-- **False negatives**: Extremely rare; if missed, file falls back to lossy convert (safe degradation)
-- **False positives**: Impossible (exact byte signature matching)
-
-If you encounter a valid JPEG-reconstructible JXL that isn't detected, the file likely has its `jbrd` box positioned >16KB into the file (highly unusual). Use `--force-transcode` as workaround.
+- **Full coverage**: boxes are found regardless of position or metadata header size
+- **False negatives**: only if the file is not a valid container-format JXL
+- **False positives**: impossible (exact byte signature matching)
 
 * * *
 

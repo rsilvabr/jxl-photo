@@ -30,7 +30,9 @@ try:
     from rich.prompt import Prompt, IntPrompt, Confirm
     from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
     RICH_AVAILABLE = True
-    console = Console(force_terminal=True)
+    # No force_terminal: when stdout is redirected to a file/pipe, rich must
+    # not emit ANSI escape sequences.
+    console = Console()
 except ImportError:
     RICH_AVAILABLE = False
     console = None
@@ -51,6 +53,37 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _split_expert_flags(flags: str) -> List[str]:
+    """Split a free-form expert-flags string into argv tokens.
+
+    shlex posix=False keeps Windows backslashes intact AND groups quoted
+    segments, but retains the surrounding quote characters — so we strip
+    balanced surrounding quotes from each token afterwards. This handles
+    both quoted paths with spaces (--staging "E:\\my dir\\x") and plain
+    backslash paths (--staging E:\\temp_jxl).
+    """
+    import shlex
+    try:
+        tokens = shlex.split(flags, posix=False)
+    except ValueError:
+        tokens = flags.split()
+    stripped = []
+    for t in tokens:
+        if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'"):
+            t = t[1:-1]
+        stripped.append(t)
+    return stripped
+
+
+def _strip_surrounding_quotes(value: str) -> str:
+    """Strip balanced surrounding quotes from pasted paths
+    (e.g. Explorer's 'Copy as path' wraps the path in double quotes)."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -137,8 +170,10 @@ class ConfigManager:
         except IOError as e:
             print(f"Error: Failed to save config: {e}")
 
+    _STAGING_UNSET = object()
+
     def save_last_session(self, input_dir: Optional[str] = None, output_mode: Optional[str] = None,
-                          workers: Optional[int] = None, staging: Optional[str] = None,
+                          workers: Optional[int] = None, staging=_STAGING_UNSET,
                           effort: Optional[int] = None, quality: Optional[int] = None,
                           distance: Optional[float] = None,
                           origin_format: Optional[str] = None,
@@ -165,7 +200,10 @@ class ConfigManager:
             self.config.last_output_mode = output_mode
         if workers is not None:
             self.config.last_workers = workers
-        if staging is not None:
+        if staging is not self._STAGING_UNSET:
+            # Sentinel-based: callers that explicitly chose "system default"
+            # pass None and CLEAR the saved staging; callers that didn't ask
+            # simply omit the argument and the previous value is kept.
             self.config.last_staging = staging
         if effort is not None:
             self.config.last_effort = effort
@@ -500,6 +538,15 @@ class FolderAnalyzer:
                 confidence = 'high'
                 reasoning.append("Mode 6 recommended — processes all files inside export folders")
 
+        # Mode 4: folder rename when source type is in folder name.
+        # Checked before the generic recursive/flat modes — a folder tree
+        # named after the origin format (e.g. "..._TIFF") is the strongest
+        # signal for a rename workflow. (Previously nearly unreachable.)
+        elif result['has_subfolders'] and any(self.origin.lower() in Path(p).name.lower() for p in result['subfolders'][:3]):
+            result['recommended_mode'] = 4
+            confidence = 'medium'
+            reasoning.append(f"Folder names contain '{self.origin}' — Mode 4 (rename/suffix) recommended")
+
         # Mode 3: recursive subfolders with files
         elif result['has_recursive_structure'] and result['total_files'] > 10:
             result['recommended_mode'] = 3
@@ -507,11 +554,12 @@ class FolderAnalyzer:
             reasoning.append(f"Recursive structure detected — {len(result['file_distribution'])} subfolders with files")
             reasoning.append(f"Mode 3 recommended — creates '{self.dest}_files' subfolder in each location")
 
-        # Mode 2: flat output folder
-        elif result['has_subfolders'] and result['total_files'] > 5:
+        # Mode 2: flat output folder (only when there really are multiple
+        # subfolders — a single subfolder is better served by mode 1)
+        elif result['has_subfolders'] and len(result['subfolders']) > 1 and result['total_files'] > 5:
             result['recommended_mode'] = 2
             confidence = 'medium'
-            reasoning.append(f"Multiple subfolders found ({len(result['file_distribution'])}) with many files")
+            reasoning.append(f"Multiple subfolders found ({len(result['subfolders'])}) with many files")
             reasoning.append("Mode 2 recommended — merges all to single output folder")
 
         # Mode 1: single subfolder
@@ -527,12 +575,6 @@ class FolderAnalyzer:
             confidence = 'high'
             reasoning.append("Files found in root folder — in-place mode works well")
             reasoning.append("Mode 0 recommended — files stay side by side")
-
-        # Mode 4: folder rename when source type is in folder name
-        elif any(self.origin.lower() in Path(p).name.lower() for p in result['subfolders'][:3]):
-            result['recommended_mode'] = 4
-            confidence = 'medium'
-            reasoning.append(f"Folder names contain '{self.origin}' — Mode 4 (rename/suffix) recommended")
 
         else:
             result['recommended_mode'] = 0
@@ -976,7 +1018,8 @@ class InteractiveMenu:
             return None
         if not self._wizard_mode_specific_config(workflow):
             return None
-        self.config.save_last_session(mode_config=workflow.get('mode_config'))
+        # mode_config is persisted only at the end of the wizard (in main),
+        # so cancelling mid-wizard never mutates saved state.
         if not self._wizard_parameters_basic(workflow, status):
             return None
         if not self._wizard_confirm(workflow):
@@ -1110,7 +1153,7 @@ class InteractiveMenu:
                     dist_default = workflow.get('distance', 0.1)
                     dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(dist_default))
                     try:
-                        workflow['distance'] = float(dist_str)
+                        workflow['distance'] = max(0.0, min(float(dist_str), 15.0))
                     except ValueError:
                         workflow['distance'] = dist_default
                 custom_effort = IntPrompt.ask("Effort (1-10, higher=smaller)", default=workflow['effort'])
@@ -1152,7 +1195,7 @@ class InteractiveMenu:
             print(f"\n--- Step 3: Source Directory ---")
             input_dir = input(f"Directory [{default_dir}]: ").strip() or default_dir
 
-        path = Path(input_dir).expanduser().resolve()
+        path = Path(_strip_surrounding_quotes(input_dir)).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             self._print_error(f"Invalid directory: {path}")
             return False
@@ -1386,9 +1429,13 @@ class InteractiveMenu:
 
         with open(manifest_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(["Source", "Destination", "Mode"])
+            # The Direction column binds the manifest to the workflow that
+            # generated it, so a TIFF->JXL manifest is never accidentally
+            # replayed by a JXL->TIFF session (which would run the wrong script).
+            writer.writerow(["Source", "Destination", "Mode", "Direction"])
+            direction = f"{analyzer.origin}2{analyzer.dest}"
             for src, dst, count, entry_mode in mappings:
-                writer.writerow([src, dst, entry_mode])
+                writer.writerow([src, dst, entry_mode, direction])
 
         return str(manifest_path)
 
@@ -1412,13 +1459,20 @@ class InteractiveMenu:
         entries = []
         with open(manifest_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            header = next(reader, None)
-            for row in reader:
+            first_row = next(reader, None)
+            rows = []
+            if first_row is not None:
+                if first_row and first_row[0].strip().lower() == "source":
+                    rows = list(reader)
+                else:
+                    rows = [first_row] + list(reader)
+            for row in rows:
                 if row and not (len(row) == 1 and row[0].strip().startswith('#')):
                     source = row[0].strip()
                     dest = row[1].strip() if len(row) > 1 else source
+                    mode = row[2].strip() if len(row) > 2 else "?"
                     if not source.startswith('#'):
-                        entries.append((source, dest))
+                        entries.append((source, dest, mode))
 
         if not entries:
             if RICH_AVAILABLE and console:
@@ -1432,20 +1486,21 @@ class InteractiveMenu:
             table.add_column("#", justify="right", style="dim")
             table.add_column("Source", style="red")
             table.add_column("Destination", style="green")
+            table.add_column("Mode", style="magenta")
 
-            for i, (src, dst) in enumerate(entries, 1):
+            for i, (src, dst, mode) in enumerate(entries, 1):
                 src_display = self._truncate_path(src)
                 dst_display = self._truncate_path(dst)
-                table.add_row(str(i), src_display, dst_display)
+                table.add_row(str(i), src_display, dst_display, mode)
 
             console.print(Panel(table, title=f"[bold]Manifest[/bold] — {manifest_path}", border_style="blue"))
             console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
         else:
             print(f"\n=== Manifest: {manifest_path} ===")
             print(f"Total: {len(entries)} entry(ies)\n")
-            for i, (src, dst) in enumerate(entries, 1):
+            for i, (src, dst, mode) in enumerate(entries, 1):
                 print(f"  {i}. {src}")
-                print(f"     -> {dst}")
+                print(f"     -> {dst} (mode {mode})")
                 print()
 
     def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
@@ -1460,18 +1515,31 @@ class InteractiveMenu:
 
         # Load manifest
         entries = []
+        directions = set()
         with open(manifest_path, 'r', encoding='utf-8') as f:
             import csv
             reader = csv.reader(f)
-            header = next(reader, None)
-            for row in reader:
+            first_row = next(reader, None)
+            # Only skip the first row if it really is the header; a manifest
+            # whose header line was deleted must not silently lose entry #1.
+            rows = []
+            if first_row is not None:
+                if first_row and first_row[0].strip().lower() == "source":
+                    rows = list(reader)
+                else:
+                    rows = [first_row] + list(reader)
+            for row in rows:
                 if row and len(row) >= 1:
                     source = row[0].strip()
                     dest = row[1].strip() if len(row) > 1 else source
                     entry_mode = int(row[2].strip()) if len(row) > 2 and row[2].strip().isdigit() else 0
+                    if len(row) > 3 and row[3].strip():
+                        directions.add(row[3].strip())
                     if source and not source.startswith('#'):
-                        # Validate paths to prevent directory traversal
-                        if '..' in source or '..' in dest:
+                        # Validate paths to prevent directory traversal. Check
+                        # path PARTS (not a substring match, which false-
+                        # positives on legitimate names like "2024..final").
+                        if '..' in Path(source).parts or '..' in Path(dest).parts:
                             logger.warning(f"Skipping manifest entry with path traversal: {source} -> {dest}")
                             continue
                         entries.append((source, dest, entry_mode))
@@ -1482,6 +1550,26 @@ class InteractiveMenu:
             else:
                 print("Manifest is empty or only has comments.")
             return False
+
+        # Direction guard: a manifest is bound to the workflow that generated
+        # it (e.g. tiff2jxl). Running it from a different session would invoke
+        # the wrong script on the wrong files.
+        current_direction = f"{workflow['origin_format']}2{workflow['dest_format']}"
+        if directions:
+            if directions != {current_direction}:
+                self._print_error(
+                    f"Manifest direction {sorted(directions)} does not match the current "
+                    f"workflow ({current_direction}). Generate/select a matching manifest."
+                )
+                return False
+        else:
+            # Legacy manifest without a Direction column: allow, but warn.
+            warn = (f"Manifest has no Direction column (pre-v1.8.2 format). "
+                    f"Assuming it matches the current workflow ({current_direction}).")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{warn}[/yellow]")
+            else:
+                print(f"WARNING: {warn}")
 
         # Show preview
         if RICH_AVAILABLE and console:
@@ -1547,15 +1635,15 @@ class InteractiveMenu:
             ("6", f"Marker [green]export[/green] (full)",
              f"ONLY files INSIDE folders with 'export' in name — ignores everything outside"),
             ("7", f"Marker [green]export[/green] (specific subfolder)",
-             f"Like mode 6, but only a specific subfolder (e.g. [green].../Export/JXL[/green])"),
+             f"Like mode 6, but only one subfolder of the export marker (asked in Step 5; empty = all = mode 6)"),
             ("8", "DELETE originals ⚠️",
              "DELETES source files after conversion - IRREVERSIBLE")
         ]
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Step 4: Organization Mode[/bold cyan]")
-            console.print("[dim]Items in [green]green[/green] (e.g. 'converted_jxl', '_EXPORT') are configurable in option 4[/dim]")
-            console.print("[dim]Other folder names (e.g. 'JXL_16bits', '16B_TIFF') require editing the scripts directly[/dim]")
+            console.print("[dim]The export marker (e.g. '_EXPORT') is configurable in option 4 (Edit default settings)[/dim]")
+            console.print("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') require editing the scripts directly[/dim]")
 
             # Highlight auto mode and manifest
             console.print()
@@ -1629,8 +1717,9 @@ class InteractiveMenu:
         workflow['mode'] = int(choice)
 
         note_lines = [
-            "[bold yellow]Configurable items:[/bold yellow] green names like 'converted_jxl', '_EXPORT', '_TIFF', etc.",
-            "can be customized in [bold cyan]Edit default settings (option 4)[/bold cyan] before running.",
+            "[bold yellow]Configurable items:[/bold yellow] the export marker (e.g. '_EXPORT') can be customized",
+            "in [bold cyan]Edit default settings (option 4)[/bold cyan]. Folder names like 'converted_jxl'",
+            "are script settings (edit the scripts directly).",
         ]
         if int(choice) == 8:
             note_lines.append("[bold red]WARNING: Mode 8 will DELETE your original files after conversion![/bold red]")
@@ -1749,8 +1838,8 @@ class InteractiveMenu:
              f"Works with _EXPORT, Export_Lightroom, Lightroom_Export, etc. (case-insensitive)."),
 
             ("7", f"Marker export (specific subfolder)",
-             f"Like mode 6, but ONLY processes files inside a specific subfolder of export folders.\n"
-             f"Default subfolder is [green].../Export/JXL[/green] (configurable).\n"
+             f"Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
+             f"The subfolder name is asked in Step 5 (empty = all subfolders = same as mode 6).\n"
              f"Files in other subfolders within export folders are ignored.\n"
              f"Use when you keep different color-space variants in separate subfolders."),
 
@@ -1790,9 +1879,9 @@ class InteractiveMenu:
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"   {clean}\n")
             valid_choices = [d[0] for d in details] + ["A", "M"]
-            choice = input("Select mode [0-8/A/M/?]: ").strip().upper()
+            choice = input("Select mode [0-8/A/M]: ").strip().upper()
             while choice not in valid_choices:
-                choice = input("Select mode [0-8/A/M/?]: ").strip().upper()
+                choice = input("Select mode [0-8/A/M]: ").strip().upper()
 
         # Handle Auto and Manifest from detail view
         if choice == "A":
@@ -1838,9 +1927,30 @@ class InteractiveMenu:
                 new_marker = input(f"EXPORT marker [{current}]: ").strip() or current
 
             if new_marker != current:
+                # Store per-workflow only (persisted at the end via mode_config);
+                # the global setting is NOT mutated mid-wizard.
                 mode_config['export_marker'] = new_marker
-                self.config.config.export_marker = new_marker
-                self.config.save_config()
+
+            if mode == 7:
+                # Mode 7 processes only one subfolder of the export marker.
+                # Empty = all subfolders (identical to mode 6).
+                last_sub = (self.config.config.last_mode_config or {}).get('export_subfolder', '')
+                if RICH_AVAILABLE and console:
+                    sub = Prompt.ask(
+                        "Subfolder inside export marker to process (empty = all, same as mode 6)",
+                        default=last_sub
+                    )
+                else:
+                    sub = input(f"Subfolder inside export marker (empty = all) [{last_sub}]: ").strip() or last_sub
+                sub = _strip_surrounding_quotes(sub).strip().strip('/\\')
+                if sub:
+                    mode_config['export_subfolder'] = sub
+                    if workflow.get('auto_mode_used'):
+                        console_msg = "[yellow]Note: subfolder set manually after Auto Mode — preview used auto-detection.[/yellow]"
+                        if RICH_AVAILABLE and console:
+                            console.print(console_msg)
+                        else:
+                            print("Note: subfolder set manually after Auto Mode — preview used auto-detection.")
 
         elif mode == 2:
             default_out = Path(workflow['input_dir']).parent / "output"
@@ -1850,7 +1960,7 @@ class InteractiveMenu:
             else:
                 print(f"\n--- Step 5: Flat Folder ---")
                 output_dir = input(f"Destination [{default_out}]: ").strip() or str(default_out)
-            mode_config['output_dir'] = output_dir
+            mode_config['output_dir'] = _strip_surrounding_quotes(output_dir)
 
         elif mode == 1:
             folder_name = _dest_folder_names(origin, dest)[0]
@@ -1942,8 +2052,12 @@ class InteractiveMenu:
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
-                    distance = float(Prompt.ask("Distance (0=lossless, 0.1=near-lossless, 1=visually lossless)", default=str(workflow.get('distance', 0.5))))
-                    workflow['distance'] = max(0.0, min(distance, 15.0))
+                    try:
+                        distance = float(Prompt.ask("Distance (0=lossless, 0.1=near-lossless, 1=visually lossless)", default=str(workflow.get('distance', 0.5))))
+                        workflow['distance'] = max(0.0, min(distance, 15.0))
+                    except ValueError:
+                        workflow['distance'] = workflow.get('distance', 0.5)
+                        console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
                 else:
                     quality = IntPrompt.ask("Quality (1-100)", default=workflow['quality'])
                     workflow['quality'] = max(1, min(quality, 100))
@@ -1973,6 +2087,10 @@ class InteractiveMenu:
                     convert_icc = Confirm.ask("Convert to sRGB?", default=False)
                     if convert_icc:
                         workflow['icc_profile'] = 'sRGB'
+
+            if dest == 'png':
+                depth = IntPrompt.ask("PNG bit depth", choices=["8", "16"], default=str(workflow['bit_depth']))
+                workflow['bit_depth'] = int(depth) if depth else workflow['bit_depth']
 
             if dest == 'tiff':
                 compression = Prompt.ask("TIFF compression", choices=["zip", "lzw", "none"], default=workflow['compression'])
@@ -2024,7 +2142,7 @@ class InteractiveMenu:
                 workflow['use_ram'] = not ram_input.startswith('n')
 
             workers = input(f"Workers [{workflow['workers']}]: ").strip()
-            workflow['workers'] = int(workers) if workers.isdigit() else workflow['workers']
+            workflow['workers'] = max(1, min(int(workers), 32)) if workers.isdigit() else workflow['workers']
 
             if origin == 'tiff' and dest == 'jxl':
                 print(f"Distance: {workflow.get('distance', 0.1):.2f} (set in Step 2)")
@@ -2036,15 +2154,18 @@ class InteractiveMenu:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
                     distance = input(f"Distance (0=lossless, 0.1=near-lossless, 1=visually lossless) [{workflow.get('distance', 0.5)}]: ").strip()
-                    workflow['distance'] = max(0.0, min(float(distance) if distance else workflow.get('distance', 0.5), 15.0))
+                    try:
+                        workflow['distance'] = max(0.0, min(float(distance) if distance else workflow.get('distance', 0.5), 15.0))
+                    except ValueError:
+                        workflow['distance'] = workflow.get('distance', 0.5)
                 else:
                     quality = input(f"Quality (1-100) [{workflow['quality']}]: ").strip()
-                    workflow['quality'] = int(quality) if quality.isdigit() else workflow['quality']
+                    workflow['quality'] = max(1, min(int(quality), 100)) if quality.isdigit() else workflow['quality']
                 effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = int(effort) if effort.isdigit() else workflow['effort']
+                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
             else:
                 effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = int(effort) if effort.isdigit() else workflow['effort']
+                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
 
             if origin == 'tiff' and dest == 'jxl':
                 d50_input = input("D50 patch (auto/on/off) [auto]: ").strip().lower() or "auto"
@@ -2067,6 +2188,11 @@ class InteractiveMenu:
                     icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
                     if icc_input.startswith('y'):
                         workflow['icc_profile'] = 'sRGB'
+
+            if dest == 'png':
+                depth_input = input(f"PNG bit depth (8/16) [{workflow['bit_depth']}]: ").strip()
+                if depth_input in ['8', '16']:
+                    workflow['bit_depth'] = int(depth_input)
 
             if dest == 'tiff':
                 comp_input = input(f"TIFF compression (zip/lzw/none) [{workflow['compression']}]: ").strip()
@@ -2101,11 +2227,15 @@ class InteractiveMenu:
             workflow['overwrite_mode'] = ow_input
 
         # Persist basic parameters that the repeat workflow needs to restore.
+        # Only persist values that were actually asked for this direction —
+        # otherwise an unrelated workflow would clobber them with defaults.
+        _origin_fmt = workflow.get('origin_format')
+        _dest_fmt = workflow.get('dest_format')
         self.config.save_last_session(
-            use_ram=workflow.get('use_ram'),
-            compression=workflow.get('compression'),
-            bit_depth=workflow.get('bit_depth'),
-            add_preview=workflow.get('add_preview')
+            use_ram=workflow.get('use_ram') if _origin_fmt == 'tiff' else None,
+            compression=workflow.get('compression') if _dest_fmt == 'tiff' else None,
+            bit_depth=workflow.get('bit_depth') if _dest_fmt in ('tiff', 'png') else None,
+            add_preview=workflow.get('add_preview') if _dest_fmt == 'tiff' else None
         )
 
         return self._wizard_parameters_advanced(workflow, status)
@@ -2660,9 +2790,16 @@ class InteractiveMenu:
                 continue
 
             # Execute
-            result = self._run_subprocess(cmd)
-            if result:
+            rc = self._run_subprocess(cmd)
+            if rc == 0:
                 ok_count += 1
+            elif rc == 3:
+                # User declined the child's confirmation prompt
+                skip_count += 1
+                if RICH_AVAILABLE and console:
+                    console.print("  [yellow]Cancelled by user[/yellow]")
+                else:
+                    print("  Cancelled by user")
             else:
                 error_count += 1
 
@@ -2682,9 +2819,12 @@ class InteractiveMenu:
         cmd = [sys.executable, script, source, dest_path, '--mode', str(mode), '--workers', str(workers)]
 
         # Pass configured export marker so scripts match the wrapper's detection.
-        export_marker = self.config.config.export_marker
+        export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
         if export_marker and export_marker != "_EXPORT":
             cmd.extend(['--export-marker', export_marker])
+        export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
+        if export_subfolder:
+            cmd.extend(['--export-subfolder', export_subfolder])
 
         if origin == 'tiff' and dest == 'jxl':
             distance = workflow.get('distance', 0.1)
@@ -2712,6 +2852,10 @@ class InteractiveMenu:
                 cmd.append('--embed-thumbnail')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                # Wrapper already confirmed deletion (HHMM in step 4); without
+                # this the child would ask again on an invisible stdin prompt
+                # and the run would appear to hang.
+                cmd.append('--delete-confirm-off')
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -2742,6 +2886,7 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                cmd.append('--delete-confirm-off')
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -2765,8 +2910,9 @@ class InteractiveMenu:
                 cmd.append('--force-convert')
                 cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
             elif conv_type == 'jxl_to_jpeg_auto':
-                # JXL->JPEG: auto-detect per-file (no extra flag needed)
-                pass
+                # JXL->JPEG: auto-detect per-file, restricted to .jxl inputs
+                # (see the wizard path for why --from-jxl is required).
+                cmd.append('--from-jxl')
             elif conv_type == 'jxl_to_jpeg_lossless':
                 # JXL->JPEG: force lossless transcode (requires jbrd)
                 cmd.append('--force-transcode')
@@ -2800,6 +2946,7 @@ class InteractiveMenu:
                 cmd.append('--sync')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                cmd.append('--delete-confirm-off')
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -2816,17 +2963,16 @@ class InteractiveMenu:
             cmd.append('--dry-run')
 
         if workflow.get('expert_flags'):
-            try:
-                import shlex
-                expert_args = shlex.split(workflow['expert_flags'], posix=(os.name != 'nt'))
-                cmd.extend(expert_args)
-            except ValueError:
-                cmd.extend(workflow['expert_flags'].split())
+            cmd.extend(_split_expert_flags(workflow['expert_flags']))
 
         return cmd
 
-    def _run_subprocess(self, cmd: List) -> bool:
-        """Run subprocess and return True if success."""
+    def _run_subprocess(self, cmd: List) -> int:
+        """Run subprocess and return its exit code (-1 on launch failure).
+
+        Exit code contract with the child scripts: 0 = success, 1 = some
+        files failed, 2 = aborted, 3 = user declined a confirmation.
+        """
         try:
             process = subprocess.Popen(
                 cmd,
@@ -2857,7 +3003,7 @@ class InteractiveMenu:
                         print(f"  {line}")
 
             process.wait(timeout=3600)  # 1 hour timeout
-            return process.returncode == 0
+            return process.returncode
 
         except subprocess.TimeoutExpired:
             process.kill()
@@ -2865,14 +3011,14 @@ class InteractiveMenu:
                 console.print("  [red]Timeout: Process killed after 1 hour[/red]")
             else:
                 print("  Timeout: Process killed after 1 hour")
-            return False
+            return -1
 
         except Exception as e:
             if RICH_AVAILABLE and console:
                 console.print(f"  [red]Error: {e}[/red]")
             else:
                 print(f"  Error: {e}")
-            return False
+            return -1
 
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
@@ -2898,15 +3044,21 @@ class InteractiveMenu:
                 '--workers', str(workers)
             ]
 
-            export_marker = self.config.config.export_marker
+            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
             if export_marker and export_marker != "_EXPORT":
                 cmd.extend(['--export-marker', export_marker])
+            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
+            if export_subfolder:
+                cmd.extend(['--export-subfolder', export_subfolder])
 
             # Mode 2: flat output folder
             if mode == 2:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
-                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    # The child creates the dir itself; only pre-create for real
+                    # runs so a dry-run leaves no trace on disk.
+                    if not workflow.get('dry_run'):
+                        Path(output_dir).mkdir(parents=True, exist_ok=True)
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -2929,6 +3081,10 @@ class InteractiveMenu:
                 cmd.append('--overwrite')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                # Wrapper already confirmed deletion (HHMM in step 4); without
+                # this the child would ask again on an invisible stdin prompt
+                # and the run would appear to hang.
+                cmd.append('--delete-confirm-off')
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -2953,15 +3109,21 @@ class InteractiveMenu:
                 '--workers', str(workers)
             ]
 
-            export_marker = self.config.config.export_marker
+            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
             if export_marker and export_marker != "_EXPORT":
                 cmd.extend(['--export-marker', export_marker])
+            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
+            if export_subfolder:
+                cmd.extend(['--export-subfolder', export_subfolder])
 
             # Mode 2: flat output folder
             if mode == 2:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
-                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    # The child creates the dir itself; only pre-create for real
+                    # runs so a dry-run leaves no trace on disk.
+                    if not workflow.get('dry_run'):
+                        Path(output_dir).mkdir(parents=True, exist_ok=True)
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -2987,6 +3149,7 @@ class InteractiveMenu:
                 cmd.append('--no-icc-cleanup')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                cmd.append('--delete-confirm-off')
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -3014,15 +3177,21 @@ class InteractiveMenu:
                 '--workers', str(workers)
             ]
 
-            export_marker = self.config.config.export_marker
+            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
             if export_marker and export_marker != "_EXPORT":
                 cmd.extend(['--export-marker', export_marker])
+            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
+            if export_subfolder:
+                cmd.extend(['--export-subfolder', export_subfolder])
 
             # Mode 2: flat output folder
             if mode == 2:
                 output_dir = workflow.get('mode_config', {}).get('output_dir')
                 if output_dir:
-                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    # The child creates the dir itself; only pre-create for real
+                    # runs so a dry-run leaves no trace on disk.
+                    if not workflow.get('dry_run'):
+                        Path(output_dir).mkdir(parents=True, exist_ok=True)
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -3038,9 +3207,11 @@ class InteractiveMenu:
                 cmd.append('--force-convert')
                 cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
             elif conv_type == 'jxl_to_jpeg_auto':
-                # JXL->JPEG: auto-detect per-file (new in transcoder)
-                # No flag needed - transcoder will check jbrd for each file
-                pass
+                # JXL->JPEG: auto-detect per-file. MUST pass --from-jxl so the
+                # transcoder's auto mode only processes .jxl files — otherwise
+                # it would also transcode JPEGs/PNGs in the folder INTO JXL
+                # (wrong direction for a "JXL -> JPEG" workflow).
+                cmd.append('--from-jxl')
             elif conv_type == 'jxl_to_jpeg_lossless':
                 # JXL->JPEG: force lossless transcode (requires jbrd)
                 cmd.append('--force-transcode')
@@ -3078,6 +3249,7 @@ class InteractiveMenu:
                 cmd.append('--sync')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
+                cmd.append('--delete-confirm-off')
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -3093,14 +3265,7 @@ class InteractiveMenu:
             cmd.append('--dry-run')
 
         if expert_flags:
-            try:
-                import shlex
-                # posix=False on Windows: preserve backslashes in paths
-                # (e.g. --staging E:\temp_jxl), same as the manifest path.
-                expert_args = shlex.split(expert_flags, posix=(os.name != 'nt'))
-                cmd.extend(expert_args)
-            except ValueError:
-                cmd.extend(expert_flags.split())
+            cmd.extend(_split_expert_flags(expert_flags))
 
         if not Path(script).exists():
             self._print_error(f"Script not found: {script}")
@@ -3147,6 +3312,9 @@ class InteractiveMenu:
             if process.returncode == 0:
                 self._print_success("✓ Conversion completed successfully!\n")
                 return True
+            elif process.returncode == 3:
+                self._print_error("\n✗ Conversion cancelled (confirmation declined)")
+                return False
             else:
                 self._print_error(f"\n✗ Conversion failed (code {process.returncode})")
                 return False
@@ -3219,33 +3387,36 @@ def main():
                     saved_quality = config.config.default_quality
                     saved_distance = None
 
-                config.save_last_session(
-                    workflow['input_dir'],
-                    str(workflow['mode']),
-                    workflow['workers'],
-                    workflow['staging'],
-                    workflow['effort'],
-                    saved_quality,
-                    saved_distance,
-                    workflow['origin_format'],
-                    workflow['dest_format'],
-                    workflow['conversion_type'],
-                    workflow.get('advanced_options', {}).get('d50_patch'),
-                    workflow.get('advanced_options', {}).get('encode_tag'),
-                    workflow.get('advanced_options', {}).get('jpeg_thumbnail'),
-                    workflow.get('advanced_options', {}).get('multipage_mode'),
-                    workflow.get('advanced_options', {}).get('thumbnail_mode'),
-                    workflow.get('advanced_options', {}).get('thumbnail_suffix'),
-                    workflow.get('advanced_options', {}).get('thumbnail_handling'),
-                    workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
-                    workflow.get('advanced_options', {}).get('depth_policy'),
-                    workflow.get('advanced_options'),
-                    workflow.get('use_ram'),
-                    workflow.get('compression'),
-                    workflow.get('bit_depth'),
-                    workflow.get('add_preview', True),
-                    workflow.get('mode_config')
-                )
+                # Manifest runs (mode 99) are not repeatable and must not
+                # clobber the saved repeat-workflow state.
+                if workflow['mode'] != 99:
+                    config.save_last_session(
+                        workflow['input_dir'],
+                        str(workflow['mode']),
+                        workflow['workers'],
+                        workflow['staging'],
+                        workflow['effort'],
+                        saved_quality,
+                        saved_distance,
+                        workflow['origin_format'],
+                        workflow['dest_format'],
+                        workflow['conversion_type'],
+                        workflow.get('advanced_options', {}).get('d50_patch'),
+                        workflow.get('advanced_options', {}).get('encode_tag'),
+                        workflow.get('advanced_options', {}).get('jpeg_thumbnail'),
+                        workflow.get('advanced_options', {}).get('multipage_mode'),
+                        workflow.get('advanced_options', {}).get('thumbnail_mode'),
+                        workflow.get('advanced_options', {}).get('thumbnail_suffix'),
+                        workflow.get('advanced_options', {}).get('thumbnail_handling'),
+                        workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
+                        workflow.get('advanced_options', {}).get('depth_policy'),
+                        workflow.get('advanced_options'),
+                        workflow.get('use_ram') if origin == 'tiff' else None,
+                        workflow.get('compression') if dest == 'tiff' else None,
+                        workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
+                        workflow.get('add_preview') if dest == 'tiff' else None,
+                        workflow.get('mode_config')
+                    )
 
                 if RICH_AVAILABLE and console:
                     execute_now = Confirm.ask("\nConfiguration saved! Execute now?", default=True)
@@ -3344,6 +3515,7 @@ def main():
             if not new_folder:
                 new_folder = last_dir
 
+            new_folder = _strip_surrounding_quotes(new_folder)
             input_path = Path(new_folder)
             if not input_path.exists():
                 if RICH_AVAILABLE and console:
@@ -3402,8 +3574,10 @@ def main():
                 output_dir = config.config.last_mode_config.get('output_dir') if config.config.last_mode_config else None
                 workflow['mode_config'] = {'output_dir': output_dir or str(input_path.parent / "output")}
             elif workflow['mode'] in (6, 7):
-                marker = config.config.last_mode_config.get('export_marker') if config.config.last_mode_config else None
-                workflow['mode_config'] = {'export_marker': marker} if marker else {}
+                # Preserve the full saved mode_config (export_marker AND
+                # export_subfolder) — dropping keys here silently turns a
+                # saved mode-7 run into a mode-6-equivalent one.
+                workflow['mode_config'] = dict(config.config.last_mode_config or {})
             else:
                 workflow['mode_config'] = dict(config.config.last_mode_config or {})
 
@@ -3458,6 +3632,12 @@ def main():
                 workflow['conversion_type'] = 'jxl_to_png'
             else:
                 workflow['conversion_type'] = 'jxl_to_jpeg_force'
+
+            # Repeat-last must pass through the same safety gate as the wizard:
+            # mode 8 + delete_source requires the HHMM confirmation.
+            if workflow['mode'] == 8 and workflow.get('advanced_options', {}).get('delete_source'):
+                if not menu._confirm_archive_mode():
+                    continue
 
             menu.execute_workflow(workflow, status)
 
@@ -3529,6 +3709,19 @@ def main():
 
             if confirm:
                 try:
+                    # shutil.move falls back to copy2 when the target exists,
+                    # silently overwriting an existing config there — confirm first.
+                    if target.exists():
+                        if RICH_AVAILABLE and console:
+                            ow = Confirm.ask(
+                                f"[red]A settings file already exists at {target.parent}. Overwrite it?[/red]",
+                                default=False
+                            )
+                        else:
+                            ow = input(f"A settings file already exists at {target.parent}. Overwrite? [y/N]: ").strip().lower() == 'y'
+                        if not ow:
+                            continue
+                        target.unlink()
                     shutil.move(str(source), str(target))
                     config.config_path = target
                     if RICH_AVAILABLE and console:

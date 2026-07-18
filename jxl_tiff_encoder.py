@@ -29,35 +29,65 @@ logger = logging.getLogger("jxl_convert")
 
 def _verify_jxl_integrity(jxl_path: Path) -> bool:
     """Verify JXL file integrity before deleting source.
-    
+
     Checks:
     1. File exists and size > 0
     2. File has valid JXL signature (0xFF 0x0A for bare JXL or ISOBMFF box)
+    3. For container files: the box chain is walked and must be well-formed
+       and end exactly at EOF — catches truncated/short-written files, which
+       a signature-only check would accept.
     """
     if not jxl_path.exists():
         return False
-    
+
     try:
         stat = jxl_path.stat()
         if stat.st_size == 0:
             return False
-        
+
         # Check JXL signature (first 2 bytes for bare JXL, or first 12 for container)
         with open(jxl_path, 'rb') as f:
             header = f.read(12)
-        
+
         if len(header) < 2:
             return False
-        
+
         # Bare JXL starts with 0xFF 0x0A
         if header[0:2] == b'\xff\x0a':
             return True
-        
+
         # Container format starts with 0x00 0x00 0x00 0x0C 0x4A 0x58 0x4C 0x20 0x0D 0x0A 0x87 0x0A
-        if header == b'\x00\x00\x00\x0cJXL \r\n\x87\n':
-            return True
-        
-        return False
+        if header != b'\x00\x00\x00\x0cJXL \r\n\x87\n':
+            return False
+
+        # Walk the ISOBMFF box chain; every box must be well-formed and the
+        # chain must end exactly at EOF.
+        file_size = stat.st_size
+        i = 12
+        with open(jxl_path, 'rb') as f:
+            while i < file_size:
+                if i + 8 > file_size:
+                    return False
+                f.seek(i)
+                box_header = f.read(8)
+                size = int.from_bytes(box_header[0:4], "big")
+                if size == 0:
+                    # Box extends to end of file; must be the last one
+                    return True
+                if size == 1:
+                    # Extended 64-bit size
+                    if i + 16 > file_size:
+                        return False
+                    ext = f.read(8)
+                    size = int.from_bytes(ext, "big")
+                    if size < 16:
+                        return False
+                elif size < 8:
+                    return False
+                if i + size > file_size:
+                    return False
+                i += size
+        return i == file_size
     except (OSError, IOError):
         return False
 
@@ -455,8 +485,14 @@ def _abort_on_duplicate_outputs(dests):
     several distinct sources). Better to stop loudly than to lose data.
     """
     from collections import Counter
-    counts = Counter(str(d) for d in dests)
-    dupes = sorted(d for d, c in counts.items() if c > 1)
+    # Case-insensitive comparison: on Windows/macOS, photo.jxl and PHOTO.jxl
+    # are the same file but different strings. Map the normalized form back to
+    # an original path for display.
+    norm = {}
+    for d in dests:
+        norm.setdefault(os.path.normcase(str(d)), str(d))
+    counts = Counter(os.path.normcase(str(d)) for d in dests)
+    dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
     if dupes:
         for d in dupes[:10]:
             logger.error(f"Duplicate output destination: {d}")
@@ -592,16 +628,20 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
 
     elif mode == 6:
         # EXPORT_MARKER anchor — only TIFFs INSIDE export marker folder
+        # Match only path *directory* parts (parts[:-1]); a TIFF whose own
+        # filename happens to start/end with the marker is not an anchor.
         parts = tiff_path.parts
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
-        export_idx = next((i for i, p in enumerate(parts)
+        export_idx = next((i for i, p in enumerate(parts[:-1])
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
         export_dir = Path(*parts[:export_idx + 1])
         rel_parts = tiff_path.relative_to(export_dir).parts
+        if not rel_parts:
+            return None  # The marker matched the filename itself; not inside it
         if len(rel_parts) > 1:
             rel = Path(*rel_parts[1:])
         else:
@@ -612,7 +652,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         # EXPORT_MARKER anchor — only TIFFs inside export marker/[subfolder]
         parts = tiff_path.parts
         marker_lower = EXPORT_MARKER.lower()
-        export_idx = next((i for i, p in enumerate(parts)
+        export_idx = next((i for i, p in enumerate(parts[:-1])
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
@@ -626,6 +666,8 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
             rel = tiff_path.relative_to(anchor)
         else:
             rel_parts = tiff_path.relative_to(export_dir).parts
+            if not rel_parts:
+                return None  # The marker matched the filename itself
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
 
         return export_dir / EXPORT_JXL_FOLDER / rel.with_suffix(".jxl")
@@ -636,9 +678,25 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
 
     raise ValueError(f"Invalid mode: {mode}")
 
+def _argfile_safe(value) -> str:
+    """Sanitize a value for inclusion in an exiftool argfile (-@).
+
+    Argfiles are parsed one argument per line, so embedded newlines in XMP
+    text (multi-line captions, etc.) would split one argument into several
+    bogus ones. Collapse all CR/LF runs into a single space.
+    """
+    return re.sub(r"[\r\n]+", " ", str(value))
+
+
+# Charset directive that must precede any non-ASCII file path in an argfile.
+# Without it, exiftool on Windows interprets UTF-8 argfile paths using the
+# system codepage and fails to find files with non-ASCII names.
+_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n"
+
+
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
-    arg_file.write_text(f"-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
+    arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
     r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
     if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
         p = tmp_dir / f"{tiff_path.stem}.exif.bin"
@@ -653,7 +711,7 @@ def get_exif_software(tiff_path):
         # Use -@ argument file to avoid wildcard expansion issues with brackets in paths
         with tempfile.TemporaryDirectory(prefix="exiftmp_") as tmp:
             arg_file = Path(tmp) / "args.txt"
-            arg_file.write_text(f"-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+            arg_file.write_text(f"{_ARGFILE_CHARSET}-s\n-Software\n{tiff_path}\n", encoding="utf-8")
             r = subprocess.run(
                 [_get_exiftool_cmd(), "-@", str(arg_file)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
@@ -758,6 +816,11 @@ _CAU_MIN_MEAN = 10.0
 _CAU_MIN_RATIO = 0.7
 _CAU_TEST_SIZE = 64
 
+# Serializes the cautious ICC test + cache read-modify-write across worker
+# threads. Without it, two threads testing unseen profiles concurrently
+# interleave cache reads/writes and lose entries (or corrupt the JSON file).
+_icc_test_lock = threading.Lock()
+
 
 def _icc_cache_dir() -> Path:
     if ICC_CACHE_DIR_OVERRIDE is not None:
@@ -797,8 +860,12 @@ def _save_icc_cache(cache: Dict[str, Any]) -> None:
     path = _icc_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # Atomic write: temp file + os.replace so a concurrent reader (or a
+        # crash mid-write) never sees a truncated JSON file.
+        tmp_path = path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(cache, f, indent=2)
+        os.replace(tmp_path, path)
     except Exception as e:
         logger.warning(f"Failed to save ICC cache: {e}")
 
@@ -951,35 +1018,40 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
 
 def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
     """Test an ICC profile with a small round-trip before trusting it."""
-    cache = _load_icc_cache()
-    key = hashlib.sha256(icc_bytes).hexdigest()
-    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}"
-    cached = cache.get(versioned_key)
-    if cached is not None:
-        if isinstance(cached, dict):
-            embed = bool(cached.get("embed"))
-        else:
-            embed = bool(cached)
-        logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
-        return embed
+    with _icc_test_lock:
+        cache = _load_icc_cache()
+        key = hashlib.sha256(icc_bytes).hexdigest()
+        # Include the cjxl version in the key: an encoder upgrade can change
+        # how a profile behaves, so stale verdicts from older cjxl builds
+        # must not be trusted.
+        cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
+        versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}"
+        cached = cache.get(versioned_key)
+        if cached is not None:
+            if isinstance(cached, dict):
+                embed = bool(cached.get("embed"))
+            else:
+                embed = bool(cached)
+            logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
+            return embed
 
-    if not shutil.which("cjxl") or not shutil.which("djxl"):
-        logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
-        return _should_embed_icc_heuristic(icc_bytes)
+        if not shutil.which("cjxl") or not shutil.which("djxl"):
+            logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
+            return _should_embed_icc_heuristic(icc_bytes)
 
-    safe = True
-    for depth in (8, 16):
-        if not _cautious_test_icc_depth(icc_bytes, depth):
-            safe = False
-            break
+        safe = True
+        for depth in (8, 16):
+            if not _cautious_test_icc_depth(icc_bytes, depth):
+                safe = False
+                break
 
-    cache[versioned_key] = {"embed": safe, "ts": datetime.now().isoformat()}
-    _save_icc_cache(cache)
-    logger.info(
-        f"Cautious ICC: {'embed' if safe else 'skip'} for {tiff_path.name} "
-        f"({len(icc_bytes)} bytes, profile class {_get_icc_profile_class(icc_bytes) or b'?'})"
-    )
-    return safe
+        cache[versioned_key] = {"embed": safe, "ts": datetime.now().isoformat()}
+        _save_icc_cache(cache)
+        logger.info(
+            f"Cautious ICC: {'embed' if safe else 'skip'} for {tiff_path.name} "
+            f"({len(icc_bytes)} bytes, profile class {_get_icc_profile_class(icc_bytes) or b'?'})"
+        )
+        return safe
 
 
 # ─────────────────────────────────────────────
@@ -987,7 +1059,7 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
 # ─────────────────────────────────────────────
 
 def _should_embed_icc_heuristic(icc_bytes: bytes) -> bool:
-    if len(icc_bytes) > ICC_PROBLEMATIC_SIZE_THRESHOLD:
+    if len(icc_bytes) >= ICC_PROBLEMATIC_SIZE_THRESHOLD:
         logger.debug(f"ICC profile ({len(icc_bytes)} bytes) exceeds size threshold; skipping iCCP")
         return False
     profile_class = _get_icc_profile_class(icc_bytes)
@@ -1053,9 +1125,14 @@ def extract_xmp_original(tiff_path, tmp_dir):
     """Extract original XMP from TIFF as separate file for preservation.
     Returns path to XMP file or None if no XMP exists."""
     xmp_path = tmp_dir / f"{tiff_path.stem}_original.xmp"
+    # Use an argfile (like the other exiftool calls here): paths containing
+    # [ ] would be treated as wildcards on the command line, and non-ASCII
+    # paths need the UTF-8 charset directive.
     # Correct order: -o output.xmp -b -XMP input.tif
+    arg_file = tmp_dir / "xmp_extract.args"
+    arg_file.write_text(f"{_ARGFILE_CHARSET}-o\n{xmp_path}\n-b\n-XMP\n{tiff_path}\n", encoding="utf-8")
     r = subprocess.run(
-        [_get_exiftool_cmd(), "-o", str(xmp_path), "-b", "-XMP", str(tiff_path)],
+        [_get_exiftool_cmd(), "-@", str(arg_file)],
         capture_output=True, timeout=60
     )
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
@@ -1103,16 +1180,19 @@ def read_existing_creator_tool(xmp_path):
     Returns empty string if not found."""
     if not xmp_path or not xmp_path.exists():
         return ""
-    r = subprocess.run(
-        [_get_exiftool_cmd(), "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
-        capture_output=True, text=True, timeout=10
-    )
-    if r.returncode == 0 and r.stdout:
-        stdout = r.stdout.strip()
-        if " : " in stdout:
-            return stdout.split(" : ", 1)[1].strip()
-        elif ":" in stdout:
-            return stdout.split(":", 1)[1].strip()
+    try:
+        r = subprocess.run(
+            [_get_exiftool_cmd(), "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+        )
+        if r.returncode == 0 and r.stdout:
+            stdout = r.stdout.strip()
+            if " : " in stdout:
+                return stdout.split(" : ", 1)[1].strip()
+            elif ":" in stdout:
+                return stdout.split(":", 1)[1].strip()
+    except Exception as e:
+        logger.debug(f"Failed to read CreatorTool: {e}")
     return ""
 
 def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False):
@@ -1129,7 +1209,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     Returns path to arg file.
     """
     args_lines = ["-overwrite_original"]
-    
+
     # If stripping metadata, only add minimal encoding info and exit
     if strip_metadata:
         # Strip all EXIF first
@@ -1141,9 +1221,9 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append(f"-xmp-dc:Description={encoding_desc}")
         # Target file
         args_lines.append(str(write_path))
-        # Write args file
+        # Write args file (UTF-8 charset first so non-ASCII paths work)
         arg_file = tmp_dir / "inject.args"
-        arg_file.write_text("\n".join(args_lines), encoding="utf-8")
+        arg_file.write_text(_ARGFILE_CHARSET + "\n".join(args_lines) + "\n", encoding="utf-8")
         return arg_file
     
     # 1. Inject raw EXIF binary blob if extracted
@@ -1167,26 +1247,27 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     
     # Build final dc:Description (concatenate if original exists)
     if ENCODE_TAG_MODE == "xmp":
-        if existing_desc and existing_desc != encoding_desc:
-            # Concatenate: original | encoding_params
+        if existing_desc and existing_desc != encoding_desc and encoding_desc not in existing_desc:
+            # Concatenate: original | encoding_params (skip if already tagged,
+            # e.g. re-encoding a TIFF produced by the decoder)
             final_description = f"{existing_desc} | {encoding_desc}"
         elif existing_desc:
             final_description = existing_desc
         else:
             final_description = encoding_desc
-            
+
         # Set dc:Description with concatenated content
-        args_lines.append(f"-xmp-dc:Description={final_description}")
-        
+        args_lines.append(f"-xmp-dc:Description={_argfile_safe(final_description)}")
+
     elif ENCODE_TAG_MODE == "software":
         # For software mode, we don't modify dc:Description
         # Instead, we update the EXIF Software field
         sw_arg = tmp_dir / "sw_read.args"
-        sw_arg.write_text(f"-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
         new_sw = f"{original_sw} | {encoding_desc}"
-        args_lines.append(f"-Software={new_sw}")
+        args_lines.append(f"-Software={_argfile_safe(new_sw)}")
     
     # Always store original bit depth in dc:Relation so the decoder can restore
     # the original BitsPerSample per page according to --depth-policy.
@@ -1207,8 +1288,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
             creator_tool = f"{existing_creator} | ICC:{icc_b64}"
         else:
             creator_tool = f"ICC:{icc_b64}"
-            
-        args_lines.append(f"-xmp-xmp:CreatorTool={creator_tool}")
+
+        args_lines.append(f"-xmp-xmp:CreatorTool={_argfile_safe(creator_tool)}")
     
     # 5. Cleanup legacy ICC markers from XMP if requested
     if CLEANUP_XMP_ICC_MARKER:
@@ -1221,10 +1302,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     
     # 7. Target file
     args_lines.append(str(write_path))
-    
-    # Write args file
+
+    # Write args file (UTF-8 charset first so non-ASCII paths work)
     arg_file = tmp_dir / "inject.args"
-    arg_file.write_text("\n".join(args_lines), encoding="utf-8")
+    arg_file.write_text(_ARGFILE_CHARSET + "\n".join(args_lines) + "\n", encoding="utf-8")
     return arg_file
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1435,8 +1516,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # correctly instead of defaulting to "error".
             return ((str(tiff_path), page_idx), "skipped", str(final_path), None)
         elif OVERWRITE == "smart":
-            tiff_mtime = tiff_path.stat().st_mtime
-            jxl_mtime  = final_path.stat().st_mtime
+            try:
+                tiff_mtime = tiff_path.stat().st_mtime
+                jxl_mtime  = final_path.stat().st_mtime
+            except OSError:
+                # Source or destination vanished mid-run (TOCTOU): treat as
+                # stale and attempt the conversion instead of crashing.
+                tiff_mtime, jxl_mtime = 1, 0
             if tiff_mtime <= jxl_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
@@ -1447,6 +1533,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
         write_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass  # Another thread may have created it
+
+    # Tracks whether this run has started writing to write_path. Used by the
+    # error handler: a partial/corrupt output produced by THIS run is deleted
+    # (so smart-sync can't mistake it for an up-to-date file), but a
+    # pre-existing JXL is never touched when we failed before writing.
+    output_dirty = False
 
     with tempfile.TemporaryDirectory(prefix="jxl_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
@@ -1475,6 +1567,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if photometric == tifffile.PHOTOMETRIC.SEPARATED:
                     _log_rejected_file(str(tiff_path), "CMYK not supported")
                     raise ValueError("CMYK TIFFs are not supported")
+                if photometric == tifffile.PHOTOMETRIC.PALETTE:
+                    _log_rejected_file(str(tiff_path), "palette-color not supported")
+                    raise ValueError("Palette-color TIFFs are not supported. Convert to RGB first.")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
@@ -1492,12 +1587,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
                 else:
                     img = img.astype(np.uint16)
-            is_grayscale = (samples == 1)
+            # Grayscale detection is driven by the ACTUAL array, not just the
+            # planning-time samples-per-pixel (which falls back to 3 when page
+            # probing fails). A 2D array or a single-channel 3D array is
+            # grayscale regardless of what the plan said.
+            is_grayscale = (samples == 1) or (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
             if img.ndim == 2:
-                if not is_grayscale:
-                    img = img[:, :, np.newaxis]
-            elif img.ndim == 3 and img.shape[2] == 1:
-                is_grayscale = True
+                img = img[:, :, np.newaxis]
 
             # If a page inherited its ICC from IFD0 but is actually grayscale, do not
             # apply the inherited RGB ICC. Keep icc_inherited=True so the decoder knows
@@ -1539,6 +1635,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
                 cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                output_dirty = True
                 r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
                 del png_input
             else:
@@ -1548,6 +1645,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 png_path.write_bytes(png_bytes)
                 del png_bytes
                 cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                output_dirty = True
                 r = subprocess.run(cjxl_cmd, capture_output=True, timeout=600)
 
             if r.returncode != 0:
@@ -1689,7 +1787,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # dc:Relation list (a bag), so any Relation the user already had is
             # preserved — unlike a scalar field, appending never overwrites.
             # Absence of the marker means "standalone file" even if the name has _pageN.
-            if multipage_group:
+            # Skipped entirely under --strip (no metadata = no reconstruction markers).
+            if multipage_group and not STRIP_METADATA:
                 try:
                     relation_args = [
                         "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
@@ -1698,26 +1797,38 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
                     if subfiletype != 0:
                         relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
-                    subprocess.run(
+                    r_mark = subprocess.run(
                         [_get_exiftool_cmd(), "-overwrite_original"] + relation_args +
                         [str(write_path)],
                         capture_output=True, timeout=10
                     )
+                    # A failed marker write must not be silent: without the marker
+                    # the decoder can never reconstruct this multi-page TIFF.
+                    if r_mark.returncode != 0:
+                        err_msg = (r_mark.stderr or r_mark.stdout or b"no output")[:200]
+                        raise RuntimeError(f"exiftool multipage marker write failed: {err_msg.decode(errors='replace') if isinstance(err_msg, bytes) else err_msg}")
+                except RuntimeError:
+                    raise
                 except Exception as e_mark:
-                    logger.debug(f"  >Multi-page marker write failed (non-critical): {e_mark}")
+                    raise RuntimeError(f"multipage marker write failed: {e_mark}") from e_mark
 
             # Grayscale marker: must be written for standalone files too, otherwise
             # read_png_to_numpy returns a 3-channel RGB array and the decoder cannot
             # restore the original single-channel TIFF page.
-            if is_grayscale:
+            if is_grayscale and not STRIP_METADATA:
                 try:
-                    subprocess.run(
+                    r_gray = subprocess.run(
                         [_get_exiftool_cmd(), "-overwrite_original",
                          "-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG, str(write_path)],
                         capture_output=True, timeout=10
                     )
+                    if r_gray.returncode != 0:
+                        err_msg = (r_gray.stderr or r_gray.stdout or b"no output")[:200]
+                        raise RuntimeError(f"exiftool grayscale marker write failed: {err_msg.decode(errors='replace') if isinstance(err_msg, bytes) else err_msg}")
+                except RuntimeError:
+                    raise
                 except Exception as e_mark:
-                    logger.debug(f"  >Grayscale marker write failed (non-critical): {e_mark}")
+                    raise RuntimeError(f"grayscale marker write failed: {e_mark}") from e_mark
 
             # Reorder JXL boxes so Exif/XMP come before the codestream. This must
             # run after all exiftool operations (metadata, thumbnail, markers)
@@ -1733,6 +1844,16 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             return ((str(tiff_path), page_idx), status, str(final_path), tiff_path)
 
         except Exception as e:
+            # Remove any partial/corrupt output produced by THIS run so the
+            # next smart-sync run does not mistake it for a fresh, up-to-date
+            # JXL and skip it forever. A pre-existing JXL (output_dirty=False,
+            # i.e. we failed before cjxl started writing) is left untouched.
+            if output_dirty:
+                try:
+                    if write_path.exists():
+                        write_path.unlink()
+                except OSError:
+                    pass
             n, total = next_count()
             page_label = f" page{page_idx}" if page_idx > 0 else ""
             logger.error(f"[{n}/{total}] ERROR{page_label} | {tiff_path.name} | {e}")
@@ -1819,8 +1940,15 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
 
     # Resolve final output path for each page
     results = []
+    # When the file yields exactly one non-thumbnail output, use the plain
+    # stem (photo.jxl) even if that page sits at an index > 0 — consistent
+    # with ignore mode and the documented examples.
+    single_output = len(pages_to_encode) == 1 and not pages_to_encode[0][1]
     for page_idx, is_thumbnail, subfiletype, samples in pages_to_encode:
-        name = _page_output_name(stem, page_idx, is_thumbnail)
+        if single_output:
+            name = f"{stem}.jxl"
+        else:
+            name = _page_output_name(stem, page_idx, is_thumbnail)
         final_jxl = output_dir / name
         results.append((tiff_path, final_jxl, page_idx, is_thumbnail, subfiletype, samples))
 
@@ -1866,7 +1994,16 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g): (t, w, f, p, th, sft, spl, g)
                    for t, w, f, p, th, sft, spl, g in tasks}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            task = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                # An exception escaped convert_one entirely (e.g. temp-dir
+                # failure, source vanished before the sync check). One bad
+                # file must not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                results.append(((str(task[0]), task[3]), "error", str(e), None))
 
     # Move from staging to final destination in bulk
     if use_staging:
@@ -1876,7 +2013,11 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
-                    logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
+                    if write_jxl.exists():
+                        logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
+                    else:
+                        # Partial output was already discarded by the error handler
+                        logger.warning(f"  Partial output discarded ({status}) | {tiff.name}")
                 continue
             if not write_jxl.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_jxl.name}")
@@ -1961,7 +2102,8 @@ def find_tiffs_mode6(input_path: Path):
     filtered = []
     marker_lower = EXPORT_MARKER.lower()
     for t in all_tiffs:
-        parts_str = list(t.parts)
+        # Match only directory parts; the filename itself is not an anchor
+        parts_str = list(t.parts[:-1])
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts_str)
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
@@ -1974,14 +2116,16 @@ def find_tiffs_mode7(input_path: Path):
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
     marker_lower = EXPORT_MARKER.lower()
+    subfolder_lower = EXPORT_TIFF_SUBFOLDER.lower()
     for t in all_tiffs:
-        parts_str = list(t.parts)
+        # Match only directory parts; the filename itself is not an anchor
+        parts_str = list(t.parts[:-1])
         export_idx = next((i for i, p in enumerate(parts_str)
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             continue
         if EXPORT_TIFF_SUBFOLDER:
-            if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1] == EXPORT_TIFF_SUBFOLDER:
+            if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
                 filtered.append(t)
         else:
             filtered.append(t)
@@ -2011,6 +2155,14 @@ def main():
                         help="Write PNG intermediate to disk (slower, less memory)")
     parser.add_argument("--delete-source",   action="store_true",
                         help="Delete source TIFFs after successful encode (mode 8 only)")
+    parser.add_argument("--delete-confirm-off", action="store_true",
+                        help="Skip the interactive delete confirmation. For automation/"
+                             "wrappers that already asked the user (DELETE_CONFIRM stays "
+                             "untouched for interactive runs).")
+    parser.add_argument("--export-subfolder", type=str, default=None,
+                        help="[Mode 7] Only process files inside this subfolder of the "
+                             "export marker (default: script setting EXPORT_TIFF_SUBFOLDER, "
+                             "empty = all subfolders). Overrides EXPORT_TIFF_SUBFOLDER.")
     parser.add_argument("--multipage-mode",  type=str, default=None,
                         choices=["ignore", "skip", "split", "split_all"],
                         help="How to handle multi-page TIFFs: ignore (default), skip, split, split_all")
@@ -2047,7 +2199,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -2060,6 +2212,20 @@ def main():
     if args.input is None:
         parser.error("the following arguments are required: input")
 
+    if not args.input.exists():
+        parser.error(f"input path does not exist: {args.input}")
+
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+
+    # Validate the temp dir up front: a bad TEMP_DIR would otherwise crash a
+    # worker mid-batch (TemporaryDirectory(dir=TEMP_DIR)).
+    if TEMP_DIR is not None:
+        try:
+            Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            parser.error(f"TEMP_DIR is not usable: {TEMP_DIR} ({e})")
+
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -2067,6 +2233,12 @@ def main():
 
     if args.delete_source:
         DELETE_SOURCE = True
+    if args.delete_confirm_off:
+        DELETE_CONFIRM = False
+
+    if args.export_subfolder is not None:
+        global EXPORT_TIFF_SUBFOLDER
+        EXPORT_TIFF_SUBFOLDER = args.export_subfolder
 
     if args.distance is not None:
         if not 0 <= args.distance <= 15:
@@ -2226,7 +2398,7 @@ def main():
             is_lossy = CJXL_DISTANCE > 0
             if not confirm_deletion_tiff(is_lossy):
                 logger.info("Deletion not confirmed -- exiting.")
-                return
+                sys.exit(3)
     elif args.mode == 8:
         logger.info("Mode 8 -- in-place recursive | DELETE_SOURCE=False: TIFF and JXL will coexist")
 
@@ -2292,6 +2464,10 @@ def main():
             logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
+
+    # Non-zero exit when any file failed so wrappers/automation can detect it.
+    if err > 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -222,7 +222,7 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 
 ## Modes 6 and 7 — ONLY files inside `_EXPORT`
 
-**Modes 6 and 7 ONLY process files inside folders containing `_EXPORT`. Everything outside is IGNORED.**
+**Modes 6 and 7 ONLY process files inside folders whose names start with or end with `_EXPORT` (case-insensitive). Everything outside is IGNORED.**
 
 ```
 E:\sessao\
@@ -256,7 +256,7 @@ session/_EXPORT/AdobeRGB/photo.tif → ignored
 | `0` | File or directory | Flat (non-recursive) — only files in the given folder | In-place (flat, non-recursive) | `photo.jxl` |
 | `1` | File or directory | Flat (non-recursive) — only files in the given folder | `converted_jxl/` subfolder next to source | `.../converted_jxl/photo.jxl` |
 | `2` | Directory | Recursive — all subfolders | Flat → output_dir (recursive) | `output_dir/photo.jxl` |
-| `3` | Directory | Recursive — all subfolders | `converted_jxl/` inside each TIFF folder | `.../TIFF/converted_jxl/photo.jxl` |
+| `3` | Directory | Recursive — all subfolders | `JXL_16bits/` inside each TIFF folder | `.../TIFF/JXL_16bits/photo.jxl` |
 | `4` | Directory | Recursive — all subfolders | Rename folder `TIFF` → `JXL` | `.../Export_JXL/photo.jxl` |
 | `5` | Directory | Recursive — all subfolders | Sibling folder `JXL_16bits/` | `.../JXL_16bits/photo.jxl` |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | ONLY TIFFs INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name configurable. | `.../session/_EXPORT/16B_JXL/photo.jxl` |
@@ -288,15 +288,31 @@ Options:
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after successful encode (mode 8 only)
+  --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
+                   automation that already asked the user)
+  --export-subfolder NAME
+                   [Mode 7] Only process TIFFs inside this subfolder of the
+                   export marker (default: script setting, empty = all)
   --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
   --encode-tag      Where to record encoding params: xmp (default), software, off
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
   --icc-png-strategy cautious|heuristic|always|skip
                     How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
-  --strip           Strip all metadata from output (no EXIF/XMP preservation)
+  --strip           Strip all metadata from output (no EXIF/XMP preservation;
+                    also disables the multi-page reconstruction markers, so
+                    split pages decode as standalone files)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (all files converted or legitimately skipped) |
+| `1` | One or more files failed |
+| `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
+| `3` | User declined the delete-source confirmation |
 
 **D50 Patch option:**
 ```powershell

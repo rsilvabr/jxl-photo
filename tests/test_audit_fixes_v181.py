@@ -164,14 +164,16 @@ def test_cleanup_xmp_icc_strips_leading_pipe(monkeypatch, tmp_path):
     dec.CLEANUP_XMP_ICC_MARKER = True
     writes = []
 
-    def fake_run(cmd, **kw):
-        if "-XMP-xmp:CreatorTool" in cmd and "=" not in cmd[-1]:
+    # cleanup_xmp_icc now goes through _run_exiftool_argfile (argfile-based);
+    # mock that boundary instead of subprocess.run.
+    def fake_argfile(args_lines, timeout=60):
+        if any(str(a) == "-XMP-xmp:CreatorTool" for a in args_lines) and not any("CreatorTool=" in str(a) for a in args_lines):
             return _FakeRun(stdout="ICC:QUJDRA== | Capture One 23\n")
-        if any("CreatorTool=" in str(c) for c in cmd):
-            writes.append(cmd)
+        if any("CreatorTool=" in str(a) for a in args_lines):
+            writes.append(args_lines)
         return _FakeRun()
 
-    monkeypatch.setattr(dec.subprocess, "run", fake_run)
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", fake_argfile)
     dec.cleanup_xmp_icc(tif)
     assert writes, "cleanup did not rewrite CreatorTool"
     written = [c for c in writes[0] if "CreatorTool=" in str(c)][0]

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""
+Regression tests for the v1.8.2 audit fixes:
+
+- modes 6/7: a filename that matches the export marker no longer crashes
+  resolve_output (IndexError) and is ignored instead
+- failed conversions delete partial outputs (encoder + transcoder)
+- a pre-existing output is preserved when the run fails before writing
+- MD5-failed decode output is deleted
+- --force-transcode on a .jxl routes to the decode direction
+- auto mode --from-jxl only processes .jxl files
+- cautious ICC cache survives concurrent access
+- _verify_jxl_integrity rejects truncated container files
+- wrapper expert-flags splitting keeps quoted Windows paths intact
+- scripts exit non-zero when conversions fail
+"""
+
+import argparse
+import json
+import sys
+import threading
+from pathlib import Path
+
+import numpy as np
+import pytest
+import tifffile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import jxl_tiff_encoder as enc
+import jxl_tiff_decoder as dec
+import jxl_jpeg_transcoder as tr
+import jxl_photo as wp
+
+
+class _FakeRun:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+@pytest.fixture(autouse=True)
+def _reset_globals():
+    yield
+    enc.OVERWRITE = "smart"
+    enc.TEMP2_DIR = None
+    enc.DELETE_SOURCE = False
+    tr.DELETE_SOURCE = False
+    tr.TEMP2_DIR = None
+    tr.STORE_MD5 = True
+    dec.TEMP2_DIR = None
+
+
+# ---------------------------------------------------------------------------
+# modes 6/7: filename matching the marker must not crash (IndexError)
+# ---------------------------------------------------------------------------
+
+def test_encoder_mode6_filename_marker_ignored(tmp_path):
+    f = tmp_path / "_export_001.tif"
+    assert enc.resolve_output(f, 6, tmp_path) is None
+    assert enc.resolve_output(f, 7, tmp_path) is None
+
+
+def test_encoder_mode6_real_marker_folder_still_works(tmp_path):
+    f = tmp_path / "session" / "_EXPORT" / "16B_TIFF" / "photo.tif"
+    out = enc.resolve_output(f, 6, tmp_path)
+    assert out is not None
+    assert out.parent.name == enc.EXPORT_JXL_FOLDER
+    assert out.name == "photo.jxl"
+
+
+def test_decoder_mode6_filename_marker_ignored(tmp_path):
+    f = tmp_path / "_export_001.jxl"
+    assert dec.resolve_output(f, 6, tmp_path) is None
+    assert dec.resolve_output(f, 7, tmp_path) is None
+
+
+def test_transcoder_mode6_filename_marker_ignored(tmp_path):
+    f = tmp_path / "_export_001.jpg"
+    assert tr.resolve_output_transcode(f, 6, tmp_path, decode=False) is None
+    assert tr.resolve_output_transcode(f, 7, tmp_path, decode=False) is None
+    assert tr.resolve_output_convert(f, 6, "converted", "_c", "jxl", "", "", tmp_path, decode=False) is None
+
+
+def test_finders_ignore_filename_marker(tmp_path):
+    (tmp_path / "_export_001.tif").write_bytes(b"x")
+    (tmp_path / "_export_001.jxl").write_bytes(b"x")
+    assert enc.find_tiffs_mode6(tmp_path) == []
+    assert dec.find_jxls_mode6(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# failed conversions delete partial outputs
+# ---------------------------------------------------------------------------
+
+def test_encoder_partial_jxl_deleted_on_cjxl_failure(monkeypatch, tmp_path):
+    tif = tmp_path / "photo.tif"
+    tifffile.imwrite(tif, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "photo.jxl"
+
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "get_page_icc", lambda *a, **k: (None, False))
+    monkeypatch.setattr(enc, "apply_d50_policy", lambda icc, p: icc)
+    monkeypatch.setattr(enc.subprocess, "run",
+                        lambda *a, **k: _FakeRun(stderr=b"boom", returncode=1))
+    enc.setup_logger()
+    enc.OVERWRITE = True
+
+    (key, status, msg, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert not final.exists(), "partial JXL from failed cjxl run was not deleted"
+
+
+def test_encoder_preexisting_jxl_kept_when_failure_before_write(monkeypatch, tmp_path):
+    tif = tmp_path / "corrupt.tif"
+    tif.write_bytes(b"not a tiff at all")
+    final = tmp_path / "corrupt.jxl"
+    final.write_bytes(b"\xff\x0aPREVIOUS_GOOD_JXL")
+
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+
+    (key, status, msg, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert final.read_bytes() == b"\xff\x0aPREVIOUS_GOOD_JXL", \
+        "pre-existing JXL must survive a failure that happened before any write"
+
+
+def test_transcoder_md5_fail_deletes_output(monkeypatch, tmp_path):
+    jxl = tmp_path / "photo.jxl"
+    jxl.write_bytes(b"\x00" * 32)
+    final = tmp_path / "photo.jpg"
+
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    monkeypatch.setattr(tr, "read_md5_db", lambda p: "stored-md5")
+    monkeypatch.setattr(tr, "md5_of_file", lambda p: "different-md5")
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
+
+    def fake_djxl(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"\xff\xd8recovered")
+        return _FakeRun()
+
+    monkeypatch.setattr(tr.subprocess, "run", fake_djxl)
+    tr.setup_logger()
+
+    (_, status, _, _) = tr.decode_one_transcode(jxl, final, final, True, False, False)
+    assert status == "md5_fail"
+    assert not final.exists(), "MD5-failed output must be deleted"
+
+
+def test_transcoder_partial_deleted_on_djxl_failure(monkeypatch, tmp_path):
+    jxl = tmp_path / "photo.jxl"
+    jxl.write_bytes(b"\x00" * 32)
+    final = tmp_path / "photo.jpg"
+
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
+
+    def fake_djxl(cmd, **kw):
+        Path(cmd[-1]).write_bytes(b"\xff\xd8partial")  # djxl started writing
+        return _FakeRun(stderr=b"boom", returncode=1)
+
+    monkeypatch.setattr(tr.subprocess, "run", fake_djxl)
+    tr.setup_logger()
+
+    (_, status, _, _) = tr.decode_one_transcode(jxl, final, final, False, False, False)
+    assert status == "error"
+    assert not final.exists(), "partial output from failed djxl run was not deleted"
+
+
+# ---------------------------------------------------------------------------
+# routing
+# ---------------------------------------------------------------------------
+
+def test_force_transcode_on_jxl_routes_to_decode(tmp_path):
+    cmd, auto_decode, _ = tr.determine_command(tmp_path / "photo.jxl", force_transcode=True)
+    assert cmd == "transcode"
+    assert auto_decode is True
+
+
+def test_force_transcode_on_jpeg_routes_to_encode(tmp_path):
+    cmd, auto_decode, _ = tr.determine_command(tmp_path / "photo.jpg", force_transcode=True)
+    assert cmd == "transcode"
+    assert auto_decode is False
+
+
+def _args(tmp_path, **kw):
+    base = dict(
+        input=tmp_path, output=None, mode=1, workers=2, effort=7,
+        overwrite=False, sync=False, staging=None, dry_run=False,
+        delete_source=False, no_md5=False, no_verify=False, decode=False,
+        force_transcode=False, force_convert=False, format=None, quality=95,
+        distance=1.0, bit_depth=None, icc_profile=None, ram=True,
+        output_name="converted", output_suffix="_converted",
+        rename_from="", rename_to="", from_jxl=False,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_auto_from_jxl_ignores_jpegs_and_pngs(monkeypatch, tmp_path):
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8fake")
+    (tmp_path / "photo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    tr.setup_logger()
+    processed = []
+
+    def fake_group(files, args, **kw):
+        if kw.get("collect_only") is None:
+            processed.extend(f.name for f in files)
+        return {"ok": 0, "err": 0, "skipped": 0}
+
+    monkeypatch.setattr(tr, "_process_file_group", fake_group)
+    err, cancelled = tr.cmd_auto(_args(tmp_path, from_jxl=True))
+    assert processed == ["photo.jxl"], f"only .jxl files expected, got {processed}"
+
+
+def test_cmd_transcode_returns_error_tuple(monkeypatch, tmp_path):
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8fake")
+    tr.setup_logger()
+    monkeypatch.setattr(tr.subprocess, "run",
+                        lambda *a, **k: _FakeRun(stderr=b"boom", returncode=1))
+    err, cancelled = tr.cmd_transcode(_args(tmp_path, mode=0))
+    assert err == 1
+    assert cancelled is False
+
+
+# ---------------------------------------------------------------------------
+# cautious ICC cache concurrency
+# ---------------------------------------------------------------------------
+
+def test_icc_cache_concurrent_writes(monkeypatch, tmp_path):
+    monkeypatch.setattr(enc, "ICC_CACHE_DIR_OVERRIDE", tmp_path)
+    monkeypatch.setattr(enc, "_cautious_test_icc_depth", lambda icc, depth: True)
+    monkeypatch.setattr(enc.shutil, "which", lambda x: x)
+    enc.setup_logger()
+
+    icc = b"\x00" * 128 + b"test-profile"
+
+    def worker():
+        for _ in range(5):
+            assert enc._cautious_should_embed_icc(icc, Path("x.tif")) is True
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    cache_file = tmp_path / "icc_cache.json"
+    data = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert len(data) == 1, f"cache corrupted or lost entries: {data}"
+
+
+# ---------------------------------------------------------------------------
+# JXL integrity check: truncated container rejected
+# ---------------------------------------------------------------------------
+
+def test_verify_jxl_integrity_truncated_container(tmp_path):
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    # One box declaring 100 bytes but only 50 present -> truncated
+    box = (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 42
+    bad = tmp_path / "bad.jxl"
+    bad.write_bytes(sig + box)
+    assert enc._verify_jxl_integrity(bad) is False
+
+    # Same box fully present -> valid
+    good = tmp_path / "good.jxl"
+    good.write_bytes(sig + (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 92)
+    assert enc._verify_jxl_integrity(good) is True
+
+    # Bare codestream signature still accepted (header-only check)
+    bare = tmp_path / "bare.jxl"
+    bare.write_bytes(b"\xff\x0a" + b"\x00" * 64)
+    assert enc._verify_jxl_integrity(bare) is True
+
+
+# ---------------------------------------------------------------------------
+# wrapper expert flags / path quoting
+# ---------------------------------------------------------------------------
+
+def test_split_expert_flags_quoted_windows_path():
+    tokens = wp._split_expert_flags('--staging "E:\\my dir\\x" --effort 10')
+    assert tokens == ["--staging", "E:\\my dir\\x", "--effort", "10"]
+
+
+def test_split_expert_flags_unquoted_backslashes():
+    tokens = wp._split_expert_flags("--staging E:\\temp_jxl --strip")
+    assert tokens == ["--staging", "E:\\temp_jxl", "--strip"]
+
+
+def test_strip_surrounding_quotes():
+    assert wp._strip_surrounding_quotes('"C:\\Photos"') == "C:\\Photos"
+    assert wp._strip_surrounding_quotes("C:\\Photos") == "C:\\Photos"
+
+
+# ---------------------------------------------------------------------------
+# non-zero exit on failure
+# ---------------------------------------------------------------------------
+
+def test_encoder_exits_nonzero_on_error(monkeypatch, tmp_path):
+    (tmp_path / "corrupt.tif").write_bytes(b"not a tiff")
+    enc.setup_logger()
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(tmp_path), "--mode", "0"])
+    with pytest.raises(SystemExit) as exc:
+        enc.main()
+    assert exc.value.code == 1

@@ -409,7 +409,9 @@ def test_misc():
     finally:
         Path(tmp_tif.name).unlink(missing_ok=True)
 
-    # ---- read_png_to_numpy target_depth=8 converts 16-bit grayscale to 8-bit RGB ----
+    # ---- read_png_to_numpy target_depth=8 converts 16-bit grayscale to 8-bit 2D ----
+    # Grayscale PNGs stay single-channel (2D) so single-channel JXLs decode back
+    # to single-channel TIFF pages instead of being expanded to RGB.
     img16 = np.random.randint(0, 65535, (20, 20), dtype=np.uint16)
     tmp_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     tmp_png.close()
@@ -417,7 +419,7 @@ def test_misc():
         tifffile.imwrite(tmp_png.name, img16, photometric='minisblack')
         arr8, _ = read_png_to_numpy(tmp_png.name, target_depth=8)
         assert arr8.dtype == np.uint8, f"expected uint8, got {arr8.dtype}"
-        assert arr8.shape == (20, 20, 3), f"expected RGB shape (20, 20, 3), got {arr8.shape}"
+        assert arr8.shape == (20, 20), f"expected 2D grayscale shape (20, 20), got {arr8.shape}"
     finally:
         Path(tmp_png.name).unlink(missing_ok=True)
 

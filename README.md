@@ -26,6 +26,8 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New in v1.8
 
+> **v1.8.2:** full-audit fixes — failed conversions now **delete their partial outputs** (smart sync can't skip corrupt JXL/JPEGs anymore), modes 6/7 no longer crash when a *filename* matches the `_EXPORT` marker, JXL→JPEG Auto in the wrapper **only processes .jxl files** (new `--from-jxl` flag — JPEGs in the folder used to be silently transcoded *into* JXL), mode-8 delete confirmation no longer double-prompts/hangs when run from the wrapper (new `--delete-confirm-off` flag), mode 7 gets a real `--export-subfolder` option, exit codes are now meaningful (`0` ok / `1` errors / `2` abort / `3` cancelled), ICC cautious-cache is thread-safe, exiftool calls are argfile-based everywhere (unicode + `[` paths), `--force-transcode` on a JXL routes to decode as documented, manifests gain a `Direction` guard column, and ~30 smaller fixes. New regression tests in `tests/test_audit_fixes_v182.py`.
+
 > **v1.8.1:** third-pass audit fixes — mode 6 now **aborts** on duplicate output destinations (same-named files in different `_EXPORT` subfolders), `--delete-source` propagates through all wizard paths, multipage marker batch uses exiftool argfile (no more command-line limit or `[` wildcard issues), decoder deletes partial outputs so smart sync can't skip corrupt TIFFs, `--decode` works on directories, plus ~15 smaller fixes. See the [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1).
 
 ### libjxl v0.12 Support (auto-detected)
@@ -295,15 +297,16 @@ Instead of memorizing modes 0-8, press **[A]** in Step 4. The wizard scans your 
 
 Generate a CSV to edit before running:
 ```csv
-Source,Destination,Mode
-F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\TIFF,6
-F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL,7
-# F:\2025\Osaka\RAW,F:\2025\Osaka\JXL,0
+Source,Destination,Mode,Direction
+F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\TIFF,6,tiff2jxl
+F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL,7,tiff2jxl
+# F:\2025\Osaka\RAW,F:\2025\Osaka\JXL,0,tiff2jxl
 ```
 
 - Edit paths, delete rows, reorder
 - Comment with `#` to skip
 - Rerun same manifest anytime
+- The `Direction` column binds the manifest to the workflow that generated it — running it from a different direction (e.g. a `tiff2jxl` manifest in a `jxl2tiff` session) is refused with a clear error instead of running the wrong script. Manifests without the column (older format) still run, with a warning.
 - **Manifest compatibility:** manifests are guaranteed to work with the version that generated them. Backward compatibility with older 2-column manifests is not guaranteed; regenerate the manifest if upgrading from a previous version.
 
 ---

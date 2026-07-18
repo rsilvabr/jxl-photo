@@ -113,7 +113,7 @@ TRANSCODE_DEFAULT_MODE = 0
 
 CONVERT_DEFAULT_MODE = 0
 # 0 = in-place (same folder as source)
-# 1 = sibling folder (../converted/)
+# 1 = subfolder inside each source folder (converted_jxl/ or recovered_jpeg/)
 # 2 = suffix folder (source_converted/)
 
 # Output settings
@@ -204,8 +204,13 @@ def _abort_on_duplicate_outputs(pairs):
     several distinct sources). Better to stop loudly than to lose data.
     """
     from collections import Counter
-    counts = Counter(str(out) for _, out in pairs)
-    dupes = sorted(d for d, c in counts.items() if c > 1)
+    # Case-insensitive comparison: on Windows/macOS, photo.jxl and PHOTO.jxl
+    # are the same file but different strings.
+    norm = {}
+    for _, out in pairs:
+        norm.setdefault(os.path.normcase(str(out)), str(out))
+    counts = Counter(os.path.normcase(str(out)) for _, out in pairs)
+    dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
     if dupes:
         for d in dupes[:10]:
             logger.error(f"Duplicate output destination: {d}")
@@ -214,6 +219,37 @@ def _abort_on_duplicate_outputs(pairs):
         logger.error("Aborting: multiple inputs map to the same output file. "
                      "Rename inputs or pick another mode/folder to avoid silent overwrites.")
         sys.exit(2)
+
+# Charset directive that must precede any non-ASCII file path in an argfile.
+_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n"
+
+
+def _run_exiftool_argfile(args_lines, timeout=60):
+    """Run exiftool with an argfile (UTF-8 + FileName charset).
+
+    Using an argfile instead of raw argv avoids two Windows pitfalls:
+    paths containing [ ] being treated as wildcards, and non-ASCII paths
+    being decoded with the wrong codepage.
+    """
+    argfile = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
+            argfile = af.name
+            af.write(_ARGFILE_CHARSET)
+            af.write("\n".join(str(a) for a in args_lines))
+            af.write("\n")
+        return subprocess.run(
+            [_get_exiftool_cmd(), "-@", argfile],
+            capture_output=True, timeout=timeout
+        )
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
+
 
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
@@ -224,10 +260,10 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     if shutil.which(_get_exiftool_cmd()) is None:
         return
     try:
-        subprocess.run(
-            [_get_exiftool_cmd(), "-overwrite_original", "-tagsfromfile", str(src_path),
+        _run_exiftool_argfile(
+            ["-overwrite_original", "-tagsfromfile", str(src_path),
              "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
-            capture_output=True, timeout=30
+            timeout=120
         )
     except Exception:
         pass
@@ -636,13 +672,16 @@ def confirm_deletion_lossy() -> bool:
 # COMMAND ROUTING (Auto-detect)
 # --------------------------------------------─
 
-def determine_command(input_path: Path, force_transcode: bool = False, 
-                       force_convert: bool = False) -> tuple:
+def determine_command(input_path: Path, force_transcode: bool = False,
+                      force_convert: bool = False) -> tuple:
     """Determine which command to run based on input file.
     Returns (command_str, auto_decode_bool, explanation)
     """
     if force_transcode:
-        return ("transcode", False, "Forced transcode")
+        # Forced transcode on a JXL means forced lossless DECODE (jbrd-gated
+        # per file); on anything else it's a lossless encode.
+        auto_decode = input_path.suffix.lower() == '.jxl'
+        return ("transcode", auto_decode, "Forced transcode")
     if force_convert:
         return ("convert", False, "Forced convert")
 
@@ -715,10 +754,12 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         # Sibling folder (aligned with encoder/decoder mode 5)
         return src_path.parent.parent / sibling_jxl / src_path.with_suffix(out_ext).name
     elif mode in (6, 7):
+        # Match only path *directory* parts (parts[:-1]); a file whose own
+        # name happens to start/end with the marker is not an anchor.
         parts = src_path.parts
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
-        export_idx = next((i for i, p in enumerate(parts)
+        export_idx = next((i for i, p in enumerate(parts[:-1])
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             # Files outside the export marker must be ignored in modes 6/7.
@@ -727,6 +768,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         if mode == 6:
             if _is_relative_to(src_path, export_dir):
                 rel_parts = src_path.relative_to(export_dir).parts
+                if not rel_parts:
+                    return None  # The marker matched the filename itself
                 rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
             else:
                 rel = src_path.relative_to(Path(*parts[:export_idx]))
@@ -738,6 +781,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
                 rel = src_path.relative_to(anchor)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
+                if not rel_parts:
+                    return None  # The marker matched the filename itself
                 rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         return export_dir / exp_out / rel.with_suffix(out_ext)
     elif mode == 8:
@@ -769,13 +814,18 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         # Determine if this is an encode (JPEG -> JXL) or decode (JXL -> JPEG)
         is_jpeg_encode = src_path.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
 
+        # From this point the tool writes to write_path; on failure the
+        # partial output must be removed (see except below).
+        output_dirty = False
         if is_jpeg_encode:
+            output_dirty = True
             r = subprocess.run(
                 ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
                  "--effort", str(effort)],
                 capture_output=True, timeout=600
             )
         else:
+            output_dirty = True
             r = subprocess.run(
                 ["djxl", str(src_path), str(write_path)],
                 capture_output=True, timeout=600
@@ -797,6 +847,13 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), src_md5)
     except Exception as e:
+        # Remove any partial output produced by THIS run so the next run does
+        # not mistake it for a completed conversion and skip it.
+        try:
+            if output_dirty and write_path.exists():
+                write_path.unlink()
+        except (OSError, UnboundLocalError):
+            pass
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
@@ -839,6 +896,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         # Mutually exclusive with --jpeg_quality / --pixels_to_jpeg (not used on this path).
         if is_jxl_decode and _tool_at_least("djxl", 0, 12):
             djxl_cmd.insert(1, "--reconstruct_jpeg")
+        output_dirty = True
         r = subprocess.run(djxl_cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -853,7 +911,14 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                 if recovered_md5 == stored_md5:
                     logger.info(f"[{n}/{total}] OK [MD5 PASS] | {jxl_path.name}")
                 else:
-                    logger.error(f"[{n}/{total}] MD5 FAIL | {jxl_path.name}")
+                    # Verification failed: delete the bad output so a re-run is
+                    # not skipped by should_process seeing the file exists.
+                    try:
+                        if write_path.exists():
+                            write_path.unlink()
+                    except OSError:
+                        pass
+                    logger.error(f"[{n}/{total}] MD5 FAIL (output deleted) | {jxl_path.name}")
                     return (str(jxl_path), "md5_fail", str(final_path), None)
         else:
             logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
@@ -861,6 +926,13 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         status = "reconvert" if overwritten else "ok"
         return (str(jxl_path), status, str(final_path), None)
     except Exception as e:
+        # Remove any partial output produced by THIS run so the next run does
+        # not mistake it for a completed conversion and skip it.
+        try:
+            if output_dirty and write_path.exists():
+                write_path.unlink()
+        except (OSError, UnboundLocalError):
+            pass
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         return (str(jxl_path), "error", str(e), None)
@@ -885,9 +957,17 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                       for s, w, f in tasks}
         else:
             futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, effort, smart): (s, w, f) 
-                      for s, w, f in tasks}
+                       for s, w, f in tasks}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            task = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                # An exception escaped the worker entirely — one bad file must
+                # not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                results.append((str(task[0]), "error", str(e), None))
 
     if use_staging:
         moved = 0
@@ -969,6 +1049,8 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     return results
 
 def cmd_transcode(args, auto_decode: bool = False):
+    """Returns (errors, cancelled): error count and whether the user declined
+    the delete confirmation."""
     global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR
     _counter = {"done": 0, "total": 0}
 
@@ -980,6 +1062,16 @@ def cmd_transcode(args, auto_decode: bool = False):
         STORE_MD5 = False
     if args.delete_source:
         DELETE_SOURCE = True
+
+    # A stale staging checksums.md5 from a crashed previous run would leak
+    # wrong entries into this run's destination folders — start clean.
+    if TEMP2_DIR is not None:
+        try:
+            stale = Path(TEMP2_DIR) / CHECKSUMS_FILENAME
+            if stale.exists():
+                stale.unlink()
+        except OSError:
+            pass
 
     # Determine direction
     decode = args.decode or auto_decode
@@ -1007,17 +1099,13 @@ def cmd_transcode(args, auto_decode: bool = False):
     elif decode:
         files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
         output_root = args.output or args.input
-        if args.mode == 2:
-            output_root.mkdir(parents=True, exist_ok=True)
     else:
         files = find_jpegs_flat(args.input) if args.mode in (0, 1) else find_jpegs_recursive(args.input)
         output_root = args.output or args.input
-        if args.mode == 2:
-            output_root.mkdir(parents=True, exist_ok=True)
 
     if not files:
         logger.warning("No input files found.")
-        return
+        return (0, False)
 
     logger.info(f"Files found: {len(files)}")
 
@@ -1038,7 +1126,11 @@ def cmd_transcode(args, auto_decode: bool = False):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be processed.")
-        return
+        return (0, False)
+
+    # Create the mode-2 output dir only for real runs (dry-run must not write)
+    if args.mode == 2 and not args.input.is_file():
+        output_root.mkdir(parents=True, exist_ok=True)
 
     # Group by output folder
     groups = {}
@@ -1053,7 +1145,7 @@ def cmd_transcode(args, auto_decode: bool = False):
             # for lossy converts (cmd_convert/cmd_auto).
             if not confirm_deletion_jpeg():
                 logger.info("Deletion not confirmed -- exiting.")
-                return
+                return (0, True)
 
     logger.info(f"Output groups: {len(groups)}")
 
@@ -1086,6 +1178,7 @@ def cmd_transcode(args, auto_decode: bool = False):
     else:
         logger.info(f"Done: {ok} OK | {overwritten} reconverted | {skipped} up to date | {err} errors")
     logger.info(f"Log: {log_file}")
+    return (err, False)
 
 # --------------------------------------------─
 # CONVERT IMPLEMENTATION
@@ -1110,19 +1203,22 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             return Path(output_root) / f"{stem}.{ext}"
         return src_path.parent / f"{stem}.{ext}"
     elif mode == 1:
-        if output_root:
-            return Path(output_root) / output_name / f"{stem}.{ext}"
-        return src_path.parent.parent / output_name / f"{stem}.{ext}"
+        # Subfolder inside each source folder (aligned with transcode mode 1).
+        # A non-default --output-name still wins for explicit overrides.
+        folder = output_name if output_name != CONVERT_OUTPUT_FOLDER else conv_folder
+        return src_path.parent / folder / f"{stem}.{ext}"
     elif mode == 2:
         if output_root:
             return Path(output_root) / f"{stem}.{ext}"
         new_folder = src_path.parent.name + suffix
         return src_path.parent.parent / new_folder / f"{stem}.{ext}"
     elif mode == 3:
-        # Subfolder (same as mode 1, used for recursive processing)
-        if output_root:
-            return Path(output_root) / output_name / f"{stem}.{ext}"
-        return src_path.parent / conv_folder / f"{stem}.{ext}"
+        # Subfolder inside each source folder, recursive variant (aligned with
+        # transcode mode 3). Previously this flattened every recursively-found
+        # file into a single <input>/converted/ folder, causing cross-folder
+        # name collisions.
+        folder = output_name if output_name != CONVERT_OUTPUT_FOLDER else conv_folder
+        return src_path.parent / folder / f"{stem}.{ext}"
     elif mode == 4:
         # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
@@ -1141,10 +1237,12 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         return src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
     elif mode in (6, 7):
         # Export marker modes - only process files INSIDE export marker folder
+        # Match only path *directory* parts (parts[:-1]); a file whose own
+        # name happens to start/end with the marker is not an anchor.
         parts = src_path.parts
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
-        export_idx = next((i for i, p in enumerate(parts)
+        export_idx = next((i for i, p in enumerate(parts[:-1])
                            if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
@@ -1152,6 +1250,8 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         if mode == 6:
             # Mode 6: any file inside export marker folder
             rel_parts = src_path.relative_to(export_dir).parts
+            if not rel_parts:
+                return None  # The marker matched the filename itself
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         else:
             # Mode 7: only files inside export marker / EXPORT_JPEG_SUBFOLDER
@@ -1162,6 +1262,8 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
                 rel = src_path.relative_to(anchor)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
+                if not rel_parts:
+                    return None  # The marker matched the filename itself
                 rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         return export_dir / exp_out / rel.with_suffix(f".{ext}")
     elif mode == 8:
@@ -1183,9 +1285,10 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         return (str(src_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
-    write_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Build cjxl command
         cmd = ["cjxl", str(src_path), str(write_path), "--effort", str(effort), "-d", str(distance)]
         # cjxl 0.11.2 default --lossless_jpeg=1 is incompatible with distance>0
@@ -1201,6 +1304,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # [libjxl >= 0.12] optional --buffering (off by default; see CJXL_BUFFERING)
         cmd += _cjxl_buffering_flag()
 
+        output_dirty = True
         r = subprocess.run(cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -1217,6 +1321,13 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), None)
     except Exception as e:
+        # Remove any partial output produced by THIS run so the next run does
+        # not mistake it for a completed conversion and skip it.
+        try:
+            if output_dirty and write_path.exists():
+                write_path.unlink()
+        except (OSError, UnboundLocalError):
+            pass
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
@@ -1235,11 +1346,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
-    write_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dirty = False
         actual_out = write_path
-        original_final_path = final_path
 
         is_png = (fmt == "png")
         if fmt == "jpeg" and bit_depth == 16:
@@ -1247,6 +1358,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             is_png = True
             actual_out = write_path.with_suffix(".png")
             final_path = final_path.with_suffix(".png")
+
+        # From here on, a tool writes to actual_out; on failure the partial
+        # output must be removed (see except below).
+        output_dirty = True
 
         if is_png:
             # PNG output
@@ -1307,12 +1422,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
     except Exception as e:
-        # Clean up any alternate extension orphan created during bit_depth fallback
-        if actual_out != write_path and actual_out.exists():
-            try:
-                actual_out.unlink()
-            except OSError:
-                pass
+        # Remove any partial output produced by THIS run (including an
+        # alternate-extension orphan from the bit_depth fallback) so the next
+        # run does not mistake it for a completed conversion and skip it.
+        if output_dirty:
+            for candidate in {actual_out, write_path}:
+                try:
+                    if candidate.exists():
+                        candidate.unlink()
+                except OSError:
+                    pass
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         return (str(jxl_path), "error", str(e), None)
@@ -1341,11 +1460,19 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
             futures = {ex.submit(encode_to_jxl, s, w, f, effort, distance, reconvert_val, smart): (s, w, f) 
                       for s, w, f in tasks}
         else:
-            futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth, 
-                                output_icc, use_ram, reconvert_val, smart): (s, w, f) 
-                      for s, w, f in tasks}
+            futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth,
+                                output_icc, use_ram, reconvert_val, smart): (s, w, f)
+                       for s, w, f in tasks}
         for fut in as_completed(futures):
-            results.append(fut.result())
+            task = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                # An exception escaped the worker entirely — one bad file must
+                # not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                results.append((str(task[0]), "error", str(e), None))
 
     if use_staging:
         moved = 0
@@ -1366,6 +1493,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
     return results
 
 def cmd_convert(args, from_jxl: bool = True):
+    """Returns (errors, cancelled)."""
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
 
@@ -1419,21 +1547,26 @@ def cmd_convert(args, from_jxl: bool = True):
                 direction = "from_jxl"
                 if args.format is None:
                     args.format = "jpeg"
+                # Same per-format defaults as the normal from_jxl branch:
+                # PNG keeps 16-bit, JPEG is 8-bit (JPEG has no 16-bit).
                 if args.bit_depth is None:
-                    args.bit_depth = 8
+                    args.bit_depth = PNG_DEFAULT_BIT_DEPTH if args.format == "png" else 8
                 logger.debug("Auto-detected JXL content, switching to from_jxl")
+        elif direction == "to_jxl":
+            # Mixed folder with --force-convert: JXLs are silently ignored
+            # without this note (use auto mode for mixed content instead).
+            jxls_present = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
+            if jxls_present:
+                logger.warning(f"{len(jxls_present)} JXL file(s) present but ignored "
+                               f"(JPEG/PNG -> JXL direction). Use auto mode for mixed folders.")
         output_root = args.output or args.input
-        if args.mode == 2:
-            output_root.mkdir(parents=True, exist_ok=True)
     else:
         files = find_jxls_flat(args.input) if args.mode in (0, 1) else find_jxls_recursive(args.input)
         output_root = args.output or args.input
-        if args.mode == 2:
-            output_root.mkdir(parents=True, exist_ok=True)
 
     if not files:
         logger.warning("No input files found.")
-        return
+        return (0, False)
 
     # JPEG does not support 16-bit. Switch format to PNG before building output
     # pairs so that staging files and final paths use the correct extension.
@@ -1498,7 +1631,11 @@ def cmd_convert(args, from_jxl: bool = True):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be converted.")
-        return
+        return (0, False)
+
+    # Create the mode-2 output dir only for real runs (dry-run must not write)
+    if args.mode == 2 and not args.input.is_file():
+        output_root.mkdir(parents=True, exist_ok=True)
 
     groups = {}
     for f, out in pairs:
@@ -1518,15 +1655,15 @@ def cmd_convert(args, from_jxl: bool = True):
                 # JXL -> JPEG/PNG: lossy if output is JPEG, or if PNG with ICC conversion
                 fmt = args.format if args.format else "jpeg"
                 is_lossy = (fmt == "jpeg") or (args.icc_profile is not None)
-            
+
             if is_lossy:
                 if not confirm_deletion_lossy():
                     logger.info("Deletion not confirmed -- exiting.")
-                    return
+                    return (0, True)
             else:
                 if not confirm_deletion_jpeg():
                     logger.info("Deletion not confirmed -- exiting.")
-                    return
+                    return (0, True)
 
     ok = err = skipped = overwritten = 0
     for dest_folder, group_pairs in groups.items():
@@ -1574,6 +1711,7 @@ def cmd_convert(args, from_jxl: bool = True):
     logger.info(f"\n{'-'*50}")
     logger.info(f"Done: {ok} OK | {overwritten} reconverts | {skipped} skipped | {err} errors")
     logger.info(f"Log: {log_file}")
+    return (err, False)
 
 # --------------------------------------------─
 # AUTO MODE (Per-file detection for directories)
@@ -1581,22 +1719,45 @@ def cmd_convert(args, from_jxl: bool = True):
 
 def cmd_auto(args):
     """Auto-detect per-file for batch processing.
-    
+
     For directories containing JPEG and/or JXL files:
     - JPEG files         -> lossless transcode encode to JXL
     - JXL files WITH jbrd box -> lossless transcode decode to JPEG
     - JXL files WITHOUT jbrd  -> lossy convert
+
+    Returns (errors, cancelled).
     """
-    global _counter, TEMP2_DIR, DELETE_SOURCE
+    global _counter, TEMP2_DIR, DELETE_SOURCE, STORE_MD5
     _counter = {"done": 0, "total": 0}
+
+    if args.icc_profile and not MAGICK_AVAILABLE:
+        # Same guard as cmd_convert: without ImageMagick the ICC conversion
+        # would be silently skipped and outputs would keep the embedded ICC.
+        print("ERROR: --icc-profile/--to-srgb requires ImageMagick (magick) in PATH.")
+        sys.exit(1)
 
     TEMP2_DIR = args.staging
     smart_mode = args.sync
+
     reconvert_explicit = args.overwrite
+
+    # Handle --no-md5 (was silently ignored on this path)
+    if args.no_md5:
+        STORE_MD5 = False
 
     # Handle DELETE_SOURCE from CLI (same as cmd_transcode/cmd_convert)
     if args.delete_source:
         DELETE_SOURCE = True
+
+    # A stale staging checksums.md5 from a crashed previous run would leak
+    # wrong entries into this run's destination folders — start clean.
+    if TEMP2_DIR is not None:
+        try:
+            stale = Path(TEMP2_DIR) / CHECKSUMS_FILENAME
+            if stale.exists():
+                stale.unlink()
+        except OSError:
+            pass
 
     log_file = setup_logger()
     
@@ -1611,9 +1772,18 @@ def cmd_auto(args):
         png_files = find_pngs_recursive(args.input)
         jxl_files = find_jxls_recursive(args.input)
 
+    # --from-jxl: restrict auto mode to the JXL decode direction. JPEG/PNG
+    # inputs are left untouched (used by the wrapper's "JXL -> JPEG auto"
+    # workflow, which must never create new JXLs from folder JPEGs).
+    if getattr(args, "from_jxl", False):
+        if jpeg_files or png_files:
+            logger.info(f"--from-jxl: ignoring {len(jpeg_files)} JPEG and {len(png_files)} PNG file(s)")
+        jpeg_files = []
+        png_files = []
+
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")
-        return
+        return (0, False)
 
     # Separate JXL files by jbrd presence
     jxl_transcode_files = []  # Have jbrd - can decode losslessly to JPEG
@@ -1639,11 +1809,11 @@ def cmd_auto(args):
         if has_lossy:
             if not confirm_deletion_lossy():
                 logger.info("Deletion not confirmed -- exiting.")
-                return
+                return (0, True)
         elif has_lossless:
             if not confirm_deletion_jpeg():
                 logger.info("Deletion not confirmed -- exiting.")
-                return
+                return (0, True)
 
     logger.info(f"AUTO MODE | Directory: {args.input}")
     logger.info(f"JPEG files (lossless encode): {len(jpeg_files)}")
@@ -1669,28 +1839,36 @@ def cmd_auto(args):
     _abort_on_duplicate_outputs(all_pairs)
 
     # Process JPEG files (lossless encode to JXL)
+    totals = {"ok": 0, "err": 0, "skipped": 0}
+
+    def _merge(tally):
+        for k in totals:
+            totals[k] += tally.get(k, 0)
+
     if jpeg_files:
         logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
-        _process_file_group(jpeg_files, args, use_transcode=True)
+        _merge(_process_file_group(jpeg_files, args, use_transcode=True))
 
     # Process PNG files (convert encode to JXL; no lossless transcode for PNG)
     if png_files:
         logger.info(f"\n--- Processing {len(png_files)} PNG files (convert encode) ---")
-        _process_file_group(png_files, args, use_transcode=False, direction="to_jxl")
+        _merge(_process_file_group(png_files, args, use_transcode=False, direction="to_jxl"))
 
     # Process JXL transcode files (lossless decode to JPEG)
     if jxl_transcode_files:
         logger.info(f"\n--- Processing {len(jxl_transcode_files)} JXL files with jbrd (lossless) ---")
-        _process_file_group(jxl_transcode_files, args, use_transcode=True)
-    
+        _merge(_process_file_group(jxl_transcode_files, args, use_transcode=True))
+
     # Process JXL convert files (lossy)
     if jxl_convert_files:
         logger.info(f"\n--- Processing {len(jxl_convert_files)} JXL files without jbrd (lossy) ---")
-        _process_file_group(jxl_convert_files, args, use_transcode=False)
-    
+        _merge(_process_file_group(jxl_convert_files, args, use_transcode=False))
+
     logger.info(f"\n{'-'*50}")
-    logger.info(f"AUTO MODE complete | Total: {total_files} files")
+    logger.info(f"AUTO MODE complete | Total: {total_files} files | "
+                f"{totals['ok']} OK | {totals['skipped']} skipped | {totals['err']} errors")
     logger.info(f"Log: {log_file}")
+    return (totals["err"], False)
 
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
     """Process a group of files with the same method.
@@ -1741,7 +1919,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if collect_only is not None:
         # Pre-pass: only collect pairs for cross-group duplicate detection
         collect_only.extend(pairs)
-        return
+        return {"ok": 0, "err": 0, "skipped": 0}
 
     # Discount files filtered out by modes 6/7 from the progress total
     _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))
@@ -1751,16 +1929,28 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if args.dry_run:
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
-        return
+        return {"ok": 0, "err": 0, "skipped": 0}
 
     if not pairs:
-        return
-    
+        return {"ok": 0, "err": 0, "skipped": 0}
+
+    tally = {"ok": 0, "err": 0, "skipped": 0}
+
+    def _accumulate(results):
+        for r in results:
+            st = r[1]
+            if st in ("ok", "reconvert", "overwrite"):
+                tally["ok"] += 1
+            elif st == "skipped":
+                tally["skipped"] += 1
+            else:
+                tally["err"] += 1
+
     # Group by output folder
     groups = {}
     for f, out in pairs:
         groups.setdefault(out.parent, []).append((f, out))
-    
+
     # Process each group
     for dest_folder, group_pairs in groups.items():
         if use_transcode:
@@ -1768,17 +1958,17 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             encode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')]
             decode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() == '.jxl']
             if encode_pairs:
-                process_group_transcode(
+                _accumulate(process_group_transcode(
                     encode_pairs, args.workers, decode=False,
                     verify=not args.no_verify, mode=args.mode,
                     reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
-                )
+                ))
             if decode_pairs:
-                process_group_transcode(
+                _accumulate(process_group_transcode(
                     decode_pairs, args.workers, decode=True,
                     verify=not args.no_verify, mode=args.mode,
                     reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
-                )
+                ))
         else:
             results = process_group_convert(
                 group_pairs, args.workers, direction=direction,
@@ -1789,6 +1979,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 effort=args.effort, reconvert_val=args.overwrite,
                 use_internal_srgb=False, smart=args.sync
             )
+            _accumulate(results)
             # Handle DELETE_SOURCE for lossy convert (auto mode), only in mode 8
             if DELETE_SOURCE and args.mode == 8:
                 deleted = 0
@@ -1808,6 +1999,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     logger.info(f" DELETED source | {src_path.name}")
                 if deleted:
                     logger.info(f" -> Deleted {deleted} source file(s)")
+
+    return tally
 
 # --------------------------------------------─
 # AUTO MODE (Per-file detection for directories)
@@ -1868,6 +2061,15 @@ Examples:
     parser.add_argument("--no-md5", action="store_true", help="Skip MD5 storage")
     parser.add_argument("--no-verify", action="store_true", help="Skip MD5 verify on decode")
     parser.add_argument("--delete-source", action="store_true", help="Delete after mode 8")
+    parser.add_argument("--delete-confirm-off", action="store_true",
+                        help="Skip the interactive delete confirmation. For automation/"
+                             "wrappers that already asked the user.")
+    parser.add_argument("--export-subfolder", type=str, default=None,
+                        help="[Mode 7] Only process files inside this subfolder of the "
+                             "export marker (default: empty = all subfolders).")
+    parser.add_argument("--from-jxl", action="store_true",
+                        help="[Auto mode] Restrict processing to .jxl files only "
+                             "(JPEG/PNG files in the folder are left untouched).")
     parser.add_argument("--effort", type=int, default=CJXL_EFFORT, choices=range(1, 11),
                         help="cjxl effort 1-10")
 
@@ -1896,14 +2098,32 @@ Examples:
 
     args = parser.parse_args()
 
+    if not args.input.exists():
+        print(f"ERROR: input path does not exist: {args.input}")
+        sys.exit(1)
+
+    if args.workers < 1:
+        print("ERROR: --workers must be >= 1")
+        sys.exit(1)
+
+    # --decode only makes sense for JXL inputs; reject it for other single
+    # files instead of silently misrouting (e.g. djxl on a PNG).
+    if args.decode and args.input.is_file() and args.input.suffix.lower() != '.jxl':
+        print(f"ERROR: --decode requires a .jxl input (got {args.input.name})")
+        sys.exit(1)
+
     # Normalize format: jpg -> jpeg
     if args.format == "jpg":
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM
     if args.export_marker:
         EXPORT_MARKER = args.export_marker
+    if args.export_subfolder is not None:
+        EXPORT_JPEG_SUBFOLDER = args.export_subfolder
+    if args.delete_confirm_off:
+        DELETE_CONFIRM = False
 
     # Handle --to-srgb shortcut
     if args.to_srgb:
@@ -1924,26 +2144,32 @@ Examples:
         else:
             args.mode = CONVERT_DEFAULT_MODE     # 0 = in-place
 
-    # Route to appropriate command
+    # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
+    # tuple so automation/wrappers can detect failures and user cancellations.
     if cmd == "transcode":
-        cmd_transcode(args, auto_decode)
+        errors, cancelled = cmd_transcode(args, auto_decode)
     elif cmd == "convert":
         # Determine direction for convert
         if args.input.suffix.lower() == '.jxl' or args.decode:
-            cmd_convert(args, from_jxl=True)
+            errors, cancelled = cmd_convert(args, from_jxl=True)
         else:
-            cmd_convert(args, from_jxl=False)
+            errors, cancelled = cmd_convert(args, from_jxl=False)
     elif cmd == "auto":
         # Auto-detect per-file for directories. --decode forces the lossless
         # recovery direction: JXL-only, jbrd-gated (non-jbrd files error out
         # per file instead of being silently lossy-converted).
         if args.decode:
-            cmd_transcode(args, auto_decode=True)
+            errors, cancelled = cmd_transcode(args, auto_decode=True)
         else:
-            cmd_auto(args)
+            errors, cancelled = cmd_auto(args)
     else:
         # Fallback - should not reach here
         print(f"ERROR: Unknown command state: {cmd}")
+        sys.exit(1)
+
+    if cancelled:
+        sys.exit(3)
+    if errors:
         sys.exit(1)
 
 if __name__ == "__main__":
