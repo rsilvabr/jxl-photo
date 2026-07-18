@@ -3048,7 +3048,8 @@ class InteractiveMenu:
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
-                errors="replace"
+                errors="replace",
+                env={**os.environ, "PYTHONUNBUFFERED": "1"}
             )
 
             for line in process.stdout:

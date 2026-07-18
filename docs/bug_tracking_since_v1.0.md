@@ -194,8 +194,24 @@ New regression test: `tests/test_multipage.py`
 | 122 | Repeat workflow offered for manifest mode 99 | photo | ✅ FIXED |
 | 123 | `jxl_jpeg_transcoder.encode_to_jxl` returns 3-element tuples instead of 4 | transcoder | ✅ FIXED |
 | 124 | Lossy JXL encoding darkens images with large scanner ICCs in PNG iCCP | encoder | ✅ FIXED |
+| 120d | Embedded JPEG thumbnail always generated from page 0 | encoder | ✅ FIXED (v1.7.1) |
+| 121d | `reorder_jxl_boxes()` fails on bare codestreams | encoder, transcoder | ✅ FIXED (v1.7.1) |
+| 122d | Obsolete comments in `add_jpeg_preview()` | decoder | ✅ FIXED (v1.7.1) |
+| 123d | Transcoder uses invalid `--output_format=png` flag | transcoder | ✅ FIXED (v1.7.1) |
+| 124d | Staging orphan with `--format jpeg --bit-depth 16` | transcoder | ✅ FIXED (v1.7.1) |
+| 125 | `make_png_bytes()` always writes 16-bit PNGs | encoder | ✅ FIXED (v1.7.1) |
+| 126 | `add_jpeg_preview()` obsolete comment and dead code | decoder | ✅ FIXED (v1.7.1) |
+| 127 | `read_ppm_to_numpy()` fails when dimensions are on separate lines | decoder | ✅ FIXED (v1.7.1) |
+| 128 | `--force-transcode --decode` crashes on missing `jbrd` box | transcoder | ✅ FIXED (v1.7.1) |
+| 129 | Wrapper `--delete-source` confirmation invisible/blocked | photo | ✅ FIXED (v1.7.1) |
+| 130 | Lossy convert paths drop EXIF/XMP/IPTC metadata | transcoder | ✅ FIXED (v1.7.1) |
+| 131 | `decode_one_transcode()` never reports reconvert on overwrite | transcoder | ✅ FIXED (v1.7.1) |
+| 132 | `--multipage-mode skip` always encodes page 0 | encoder | ✅ FIXED (v1.7.1) |
+| 133 | JPEG scanners ignore `.jfif` / `.jpe` files | transcoder, photo | ✅ FIXED (v1.7.1) |
+| 134 | `_copy_metadata()` runs after `reorder_jxl_boxes()`, undoing the reorder | transcoder | ✅ FIXED (v1.7.2) |
+| 135 | `execute_workflow()` missing `PYTHONUNBUFFERED` (main wizard path) | photo | ✅ FIXED (v1.7.2) |
 
-**Total bugs fixed: 113**
+**Total bugs fixed: 129**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2451,6 +2467,32 @@ The encoder now aborts with a clear error message instead of producing incorrect
 **Files changed:**
 - `jxl_jpeg_transcoder.py` `find_jpegs_flat()`, `find_jpegs_recursive()`
 - `jxl_photo.py` `_get_extensions()`
+
+---
+
+### Bug #134 — `_copy_metadata()` Runs After `reorder_jxl_boxes()`, Undoing the Reorder
+
+**Location:** `jxl_jpeg_transcoder.py` — `encode_to_jxl()`
+
+**Problem:** The lossy convert path called `reorder_jxl_boxes(write_path)` first and `_copy_metadata(src_path, write_path)` second. Since `_copy_metadata()` uses exiftool, which re-appends metadata boxes at the end of the file, the reorder was silently undone: Exif/XMP boxes ended up after the codestream, breaking IrfanView compatibility (IrfanView reads boxes linearly and stops at the codestream). The TIFF encoder already documents that `reorder_jxl_boxes()` must be the **last** mutation on the file.
+
+**Fix:** Swapped the order: `_copy_metadata()` runs first and `reorder_jxl_boxes()` is now the last mutation on the JXL file, matching the encoder. Verified: metadata boxes (`brob`/`xml `) now precede the codestream boxes in lossy convert output.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `encode_to_jxl()`
+
+---
+
+### Bug #135 — `execute_workflow()` Missing `PYTHONUNBUFFERED` (Main Wizard Path)
+
+**Location:** `jxl_photo.py` — `execute_workflow()`
+
+**Problem:** Bug #129 fixed `_run_subprocess()` (used by the manifest path), but the main wizard path ("New workflow") builds its own `subprocess.Popen` without the unbuffered environment. With `--delete-source` (mode 8), the child script's interactive confirmation prompt (`print()` + `input()`) could stay block-buffered in the pipe — the process looked hung while waiting for input the user never saw.
+
+**Fix:** Pass `env={**os.environ, "PYTHONUNBUFFERED": "1"}` to the `Popen` call in `execute_workflow()`, mirroring `_run_subprocess()`. Verified: a child blocked on `input()` now has its prompt line delivered through the pipe immediately.
+
+**Files changed:**
+- `jxl_photo.py` `execute_workflow()`
 
 ---
 

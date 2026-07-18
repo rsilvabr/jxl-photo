@@ -1194,11 +1194,12 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
-        # Reorder boxes for IrfanView compatibility
-        reorder_jxl_boxes(write_path)
-
         # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode
         _copy_metadata(src_path, write_path)
+
+        # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
+        # otherwise exiftool re-appends metadata boxes after the codestream.
+        reorder_jxl_boxes(write_path)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
