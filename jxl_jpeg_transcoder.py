@@ -195,6 +195,26 @@ def _cjxl_buffering_flag():
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
 
+def _abort_on_duplicate_outputs(pairs):
+    """Abort the run if two outputs map to the same destination file.
+
+    Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
+    files in different recipe subfolders would silently overwrite each other
+    (and with mode 8 + delete, a single validated output could justify deleting
+    several distinct sources). Better to stop loudly than to lose data.
+    """
+    from collections import Counter
+    counts = Counter(str(out) for _, out in pairs)
+    dupes = sorted(d for d, c in counts.items() if c > 1)
+    if dupes:
+        for d in dupes[:10]:
+            logger.error(f"Duplicate output destination: {d}")
+        if len(dupes) > 10:
+            logger.error(f"... and {len(dupes) - 10} more")
+        logger.error("Aborting: multiple inputs map to the same output file. "
+                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+        sys.exit(2)
+
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
 
@@ -509,20 +529,22 @@ def find_jpegs_recursive(input_path: Path):
 
 def find_jxls_flat(input_path: Path):
     seen, files = set(), []
-    for f in input_path.glob("*.jxl"):
-        key = f.resolve()
-        if key not in seen:
-            seen.add(key)
-            files.append(f)
+    for ext in ("*.jxl", "*.JXL"):
+        for f in input_path.glob(ext):
+            key = f.resolve()
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
     return sorted(files)
 
 def find_jxls_recursive(input_path: Path):
     seen, files = set(), []
-    for f in input_path.rglob("*.jxl"):
-        key = f.resolve()
-        if key not in seen:
-            seen.add(key)
-            files.append(f)
+    for ext in ("*.jxl", "*.JXL"):
+        for f in input_path.rglob(ext):
+            key = f.resolve()
+            if key not in seen:
+                seen.add(key)
+                files.append(f)
     return sorted(files)
 
 def find_pngs_recursive(input_path: Path):
@@ -1010,6 +1032,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
 
+    _abort_on_duplicate_outputs(pairs)
+
     if args.dry_run:
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
@@ -1168,8 +1192,10 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if distance > 0:
             cmd.append("--lossless_jpeg=0")
 
-        # Add container flag for metadata support (needed for EXIF in IrfanView)
-        if FORCE_CONTAINER_FOR_LOSSY:
+        # Add container flag for metadata support (needed for EXIF in IrfanView).
+        # Lossy only (d>0): on lossless it changes how the ICC is stored and
+        # breaks color display in IrfanView (same rule as the TIFF encoder).
+        if FORCE_CONTAINER_FOR_LOSSY and distance > 0:
             cmd.append("--container=1")
 
         # [libjxl >= 0.12] optional --buffering (off by default; see CJXL_BUFFERING)
@@ -1466,6 +1492,8 @@ def cmd_convert(args, from_jxl: bool = True):
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
 
+    _abort_on_duplicate_outputs(pairs)
+
     if args.dry_run:
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
@@ -1561,11 +1589,15 @@ def cmd_auto(args):
     """
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
-    
+
     TEMP2_DIR = args.staging
     smart_mode = args.sync
     reconvert_explicit = args.overwrite
-    
+
+    # Handle DELETE_SOURCE from CLI (same as cmd_transcode/cmd_convert)
+    if args.delete_source:
+        DELETE_SOURCE = True
+
     log_file = setup_logger()
     
     # Collect JPEG files (encode direction), PNG files (convert encode direction)
@@ -1598,8 +1630,9 @@ def cmd_auto(args):
 
     # Confirm source deletion BEFORE any processing. Lossy conversion requires
     # stricter confirmation than lossless transcode. Only meaningful in mode 8.
-    # Skipped on dry runs (nothing is converted, so nothing would be deleted).
-    if args.delete_source and args.mode == 8 and not args.dry_run:
+    # Skipped on dry runs (nothing is converted, so nothing would be deleted)
+    # and when DELETE_CONFIRM is off (script setting for automation).
+    if args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
         # PNG -> JXL convert re-encodes pixels (not bit-recoverable): treat as lossy.
         has_lossy = bool(jxl_convert_files) or bool(png_files)
         has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
@@ -1611,7 +1644,6 @@ def cmd_auto(args):
             if not confirm_deletion_jpeg():
                 logger.info("Deletion not confirmed -- exiting.")
                 return
-        DELETE_SOURCE = True
 
     logger.info(f"AUTO MODE | Directory: {args.input}")
     logger.info(f"JPEG files (lossless encode): {len(jpeg_files)}")
@@ -1692,6 +1724,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl"):
             )
         if out:
             pairs.append((f, out))
+
+    # Discount files filtered out by modes 6/7 from the progress total
+    _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))
+
+    _abort_on_duplicate_outputs(pairs)
 
     if args.dry_run:
         for f, out in pairs:
@@ -1817,7 +1854,7 @@ Examples:
                         help="cjxl effort 1-10")
 
     # Convert specific
-    parser.add_argument("--ram", action="store_true", default=True, help="Use RAM pipeline when possible (ICC conversions always use a temporary PNG)")
+    parser.add_argument("--ram", action="store_true", default=True, help="Accepted for CLI compatibility; decode currently always uses temporary files (no in-RAM pipeline yet)")
     parser.add_argument("--no-ram", dest="ram", action="store_false", help="Use disk")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
@@ -1879,8 +1916,13 @@ Examples:
         else:
             cmd_convert(args, from_jxl=False)
     elif cmd == "auto":
-        # Auto-detect per-file for directories
-        cmd_auto(args)
+        # Auto-detect per-file for directories. --decode forces the lossless
+        # recovery direction: JXL-only, jbrd-gated (non-jbrd files error out
+        # per file instead of being silently lossy-converted).
+        if args.decode:
+            cmd_transcode(args, auto_decode=True)
+        else:
+            cmd_auto(args)
     else:
         # Fallback - should not reach here
         print(f"ERROR: Unknown command state: {cmd}")

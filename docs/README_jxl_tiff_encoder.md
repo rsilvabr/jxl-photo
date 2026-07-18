@@ -142,8 +142,8 @@ ENCODE_TAG_MODE = "xmp"
 # "xmp"      → writes as XMP metadata (default)
 # "off"      → does not add anything
 # Can also be set via --encode-tag CLI argument (xmp/software/off)
-# NOTE: When EMBED_ICC_IN_JXL is True, encoding params go to XMP:CreatorTool
-# (dc:Description is used for ICC embedding).
+# NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP:CreatorTool
+# and encoding params are concatenated to dc:Description.
 
 EMBED_JPEG_THUMBNAIL = False
 # Embed a JPEG thumbnail (256px) in the JXL file EXIF metadata.
@@ -546,11 +546,11 @@ D50 patch: 15 applied | 27 skipped (mode: auto)
 ## How to verify output
 
 ```powershell
-# Check JXL has embedded ICC
-exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+# Check JXL has embedded ICC (ICC lives in XMP CreatorTool)
+exiftool -XMP-xmp:CreatorTool photo.jxl | findstr "ICC:"
 
-# Check encoding params
-exiftool -XMP-xmp:CreatorTool photo.jxl
+# Check encoding params (they live in dc:Description)
+exiftool -XMP-dc:Description photo.jxl
 
 # Check EXIF Software (for D50 patch detection)
 exiftool -Software photo.jxl

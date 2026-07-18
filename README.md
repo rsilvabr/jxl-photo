@@ -26,6 +26,8 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New in v1.8
 
+> **v1.8.1:** third-pass audit fixes — mode 6 now **aborts** on duplicate output destinations (same-named files in different `_EXPORT` subfolders), `--delete-source` propagates through all wizard paths, multipage marker batch uses exiftool argfile (no more command-line limit or `[` wildcard issues), decoder deletes partial outputs so smart sync can't skip corrupt TIFFs, `--decode` works on directories, plus ~15 smaller fixes. See the [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1).
+
 ### libjxl v0.12 Support (auto-detected)
 The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.
 
@@ -645,8 +647,8 @@ exiftool -ProfileDescription -ProfileCopyright roundtrip.tif
 
 # Should match exactly!
 
-# Check ICC is embedded in JXL
-exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+# Check ICC is embedded in JXL (ICC lives in XMP CreatorTool)
+exiftool -XMP-xmp:CreatorTool photo.jxl | findstr "ICC:"
 
 # Check EXIF is visible in IrfanView
 exiftool -Make -Model roundtrip.tif
@@ -675,7 +677,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-- Release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
+- Release notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
 - [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code

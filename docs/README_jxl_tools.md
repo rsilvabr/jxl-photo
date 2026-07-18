@@ -191,7 +191,7 @@ E:\sessao\
 **Mode 6** — processes ALL files under ALL `_EXPORT` folders found recursively.
 
 **Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT`.
-Default: `_EXPORT/JXL` (configurable via `EXPORT_JXL_SUBFOLDER` / `EXPORT_JPEG_SUBFOLDER`).
+Default: empty (`EXPORT_JXL_SUBFOLDER` / `EXPORT_JPEG_SUBFOLDER` unset) = processes all subfolders, same as mode 6.
 
 ```
 _EXPORT/
@@ -314,7 +314,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
-| `DELETE_CONFIRM` | `True` | Require HHMMSS confirmation for mode 8 delete |
+| `DELETE_CONFIRM` | `True` | Require HHMM confirmation for mode 8 delete |
 
 #### jxl_tiff_decoder.py
 | Variable | Default | What it does |

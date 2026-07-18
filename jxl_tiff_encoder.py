@@ -446,6 +446,26 @@ _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_n
 _d50_patched_hashes = set()
 _d50_patch_lock = threading.Lock()
 
+def _abort_on_duplicate_outputs(dests):
+    """Abort the run if two outputs map to the same destination file.
+
+    Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
+    files in different recipe subfolders would silently overwrite each other
+    (and with mode 8 + delete, a single validated output could justify deleting
+    several distinct sources). Better to stop loudly than to lose data.
+    """
+    from collections import Counter
+    counts = Counter(str(d) for d in dests)
+    dupes = sorted(d for d, c in counts.items() if c > 1)
+    if dupes:
+        for d in dupes[:10]:
+            logger.error(f"Duplicate output destination: {d}")
+        if len(dupes) > 10:
+            logger.error(f"... and {len(dupes) - 10} more")
+        logger.error("Aborting: multiple inputs map to the same output file. "
+                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+        sys.exit(2)
+
 def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1916,7 +1936,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 def find_files_mode0(input_path: Path):
     seen = set()
     files = []
-    for ext in ("*.tif", "*.tiff"):
+    for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
         for f in input_path.glob(ext):
             key = f.resolve()
             if key not in seen:
@@ -1927,7 +1947,7 @@ def find_files_mode0(input_path: Path):
 def find_tiffs_recursive(input_path: Path):
     seen = set()
     files = []
-    for ext in ("*.tif", "*.tiff"):
+    for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
         for f in input_path.rglob(ext):
             key = f.resolve()
             if key not in seen:
@@ -2187,6 +2207,8 @@ def main():
         planned_msg += f", {analyze_errors} unreadable"
     planned_msg += ")"
     logger.info(planned_msg)
+
+    _abort_on_duplicate_outputs([item[1] for item in all_items])
     _counter["total"] = len(all_items)
 
     # Dry run

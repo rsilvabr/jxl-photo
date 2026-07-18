@@ -657,26 +657,26 @@ class FolderAnalyzer:
                     mappings.append((src, src, count))
 
         elif mode == 1:
-            # Subfolder: converted_{dest} inside each source folder
+            # Subfolder: real per-direction name inside each source folder
             for folder, count in analysis['file_distribution'].items():
                 if count > 0:
                     src = str(self.root / folder) if folder != '.' else str(self.root)
-                    dest = str(Path(src) / f"converted_{self.dest}")
+                    dest = str(Path(src) / _dest_folder_names(self.origin, self.dest)[0])
                     mappings.append((src, dest, count))
 
         elif mode == 2:
-            # Flat: all to one output folder
+            # Flat: all to one output folder (matches the Step 5 default)
             total = sum(analysis['file_distribution'].values())
             if total > 0:
-                out_dir = str(self.root / f"output_{self.dest}")
+                out_dir = str(self.root.parent / "output")
                 mappings.append((str(self.root), out_dir, total))
 
         elif mode == 3:
-            # Recursive: each folder gets its own {dest}_files subfolder
+            # Recursive: each folder gets its own real subfolder name
             for folder, count in analysis['file_distribution'].items():
                 if count > 0 and folder != '.':
                     src = str(self.root / folder)
-                    dest = str(Path(src) / f"{self.dest}_files")
+                    dest = str(Path(src) / _dest_folder_names(self.origin, self.dest)[1])
                     mappings.append((src, dest, count))
 
         elif mode in [4, 5]:
@@ -789,6 +789,20 @@ class FolderAnalyzer:
             pass
 
         return 0
+
+
+def _dest_folder_names(origin: str, dest: str) -> tuple:
+    """Real output subfolder names created by the backend scripts, by direction.
+
+    Returns (mode1_subfolder, mode3_subfolder). Keep in sync with
+    CONVERTED_*_FOLDER / *_FOLDER_NAME constants in the scripts.
+    """
+    if dest == 'tiff':
+        return ('converted_tiff', 'TIFF_16bits')
+    if dest == 'jxl':
+        return ('converted_jxl', 'JXL_16bits' if origin == 'tiff' else 'converted_jxl')
+    # jpeg / png outputs come from the transcoder's decode path
+    return ('recovered_jpeg', 'recovered_jpeg')
 
 
 class InteractiveMenu:
@@ -1516,15 +1530,16 @@ class InteractiveMenu:
         dest = workflow['dest_format']
         export_marker = self.config.config.export_marker
 
+        m1_name, m3_name = _dest_folder_names(origin, dest)
         modes = [
             ("0", "In-place",
              f"{origin.upper()} and {dest.upper()} side by side in same folder"),
             ("1", "Subfolder",
-             f"Creates [green]'converted_{dest}'[/green] subfolder"),
+             f"Creates [green]'{m1_name}'[/green] subfolder"),
             ("2", "Flat -> output folder",
              f"All files from subfolders merged to single output folder (recursive)"),
             ("3", "Recursive subfolders",
-             f"Creates [green]'{dest.upper()}_files'[/green] in each subfolder"),
+             f"Creates [green]'{m3_name}'[/green] in each subfolder"),
             ("4", "Folder rename (suffix swap)",
              f"Replaces {origin.upper()} with {dest.upper()} in folder name"),
             ("5", "Sibling folder",
@@ -1649,11 +1664,12 @@ class InteractiveMenu:
         dest = workflow['dest_format']
         export_marker = self.config.config.export_marker
 
+        m1_name, m3_name = _dest_folder_names(origin, dest)
         modes = [
             ("0", "In-place", f"{origin.upper()} and {dest.upper()} side by side"),
-            ("1", "Subfolder", f"Creates 'converted_{dest}' subfolder"),
+            ("1", "Subfolder", f"Creates '{m1_name}' subfolder"),
             ("2", "Flat", "All to one folder (recursive)"),
-            ("3", "Recursive", f"'{dest}_files' in each subfolder"),
+            ("3", "Recursive", f"'{m3_name}' in each subfolder"),
             ("4", "Rename", f"Renames folder {origin}→{dest}"),
             ("5", "Sibling", f"Creates sibling folder next to source"),
             ("6", f"Marker export (full)", f"Only inside folders with 'export' in name"),
@@ -1684,6 +1700,7 @@ class InteractiveMenu:
         if choice == "8":
             if not self._confirm_archive_mode():
                 return False
+            workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
         return True
@@ -1702,7 +1719,7 @@ class InteractiveMenu:
              f"[bold green]Non-recursive[/bold green] - subfolders are NOT processed."),
 
             ("1", "Subfolder",
-             f"Creates a [green]'converted_{dest}'[/green] subfolder next to each source folder.\n"
+             f"Creates a [green]'{_dest_folder_names(origin, dest)[0]}'[/green] subfolder next to each source folder.\n"
              f"Example: [cyan]F:/Photos/2024/[/cyan] -> [cyan]F:/Photos/2024/converted_{dest}/[/cyan]\n"
              f"Works on folder input only. Non-recursive."),
 
@@ -1713,8 +1730,8 @@ class InteractiveMenu:
              f"Otherwise uses the input root as output root."),
 
             ("3", "Recursive subfolders",
-             f"Each subfolder gets its own [green]'{dest.upper()}_files'[/green] subfolder.\n"
-             f"Preserves folder structure: [cyan]F:/Photos/2024/A/[/cyan] -> [cyan]F:/Photos/2024/A/{dest.upper()}_files/[/cyan]"),
+             f"Each subfolder gets its own [green]'{_dest_folder_names(origin, dest)[1]}'[/green] subfolder.\n"
+             f"Preserves folder structure: [cyan]F:/Photos/2024/A/[/cyan] -> [cyan]F:/Photos/2024/A/{_dest_folder_names(origin, dest)[1]}/[/cyan]"),
 
             ("4", "Folder rename (suffix swap)",
              f"Renames the folder, replacing [green]{origin.upper()}[/green] with [green]{dest.upper()}[/green] in the folder name.\n"
@@ -1787,6 +1804,7 @@ class InteractiveMenu:
         if choice == "8":
             if not self._confirm_archive_mode():
                 return self._show_mode_details_and_select(workflow)
+            workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
         return True
@@ -1835,7 +1853,7 @@ class InteractiveMenu:
             mode_config['output_dir'] = output_dir
 
         elif mode == 1:
-            folder_name = f"converted_{dest}"
+            folder_name = _dest_folder_names(origin, dest)[0]
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
                 console.print(f"Will create: [green]'{folder_name}'[/green] in each source folder")
@@ -1844,7 +1862,7 @@ class InteractiveMenu:
                 print(f"Will create: '{folder_name}' in each source folder")
 
         elif mode == 3:
-            folder_name = f"{dest.upper()}_files"
+            folder_name = _dest_folder_names(origin, dest)[1]
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
                 console.print(f"Will create: [green]'{folder_name}'[/green] in each source folder")
@@ -2067,14 +2085,14 @@ class InteractiveMenu:
                     advanced_options = workflow.setdefault('advanced_options', {})
                     if decode_mode == "matrix":
                         advanced_options['matrix'] = True
+                        # Target ICC only applies to matrix mode
+                        target_icc = input("Target ICC (file path, sRGB, or empty): ").strip()
+                        if target_icc:
+                            advanced_options['target_icc'] = target_icc
                     elif decode_mode == "basic":
                         advanced_options['basic'] = True
                     elif decode_mode == "none":
                         advanced_options['none'] = True
-
-                    target_icc = input("Target ICC (file path, sRGB, or empty): ").strip()
-                    if target_icc:
-                        advanced_options['target_icc'] = target_icc
 
             dry_input = input("Dry run? [y/N]: ").strip().lower()
             workflow['dry_run'] = dry_input.startswith('y')
@@ -2493,7 +2511,8 @@ class InteractiveMenu:
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
             elif 'lossy' in workflow['conversion_type']:
-                table.add_row("Quality:", str(workflow['quality']))
+                # convert_lossy is JPEG->JXL lossy, which is distance-driven
+                table.add_row("Distance:", str(workflow.get('distance', 1.0)))
             elif origin == 'jxl' and dest == 'jpeg':
                 # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
                 if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
@@ -3075,7 +3094,9 @@ class InteractiveMenu:
         if expert_flags:
             try:
                 import shlex
-                expert_args = shlex.split(expert_flags)
+                # posix=False on Windows: preserve backslashes in paths
+                # (e.g. --staging E:\temp_jxl), same as the manifest path.
+                expert_args = shlex.split(expert_flags, posix=(os.name != 'nt'))
                 cmd.extend(expert_args)
             except ValueError:
                 cmd.extend(expert_flags.split())
@@ -3189,7 +3210,7 @@ def main():
                 if origin == 'tiff' and dest == 'jxl':
                     saved_distance = workflow.get('distance') if workflow.get('distance') is not None else 0.1
                     saved_quality = None
-                elif 'lossy' in workflow['conversion_type']:
+                elif 'lossy' in workflow['conversion_type'] or workflow['conversion_type'] in ('jxl_to_jpeg_force', 'jxl_to_jpeg_auto'):
                     saved_quality = workflow.get('quality') if workflow.get('quality') is not None else 95
                     # Lossy JXL encode also uses distance; preserve it for repeat
                     saved_distance = workflow.get('distance')

@@ -223,8 +223,27 @@ New regression test: `tests/test_multipage.py`
 | 146 | Wizard mode 2 output positional after flags breaks argparse on Python < 3.12.7 | photo | ✅ FIXED (v1.8.0) |
 | 147 | D50 patch stats count per page in multipage splits | encoder | ✅ FIXED (v1.8.1) |
 | 148 | `check_dependencies(force=...)` ignores the `force` parameter | photo | ✅ FIXED (v1.8.1) |
+| 149 | Mode 8 delete flag lost on manual/detail mode-selection paths | photo | ✅ FIXED (v1.8.1) |
+| 150 | `cmd_auto` ignores script-level `DELETE_SOURCE`/`DELETE_CONFIRM` | transcoder | ✅ FIXED (v1.8.1) |
+| 151 | Multipage marker batch: 32k cmdline limit + `[` wildcards + silent fallback | decoder | ✅ FIXED (v1.8.1) |
+| 152 | Mode 6 output collision across `_EXPORT` subfolders | encoder, decoder, transcoder | ✅ FIXED (v1.8.1) |
+| 153 | Decoder partial output + smart sync skips forever | decoder | ✅ FIXED (v1.8.1) |
+| 154 | `shlex.split` posix mangles Windows paths in expert flags | photo | ✅ FIXED (v1.8.1) |
+| 155 | Repeat workflow loses quality for `jxl_to_jpeg_force/auto` | photo | ✅ FIXED (v1.8.1) |
+| 156 | `--decode` ignored for directories | transcoder | ✅ FIXED (v1.8.1) |
+| 157 | `--ram`/`--no-ram` is a no-op in transcoder decode | transcoder | ✅ FIXED (v1.8.1, help/docs) |
+| 158 | `cmd_auto` progress total counts files filtered by modes 6/7 | transcoder | ✅ FIXED (v1.8.1) |
+| 159 | `--container=1` applied on lossless (d=0) in `encode_to_jxl` | transcoder | ✅ FIXED (v1.8.1) |
+| 160 | `cleanup_xmp_icc` leaves leading `\| ` when ICC marker is mid-string | decoder | ✅ FIXED (v1.8.1) |
+| 161 | Wizard texts promise wrong folder names (modes 1/3, auto preview) | photo | ✅ FIXED (v1.8.1) |
+| 162 | Step 7 summary shows Quality for distance-driven lossy | photo | ✅ FIXED (v1.8.1) |
+| 163 | Pure-text wizard fallback asks target ICC outside matrix mode | photo | ✅ FIXED (v1.8.1) |
+| 164 | `decode_auto` dead code in decoder | decoder | ✅ FIXED (v1.8.1) |
+| 165 | Lowercase-only globs miss `.TIF`/`.JXL` on case-sensitive filesystems | encoder, decoder, transcoder | ✅ FIXED (v1.8.1) |
+| 166 | ICC verify commands reference swapped XMP fields (docs) | docs | ✅ FIXED (v1.8.1) |
+| 167 | Mode 7 default + `HHMMSS` format wrong in tools README (docs) | docs | ✅ FIXED (v1.8.1) |
 
-**Total bugs fixed: 143**
+**Total bugs fixed: 161**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2676,6 +2695,253 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 **Files changed:**
 - `jxl_photo.py` `DependencyChecker`
+
+---
+
+### Bug #149 — Mode 8 Delete Flag Lost on Manual/Detail Selection Paths
+
+**Location:** `jxl_photo.py` — `_wizard_select_mode_manual()` / `_show_mode_details_and_select()`
+
+**Problem:** Follow-up of #137. `workflow['delete_source'] = True` was only set in `_wizard_select_mode()` (direct number input). The other two mode-8 selection paths — "choose manually" from Auto Mode and the `?` details view — asked the HHMM confirmation but never set the flag, so `--delete-source` never reached the scripts (nothing was deleted despite the user confirming twice).
+
+**Fix:** Set `workflow['delete_source'] = True` right after `_confirm_archive_mode()` in both paths.
+
+**Files changed:**
+- `jxl_photo.py` `_wizard_select_mode_manual()`, `_show_mode_details_and_select()`
+
+---
+
+### Bug #150 — `cmd_auto` Ignores Script-Level `DELETE_SOURCE`/`DELETE_CONFIRM`
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_auto()`
+
+**Problem:** The deletion confirmation in auto mode was gated on `args.delete_source` (CLI flag) instead of the `DELETE_SOURCE` global, unlike `cmd_transcode`/`cmd_convert`. Setting `DELETE_SOURCE = True` in the script made auto mode delete sources **without any confirmation**; conversely, `DELETE_CONFIRM = False` (automation) still prompted and blocked non-interactive runs.
+
+**Fix:** `cmd_auto` now sets `DELETE_SOURCE` from `args.delete_source` up front (like the other commands) and gates the confirmation on `args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM`.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_auto()`
+
+---
+
+### Bug #151 — Multipage Marker Batch: 32k Command-Line Limit + `[` Wildcards + Silent Fallback
+
+**Location:** `jxl_tiff_decoder.py` — `_read_multipage_markers_batch()`
+
+**Problem:** Up to 400 file paths were passed as arguments to a single exiftool call. With typical photo paths (~90 chars) that exceeds the ~32k Windows `CreateProcess` limit; the exception hit a silent `except: continue`, quietly disabling multipage reconstruction for the whole chunk. Paths containing `[ ]` were also interpreted as wildcards by exiftool.
+
+**Fix:** The batch now passes the file list via an exiftool argfile (`-@`, with `-charset FileName=UTF8` for non-ASCII paths) — removing both the command-line limit and the wildcard problem — and logs a warning when a batch fails instead of silently continuing.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `_read_multipage_markers_batch()`
+
+---
+
+### Bug #152 — Mode 6 Output Collision Across `_EXPORT` Subfolders
+
+**Location:** all 3 scripts — output resolution for mode 6
+
+**Problem:** Mode 6 drops the first subfolder level under `EXPORT_MARKER`, so `_EXPORT/sRGB/img.jpg` and `_EXPORT/AdobeRGB/img.jpg` (typical multi-recipe Capture One exports) both mapped to `_EXPORT/<out>/img.jxl`, silently overwriting each other — with mode 8 + delete, one validated output could justify deleting both distinct sources.
+
+**Fix:** Added `_abort_on_duplicate_outputs()` at planning time in all 3 scripts: duplicate destinations are listed and the run aborts with a clear error before converting anything. Verified end-to-end (exit 2, no outputs created).
+
+**Files changed:**
+- `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #153 — Decoder Partial Output + Smart Sync Skips Forever
+
+**Location:** `jxl_tiff_decoder.py` — `convert_multipage_jxl_group()`
+
+**Problem:** Without staging, the TIFF was written directly to its final destination. If writing failed mid-way (disk full, crash), the partial file stayed with a fresh mtime; the next run with the default smart sync compared mtimes and skipped it as "up to date" — a corrupt TIFF, never reprocessed.
+
+**Fix:** The `except` handler now deletes the partial output (if the file pre-existed, `TiffWriter` had already truncated it, so the partial on disk is never the original).
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `convert_multipage_jxl_group()`
+
+---
+
+### Bug #154 — `shlex.split` Posix Mangles Windows Paths in Expert Flags
+
+**Location:** `jxl_photo.py` — `execute_workflow()`
+
+**Problem:** `shlex.split(expert_flags)` with the default posix mode turned `--staging E:\temp_jxl` into `E:temp_jxl`. The manifest path already used `posix=(os.name != 'nt')`.
+
+**Fix:** Same `posix=(os.name != 'nt')` in `execute_workflow()`.
+
+**Files changed:**
+- `jxl_photo.py` `execute_workflow()`
+
+---
+
+### Bug #155 — Repeat Workflow Loses Quality for `jxl_to_jpeg_force/auto`
+
+**Location:** `jxl_photo.py` — session save on wizard completion
+
+**Problem:** Only conversion types containing "lossy" saved the chosen quality; `jxl_to_jpeg_force`/`jxl_to_jpeg_auto` fell into the `else` branch and saved `default_quality` (95), so a repeat ran with 95 instead of the user's choice.
+
+**Fix:** The quality-preserving branch now also covers `jxl_to_jpeg_force`/`jxl_to_jpeg_auto`.
+
+**Files changed:**
+- `jxl_photo.py` session save
+
+---
+
+### Bug #156 — `--decode` Ignored for Directories
+
+**Location:** `jxl_jpeg_transcoder.py` — `main()` routing
+
+**Problem:** Directories always routed to `cmd_auto`, which never reads `args.decode`. `--decode` on a folder re-encoded JPEGs to JXL and lossy-converted non-jbrd JXLs — the opposite of the documented "force decode direction".
+
+**Fix:** Directory + `--decode` routes to `cmd_transcode(auto_decode=True)`: JXL-only, jbrd-gated lossless recovery; non-jbrd files fail per-file.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `main()`
+
+---
+
+### Bug #157 — `--ram`/`--no-ram` Is a No-Op in Transcoder Decode
+
+**Location:** `jxl_jpeg_transcoder.py` — `decode_to_image()` + CLI help
+
+**Problem:** `decode_to_image()` accepted `use_ram` but never used it; all decodes use temporary files. The CLI help implied a working RAM pipeline.
+
+**Fix:** Help text and the Performance section of the transcoder README now state that `--ram`/`--no-ram` are accepted but currently without effect. (A real in-RAM decode pipeline is a possible future enhancement.)
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` CLI help; `docs/README_jxl_jpeg_transcoder.md`
+
+---
+
+### Bug #158 — `cmd_auto` Progress Total Counts Files Filtered by Modes 6/7
+
+**Location:** `jxl_jpeg_transcoder.py` — `_process_file_group()`
+
+**Problem:** Same class as #145 (fixed for `cmd_transcode`/`cmd_convert`): `_counter["total"]` included files that modes 6/7 later filter out (`out is None`).
+
+**Fix:** The total is decremented by the number of filtered files when pairs are built.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `_process_file_group()`
+
+---
+
+### Bug #159 — `--container=1` Applied on Lossless (d=0) in `encode_to_jxl`
+
+**Location:** `jxl_jpeg_transcoder.py` — `encode_to_jxl()`
+
+**Problem:** `FORCE_CONTAINER_FOR_LOSSY` appended `--container=1` unconditionally. On lossless encodes the container changes how the ICC is stored and breaks color display in IrfanView — the reason the TIFF encoder only passes it for `d>0`.
+
+**Fix:** The flag is now only appended when `distance > 0`.
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `encode_to_jxl()`
+
+---
+
+### Bug #160 — `cleanup_xmp_icc` Leaves Leading `| ` When ICC Marker Is Mid-String
+
+**Location:** `jxl_tiff_decoder.py` — `cleanup_xmp_icc()`
+
+**Problem:** The cleanup only stripped a trailing pipe. With `CreatorTool = "ICC:xxx | Capture One 23"` (marker not last, e.g. written by another tool), the result was `"| Capture One 23"`.
+
+**Fix:** Also strip a leading pipe after the ICC marker removal. Covered by test.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `cleanup_xmp_icc()`
+
+---
+
+### Bug #161 — Wizard Texts Promise Wrong Folder Names
+
+**Location:** `jxl_photo.py` — mode tables, Step 5, auto-mode mappings
+
+**Problem:** The wizard advertised `{dest}_files` for mode 3 and `converted_{dest}` for mode 1, but the scripts create `JXL_16bits`/`TIFF_16bits`/`converted_jxl`/`converted_tiff`/`recovered_jpeg`. The auto-mode mode-2 preview also showed `output_{dest}` while Step 5 defaults to `<parent>/output`.
+
+**Fix:** New `_dest_folder_names(origin, dest)` helper returns the real names per direction and is used by all labels, Step 5, and the auto-mode mapping preview.
+
+**Files changed:**
+- `jxl_photo.py`
+
+---
+
+### Bug #162 — Step 7 Summary Shows Quality for Distance-Driven Lossy
+
+**Location:** `jxl_photo.py` — wizard Step 7 summary
+
+**Problem:** For `convert_lossy` (JPEG→JXL lossy, which is distance-driven) the summary displayed "Quality: 95" and never showed the distance.
+
+**Fix:** The branch now displays the `Distance` row.
+
+**Files changed:**
+- `jxl_photo.py` Step 7 summary
+
+---
+
+### Bug #163 — Pure-Text Wizard Fallback Asks Target ICC Outside Matrix Mode
+
+**Location:** `jxl_photo.py` — wizard Step 6 (non-Rich fallback)
+
+**Problem:** Follow-up of #142: the plain-text fallback still asked for a target ICC unconditionally, although the decoder only honors it in matrix mode.
+
+**Fix:** The question is only asked when `decode_mode == "matrix"`, matching the Rich branch.
+
+**Files changed:**
+- `jxl_photo.py` Step 6 fallback
+
+---
+
+### Bug #164 — `decode_auto` Dead Code in Decoder
+
+**Location:** `jxl_tiff_decoder.py` — `decode_auto()`
+
+**Problem:** Never called — all paths use `decode_auto_png()` or `decode_rec2020_linear()`.
+
+**Fix:** Removed.
+
+**Files changed:**
+- `jxl_tiff_decoder.py`
+
+---
+
+### Bug #165 — Lowercase-Only Globs Miss `.TIF`/`.JXL` on Case-Sensitive Filesystems
+
+**Location:** `jxl_tiff_encoder.py` — `find_files_mode0()` / `find_tiffs_recursive()`; `jxl_tiff_decoder.py` — `find_jxls_*()`; `jxl_jpeg_transcoder.py` — `find_jxls_*()`
+
+**Problem:** Globs only matched lowercase extensions (`.tif`, `.tiff`, `.jxl`, `.jif`), missing uppercase files on Linux/macOS filesystems. (JPEG finders already covered uppercase.)
+
+**Fix:** Added uppercase variants to all glob lists.
+
+**Files changed:**
+- `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
+
+---
+
+### Bug #166 — ICC Verify Commands Reference Swapped XMP Fields (Docs)
+
+**Location:** `README.md` and `docs/README_jxl_tiff_encoder.md`
+
+**Problem:** The verification snippets checked for the ICC in `XMP-dc:Description` and for encoding params in `XMP-xmp:CreatorTool` — exactly inverted relative to what the encoder writes (ICC → `CreatorTool`, params → `dc:Description`).
+
+**Fix:** Commands corrected in both files.
+
+**Files changed:**
+- `README.md`, `docs/README_jxl_tiff_encoder.md`
+
+---
+
+### Bug #167 — Mode 7 Default + `HHMMSS` Format Wrong in Tools README (Docs)
+
+**Location:** `docs/README_jxl_tools.md`
+
+**Problem:** Documented the mode 7 default as `_EXPORT/JXL`, but the real default subfolder is empty (all subfolders processed, like mode 6). Also said the delete confirmation format is `HHMMSS` where it is `HHMM`.
+
+**Fix:** Both entries corrected.
+
+**Files changed:**
+- `docs/README_jxl_tools.md`
 
 ---
 

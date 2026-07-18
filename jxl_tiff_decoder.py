@@ -300,6 +300,26 @@ def next_count():
         _counter["done"] += 1
         return _counter["done"], _counter["total"]
 
+def _abort_on_duplicate_outputs(dests):
+    """Abort the run if two outputs map to the same destination file.
+
+    Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
+    files in different recipe subfolders would silently overwrite each other
+    (and with mode 8 + delete, a single validated output could justify deleting
+    several distinct sources). Better to stop loudly than to lose data.
+    """
+    from collections import Counter
+    counts = Counter(str(d) for d in dests)
+    dupes = sorted(d for d, c in counts.items() if c > 1)
+    if dupes:
+        for d in dupes[:10]:
+            logger.error(f"Duplicate output destination: {d}")
+        if len(dupes) > 10:
+            logger.error(f"... and {len(dupes) - 10} more")
+        logger.error("Aborting: multiple inputs map to the same output file. "
+                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+        sys.exit(2)
+
 def confirm_deletion_jxl():
     """Interactive confirmation before deleting source JXLs"""
     from datetime import datetime as _dt
@@ -495,20 +515,6 @@ def select_decode_strategy(has_original_icc=False):
 # ═══════════════════════════════════════════════════════════════════════════════
 # DECODING
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def decode_auto(jxl_path, output_ppm):
-    """
-    Decode JXL using djxl auto mode (optimized for display).
-    Format inferred from .ppm extension — do NOT pass --output_format flag
-    (not supported in djxl 0.11.x; causes "Unknown flag" error).
-    Raises RuntimeError on failure.
-    """
-    cmd = ["djxl", str(jxl_path), str(output_ppm)]
-    r = subprocess.run(cmd, capture_output=True, timeout=120)
-    if r.returncode != 0:
-        err = (r.stderr or b"").decode(errors='replace')[:200]
-        raise RuntimeError(f"djxl auto failed: {err}")
-    return True
 
 def decode_auto_png(jxl_path, output_png):
     """
@@ -1015,7 +1021,8 @@ def cleanup_xmp_icc(tiff_path):
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
             content = r.stdout.strip()
             clean = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', content).strip()
-            clean = re.sub(r'\s*\|\s*$', '', clean)
+            clean = re.sub(r'\s*\|\s*$', '', clean)   # trailing pipe
+            clean = re.sub(r'^\s*\|\s*', '', clean)   # leading pipe (ICC was mid-string)
             if not clean:
                 clean = "jxl_tiff_decoder"
             subprocess.run(
@@ -1571,6 +1578,15 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             return str(main_jxl), status, str(final_path)
 
         except Exception as e:
+            # Remove any partial output so the next smart-sync run does not
+            # mistake it for a fresh, up-to-date TIFF and skip it forever.
+            # (If the file pre-existed, TiffWriter already truncated it, so the
+            # partial on disk is never the original.)
+            try:
+                if write_path.exists():
+                    write_path.unlink()
+            except OSError:
+                pass
             n, total = next_count()
             logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
             return str(main_jxl), "error", str(e)
@@ -1676,7 +1692,7 @@ def find_jxls_flat(path):
     """Find JXL files in the top-level directory only (no subfolders) — modes 0 and 1."""
     seen = set()
     files = []
-    for ext in ("*.jxl", "*.jif"):
+    for ext in ("*.jxl", "*.jif", "*.JXL", "*.JIF"):
         for f in path.glob(ext):
             key = f.resolve()
             if key not in seen:
@@ -1688,7 +1704,7 @@ def find_jxls_recursive(path):
     """Find all JXL files recursively"""
     seen = set()
     files = []
-    for ext in ("*.jxl", "*.jif"):
+    for ext in ("*.jxl", "*.jif", "*.JXL", "*.JIF"):
         for f in path.rglob(ext):
             key = f.resolve()
             if key not in seen:
@@ -1775,11 +1791,30 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     for i in range(0, len(jxls), BATCH):
         chunk = jxls[i:i + BATCH]
         try:
-            r = subprocess.run(
-                [exe, "-j", "-s", "-s", "-XMP-dc:Relation", *[str(j) for j in chunk]],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
-            )
+            # Pass the file list via an exiftool argfile (-@): avoids the ~32k
+            # Windows command-line limit with large batches, and prevents paths
+            # containing [ ] from being treated as wildcards. UTF-8 charset for
+            # non-ASCII paths.
+            argfile = None
+            try:
+                with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                                 dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
+                    argfile = af.name
+                    af.write("-j\n-s\n-s\n-XMP-dc:Relation\n-charset\nFileName=UTF8\n")
+                    for j in chunk:
+                        af.write(str(j) + "\n")
+                r = subprocess.run(
+                    [exe, "-@", argfile],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
+                )
+            finally:
+                if argfile:
+                    try:
+                        os.unlink(argfile)
+                    except OSError:
+                        pass
             if r.returncode != 0 or not r.stdout:
+                logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} file(s) (rc={r.returncode}); treating them as standalone")
                 continue
             data = _json.loads(r.stdout)
             for entry in data:
@@ -1817,8 +1852,9 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     markers[key] = info
                 else:
                     markers[src] = info
-        except Exception:
+        except Exception as e:
             # On any batch failure, leave those files as standalone (safe default)
+            logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) treated as standalone")
             continue
     return markers
 
@@ -2098,6 +2134,8 @@ Examples:
 
     logger.info(f"TIFF outputs planned: {len(tasks)} (from {len(jxls)} JXLs, {len(mp_groups)} group(s))")
     _counter["total"] = len(tasks)
+
+    _abort_on_duplicate_outputs([task["final_tiff"] for task in tasks])
 
     # Dry run
     if args.dry_run:
