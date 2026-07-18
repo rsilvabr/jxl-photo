@@ -30,5 +30,5 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Old release notes kept locally but not published
-docs/RELEASE_v1.6.0.md
+# Release notes kept locally but not published (posted as GitHub Releases instead)
+docs/RELEASE_v*.md

@@ -154,7 +154,7 @@ CJXL_BUFFERING = None
 # [libjxl >= 0.12 only] Encoder buffering level passed to cjxl on pixel-encode
 # paths (lossy convert). None = use cjxl's own default (2) — the fast path
 # (default). 0 = best compression, but ~6x slower on large images for only
-# ~1.2% smaller files (see docs/RELEASE_v1.8.0.md benchmark).
+# ~1.2% smaller files (see the v1.8.0 release notes benchmark on GitHub).
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
 
 # ── Paths ─────────────────────────────────────────────────────────

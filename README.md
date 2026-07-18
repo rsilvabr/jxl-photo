@@ -30,7 +30,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.
 
 - **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
-- **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](docs/RELEASE_v1.8.0.md#benchmarks--why---buffering-stays-off-by-default)).
+- **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)).
 - **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
 
 ### Audit fixes (second pass)
@@ -44,7 +44,7 @@ The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 featu
 - **Auto mode processes PNG-only folders** (convert encode to JXL)
 - Wizard: decode mode no longer asked twice; target ICC only for matrix mode; repeat workflow preserves lossy `distance`; lossless transcode decode asks only the simple "yes" confirmation
 
-Full release notes: [v1.8.0](docs/RELEASE_v1.8.0.md)
+Full release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
 
 ---
 
@@ -95,7 +95,7 @@ JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 - **Audit fixes (v1.7.1)** — a batch crash on JXLs without `jbrd` became a per-file error, lossy convert preserves EXIF/XMP/IPTC via exiftool, `.jfif`/`.jpe` support, `--multipage-mode skip` uses the detected real page.
 - **v1.7.2** — the wrapper's `--delete-source` confirmation no longer gets stuck on the main wizard path, and lossy convert keeps Exif/XMP before the codestream after the metadata copy (IrfanView-compatible).
 
-Full release notes: [v1.7.1](docs/RELEASE_v1.7.1.md) · [v1.7.2](docs/RELEASE_v1.7.2.md)
+Full release notes: [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2)
 
 ---
 
@@ -438,7 +438,7 @@ Versions used before and after the dependency update on 2026-07-12 (last tested 
 
 Older versions may still work, but the current versions are what we test against.
 
-> **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](docs/RELEASE_v1.8.0.md#benchmarks--why---buffering-stays-off-by-default)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
+> **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
 
 ####  Common Download Mistakes
 
@@ -675,7 +675,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-- Release notes: [v1.8.0](docs/RELEASE_v1.8.0.md) · [v1.7.2](docs/RELEASE_v1.7.2.md) · [v1.7.1](docs/RELEASE_v1.7.1.md) · [v1.7.0](docs/RELEASE_v1.7.0.md)
+- Release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
 - [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code
