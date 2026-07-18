@@ -242,8 +242,12 @@ New regression test: `tests/test_multipage.py`
 | 165 | Lowercase-only globs miss `.TIF`/`.JXL` on case-sensitive filesystems | encoder, decoder, transcoder | ✅ FIXED (v1.8.1) |
 | 166 | ICC verify commands reference swapped XMP fields (docs) | docs | ✅ FIXED (v1.8.1) |
 | 167 | Mode 7 default + `HHMMSS` format wrong in tools README (docs) | docs | ✅ FIXED (v1.8.1) |
+| 168 | Step 7 plain-text summary shows Quality for distance-driven lossy | photo | ✅ FIXED (v1.8.1) |
+| 169 | Mode 1 detail example hardcodes `converted_{dest}` | photo | ✅ FIXED (v1.8.1) |
+| 170 | "KEEP in staging" logged for partial outputs already discarded | decoder | ✅ FIXED (v1.8.1) |
+| 171 | Cross-group collision invisible in auto mode (photo.jpg + photo.png) | transcoder | ✅ FIXED (v1.8.1) |
 
-**Total bugs fixed: 161**
+**Total bugs fixed: 165**
 
 > **Note:** Items related to new features, code quality, and compatibility have been moved to:
 > - [`new_features_since_v1.0.md`](new_features_since_v1.0.md) — for new capabilities and behavior changes
@@ -2942,6 +2946,58 @@ The encoder now aborts with a clear error message instead of producing incorrect
 
 **Files changed:**
 - `docs/README_jxl_tools.md`
+
+---
+
+### Bug #168 — Step 7 Plain-Text Summary Shows Quality for Distance-Driven Lossy
+
+**Location:** `jxl_photo.py` — wizard Step 7 summary (non-Rich fallback)
+
+**Problem:** Follow-up of #162 — the Distance fix was applied only to the Rich branch; the plain-text fallback still printed `Quality: {quality}` for `convert_lossy` (distance-driven).
+
+**Fix:** The fallback now prints the `Distance` line, matching the Rich branch.
+
+**Files changed:**
+- `jxl_photo.py` Step 7 summary (plain-text fallback)
+
+---
+
+### Bug #169 — Mode 1 Detail Example Hardcodes `converted_{dest}`
+
+**Location:** `jxl_photo.py` — `_show_mode_details_and_select()` mode 1 entry
+
+**Problem:** Follow-up of #161 — the title line was fixed to `_dest_folder_names()`, but the "Example:" line below still hardcoded `converted_{dest}` (wrong for JPEG decode, which creates `recovered_jpeg`).
+
+**Fix:** The example now uses `_dest_folder_names(origin, dest)[0]`.
+
+**Files changed:**
+- `jxl_photo.py` `_show_mode_details_and_select()`
+
+---
+
+### Bug #170 — "KEEP in staging" Logged for Partial Outputs Already Discarded
+
+**Location:** `jxl_tiff_decoder.py` — `process_group()` staging promotion
+
+**Problem:** After the #153 fix (partial outputs deleted on error), the staging loop still logged `KEEP in staging (error)` for files that no longer existed — a misleading message.
+
+**Fix:** When the staging file is gone, the log now says `Partial output discarded (status)`; `KEEP in staging` is only logged when the file actually remains.
+
+**Files changed:**
+- `jxl_tiff_decoder.py` `process_group()`
+
+---
+
+### Bug #171 — Cross-Group Collision Invisible in Auto Mode
+
+**Location:** `jxl_jpeg_transcoder.py` — `cmd_auto()` / `_process_file_group()`
+
+**Problem:** The #152 duplicate check ran per processing group, but auto mode processes JPEGs, PNGs, and JXLs in separate `_process_file_group()` calls — so `photo.jpg` and `photo.png` in the same folder (both mapping to `photo.jxl`) collided undetected (sequential processing avoided corruption, but the protection was bypassed).
+
+**Fix:** `_process_file_group()` gained a `collect_only` pre-pass mode; `cmd_auto()` collects all output pairs across the four groups and runs the duplicate check on the union before processing anything. Verified end-to-end (abort, exit 2).
+
+**Files changed:**
+- `jxl_jpeg_transcoder.py` `cmd_auto()`, `_process_file_group()`
 
 ---
 

@@ -1658,6 +1658,16 @@ def cmd_auto(args):
         logger.warning("JPEG output does not support 16-bit; switching to PNG")
         args.format = "png"
 
+    # Cross-group duplicate detection: the groups below are processed in separate
+    # calls, so per-group checks cannot see collisions across them (e.g.
+    # photo.jpg + photo.png both -> converted_jxl/photo.jxl).
+    all_pairs = []
+    _process_file_group(jpeg_files, args, use_transcode=True, collect_only=all_pairs)
+    _process_file_group(png_files, args, use_transcode=False, direction="to_jxl", collect_only=all_pairs)
+    _process_file_group(jxl_transcode_files, args, use_transcode=True, collect_only=all_pairs)
+    _process_file_group(jxl_convert_files, args, use_transcode=False, collect_only=all_pairs)
+    _abort_on_duplicate_outputs(all_pairs)
+
     # Process JPEG files (lossless encode to JXL)
     if jpeg_files:
         logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
@@ -1682,11 +1692,13 @@ def cmd_auto(args):
     logger.info(f"AUTO MODE complete | Total: {total_files} files")
     logger.info(f"Log: {log_file}")
 
-def _process_file_group(files, args, use_transcode=True, direction="from_jxl"):
+def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
     """Process a group of files with the same method.
     use_transcode=True: lossless JPEG<->JXL (direction per extension).
     use_transcode=False: convert; direction='from_jxl' (decode to image) or
-    'to_jxl' (encode image to JXL, e.g. PNG inputs in auto mode)."""
+    'to_jxl' (encode image to JXL, e.g. PNG inputs in auto mode).
+    collect_only: when a list is given, only build output pairs into it and
+    return (pre-pass for cross-group duplicate detection)."""
     # Use explicit output directory if provided, otherwise fall back to input root
     output_root = args.output if args.output is not None else args.input
 
@@ -1707,7 +1719,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl"):
             # decode_to_image switches extension at runtime and the staged file is
             # orphaned (never promoted to the destination).
             if fmt_eff in ("jpeg", "jpg") and bit_depth_eff == 16:
-                logger.warning("JPEG output does not support 16-bit; switching to PNG")
+                if collect_only is None:
+                    logger.warning("JPEG output does not support 16-bit; switching to PNG")
                 out_ext = "png"
             else:
                 out_ext = "jpg" if fmt_eff in ("jpeg", "jpg") else "png"
@@ -1724,6 +1737,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl"):
             )
         if out:
             pairs.append((f, out))
+
+    if collect_only is not None:
+        # Pre-pass: only collect pairs for cross-group duplicate detection
+        collect_only.extend(pairs)
+        return
 
     # Discount files filtered out by modes 6/7 from the progress total
     _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))

@@ -1720,7 +1720,7 @@ class InteractiveMenu:
 
             ("1", "Subfolder",
              f"Creates a [green]'{_dest_folder_names(origin, dest)[0]}'[/green] subfolder next to each source folder.\n"
-             f"Example: [cyan]F:/Photos/2024/[/cyan] -> [cyan]F:/Photos/2024/converted_{dest}/[/cyan]\n"
+             f"Example: [cyan]F:/Photos/2024/[/cyan] -> [cyan]F:/Photos/2024/{_dest_folder_names(origin, dest)[0]}/[/cyan]\n"
              f"Works on folder input only. Non-recursive."),
 
             ("2", "Flat -> output folder",
@@ -2554,7 +2554,8 @@ class InteractiveMenu:
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
             elif 'lossy' in workflow['conversion_type']:
-                print(f"Quality: {workflow['quality']}")
+                # convert_lossy is JPEG->JXL lossy, which is distance-driven
+                print(f"Distance: {workflow.get('distance', 1.0)}")
             elif origin == 'jxl' and dest == 'jpeg':
                 # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
                 if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:

@@ -1647,7 +1647,11 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             status = status_map.get(str(main_jxl), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
-                    logger.warning(f"  KEEP in staging ({status}) | {write_path.name}")
+                    if write_path.exists():
+                        logger.warning(f"  KEEP in staging ({status}) | {write_path.name}")
+                    else:
+                        # Partial output was already discarded by the error handler
+                        logger.warning(f"  Partial output discarded ({status}) | {main_jxl.name}")
                 continue
             if not write_path.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_path.name}")
