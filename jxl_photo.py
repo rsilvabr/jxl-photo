@@ -22,6 +22,17 @@ from typing import Any, Dict, List, Optional, Tuple
 # Initialize wrapper logger early so manifest/path validation code can log safely.
 logger = logging.getLogger("jxl_photo")
 
+# The wrapper prints unicode icons (✓/✗/⚠); on legacy Windows consoles or
+# redirected stdout (cp1252) they would crash with UnicodeEncodeError.
+# Reconfigure stdout to tolerate them (the backend scripts do the same).
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 try:
     from rich.console import Console
     from rich.panel import Panel
@@ -817,15 +828,15 @@ class FolderAnalyzer:
             return 0
 
         # Check if dest is a subfolder of source with export-like name.
-        # The marker must be a path PART that starts/ends with the marker
-        # (same rule as the scripts) — a substring match on the full path
-        # would promote anything living under e.g. F:\_EXPORT\ to mode 6.
+        # The marker must be a path PART of the RELATIVE path (not the full
+        # absolute path — living under F:\_EXPORT must not promote a manifest
+        # entry to mode 6 by itself).
         try:
             rel = dst_path.relative_to(src_path)
             marker_lower = self.export_marker.lower()
             marker_in_dest = any(
                 p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)
-                for p in dst_path.parts
+                for p in rel.parts
             )
             if marker_in_dest:
                 # Distinguish mode 7 (subfolder) from mode 6 (same export folder).
@@ -1168,7 +1179,7 @@ class InteractiveMenu:
                     dist_default = workflow.get('distance', 0.1)
                     dist_str = input(f"Distance (0.0-15.0) [{dist_default}]: ").strip()
                     try:
-                        workflow['distance'] = float(dist_str) if dist_str else dist_default
+                        workflow['distance'] = max(0.0, min(float(dist_str), 15.0)) if dist_str else dist_default
                     except ValueError:
                         workflow['distance'] = dist_default
                 effort_input = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
@@ -1645,7 +1656,8 @@ class InteractiveMenu:
         workflow['mode'] = 99  # Special mode for manifest execution
         workflow['manifest_entries'] = entries
         workflow['manifest_path'] = manifest_path
-        workflow['auto_mode_used'] = True
+        # auto_mode_used stays False: a manifest run must not report
+        # "Auto Mode: Yes" in the Step-7 summary.
 
         return True
 
@@ -1699,10 +1711,11 @@ class InteractiveMenu:
             console.print("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
             console.print()
 
-            valid_choices = [m[0] for m in modes] + ["?", "A", "M"]
+            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "a", "m"]
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice:
+                    choice = choice.upper()
                     break
         else:
             print(f"\n--- Step 4: Organization Mode ---")
@@ -2112,7 +2125,7 @@ class InteractiveMenu:
             elif staging_input.lower() == 'system default':
                 workflow['staging'] = None
             else:
-                workflow['staging'] = staging_input
+                workflow['staging'] = _strip_surrounding_quotes(staging_input)
 
             # Quality and ICC settings for JPEG output (only for lossy conversion)
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
@@ -2212,7 +2225,7 @@ class InteractiveMenu:
             if staging_input.lower() == 'system default':
                 workflow['staging'] = None
             elif staging_input:
-                workflow['staging'] = staging_input
+                workflow['staging'] = _strip_surrounding_quotes(staging_input)
 
             # Quality and ICC settings for JPEG output (only for lossy conversion)
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
@@ -2457,9 +2470,15 @@ class InteractiveMenu:
                 # Target ICC only applies to matrix mode (decoder ignores it otherwise)
                 if use_matrix:
                     _ticc_prev = _prev.get('target_icc') or ""
-                    target_icc = input(f"Target ICC (sRGB/custom/empty) [{_ticc_prev}]: ").strip() or _ticc_prev
-                    if target_icc.lower() == "custom":
+                    target_icc = input(f"Target ICC (sRGB/custom/empty to clear) [{_ticc_prev}]: ").strip()
+                    if not target_icc:
+                        target_icc = _ticc_prev  # empty input keeps previous
+                    elif target_icc.lower() == "empty":
+                        target_icc = ""  # explicit clear
+                    elif target_icc.lower() == "custom":
                         target_icc = input("Enter ICC profile path: ").strip()
+                    else:
+                        target_icc = _strip_surrounding_quotes(target_icc)
                 else:
                     target_icc = ""
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
@@ -2647,6 +2666,15 @@ class InteractiveMenu:
             table.add_row("If exists:", ow_label)
             table.add_row("Workers:", str(workflow['workers']))
 
+            # Mode-specific config so the user doesn't confirm blind
+            _mc = workflow.get('mode_config', {})
+            if workflow['mode'] in (6, 7):
+                table.add_row("Export marker:", _mc.get('export_marker') or self.config.config.export_marker)
+                if workflow['mode'] == 7:
+                    table.add_row("Export subfolder:", _mc.get('export_subfolder') or "(all)")
+            elif workflow['mode'] == 2 and _mc.get('output_dir'):
+                table.add_row("Output dir:", _mc['output_dir'])
+
             if origin == 'tiff' and dest == 'jxl':
                 table.add_row("Distance:", str(workflow['distance']))
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
@@ -2662,7 +2690,9 @@ class InteractiveMenu:
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get('add_preview', True) else "No"
                 table.add_row("JPEG Preview:", preview_status)
-            table.add_row("Effort:", str(workflow['effort']))
+            # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
+            if not (origin == 'jxl' and dest == 'tiff'):
+                table.add_row("Effort:", str(workflow['effort']))
 
             if extra_info:
                 table.add_row("Config:", ", ".join(extra_info))
@@ -2687,6 +2717,13 @@ class InteractiveMenu:
             print(f"Destination: {dest.upper() if dest else '?'}")
             print(f"Mode: {workflow['mode']} - {mode_names.get(workflow['mode'])}")
             print(f"Directory: {workflow['input_dir']}")
+            _mc = workflow.get('mode_config', {})
+            if workflow['mode'] in (6, 7):
+                print(f"Export marker: {_mc.get('export_marker') or self.config.config.export_marker}")
+                if workflow['mode'] == 7:
+                    print(f"Export subfolder: {_mc.get('export_subfolder') or '(all)'}")
+            elif workflow['mode'] == 2 and _mc.get('output_dir'):
+                print(f"Output dir: {_mc['output_dir']}")
             print(f"If exists: {ow_label}")
             print(f"Workers: {workflow['workers']}")
 
@@ -2744,6 +2781,14 @@ class InteractiveMenu:
             self._print_error(f"Script not found: {script_path}")
             return False
         script = str(script_path)
+
+        # Manifest entries with mode 8 + delete_source get --delete-confirm-off
+        # from the cmd builder — so the wrapper MUST gate them with the same
+        # HHMM confirmation the wizard/repeat paths enforce. Ask once, before
+        # anything runs.
+        if not dry_run and advanced.get('delete_source') and any(m == 8 for _, _, m in manifest_entries):
+            if not self._confirm_archive_mode():
+                return False
 
         total_entries = len(manifest_entries)
         ok_count = 0
@@ -2986,16 +3031,20 @@ class InteractiveMenu:
         if not line:
             return
         if RICH_AVAILABLE and console:
+            # Escape external content: file/folder names may contain [ ],
+            # which rich would parse as markup (crash or silent corruption).
+            from rich.markup import escape as _escape
+            eline = _escape(line)
             if "[OK]" in line or "✓" in line or "Processing" in line:
-                console.print(f"  [green]{line}[/green]")
+                console.print(f"  [green]{eline}[/green]")
             elif "[ERROR]" in line or "Error" in line or "✗" in line:
-                console.print(f"  [red]{line}[/red]")
+                console.print(f"  [red]{eline}[/red]")
             elif "[WARNING]" in line or "⚠" in line:
-                console.print(f"  [yellow]{line}[/yellow]")
+                console.print(f"  [yellow]{eline}[/yellow]")
             elif "DRY" in line or "simulation" in line.lower():
-                console.print(f"  [blue]{line}[/blue]")
+                console.print(f"  [blue]{eline}[/blue]")
             else:
-                console.print(f"  {line}")
+                console.print(f"  {eline}")
         else:
             print(f"  {line}")
 
@@ -3045,21 +3094,29 @@ class InteractiveMenu:
         reader.start()
 
         deadline = time.time() + timeout
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                process.kill()
-                self._print_error("Timeout: process killed (possible hidden prompt or hang)")
-                return -1
-            try:
-                line = q.get(timeout=min(1.0, max(remaining, 0.1)))
-            except queue.Empty:
-                if not reader.is_alive():
+        try:
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    process.kill()
+                    self._print_error("Timeout: process killed (possible hidden prompt or hang)")
+                    return -1
+                try:
+                    line = q.get(timeout=min(1.0, max(remaining, 0.1)))
+                except queue.Empty:
+                    if not reader.is_alive():
+                        break
+                    continue
+                if line is None:
                     break
-                continue
-            if line is None:
-                break
-            self._print_child_line(line)
+                self._print_child_line(line)
+        except KeyboardInterrupt:
+            # Ctrl+C must also take the child down, not leave it running.
+            try:
+                process.kill()
+            except Exception:
+                pass
+            raise
 
         try:
             process.wait(timeout=30)
@@ -3494,8 +3551,10 @@ def main():
                     ["Effort", str(last_effort)],
                 ]
                 # Show relevant field based on origin format
-                # TIFF→JXL: uses distance | JPEG→JXL: uses quality | JXL→?: may use quality if JPEG dest
+                # TIFF→JXL & JPEG→JXL-lossy: distance-driven | JXL→JPEG: quality
                 if last_origin == 'tiff' and last_distance is not None:
+                    settings.append(["Distance", f"{last_distance}"])
+                elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
                     settings.append(["Distance", f"{last_distance}"])
                 elif last_origin == 'jpeg':
                     settings.append(["Quality", str(last_quality)])
@@ -3634,7 +3693,7 @@ def main():
                 'target_icc': None,
                 'no_icc_cleanup': False,
             }
-            workflow['advanced_options'] = config.config.last_advanced_options or fallback_advanced
+            workflow['advanced_options'] = dict(config.config.last_advanced_options or fallback_advanced)
             # Ensure overwrite/sync reflect the choice just made in this dialog,
             # not a stale value from a previous session's last_advanced_options.
             workflow['advanced_options']['overwrite'] = overwrite
