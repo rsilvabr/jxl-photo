@@ -59,6 +59,22 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _marker_matches(part_lower: str, marker_lower: str) -> bool:
+    """Folder-name part matches the export marker.
+
+    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
+    and, for underscore-wrapped markers, also the bare word — so the default
+    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
+    documentation promises.
+    """
+    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+        return True
+    bare = marker_lower.strip('_')
+    return bool(bare) and bare != marker_lower and (
+        part_lower.startswith(bare) or part_lower.endswith(bare)
+    )
+
+
 def _argfile_safe(value) -> str:
     """Sanitize a value for inclusion in an exiftool argfile (-@).
 
@@ -1378,7 +1394,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -1397,7 +1413,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         parts = list(jxl_path.parts)
         marker_lower = EXPORT_MARKER.lower()
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -1863,7 +1879,7 @@ def find_jxls_mode6(input_path):
         parts_str = list(j.parts[:-1])
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts_str)
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
             filtered.append(j)
     return filtered
@@ -1878,7 +1894,7 @@ def find_jxls_mode7(input_path):
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(j.parts[:-1])
         export_idx = next((i for i, p in enumerate(parts_str)
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             continue
         if EXPORT_JXL_SUBFOLDER:
@@ -1891,6 +1907,12 @@ def find_jxls_mode7(input_path):
 def _is_thumbnail_jxl(jxl_path: Path) -> bool:
     """Return True if the JXL filename ends with the configured thumbnail suffix."""
     return jxl_path.stem.endswith(THUMBNAIL_SUFFIX)
+
+
+def _has_internal_markers(info: dict) -> bool:
+    """True when the marker map entry carries any jxlphoto-* marker."""
+    return bool(info.get('group') or info.get('inherited') or info.get('subfiletype')
+                or info.get('grayscale') or info.get('depth'))
 
 def _parse_jxl_page_suffix(name: str):
     """Parse a JXL filename and return (stem, page_idx, is_thumbnail).
@@ -2033,7 +2055,10 @@ def collect_multipage_groups(jxls: list) -> dict:
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
             info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
-            groups[j] = [(j, 0, _is_thumbnail_jxl(j), info['inherited'], info['subfiletype'], info['grayscale'], info['depth'])]
+            # Thumbnail role only counts when the file carries an internal
+            # marker — a third-party *_thumbnail.jxl is a REAL photo to us.
+            is_thumb = _is_thumbnail_jxl(j) and _has_internal_markers(info)
+            groups[j] = [(j, 0, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth'])]
         return groups
 
     by_group: dict = {}
@@ -2051,7 +2076,12 @@ def collect_multipage_groups(jxls: list) -> dict:
             # split are always written to the same folder by the encoder.
             by_group.setdefault((str(j.parent), info['group']), []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
         else:
-            standalone.append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+            # Standalone (no group marker): never treat as thumbnail based on
+            # the filename alone — grouping is marker-based, and so is the
+            # thumbnail role. A third-party *_thumbnail.jxl must decode as a
+            # normal full image (not be skipped by --thumbnail-handling ignore
+            # or tagged subfiletype=1).
+            standalone.append((j, page_idx, False, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
 
 
     # Marked groups: reconstruct multi-page TIFFs

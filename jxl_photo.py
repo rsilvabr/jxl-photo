@@ -97,6 +97,22 @@ def _strip_surrounding_quotes(value: str) -> str:
     return value
 
 
+def _marker_matches(part_lower: str, marker_lower: str) -> bool:
+    """Folder-name part matches the export marker.
+
+    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
+    and, for underscore-wrapped markers, also the bare word — so the default
+    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
+    documentation promises. Same rule as the three backend scripts.
+    """
+    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+        return True
+    bare = marker_lower.strip('_')
+    return bool(bare) and bare != marker_lower and (
+        part_lower.startswith(bare) or part_lower.endswith(bare)
+    )
+
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 @dataclass
@@ -139,6 +155,7 @@ class ToolConfig:
     last_bit_depth: Optional[int] = None
     last_add_preview: Optional[bool] = None
     last_mode_config: Optional[Dict] = None
+    last_icc_profile: Optional[str] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -190,6 +207,7 @@ class ConfigManager:
                           origin_format: Optional[str] = None,
                           dest_format: Optional[str] = None,
                           conversion_type: Optional[str] = None,
+                          icc_profile: Optional[str] = None,
                           d50_patch: Optional[str] = None,
                           encode_tag: Optional[str] = None,
                           jpeg_thumbnail: Optional[bool] = None,
@@ -228,6 +246,8 @@ class ConfigManager:
             self.config.last_dest_format = dest_format
         if conversion_type is not None:
             self.config.last_conversion_type = conversion_type
+        if icc_profile is not None:
+            self.config.last_icc_profile = icc_profile
         if d50_patch is not None:
             self.config.last_d50_patch = d50_patch
         if encode_tag is not None:
@@ -447,17 +467,35 @@ class FolderAnalyzer:
         if not self.root.exists() or not self.root.is_dir():
             return result
 
-        # Collect all items
-        all_items = list(self.root.rglob('*'))
-        all_folders = [p for p in all_items if p.is_dir() and not self._is_hidden(p)]
-        all_files = [p for p in all_items if p.is_file() and not self._is_hidden(p)]
-
-        # Filter by extension
+        # Collect items by iterating (not materializing the whole tree with
+        # list(rglob) — large libraries would blow up RAM and scan time).
         origin_exts = self._get_extensions(self.origin)
         dest_exts = self._get_extensions(self.dest)
+        marker_lower = self.export_marker.lower()
 
-        origin_files = [f for f in all_files if f.suffix.lower() in origin_exts]
-        dest_files = [f for f in all_files if f.suffix.lower() in dest_exts]
+        all_folders = []
+        origin_files = []
+        dest_files = []
+        file_distribution = {}
+
+        for p in self.root.rglob('*'):
+            try:
+                if p.is_dir():
+                    if self._is_hidden(p):
+                        continue
+                    all_folders.append(p)
+                elif p.is_file():
+                    if self._is_hidden(p):
+                        continue
+                    ext = p.suffix.lower()
+                    if ext in origin_exts:
+                        origin_files.append(p)
+                        parent = str(p.parent.relative_to(self.root))
+                        file_distribution[parent] = file_distribution.get(parent, 0) + 1
+                    elif ext in dest_exts:
+                        dest_files.append(p)
+            except OSError:
+                continue  # unreadable entry (permissions, race with other tools)
 
         result['total_files'] = len(origin_files)
         result['folder_count'] = len(all_folders)
@@ -465,8 +503,7 @@ class FolderAnalyzer:
         # Check for export markers (case-insensitive, prefix or suffix only)
         marker_lower = self.export_marker.lower()
         for folder in all_folders:
-            name_lower = folder.name.lower()
-            if name_lower.startswith(marker_lower) or name_lower.endswith(marker_lower):
+            if _marker_matches(folder.name.lower(), marker_lower):
                 result['has_export_marker'] = True
                 result['export_marker_paths'].append(str(folder))
 
@@ -475,6 +512,9 @@ class FolderAnalyzer:
 
         if len(immediate_subfolders) > 0:
             result['has_subfolders'] = True
+            # Keep the REAL count for mode logic/messages; the list itself is
+            # only a display sample and is truncated to 5.
+            result['subfolder_count'] = len(immediate_subfolders)
             result['subfolders'] = [str(d) for d in immediate_subfolders[:5]]
 
             # Check if it's a flat structure (origin files in root)
@@ -486,12 +526,8 @@ class FolderAnalyzer:
             if len(subfolder_with_files) > 1:
                 result['has_recursive_structure'] = True
 
-        # Count files per folder
-        folder_counts = {}
-        for f in origin_files:
-            parent = str(f.parent.relative_to(self.root))
-            folder_counts[parent] = folder_counts.get(parent, 0) + 1
-        result['file_distribution'] = folder_counts
+        # Count files per folder (accumulated during the scan above)
+        result['file_distribution'] = file_distribution
 
         # Determine recommendation
         self._recommend(result, origin_files, dest_files)
@@ -567,14 +603,14 @@ class FolderAnalyzer:
 
         # Mode 2: flat output folder (only when there really are multiple
         # subfolders — a single subfolder is better served by mode 1)
-        elif result['has_subfolders'] and len(result['subfolders']) > 1 and result['total_files'] > 5:
+        elif result['has_subfolders'] and result.get('subfolder_count', len(result['subfolders'])) > 1 and result['total_files'] > 5:
             result['recommended_mode'] = 2
             confidence = 'medium'
-            reasoning.append(f"Multiple subfolders found ({len(result['subfolders'])}) with many files")
+            reasoning.append(f"Multiple subfolders found ({result.get('subfolder_count', len(result['subfolders']))}) with many files")
             reasoning.append("Mode 2 recommended — merges all to single output folder")
 
         # Mode 1: single subfolder
-        elif result['has_subfolders'] and len(result['subfolders']) == 1:
+        elif result['has_subfolders'] and result.get('subfolder_count', len(result['subfolders'])) == 1:
             result['recommended_mode'] = 1
             confidence = 'medium'
             reasoning.append("Single subfolder structure detected")
@@ -744,8 +780,9 @@ class FolderAnalyzer:
                 if count > 0 and folder != '.':
                     src = str(self.root / folder)
                     if mode == 4:
-                        # Replace origin in folder name with dest
-                        new_name = re.sub(re.escape(self.origin), self.dest, folder, flags=re.IGNORECASE)
+                        # Replace origin in folder name with dest — same rule as
+                        # the scripts: first occurrence only, uppercase suffix.
+                        new_name = re.sub(re.escape(self.origin), self.dest.upper(), folder, count=1, flags=re.IGNORECASE)
                         dest = str(self.root / new_name)
                     else:
                         dest = str(Path(src).parent / sibling_name)
@@ -835,7 +872,7 @@ class FolderAnalyzer:
             rel = dst_path.relative_to(src_path)
             marker_lower = self.export_marker.lower()
             marker_in_dest = any(
-                p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)
+                _marker_matches(p.lower(), marker_lower)
                 for p in rel.parts
             )
             if marker_in_dest:
@@ -3477,6 +3514,7 @@ def main():
                         workflow['origin_format'],
                         workflow['dest_format'],
                         workflow['conversion_type'],
+                        workflow.get('icc_profile'),
                         workflow.get('advanced_options', {}).get('d50_patch'),
                         workflow.get('advanced_options', {}).get('encode_tag'),
                         # The advanced-options dict stores it as 'embed_thumbnail'
@@ -3670,7 +3708,7 @@ def main():
             workflow['dest_format'] = last_dest
             workflow['selected_files'] = []
             workflow['use_ram'] = config.config.last_use_ram if config.config.last_use_ram is not None else True
-            workflow['icc_profile'] = None
+            workflow['icc_profile'] = config.config.last_icc_profile
             workflow['compression'] = config.config.last_compression or 'zip'
             workflow['bit_depth'] = config.config.last_bit_depth or 16
             workflow['dry_run'] = False

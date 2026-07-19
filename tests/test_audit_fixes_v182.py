@@ -714,3 +714,91 @@ def test_spp_out_of_range_rejected(monkeypatch, tmp_path):
     (_key, status, msg, _) = enc.convert_one(tif, final, final)
     assert status == "error"
     assert "channel count" in msg.lower() or "samples" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
+# fifth-pass fixes (external review of 1a741b8)
+# ---------------------------------------------------------------------------
+
+def test_transcoder_metadata_strips_bare_icc_blob(monkeypatch, tmp_path):
+    """The COMMON case: CreatorTool is ONLY 'ICC:<base64>' (encoder writes it
+    bare when the source TIFF had no CreatorTool). The rewrite must still
+    happen — before the fix, `if clean:` skipped it and the blob survived."""
+    src = tmp_path / "a.jxl"
+    dst = tmp_path / "a.jpg"
+    src.write_bytes(b"\x00")
+    dst.write_bytes(b"\xff\xd8")
+    writes = []
+
+    def fake_argfile(args_lines, timeout=60):
+        if any(str(a) == "-XMP-xmp:CreatorTool" for a in args_lines) and not any("CreatorTool=" in str(a) for a in args_lines):
+            return _FakeRun(stdout="ICC:QUJDRA==\n")
+        if any("CreatorTool=" in str(a) for a in args_lines):
+            writes.append(args_lines)
+        return _FakeRun()
+
+    monkeypatch.setattr(tr, "_run_exiftool_argfile", fake_argfile)
+    tr._copy_metadata(src, dst)
+    assert writes, "bare ICC blob was not rewritten (if-clean bug)"
+    written = [c for c in writes[0] if "CreatorTool=" in str(c)][0]
+    assert "ICC:" not in written
+
+
+def test_standalone_thumbnail_suffix_not_treated_as_thumbnail(monkeypatch, tmp_path):
+    """A third-party portrait_thumbnail.jxl (no jxlphoto markers) is a REAL
+    photo: it must not be skipped by --thumbnail-handling ignore nor tagged
+    subfiletype=1."""
+    files = [tmp_path / "portrait_thumbnail.jxl", tmp_path / "normal.jxl"]
+    monkeypatch.setattr(dec, "_read_multipage_markers_batch",
+                        _fake_markers({f: None for f in files}))
+    groups = dec.collect_multipage_groups(files)
+    for main, entries in groups.items():
+        assert all(not e[2] for e in entries), f"{main.name} treated as thumbnail"
+
+
+def test_grouped_thumbnail_still_detected(monkeypatch, tmp_path):
+    """Files carrying the group marker keep name-based thumbnail detection."""
+    files = [tmp_path / "scan.jxl", tmp_path / "scan_page1_thumbnail.jxl"]
+    monkeypatch.setattr(dec, "_read_multipage_markers_batch",
+                        _fake_markers({f: "gid123" for f in files}))
+    groups = dec.collect_multipage_groups(files)
+    thumbs = [e for entries in groups.values() for e in entries if e[2]]
+    assert len(thumbs) == 1
+
+
+def test_marker_matches_export_variants():
+    for mod in (enc, dec, tr):
+        m = mod._marker_matches
+        assert m("_export", "_export")
+        assert m("_export_2024", "_export")
+        assert m("my_export", "_export")
+        assert m("export_lightroom", "_export")   # the documented case
+        assert m("lightroom_export", "_export")
+        assert m("export", "_export")              # bare word prefix: by design
+        assert not m("photos", "_export")
+
+
+def test_wrapper_marker_matches_export_lightroom():
+    assert wp._marker_matches("export_lightroom", "_export")
+    assert wp._marker_matches("lightroom_export", "_export")
+    assert not wp._marker_matches("photos", "_export")
+
+
+def test_folder_analyzer_detects_export_lightroom(tmp_path):
+    (tmp_path / "Export_Lightroom").mkdir()
+    (tmp_path / "Export_Lightroom" / "a.tif").write_bytes(b"x")
+    analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
+    analysis = analyzer.analyze()
+    assert analysis['has_export_marker'] is True
+
+
+def test_no_materialized_rglob_list(tmp_path):
+    """analyze() must not crash and must count files with the iterative scan."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a.tif").write_bytes(b"x")
+    (tmp_path / "b.tif").write_bytes(b"x")
+    analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
+    analysis = analyzer.analyze()
+    assert analysis['total_files'] == 2
+    assert analysis['file_distribution']['sub'] == 1

@@ -130,6 +130,22 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _marker_matches(part_lower: str, marker_lower: str) -> bool:
+    """Folder-name part matches the export marker.
+
+    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
+    and, for underscore-wrapped markers, also the bare word — so the default
+    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
+    documentation promises.
+    """
+    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+        return True
+    bare = marker_lower.strip('_')
+    return bool(bare) and bare != marker_lower and (
+        part_lower.startswith(bare) or part_lower.endswith(bare)
+    )
+
+
 # --------------------------------------------─
 # USER SETTINGS - GENERAL
 # --------------------------------------------─
@@ -314,11 +330,16 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                 clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
                 clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
                 clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
-                if clean:
-                    _run_exiftool_argfile(
-                        ["-overwrite_original",
-                         f"-XMP-xmp:CreatorTool={clean}", str(dst_path)], timeout=60
-                    )
+                # When the blob was the WHOLE CreatorTool (the common case:
+                # encoder writes bare "ICC:<b64>" when the source had no
+                # CreatorTool of its own), rewriting is still required —
+                # otherwise the blob survives intact.
+                if not clean:
+                    clean = "jxl_jpeg_transcoder"
+                _run_exiftool_argfile(
+                    ["-overwrite_original",
+                     f"-XMP-xmp:CreatorTool={clean}", str(dst_path)], timeout=60
+                )
         except Exception:
             pass
     except Exception:
@@ -822,19 +843,17 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             # Files outside the export marker must be ignored in modes 6/7.
             return None
         export_dir = Path(*parts[:export_idx + 1])
         if mode == 6:
-            if _is_relative_to(src_path, export_dir):
-                rel_parts = src_path.relative_to(export_dir).parts
-                if not rel_parts:
-                    return None  # The marker matched the filename itself
-                rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
-            else:
-                rel = src_path.relative_to(Path(*parts[:export_idx]))
+            # Mode 6: any file inside export marker folder
+            rel_parts = src_path.relative_to(export_dir).parts
+            if not rel_parts:
+                return None  # The marker matched the filename itself
+            rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         else:
             if EXPORT_JPEG_SUBFOLDER:
                 anchor = export_dir / EXPORT_JPEG_SUBFOLDER
@@ -1139,7 +1158,6 @@ def cmd_transcode(args, auto_decode: bool = False):
     decode = args.decode or auto_decode
 
     log_file = setup_logger()
-    direction_str = "DECODE (JXL -> JPEG)" if decode else "ENCODE (JPEG -> JXL)"
 
     op_type = "TRANSCODE lossless" if not decode else "TRANSCODE decode (lossless recovery)"
     # Determine mode string
@@ -1301,7 +1319,7 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
         export_dir = Path(*parts[:export_idx + 1])
@@ -1435,10 +1453,15 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     logger.debug(f"Using ICC profile: {output_icc}")
                 # djxl does not support --output_format; write a temporary PNG (format by
                 # extension) and then convert with ImageMagick. Same as the --no-ram path.
+                # capture_output keeps worker logs clean and preserves stderr for errors.
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
-                    subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
-                    subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
+                    try:
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=600)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=600)
+                    except subprocess.CalledProcessError as cpe:
+                        err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
+                        raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
                 # Direct djxl to PNG
                 r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
@@ -1462,8 +1485,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 # extension) and let ImageMagick convert to the final JPEG.
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
-                    subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, timeout=600)
-                    subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, timeout=600)
+                    try:
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=600)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=600)
+                    except subprocess.CalledProcessError as cpe:
+                        err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
+                        raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
                 # Direct djxl to JPG (preserves embedded ICC)
                 quality_flag = f"--jpeg_quality={quality}"
@@ -1671,7 +1698,6 @@ def cmd_convert(args, from_jxl: bool = True):
     # Build pairs
     pairs = []
     for f in files:
-        is_decode = (direction == "from_jxl")
         if direction == "to_jxl":
             out = resolve_output_convert(f, args.mode, args.output_name,
                                          args.output_suffix, "jxl",
@@ -1804,9 +1830,6 @@ def cmd_auto(args):
         sys.exit(1)
 
     TEMP2_DIR = args.staging
-    smart_mode = args.sync
-
-    reconvert_explicit = args.overwrite
 
     # Handle --no-md5 (was silently ignored on this path)
     if args.no_md5:

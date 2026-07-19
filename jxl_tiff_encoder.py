@@ -105,6 +105,22 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _marker_matches(part_lower: str, marker_lower: str) -> bool:
+    """Folder-name part matches the export marker.
+
+    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
+    and, for underscore-wrapped markers, also the bare word — so the default
+    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
+    documentation promises.
+    """
+    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+        return True
+    bare = marker_lower.strip('_')
+    return bool(bare) and bare != marker_lower and (
+        part_lower.startswith(bare) or part_lower.endswith(bare)
+    )
+
+
 # ExifTool detection - try multiple name variants
 _exiftool_cmd = None
 def _get_exiftool_cmd():
@@ -644,7 +660,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -663,7 +679,7 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         parts = tiff_path.parts
         marker_lower = EXPORT_MARKER.lower()
         export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -1186,14 +1202,13 @@ def read_existing_description(xmp_path):
     if not xmp_path or not xmp_path.exists():
         return ""
     try:
-        r = subprocess.run(
-            [_get_exiftool_cmd(), "-s", "-XMP-dc:Description", str(xmp_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+        r = _run_exiftool_argfile(
+            ["-s", "-XMP-dc:Description", str(xmp_path)], timeout=15
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
             # Filter out exiftool warnings from output
-            lines = [ln for ln in stdout.splitlines() 
+            lines = [ln for ln in stdout.splitlines()
                      if not ln.strip().startswith(("Warning:", "[minor]", "[major]"))]
             stdout = "\n".join(lines).strip()
             if not stdout:
@@ -1230,9 +1245,8 @@ def read_existing_relation(xmp_path):
     if not xmp_path or not Path(xmp_path).exists():
         return []
     try:
-        r = subprocess.run(
-            [_get_exiftool_cmd(), "-j", "-XMP-dc:Relation", str(xmp_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
+        r = _run_exiftool_argfile(
+            ["-j", "-XMP-dc:Relation", str(xmp_path)], timeout=15
         )
         if r.returncode != 0 or not r.stdout:
             return []
@@ -1256,9 +1270,8 @@ def read_existing_creator_tool(xmp_path):
     if not xmp_path or not xmp_path.exists():
         return ""
     try:
-        r = subprocess.run(
-            [_get_exiftool_cmd(), "-s", "-XMP-xmp:CreatorTool", str(xmp_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+        r = _run_exiftool_argfile(
+            ["-s", "-XMP-xmp:CreatorTool", str(xmp_path)], timeout=15
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -2233,7 +2246,7 @@ def find_tiffs_mode6(input_path: Path):
         parts_str = list(t.parts[:-1])
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts_str)
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
             filtered.append(t)
     return filtered
@@ -2248,7 +2261,7 @@ def find_tiffs_mode7(input_path: Path):
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(t.parts[:-1])
         export_idx = next((i for i, p in enumerate(parts_str)
-                           if p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)), None)
+                           if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             continue
         if EXPORT_TIFF_SUBFOLDER:
