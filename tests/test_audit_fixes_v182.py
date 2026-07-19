@@ -391,12 +391,156 @@ def test_verify_file_integrity_unknown_extension_refused(tmp_path):
     assert tr._verify_file_integrity(f) is False
 
 
-def test_orientation_cleared_from_exif_blob(tmp_path):
-    """The raw EXIF blob injected before -tagsfromfile already carries
-    Orientation; the injection args must clear it explicitly afterwards."""
+def test_orientation_preserved(tmp_path):
+    """Orientation must round-trip: this pipeline never rotates pixels
+    (tifffile.asarray and djxl keep stored pixel order), so the tag is
+    required for correct display of rotated files."""
     args_file = enc.build_metadata_injection_args(
         tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
         exif_bin=None, icc_bytes=None, xmp_original=None,
     )
     content = args_file.read_text(encoding="utf-8")
-    assert "-Orientation=" in content
+    assert "-Orientation=" not in content
+    assert "--Orientation" not in content
+
+
+# ---------------------------------------------------------------------------
+# third-pass fixes (external review of fd59f12)
+# ---------------------------------------------------------------------------
+
+def _fake_markers(group_per_file):
+    def _read(jxls):
+        base = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0,
+                         'grayscale': False, 'depth': None} for j in jxls}
+        for k, g in group_per_file.items():
+            base[str(k)]['group'] = g
+        return base
+    return _read
+
+
+def test_multipage_groups_do_not_merge_across_folders(monkeypatch, tmp_path):
+    """Same TIFF encoded to two folders shares the marker id (hash of source
+    path). Decoding a parent folder must produce TWO groups, never one merged
+    TIFF with duplicated pages."""
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "backup"
+    out1.mkdir(); out2.mkdir()
+    files = [out1 / "scan.jxl", out1 / "scan_page2.jxl",
+             out2 / "scan.jxl", out2 / "scan_page2.jxl"]
+    monkeypatch.setattr(dec, "_read_multipage_markers_batch",
+                        _fake_markers({f: "sameid123" for f in files}))
+    groups = dec.collect_multipage_groups(files)
+    assert len(groups) == 2, f"expected 2 groups (one per folder), got {len(groups)}"
+    for main, entries in groups.items():
+        assert len(entries) == 2
+        assert all(e[0].parent == main.parent for e in entries)
+
+
+def test_multipage_duplicate_page_demoted(monkeypatch, tmp_path):
+    """Two marker-carrying copies in the SAME folder with the same page index:
+    the duplicate must be demoted to standalone, not merged."""
+    files = [tmp_path / "scan.jxl", tmp_path / "scan_copy.jxl", tmp_path / "scan_page2.jxl"]
+    monkeypatch.setattr(dec, "_read_multipage_markers_batch",
+                        _fake_markers({f: "sameid123" for f in files}))
+    groups = dec.collect_multipage_groups(files)
+    sizes = sorted(len(v) for v in groups.values())
+    # one group of 2 (scan.jxl + scan_page2.jxl) and one standalone (scan_copy.jxl)
+    assert sizes == [1, 2], f"expected [1, 2], got {sizes}"
+
+
+def test_copy_metadata_keeps_user_caption(monkeypatch, tmp_path):
+    """A legitimate caption containing 'shape' must NOT be cleared."""
+    tif = tmp_path / "a.tif"
+    tif.write_bytes(b"\x00")
+    cleared = []
+
+    def fake_argfile(args_lines, timeout=60):
+        if any(str(a) == "-ImageDescription" for a in args_lines):
+            return _FakeRun(stdout="Image Description : Beautiful shapes at dawn\n")
+        if any(str(a) == "-ImageDescription=" for a in args_lines):
+            cleared.append(args_lines)
+        return _FakeRun()
+
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", fake_argfile)
+    dec.copy_metadata(tmp_path / "a.jxl", tif, tmp_path)
+    assert cleared == [], "user caption was cleared by the tifffile-JSON guard"
+
+
+def test_copy_metadata_clears_tifffile_json(monkeypatch, tmp_path):
+    """tifffile's shaped-JSON ImageDescription IS still cleared."""
+    tif = tmp_path / "a.tif"
+    tif.write_bytes(b"\x00")
+    cleared = []
+
+    def fake_argfile(args_lines, timeout=60):
+        if any(str(a) == "-ImageDescription" for a in args_lines):
+            return _FakeRun(stdout='Image Description : {"shape": [1, 64, 64], "dtype": "<u2"}\n')
+        if any(str(a) == "-ImageDescription=" for a in args_lines):
+            cleared.append(args_lines)
+        return _FakeRun()
+
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", fake_argfile)
+    dec.copy_metadata(tmp_path / "a.jxl", tif, tmp_path)
+    assert len(cleared) == 1, "tifffile shaped-JSON was not cleared"
+
+
+def test_mode4_case_insensitive_all_variants(tmp_path):
+    for name in ("C1_Export_JXL", "C1_Export_jxl", "C1_Export_Jxl", "C1_Export_jXl", "C1_Export_jXL"):
+        f = tmp_path / name / "photo.jxl"
+        out = dec.resolve_output(f, 4, tmp_path)
+        assert out.parent.name == "C1_Export_TIFF", f"{name} -> {out.parent.name}"
+
+
+def test_mode4_replaces_only_first_occurrence(tmp_path):
+    f = tmp_path / "JXL_JXL" / "photo.jxl"
+    out = dec.resolve_output(f, 4, tmp_path)
+    assert out.parent.name == "TIFF_JXL", f"expected first occurrence only: {out.parent.name}"
+
+
+def test_transcoder_metadata_strips_icc_blob(monkeypatch, tmp_path):
+    """Delivered JPEGs must not carry the encoder's ICC:<base64> CreatorTool blob."""
+    src = tmp_path / "a.jxl"
+    dst = tmp_path / "a.jpg"
+    src.write_bytes(b"\x00")
+    dst.write_bytes(b"\xff\xd8")
+    writes = []
+
+    def fake_argfile(args_lines, timeout=60):
+        if any(str(a) == "-XMP-xmp:CreatorTool" for a in args_lines) and not any("CreatorTool=" in str(a) for a in args_lines):
+            return _FakeRun(stdout="ICC:QUJDRA== | Capture One 23\n")
+        if any("CreatorTool=" in str(a) for a in args_lines):
+            writes.append(args_lines)
+        return _FakeRun()
+
+    monkeypatch.setattr(tr, "_run_exiftool_argfile", fake_argfile)
+    tr._copy_metadata(src, dst)
+    assert writes, "CreatorTool was not rewritten"
+    written = [c for c in writes[0] if "CreatorTool=" in str(c)][0]
+    assert "ICC:" not in written
+    assert "Capture One 23" in written
+
+
+def test_encoder_drops_stale_icc_from_existing_creator(monkeypatch, tmp_path):
+    """An old ICC blob in the source CreatorTool must not shadow the new one
+    (the decoder extracts the FIRST valid segment)."""
+    monkeypatch.setattr(enc, "read_existing_creator_tool",
+                        lambda p: "OldApp | ICC:T0xESUJD")
+    args_file = enc.build_metadata_injection_args(
+        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        exif_bin=None, icc_bytes=b"\x00" * 200, xmp_original=tmp_path / "x.xmp",
+    )
+    content = args_file.read_text(encoding="utf-8")
+    creator_line = [ln for ln in content.splitlines() if "CreatorTool=" in ln][0]
+    assert "OldApp" in creator_line
+    assert "T0xESUJD" not in creator_line, "stale ICC blob survived"
+    assert creator_line.count("ICC:") == 1
+
+
+def test_transcoder_verify_integrity_truncated_jxl(tmp_path):
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    bad = tmp_path / "bad.jxl"
+    bad.write_bytes(sig + (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 42)
+    assert tr._verify_file_integrity(bad) is False
+    good = tmp_path / "good.jxl"
+    good.write_bytes(sig + (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 92)
+    assert tr._verify_file_integrity(good) is True

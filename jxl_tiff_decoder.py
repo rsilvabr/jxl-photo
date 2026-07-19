@@ -323,6 +323,11 @@ def setup_logger():
     logger = logging.getLogger("jxl_decode")
     logger.setLevel(logging.INFO)
 
+    # Remove old handlers so a second call in the same process (tests,
+    # wrapper-driven runs) does not duplicate log lines.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
     fh = logging.FileHandler(log_file, encoding="utf-8")
     # Ensure stdout writes UTF-8 to prevent Mojibake on Windows console
     try:
@@ -380,7 +385,7 @@ def confirm_deletion_jxl():
     print(" This deletion is IRREVERSIBLE.")
     now = _dt.now()
     token = now.strftime("%H%M")
-    print(f" Current time: {now.strftime('%H:%M')} >to confirm, type: {token}")
+    print(f" Current time: {now.strftime('%H:%M')} > to confirm, type: {token}")
     print()
     try:
         answer = input(" > ").strip()
@@ -1013,15 +1018,19 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
             _run_exiftool_argfile(
                 ["-overwrite_original", "-IFD0:Software=", str(tiff_path)], timeout=60
             )
-        # Also fix ImageDescription if it contains tifffile metadata
+        # Also fix ImageDescription if it holds tifffile's shaped-JSON metadata.
+        # Match the actual tifffile pattern (JSON starting with "shape") — a
+        # substring check would wipe legitimate user captions like "Beautiful
+        # shapes at dawn".
         r = _run_exiftool_argfile(
             ["-ImageDescription", str(tiff_path)], timeout=30
         )
-        if r.returncode == 0 and r.stdout and ('shape' in r.stdout or 'tifffile' in r.stdout):
-            # Clear the ImageDescription if it contains tifffile metadata
-            _run_exiftool_argfile(
-                ["-overwrite_original", "-ImageDescription=", str(tiff_path)], timeout=60
-            )
+        if r.returncode == 0 and r.stdout:
+            _desc_value = r.stdout.split(":", 1)[1].strip() if ":" in r.stdout else r.stdout.strip()
+            if _desc_value.startswith('{"shape"') or _desc_value.startswith("{'shape'"):
+                _run_exiftool_argfile(
+                    ["-overwrite_original", "-ImageDescription=", str(tiff_path)], timeout=60
+                )
 
         # Strip the internal multi-page marker from dc:Relation but keep any
         # Relation values the user had. We rewrite the bag with only the
@@ -1302,13 +1311,9 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 4:
         # Mode 4: Rename folder replacing JXL suffix with TIFF suffix
         old_name = jxl_path.parent.name
-        new_name = None
-        for variant in [JXL_SUFFIX_TO_REPLACE, JXL_SUFFIX_TO_REPLACE.lower(),
-                       JXL_SUFFIX_TO_REPLACE.title()]:
-            if variant in old_name:
-                new_name = old_name.replace(variant, TIFF_SUFFIX_REPLACE)
-                break
-        if new_name is None:
+        new_name = re.sub(re.escape(JXL_SUFFIX_TO_REPLACE), TIFF_SUFFIX_REPLACE,
+                          old_name, count=1, flags=re.IGNORECASE)
+        if new_name == old_name:
             new_name = old_name + "_" + TIFF_SUFFIX_REPLACE
             logger.warning(f"'{JXL_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
         return jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name
@@ -1964,13 +1969,35 @@ def collect_multipage_groups(jxls: list) -> dict:
         info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
         _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
         if info['group']:
-            by_group.setdefault(info['group'], []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+            # Group key is (folder, group_id), NOT just group_id: the id is a
+            # hash of the SOURCE TIFF path, so two encodes of the same TIFF to
+            # different folders share it. Merging across folders would produce
+            # one TIFF with duplicated pages — and mode 8 would then delete
+            # every copy after validating a single output. Pages of a genuine
+            # split are always written to the same folder by the encoder.
+            by_group.setdefault((str(j.parent), info['group']), []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
         else:
             standalone.append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
 
 
     # Marked groups: reconstruct multi-page TIFFs
     for _marker, entries in by_group.items():
+        # Demote duplicate (page_idx, is_thumbnail) entries to standalone:
+        # they mean two marker-carrying copies ended up in the SAME folder
+        # (e.g. photo.jxl plus a renamed copy), which is not a valid group.
+        seen_keys = set()
+        unique_entries = []
+        for e in sorted(entries, key=lambda e: (e[1], e[2], str(e[0]))):
+            k = (e[1], e[2])
+            if k in seen_keys:
+                logger.warning(f"Duplicate page marker in group; decoding as standalone | {e[0].name}")
+                standalone.append(e)
+                continue
+            seen_keys.add(k)
+            unique_entries.append(e)
+        if not unique_entries:
+            continue
+        entries = unique_entries
         # Prefer a real page 0 as the main/anchor; fall back to lowest real page,
         # then lowest page overall. Thumbnails are never chosen as main.
         real_page0 = [e for e in entries if e[1] == 0 and not e[2]]

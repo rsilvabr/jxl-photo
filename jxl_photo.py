@@ -816,12 +816,17 @@ class FolderAnalyzer:
         if src_path == dst_path:
             return 0
 
-        # Check if dest is a subfolder of source with export-like name
+        # Check if dest is a subfolder of source with export-like name.
+        # The marker must be a path PART that starts/ends with the marker
+        # (same rule as the scripts) — a substring match on the full path
+        # would promote anything living under e.g. F:\_EXPORT\ to mode 6.
         try:
             rel = dst_path.relative_to(src_path)
-            dest_str_lower = str(dst_path).lower()
             marker_lower = self.export_marker.lower()
-            marker_in_dest = marker_lower in dest_str_lower
+            marker_in_dest = any(
+                p.lower().startswith(marker_lower) or p.lower().endswith(marker_lower)
+                for p in dst_path.parts
+            )
             if marker_in_dest:
                 # Distinguish mode 7 (subfolder) from mode 6 (same export folder).
                 if src_path == dst_path.parent:
@@ -2258,18 +2263,9 @@ class InteractiveMenu:
             ow_input = input("Existing file handling (1=overwrite, 2=sync) [2]: ").strip() or "2"
             workflow['overwrite_mode'] = ow_input
 
-        # Persist basic parameters that the repeat workflow needs to restore.
-        # Only persist values that were actually asked for this direction —
-        # otherwise an unrelated workflow would clobber them with defaults.
-        _origin_fmt = workflow.get('origin_format')
-        _dest_fmt = workflow.get('dest_format')
-        self.config.save_last_session(
-            use_ram=workflow.get('use_ram') if _origin_fmt == 'tiff' else None,
-            compression=workflow.get('compression') if _dest_fmt == 'tiff' else None,
-            bit_depth=workflow.get('bit_depth') if _dest_fmt in ('tiff', 'png') else None,
-            add_preview=workflow.get('add_preview') if _dest_fmt == 'tiff' else None
-        )
-
+        # Nothing is persisted here: all session state is saved once, at the
+        # end of the wizard in main(), so cancelling mid-wizard never mutates
+        # saved defaults.
         return self._wizard_parameters_advanced(workflow, status)
 
     def _wizard_parameters_advanced(self, workflow: Dict, status: Dict[str, bool]) -> bool:
@@ -2326,7 +2322,6 @@ class InteractiveMenu:
                 # Thumbnail option
                 thumb_default = self.config.config.last_jpeg_thumbnail if self.config.config.last_jpeg_thumbnail is not None else False
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
-                self.config.save_last_session(jpeg_thumbnail=embed_thumb)
                 # Multi-page TIFF options
                 mp_default = self.config.config.last_multipage_mode or "ignore"
                 multipage_mode = Prompt.ask(
@@ -2334,7 +2329,6 @@ class InteractiveMenu:
                     choices=["ignore", "skip", "split", "split_all"],
                     default=mp_default
                 )
-                self.config.save_last_session(multipage_mode=multipage_mode)
                 thumbnail_mode = "exclude"
                 thumbnail_suffix = "_thumbnail"
                 if multipage_mode in ("split", "split_all"):
@@ -2344,10 +2338,8 @@ class InteractiveMenu:
                         choices=["exclude", "include"],
                         default=tm_default
                     )
-                    self.config.save_last_session(thumbnail_mode=thumbnail_mode)
                     ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
-                    self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 if not delete_src:
@@ -2361,23 +2353,19 @@ class InteractiveMenu:
                 thumb_default = "y" if self.config.config.last_jpeg_thumbnail else "n"
                 thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
                 embed_thumb = thumb_input.startswith('y')
-                self.config.save_last_session(jpeg_thumbnail=embed_thumb)
                 # Multi-page TIFF options
                 mp_default = self.config.config.last_multipage_mode or "ignore"
                 mp_input = input(f"Multi-page TIFF handling (ignore/skip/split/split_all) [{mp_default}]: ").strip().lower() or mp_default
                 multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else "ignore"
-                self.config.save_last_session(multipage_mode=multipage_mode)
                 thumbnail_mode = "exclude"
                 thumbnail_suffix = "_thumbnail"
                 if multipage_mode in ("split", "split_all"):
                     tm_default = self.config.config.last_thumbnail_mode or "exclude"
                     tm_input = input(f"Thumbnail handling when splitting (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
                     thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else "exclude"
-                    self.config.save_last_session(thumbnail_mode=thumbnail_mode)
                     ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                     thumbnail_suffix = ts_input if ts_input else ts_default
-                    self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 if not delete_src:
@@ -2437,20 +2425,16 @@ class InteractiveMenu:
                 if thumbnail_handling == "generate":
                     console.print("[yellow]generate is not yet implemented; using include[/yellow]")
                     thumbnail_handling = "include"
-                self.config.save_last_session(thumbnail_handling=thumbnail_handling)
                 ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                 thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
-                self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 no_recon_default = self.config.config.last_no_reconstruct_multipage if self.config.config.last_no_reconstruct_multipage is not None else False
                 no_reconstruct_multipage = Confirm.ask("Decode every JXL to its own TIFF (no multi-page reconstruction)?", default=no_recon_default)
-                self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
                 dp_default = self.config.config.last_depth_policy or "preserve_thumbnails"
                 depth_policy = Prompt.ask(
                     "Bit depth policy",
                     choices=["force16", "preserve_thumbnails", "preserve_original"],
                     default=dp_default
                 )
-                self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 if not delete_src:
@@ -2487,19 +2471,15 @@ class InteractiveMenu:
                 if thumbnail_handling == "generate":
                     print("generate is not yet implemented; using include")
                     thumbnail_handling = "include"
-                self.config.save_last_session(thumbnail_handling=thumbnail_handling)
                 ts_default = getattr(self.config.config, 'last_thumbnail_suffix', None) or "_thumbnail"
                 ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                 thumbnail_suffix = ts_input if ts_input else ts_default
-                self.config.save_last_session(thumbnail_suffix=thumbnail_suffix)
                 no_recon_default = "y" if self.config.config.last_no_reconstruct_multipage else "n"
                 no_recon_input = input(f"Decode every JXL to its own TIFF (no multi-page reconstruction)? [{no_recon_default}/n]: ").strip().lower() or no_recon_default
                 no_reconstruct_multipage = no_recon_input.startswith('y')
-                self.config.save_last_session(no_reconstruct_multipage=no_reconstruct_multipage)
                 dp_default = getattr(self.config.config, 'last_depth_policy', None) or "preserve_thumbnails"
                 dp_input = input(f"Bit depth policy (force16/preserve_thumbnails/preserve_original) [{dp_default}]: ").strip().lower() or dp_default
                 depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
-                self.config.save_last_session(depth_policy=depth_policy)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 if not delete_src:
@@ -2562,7 +2542,6 @@ class InteractiveMenu:
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
-        self.config.save_last_session(advanced_options=advanced_options)
         return self._wizard_parameters_expert(workflow)
 
     def _wizard_parameters_expert(self, workflow: Dict) -> bool:
@@ -3001,12 +2980,40 @@ class InteractiveMenu:
 
         return cmd
 
-    def _run_subprocess(self, cmd: List) -> int:
-        """Run subprocess and return its exit code (-1 on launch failure).
+    def _print_child_line(self, line: str) -> None:
+        """Colorize one line of child-script output."""
+        line = line.strip()
+        if not line:
+            return
+        if RICH_AVAILABLE and console:
+            if "[OK]" in line or "✓" in line or "Processing" in line:
+                console.print(f"  [green]{line}[/green]")
+            elif "[ERROR]" in line or "Error" in line or "✗" in line:
+                console.print(f"  [red]{line}[/red]")
+            elif "[WARNING]" in line or "⚠" in line:
+                console.print(f"  [yellow]{line}[/yellow]")
+            elif "DRY" in line or "simulation" in line.lower():
+                console.print(f"  [blue]{line}[/blue]")
+            else:
+                console.print(f"  {line}")
+        else:
+            print(f"  {line}")
 
-        Exit code contract with the child scripts: 0 = success, 1 = some
-        files failed, 2 = aborted, 3 = user declined a confirmation.
+    def _stream_child(self, cmd: List, timeout: int = 3600) -> int:
+        """Run a child script, streaming stdout live, with a REAL deadline.
+
+        The old pattern (`for line in process.stdout` then `wait(timeout)`)
+        could hang forever if the child blocked on an interactive stdin
+        prompt: the read loop never reached wait(), so the timeout was dead
+        code. Here a daemon reader thread drains stdout while the main thread
+        enforces the deadline and kills the child on expiry.
+
+        Exit code contract: 0 = success, 1 = some files failed, 2 = aborted,
+        3 = user declined a confirmation. Returns -1 on timeout/launch failure.
         """
+        import queue
+        import threading
+
         try:
             process = subprocess.Popen(
                 cmd,
@@ -3018,41 +3025,56 @@ class InteractiveMenu:
                 errors="replace",
                 env={**os.environ, "PYTHONUNBUFFERED": "1"}
             )
+        except FileNotFoundError:
+            self._print_error(f"Script not found: {cmd[1] if len(cmd) > 1 else cmd}")
+            return -1
+        except Exception as e:
+            self._print_error(f"Error launching: {e}")
+            return -1
 
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    if RICH_AVAILABLE and console:
-                        if "[OK]" in line or "✓" in line:
-                            console.print(f"  [green]{line}[/green]")
-                        elif "[ERROR]" in line or "✗" in line:
-                            console.print(f"  [red]{line}[/red]")
-                        elif "[WARNING]" in line or "⚠" in line:
-                            console.print(f"  [yellow]{line}[/yellow]")
-                        elif "DRY" in line:
-                            console.print(f"  [blue]{line}[/blue]")
-                        else:
-                            console.print(f"  {line}")
-                    else:
-                        print(f"  {line}")
+        q = queue.Queue()
 
-            process.wait(timeout=3600)  # 1 hour timeout
-            return process.returncode
+        def _reader():
+            try:
+                for line in process.stdout:
+                    q.put(line)
+            finally:
+                q.put(None)  # EOF sentinel
 
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                process.kill()
+                self._print_error("Timeout: process killed (possible hidden prompt or hang)")
+                return -1
+            try:
+                line = q.get(timeout=min(1.0, max(remaining, 0.1)))
+            except queue.Empty:
+                if not reader.is_alive():
+                    break
+                continue
+            if line is None:
+                break
+            self._print_child_line(line)
+
+        try:
+            process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             process.kill()
-            if RICH_AVAILABLE and console:
-                console.print("  [red]Timeout: Process killed after 1 hour[/red]")
-            else:
-                print("  Timeout: Process killed after 1 hour")
             return -1
+        return process.returncode
 
-        except Exception as e:
-            if RICH_AVAILABLE and console:
-                console.print(f"  [red]Error: {e}[/red]")
-            else:
-                print(f"  Error: {e}")
-            return -1
+    def _run_subprocess(self, cmd: List) -> int:
+        """Run subprocess and return its exit code (-1 on launch failure).
+
+        Exit code contract with the child scripts: 0 = success, 1 = some
+        files failed, 2 = aborted, 3 = user declined a confirmation.
+        """
+        return self._stream_child(cmd)
 
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
@@ -3315,56 +3337,16 @@ class InteractiveMenu:
         else:
             print(f"\nExecuting: {' '.join(cmd)}\n")
 
-        try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="replace",
-                env={**os.environ, "PYTHONUNBUFFERED": "1"}
-            )
+        returncode = self._stream_child(cmd)
 
-            for line in process.stdout:
-                line = line.strip()
-                if line:
-                    if RICH_AVAILABLE and console:
-                        if "[OK]" in line or "Processing" in line or "✓" in line:
-                            console.print(f"[green]{line}[/green]")
-                        elif "[ERROR]" in line or "Error" in line or "✗" in line:
-                            console.print(f"[red]{line}[/red]")
-                        elif "[WARNING]" in line or "⚠" in line:
-                            console.print(f"[yellow]{line}[/yellow]")
-                        elif "DRY RUN" in line or "simulation" in line.lower():
-                            console.print(f"[blue]{line}[/blue]")
-                        else:
-                            console.print(line)
-                    else:
-                        print(line)
-
-            process.wait(timeout=3600)  # 1 hour timeout
-
-            if process.returncode == 0:
-                self._print_success("✓ Conversion completed successfully!\n")
-                return True
-            elif process.returncode == 3:
-                self._print_error("\n✗ Conversion cancelled (confirmation declined)")
-                return False
-            else:
-                self._print_error(f"\n✗ Conversion failed (code {process.returncode})")
-                return False
-
-        except subprocess.TimeoutExpired:
-            process.kill()
-            self._print_error("Timeout: Process killed after 1 hour")
+        if returncode == 0:
+            self._print_success("✓ Conversion completed successfully!\n")
+            return True
+        elif returncode == 3:
+            self._print_error("\n✗ Conversion cancelled (confirmation declined)")
             return False
-        except FileNotFoundError:
-            self._print_error(f"Script not found: {script}")
-            return False
-        except Exception as e:
-            self._print_error(f"Error executing: {e}")
+        else:
+            self._print_error(f"\n✗ Conversion failed (code {returncode})")
             return False
 
     def _print_success(self, message: str) -> None:
@@ -3440,7 +3422,8 @@ def main():
                         workflow['conversion_type'],
                         workflow.get('advanced_options', {}).get('d50_patch'),
                         workflow.get('advanced_options', {}).get('encode_tag'),
-                        workflow.get('advanced_options', {}).get('jpeg_thumbnail'),
+                        # The advanced-options dict stores it as 'embed_thumbnail'
+                        workflow.get('advanced_options', {}).get('embed_thumbnail'),
                         workflow.get('advanced_options', {}).get('multipage_mode'),
                         workflow.get('advanced_options', {}).get('thumbnail_mode'),
                         workflow.get('advanced_options', {}).get('thumbnail_suffix'),
@@ -3608,8 +3591,14 @@ def main():
                     workflow['distance'] = last_distance
 
             if workflow['mode'] == 2:
-                output_dir = config.config.last_mode_config.get('output_dir') if config.config.last_mode_config else None
-                workflow['mode_config'] = {'output_dir': output_dir or str(input_path.parent / "output")}
+                saved_out = (config.config.last_mode_config or {}).get('output_dir')
+                # Only reuse the saved output folder when the input folder is
+                # the same as the saved session's; with a NEW input folder the
+                # old destination would silently swallow the new outputs.
+                if saved_out and new_folder == last_dir:
+                    workflow['mode_config'] = {'output_dir': saved_out}
+                else:
+                    workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
             elif workflow['mode'] in (6, 7):
                 # Preserve the full saved mode_config (export_marker AND
                 # export_subfolder) — dropping keys here silently turns a

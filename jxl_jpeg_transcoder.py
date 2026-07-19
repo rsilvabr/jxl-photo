@@ -67,9 +67,34 @@ def _verify_file_integrity(file_path: Path) -> bool:
             # Bare JXL: 0xFF 0x0A, Container: ISOBMFF
             if header[0:2] == b'\xff\x0a':
                 return True
-            if header == b'\x00\x00\x00\x0cJXL \r\n\x87\n':
-                return True
-            return False
+            if header != b'\x00\x00\x00\x0cJXL \r\n\x87\n':
+                return False
+            # Walk the box chain: every box must be well-formed and the chain
+            # must end exactly at EOF (same strength as the TIFF encoder's
+            # integrity check — both guard source deletion).
+            file_size = stat.st_size
+            i = 12
+            with open(file_path, 'rb') as f:
+                while i < file_size:
+                    if i + 8 > file_size:
+                        return False
+                    f.seek(i)
+                    box_header = f.read(8)
+                    size = int.from_bytes(box_header[0:4], "big")
+                    if size == 0:
+                        return True
+                    if size == 1:
+                        if i + 16 > file_size:
+                            return False
+                        size = int.from_bytes(f.read(8), "big")
+                        if size < 16:
+                            return False
+                    elif size < 8:
+                        return False
+                    if i + size > file_size:
+                        return False
+                    i += size
+            return i == file_size
         
         elif ext in ('.jpg', '.jpeg'):
             # JPEG starts with SOI marker 0xFFD8
@@ -257,6 +282,9 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
 
     Used for lossy convert paths where cjxl/djxl may not preserve metadata.
     Failures are ignored so the conversion itself always succeeds.
+    Also strips any 'ICC:<base64>' blob from XMP CreatorTool (written by the
+    TIFF encoder for TIFF round-trips): it bloats delivered JPEG/PNGs and,
+    after an ICC conversion, points at the wrong profile.
     """
     if shutil.which(_get_exiftool_cmd()) is None:
         return
@@ -266,6 +294,25 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
              "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
             timeout=120
         )
+        # Strip ICC:<base64> segments from CreatorTool (same logic as the
+        # TIFF decoder's cleanup_xmp_icc).
+        try:
+            r = _run_exiftool_argfile(
+                ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(dst_path)], timeout=30
+            )
+            if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
+                content = r.stdout.strip()
+                clean = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', content).strip()
+                clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
+                clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
+                clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
+                if clean:
+                    _run_exiftool_argfile(
+                        ["-overwrite_original",
+                         f"-XMP-xmp:CreatorTool={clean}", str(dst_path)], timeout=60
+                    )
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -742,12 +789,8 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
     elif mode == 4:
         # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
-        new_name = None
-        for variant in [sfx_from, sfx_from.lower(), sfx_from.title()]:
-            if variant in old_name:
-                new_name = old_name.replace(variant, sfx_to)
-                break
-        if new_name is None:
+        new_name = re.sub(re.escape(sfx_from), sfx_to, old_name, count=1, flags=re.IGNORECASE)
+        if new_name == old_name:
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
@@ -1223,12 +1266,8 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
     elif mode == 4:
         # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
-        new_name = None
-        for variant in [sfx_from, sfx_from.lower(), sfx_from.title()]:
-            if variant in old_name:
-                new_name = old_name.replace(variant, sfx_to)
-                break
-        if new_name is None:
+        new_name = re.sub(re.escape(sfx_from), sfx_to, old_name, count=1, flags=re.IGNORECASE)
+        if new_name == old_name:
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / f"{stem}.{ext}"
@@ -2091,7 +2130,7 @@ Examples:
     parser.add_argument("--no-ram", dest="ram", action="store_false", help="Use disk")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
-                        help="Output folder name for modes 0,1")
+                        help="Output folder name override for convert modes 1 and 3")
     parser.add_argument("output", nargs="?", type=Path, default=None,
                         help="Output directory (mode 0 single file)")
     parser.add_argument("--output-suffix", type=str, default=CONVERT_OUTPUT_SUFFIX,

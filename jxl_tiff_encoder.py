@@ -511,6 +511,11 @@ def setup_logger():
     logger = logging.getLogger("jxl_convert")
     logger.setLevel(logging.INFO)
 
+    # Remove old handlers so a second call in the same process (tests,
+    # wrapper-driven runs) does not duplicate log lines.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
 
@@ -611,13 +616,9 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 4:
         # Rename folder replacing TIFF suffix with JXL suffix
         old_name = tiff_path.parent.name
-        new_name = None
-        for variant in [TIFF_SUFFIX_TO_REPLACE, TIFF_SUFFIX_TO_REPLACE.lower(),
-                        TIFF_SUFFIX_TO_REPLACE.title()]:
-            if variant in old_name:
-                new_name = old_name.replace(variant, JXL_SUFFIX_REPLACE)
-                break
-        if new_name is None:
+        new_name = re.sub(re.escape(TIFF_SUFFIX_TO_REPLACE), JXL_SUFFIX_REPLACE,
+                          old_name, count=1, flags=re.IGNORECASE)
+        if new_name == old_name:
             new_name = old_name + "_" + JXL_SUFFIX_REPLACE
             logger.warning(f"'{TIFF_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
         return tiff_path.parent.parent / new_name / tiff_path.with_suffix(".jxl").name
@@ -1231,15 +1232,15 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append(f"-Exif<={exif_bin}")
     
     # 2. Copy tags from source file (preserves original XMP, EXIF, etc.)
+    # NOTE: Orientation is copied like any other tag — this pipeline never
+    # rotates pixels (tifffile.asarray() and djxl both keep stored pixel
+    # order), so the tag is REQUIRED for correct display of rotated files.
+    # (An earlier version stripped it to "prevent double-rotation", which
+    # could not happen here and silently de-rotated scans/camera TIFFs.)
     args_lines.append("-tagsfromfile")
     args_lines.append(str(tiff_path))
     args_lines.append("-exif:all")
     args_lines.append("-xmp:all")
-    args_lines.append("--Orientation")  # Strip orientation to prevent double-rotation issues
-    # The exclusion above only prevents re-copying Orientation from the source;
-    # the raw EXIF blob injected in step 1 already contains it. Clear it
-    # explicitly, otherwise the JXL would keep the rotation tag.
-    args_lines.append("-Orientation=")
     
     # 3. Handle encoding parameters and ICC embedding in XMP
     encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
@@ -1286,7 +1287,15 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         existing_creator = ""
         if xmp_original:
             existing_creator = read_existing_creator_tool(xmp_original)
-        
+            # Strip any stale ICC:<base64> blob (e.g. from a previous encode
+            # that skipped cleanup): the decoder extracts the FIRST valid ICC
+            # segment, so an old blob would shadow the new one.
+            if existing_creator and "ICC:" in existing_creator:
+                existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', existing_creator).strip()
+                existing_creator = re.sub(r'\s*\|\s*$', '', existing_creator).strip()
+                existing_creator = re.sub(r'^\s*\|\s*', '', existing_creator).strip()
+                existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
+
         # Build CreatorTool content: existing | ICC:base64 or just ICC:base64
         if existing_creator:
             creator_tool = f"{existing_creator} | ICC:{icc_b64}"
