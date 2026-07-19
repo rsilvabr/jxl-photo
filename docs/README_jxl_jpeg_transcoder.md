@@ -220,9 +220,11 @@ This allows mixed archives (some lossless-transcodable, some not) to be processe
 
 **Override flags** (when auto-detect isn't what you need):
 
-- `--force-transcode` → Force lossless transcoding (will fail if jbrd missing on decode)
+- `--force-transcode` → Force lossless transcoding (will fail if jbrd missing on decode). On a **directory** it only *encodes* (JPEG → JXL); to force *decode* of a JXL folder, combine with `--decode`
 - `--force-convert` → Force lossy conversion (e.g., to apply ICC profile to lossless JXL)
 - `--decode` → Force decode direction for JXL files
+
+> **Note:** `--quality`/`--jpeg_quality` has no effect when the input JXL contains a `jbrd` box — djxl reconstructs the original JPEG bit-exactly instead of re-encoding. Use files without jbrd (e.g. from the TIFF encoder) for quality-driven conversions.
 
 * * *
 

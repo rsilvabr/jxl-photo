@@ -61,9 +61,11 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
             return False
 
         # Walk the ISOBMFF box chain; every box must be well-formed and the
-        # chain must end exactly at EOF.
+        # chain must end exactly at EOF. A codestream box (jxlc/jxlp) must be
+        # present — a metadata-only file must never pass the delete gate.
         file_size = stat.st_size
         i = 12
+        has_codestream = False
         with open(jxl_path, 'rb') as f:
             while i < file_size:
                 if i + 8 > file_size:
@@ -71,9 +73,11 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                 f.seek(i)
                 box_header = f.read(8)
                 size = int.from_bytes(box_header[0:4], "big")
+                if box_header[4:8] in (b"jxlc", b"jxlp"):
+                    has_codestream = True
                 if size == 0:
                     # Box extends to end of file; must be the last one
-                    return True
+                    return has_codestream
                 if size == 1:
                     # Extended 64-bit size
                     if i + 16 > file_size:
@@ -87,7 +91,7 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                 if i + size > file_size:
                     return False
                 i += size
-        return i == file_size
+        return has_codestream and i == file_size
     except (OSError, IOError):
         return False
 
@@ -537,6 +541,9 @@ def setup_logger():
     return log_file
 
 
+_rejected_log_lock = threading.Lock()
+
+
 def _log_rejected_file(file_path, reason):
     """Log rejected files to Logs/jxl_tiff_encoder/rejected_files.log for easy review."""
     try:
@@ -544,8 +551,10 @@ def _log_rejected_file(file_path, reason):
         rej_dir.mkdir(parents=True, exist_ok=True)
         rej_file = rej_dir / "rejected_files.log"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(rej_file, "a", encoding="utf-8") as f:
-            f.write(f"{timestamp} | {reason} | {file_path}\n")
+        # Locked: called from worker threads; concurrent appends would interleave.
+        with _rejected_log_lock:
+            with open(rej_file, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} | {reason} | {file_path}\n")
     except Exception:
         pass
 
@@ -689,10 +698,39 @@ def _argfile_safe(value) -> str:
     return re.sub(r"[\r\n]+", " ", str(value))
 
 
-# Charset directive that must precede any non-ASCII file path in an argfile.
-# Without it, exiftool on Windows interprets UTF-8 argfile paths using the
-# system codepage and fails to find files with non-ASCII names.
-_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n"
+# Charset directives for exiftool argfiles:
+# - FileName=UTF8: file paths in the argfile are UTF-8 (Windows default is the
+#   system codepage, so non-ASCII paths would not be found).
+# - UTF8: tag VALUES read/written are UTF-8, so non-ASCII metadata round-trips.
+_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
+
+
+def _run_exiftool_argfile(args_lines, timeout=60):
+    """Run exiftool with an argfile (UTF-8 + FileName charset).
+
+    Using an argfile instead of raw argv avoids two Windows pitfalls:
+    paths containing [ ] being treated as wildcards, and non-ASCII paths
+    being decoded with the wrong codepage.
+    Returns the CompletedProcess (stdout decoded as UTF-8).
+    """
+    argfile = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
+            argfile = af.name
+            af.write(_ARGFILE_CHARSET)
+            af.write("\n".join(str(a) for a in args_lines))
+            af.write("\n")
+        return subprocess.run(
+            [_get_exiftool_cmd(), "-@", argfile],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
+        )
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
 
 
 def extract_exif_raw(tiff_path, tmp_dir):
@@ -980,7 +1018,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
         # match the final quality/size.  The current distance is still used because
         # lossy behaviour varies with distance.
         cmd = [
-            "cjxl",
+            _get_cjxl_cmd() or "cjxl",
             str(png_path),
             str(jxl_path),
             "-d", str(CJXL_DISTANCE),
@@ -1036,7 +1074,7 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
             logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
             return embed
 
-        if not shutil.which("cjxl") or not shutil.which("djxl"):
+        if not _get_cjxl_cmd() or not shutil.which("djxl"):
             logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
             return _should_embed_icc_heuristic(icc_bytes)
 
@@ -1176,6 +1214,42 @@ def read_existing_description(xmp_path):
         logger.debug(f"Failed to read description: {e}")
     return ""
 
+_INTERNAL_RELATION_PREFIXES = (
+    "jxlphoto-mpg:",
+    "jxlphoto-subfiletype:",
+    "jxlphoto-depth:",
+    "jxlphoto-icc:inherited",
+    "jxlphoto-grayscale",
+)
+
+
+def read_existing_relation(xmp_path):
+    """Read user dc:Relation items from an XMP file via exiftool JSON output,
+    filtering out this tool's own internal round-trip markers (jxlphoto-*).
+    Returns a list of strings (may be empty)."""
+    if not xmp_path or not Path(xmp_path).exists():
+        return []
+    try:
+        r = subprocess.run(
+            [_get_exiftool_cmd(), "-j", "-XMP-dc:Relation", str(xmp_path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
+        )
+        if r.returncode != 0 or not r.stdout:
+            return []
+        data = json.loads(r.stdout)
+        if not data:
+            return []
+        rel = data[0].get("Relation")
+        if rel is None:
+            return []
+        values = rel if isinstance(rel, list) else [str(rel)]
+        return [str(v).strip() for v in values
+                if str(v).strip() and not str(v).strip().startswith(_INTERNAL_RELATION_PREFIXES)]
+    except Exception as e:
+        logger.debug(f"Failed to read dc:Relation: {e}")
+        return []
+
+
 def read_existing_creator_tool(xmp_path):
     """Read existing CreatorTool from XMP file if present.
     Returns empty string if not found."""
@@ -1241,6 +1315,18 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     args_lines.append(str(tiff_path))
     args_lines.append("-exif:all")
     args_lines.append("-xmp:all")
+
+    # 2b. The copied XMP may carry STALE internal round-trip markers
+    # (jxlphoto-mpg/depth/grayscale/...) from a previous encode. Clear
+    # dc:Relation and re-add only the user's own values, otherwise the bag
+    # ends up with two group ids / two depths and reconstruction is ambiguous.
+    if xmp_original:
+        user_relation = read_existing_relation(xmp_original)
+    else:
+        user_relation = []
+    args_lines.append("-XMP-dc:Relation=")
+    for rel_value in user_relation:
+        args_lines.append(f"-XMP-dc:Relation+={_argfile_safe(rel_value)}")
     
     # 3. Handle encoding parameters and ICC embedding in XMP
     encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
@@ -1291,7 +1377,9 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
             # that skipped cleanup): the decoder extracts the FIRST valid ICC
             # segment, so an old blob would shadow the new one.
             if existing_creator and "ICC:" in existing_creator:
-                existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', existing_creator).strip()
+                # Blob is bounded: base64 chars only up to the next pipe or EOL,
+                # so a trailing " | Real App" segment is never eaten.
+                existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', existing_creator, flags=re.MULTILINE).strip()
                 existing_creator = re.sub(r'\s*\|\s*$', '', existing_creator).strip()
                 existing_creator = re.sub(r'^\s*\|\s*', '', existing_creator).strip()
                 existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
@@ -1455,11 +1543,19 @@ def reorder_jxl_boxes(jxl_path):
             other_boxes.append((name, h, p))
 
     # Final order: structure -> metadata -> codestream -> others
+    ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
+
+    # A box that declared size 0 ("extends to EOF") is only valid as the LAST
+    # box in the file. If regrouping moved it earlier, rewrite its header with
+    # the real computed size, otherwise everything after it becomes payload
+    # and the file is corrupt.
     out = b""
-    for _, h, p in meta_order_boxes:  out += h + p
-    for _, h, p in meta_extra_boxes:  out += h + p
-    for _, h, p in codestream_boxes:  out += h + p
-    for _, h, p in other_boxes:       out += h + p
+    for idx, (name, h, p) in enumerate(ordered):
+        declared = int.from_bytes(h[0:4], "big")
+        if declared == 0 and idx < len(ordered) - 1:
+            real_size = 8 + len(p)
+            h = real_size.to_bytes(4, "big") + h[4:8]
+        out += h + p
 
     jxl_path.write_bytes(out)
 
@@ -1583,6 +1679,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if photometric == tifffile.PHOTOMETRIC.PALETTE:
                     _log_rejected_file(str(tiff_path), "palette-color not supported")
                     raise ValueError("Palette-color TIFFs are not supported. Convert to RGB first.")
+                # Planar-separate TIFFs return (samples, H, W) from asarray(),
+                # which make_png_bytes would misread as (H, W, C) — reject
+                # clearly instead of scrambling the image.
+                planar = getattr(page, 'planarconfig', None)
+                if planar is not None and int(planar) != 1:
+                    _log_rejected_file(str(tiff_path), "planar-separate not supported")
+                    raise ValueError("Planar-separate TIFFs (PLANARCONFIG=2) are not supported. Convert to chunky/contig first.")
+                spp = int(page.samplesperpixel) if page.samplesperpixel else 1
+                if spp not in (1, 3, 4):
+                    _log_rejected_file(str(tiff_path), f"unsupported samples-per-pixel: {spp}")
+                    raise ValueError(f"Unsupported channel count: {spp}. Expected 1 (gray), 3 (RGB) or 4 (RGBA).")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
@@ -1720,9 +1827,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         thumb_path = tmp_dir / "thumbnail.jpg"
                         thumb.save(str(thumb_path), "JPEG", quality=85)
                         # Inject thumbnail into JXL
-                        r_thumb = subprocess.run(
-                            [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                            capture_output=True, timeout=10
+                        r_thumb = _run_exiftool_argfile(
+                            ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                            timeout=30
                         )
                         if r_thumb.returncode == 0:
                             logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
@@ -1783,9 +1890,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                             thumb.save(str(thumb_path), "JPEG", quality=85)
 
                             # Inject thumbnail into JXL
-                            r_thumb = subprocess.run(
-                                [_get_exiftool_cmd(), "-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                                capture_output=True, timeout=10
+                            r_thumb = _run_exiftool_argfile(
+                                ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
+                                timeout=30
                             )
                             if r_thumb.returncode == 0:
                                 logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
@@ -1810,16 +1917,15 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
                     if subfiletype != 0:
                         relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
-                    r_mark = subprocess.run(
-                        [_get_exiftool_cmd(), "-overwrite_original"] + relation_args +
-                        [str(write_path)],
-                        capture_output=True, timeout=10
+                    r_mark = _run_exiftool_argfile(
+                        ["-overwrite_original"] + relation_args + [str(write_path)],
+                        timeout=30
                     )
                     # A failed marker write must not be silent: without the marker
                     # the decoder can never reconstruct this multi-page TIFF.
                     if r_mark.returncode != 0:
-                        err_msg = (r_mark.stderr or r_mark.stdout or b"no output")[:200]
-                        raise RuntimeError(f"exiftool multipage marker write failed: {err_msg.decode(errors='replace') if isinstance(err_msg, bytes) else err_msg}")
+                        err_msg = (r_mark.stderr or r_mark.stdout or "no output")[:200]
+                        raise RuntimeError(f"exiftool multipage marker write failed: {err_msg.strip()}")
                 except RuntimeError:
                     raise
                 except Exception as e_mark:
@@ -1830,14 +1936,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # restore the original single-channel TIFF page.
             if is_grayscale and not STRIP_METADATA:
                 try:
-                    r_gray = subprocess.run(
-                        [_get_exiftool_cmd(), "-overwrite_original",
+                    r_gray = _run_exiftool_argfile(
+                        ["-overwrite_original",
                          "-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG, str(write_path)],
-                        capture_output=True, timeout=10
+                        timeout=30
                     )
                     if r_gray.returncode != 0:
-                        err_msg = (r_gray.stderr or r_gray.stdout or b"no output")[:200]
-                        raise RuntimeError(f"exiftool grayscale marker write failed: {err_msg.decode(errors='replace') if isinstance(err_msg, bytes) else err_msg}")
+                        err_msg = (r_gray.stderr or r_gray.stdout or "no output")[:200]
+                        raise RuntimeError(f"exiftool grayscale marker write failed: {err_msg.strip()}")
                 except RuntimeError:
                     raise
                 except Exception as e_mark:
@@ -2035,9 +2141,14 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             if not write_jxl.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_jxl.name}")
                 continue
-            final_jxl.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(write_jxl), str(final_jxl))
-            moved += 1
+            try:
+                final_jxl.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(write_jxl), str(final_jxl))
+                moved += 1
+            except OSError as e:
+                # A locked/readonly destination must not abort the whole batch:
+                # keep the file in staging and log it for manual recovery.
+                logger.error(f"  MOVE FAILED, kept in staging | {write_jxl.name} -> {final_jxl} | {e}")
         if moved:
             logger.info(f"  -> Moved {moved} file(s) from staging to final destination")
 
@@ -2079,9 +2190,12 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 continue
 
             src_tiff = Path(tiff_key)
-            src_tiff.unlink()
-            deleted += 1
-            logger.info(f"  DELETED source | {src_tiff.name}")
+            try:
+                src_tiff.unlink()
+                deleted += 1
+                logger.info(f"  DELETED source | {src_tiff.name}")
+            except OSError as e:
+                logger.warning(f"  KEEP (could not delete source) | {src_tiff.name}: {e}")
         if deleted:
             logger.info(f"  -> Deleted {deleted} source TIFF(s)")
 
@@ -2188,8 +2302,8 @@ def main():
                         help="Show what would be converted without converting")
     parser.add_argument("--staging",         type=str, default=None,
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
-    parser.add_argument("--export-marker",  type=str, default="_EXPORT",
-                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
+    parser.add_argument("--export-marker",  type=str, default=None,
+                        help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
     parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
                         help="Where to record encoding params: xmp (default), software, or off")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
@@ -2238,6 +2352,11 @@ def main():
             Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
         except OSError as e:
             parser.error(f"TEMP_DIR is not usable: {TEMP_DIR} ({e})")
+    if args.staging is not None:
+        try:
+            Path(args.staging).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            parser.error(f"staging directory is not usable: {args.staging} ({e})")
 
     if args.sync:
         OVERWRITE = "smart"
@@ -2353,6 +2472,7 @@ def main():
     all_items = []
     skipped_files = 0
     analyze_errors = 0
+    multipage_skipped = 0
     for t in tiffs:
         # Resolve the main JXL path just to know the output directory
         if args.mode == 0:
@@ -2385,9 +2505,17 @@ def main():
             logger.error(f"SKIP (cannot analyze TIFF) | {t.name} | {e}")
             analyze_errors += 1
             continue
+        if not items:
+            # Multipage "skip" mode (or no encodable pages): the file was seen
+            # and intentionally skipped — count it so the summary accounts for
+            # every input file.
+            multipage_skipped += 1
+            continue
         all_items.extend(items)
 
     planned_msg = f"JXL outputs planned: {len(all_items)} (from {len(tiffs)} TIFFs, {skipped_files} skipped by mode"
+    if multipage_skipped:
+        planned_msg += f", {multipage_skipped} skipped by multipage policy"
     if analyze_errors:
         planned_msg += f", {analyze_errors} unreadable"
     planned_msg += ")"
@@ -2445,6 +2573,9 @@ def main():
                 ok += 1; overwritten += 1; synced += 1
             elif status == "skipped":   skipped += 1
             elif status == "error":     err += 1
+
+    # Account for files intentionally skipped by the multipage policy
+    skipped += multipage_skipped
 
     logger.info(f"\n{'-'*50}")
     if args.sync:

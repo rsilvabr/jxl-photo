@@ -68,10 +68,12 @@ def _argfile_safe(value) -> str:
     return re.sub(r"[\r\n]+", " ", str(value))
 
 
-# Charset directive that must precede any non-ASCII file path in an argfile.
-# Without it, exiftool on Windows interprets UTF-8 argfile paths using the
-# system codepage and fails to find files with non-ASCII names.
-_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n"
+# Charset directives for exiftool argfiles:
+# - FileName=UTF8: file paths in the argfile are UTF-8 (Windows default is the
+#   system codepage, so non-ASCII paths would not be found).
+# - UTF8: tag VALUES read/written are UTF-8, so non-ASCII metadata (captions,
+#   CreatorTool, Relation items) round-trips without codepage corruption.
+_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
 
 
 def _run_exiftool_argfile(args_lines, timeout=60):
@@ -620,6 +622,17 @@ def read_png_to_numpy(png_path, target_depth=16):
             elif target_depth == 8 and arr.dtype == np.uint16:
                 arr = np.rint(arr / 257).astype(np.uint8)
             return arr, None
+        elif arr.ndim == 3 and arr.shape[2] == 2:
+            # Grayscale + alpha (PNG color type 4): return 2D gray + alpha
+            gray = arr[:, :, 0]
+            alpha = arr[:, :, 1]
+            if target_depth == 16 and gray.dtype == np.uint8:
+                gray = gray.astype(np.uint16) * 257
+                alpha = alpha.astype(np.uint16) * 257
+            elif target_depth == 8 and gray.dtype == np.uint16:
+                gray = np.rint(gray / 257).astype(np.uint8)
+                alpha = np.rint(alpha / 257).astype(np.uint8)
+            return gray, alpha
         elif arr.ndim == 3 and arr.shape[2] in (3, 4):
             rgb = arr[:, :, :3]
             alpha = arr[:, :, 3] if arr.shape[2] == 4 else None
@@ -659,6 +672,14 @@ def read_png_to_numpy(png_path, target_depth=16):
             if target_depth == 16:
                 arr = arr.astype(np.uint16) * 257
             return arr, None
+        elif img.mode == 'LA':
+            # Grayscale + alpha — keep both channels
+            arr = np.array(img)
+            gray, alpha = arr[:, :, 0], arr[:, :, 1]
+            if target_depth == 16:
+                gray = gray.astype(np.uint16) * 257
+                alpha = alpha.astype(np.uint16) * 257
+            return gray, alpha
         elif img.mode == 'RGBA':
             arr = np.array(img)
             rgb = arr[:, :, :3]
@@ -835,16 +856,15 @@ def extract_trc_from_icc(icc_bytes):
                             curves[name] = ('gamma', gamma)
                         elif func_type == 1:
                             # Gamma with offset: Y = (aX + b)^gamma
-                            # We approximate with just the gamma parameter
-                            # ICC spec: s15Fixed16Number at offset 16
-                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+16)[0]
+                            # ICC spec: params start at +12; g is the FIRST param
+                            # (s15Fixed16Number). (+16 holds 'a', not gamma.)
+                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+12)[0]
                             gamma = gamma_fixed / 65536.0
                             curves[name] = ('gamma', gamma)
                         elif func_type == 2:
                             # Segmented curve (ProPhoto uses type 2)
-                            # For simplicity, we approximate with the main gamma parameter
-                            # ICC spec: s15Fixed16Number at offset 16
-                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+16)[0]
+                            # Same layout: g at +12, then a, b, c, d, e
+                            gamma_fixed = struct.unpack_from('>i', icc_bytes, data_offset+12)[0]
                             gamma = gamma_fixed / 65536.0
                             curves[name] = ('gamma', gamma)
 
@@ -1035,22 +1055,40 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
         # Strip the internal multi-page marker from dc:Relation but keep any
         # Relation values the user had. We rewrite the bag with only the
         # non-marker items (or clear it if the marker was the only value).
+        # Read via exiftool JSON so list items are parsed exactly — splitting
+        # on commas/semicolons would corrupt legitimate user values
+        # (e.g. "Smith, John").
         try:
             rr = _run_exiftool_argfile(
-                ["-s", "-s", "-s", "-XMP-dc:Relation", str(tiff_path)], timeout=30
+                ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=30
             )
-            if rr.returncode == 0 and rr.stdout and (MULTIPAGE_MARKER_PREFIX in rr.stdout or ICC_INHERITED_FLAG in rr.stdout or SUBFILETYPE_PREFIX in rr.stdout or GRAYSCALE_FLAG in rr.stdout or DEPTH_FLAG in rr.stdout):
-                def _is_internal_marker(token: str) -> bool:
-                    t = token.strip()
-                    return (
-                        t.startswith(MULTIPAGE_MARKER_PREFIX)
-                        or t.startswith(SUBFILETYPE_PREFIX)
-                        or t.startswith(DEPTH_FLAG)
-                        or t == ICC_INHERITED_FLAG
-                        or t == GRAYSCALE_FLAG
-                    )
-                kept = [t.strip() for t in rr.stdout.replace(";", ",").split(",")
-                        if t.strip() and not _is_internal_marker(t)]
+            kept = []
+            if rr.returncode == 0 and rr.stdout:
+                import json as _json
+                try:
+                    _data = _json.loads(rr.stdout)
+                    _rel = _data[0].get("Relation") if _data else None
+                except Exception:
+                    _rel = None
+                if _rel is not None:
+                    _values = _rel if isinstance(_rel, list) else [str(_rel)]
+                    def _is_internal_marker(token: str) -> bool:
+                        t = token.strip()
+                        return (
+                            t.startswith(MULTIPAGE_MARKER_PREFIX)
+                            or t.startswith(SUBFILETYPE_PREFIX)
+                            or t.startswith(DEPTH_FLAG)
+                            or t == ICC_INHERITED_FLAG
+                            or t == GRAYSCALE_FLAG
+                        )
+                    kept = [str(v).strip() for v in _values
+                            if str(v).strip() and not _is_internal_marker(str(v))]
+                    has_internal = len(kept) != len([v for v in _values if str(v).strip()])
+                else:
+                    has_internal = False
+            else:
+                has_internal = False
+            if has_internal:
                 _run_exiftool_argfile(
                     ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=60
                 )
@@ -1074,7 +1112,9 @@ def cleanup_xmp_icc(tiff_path):
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
             content = r.stdout.strip()
-            clean = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', content).strip()
+            # Blob is bounded: base64 chars only up to the next pipe or EOL,
+            # so a trailing " | Real App" segment is never eaten.
+            clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
             clean = re.sub(r'\s*\|\s*$', '', clean)   # trailing pipe
             clean = re.sub(r'^\s*\|\s*', '', clean)   # leading pipe (ICC was mid-string)
             if not clean:
@@ -1108,6 +1148,12 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         # Read the current TIFF (16-bit data that was just written)
         with tifffile.TiffFile(str(tiff_path)) as tif:
             img_data = tif.series[0].asarray()
+            # Preserve page 0's SubfileType for the rewrite below (a restored
+            # non-zero SubfileType would otherwise be lost).
+            try:
+                main_subfiletype = int(tif.pages[0].subfiletype or 0)
+            except Exception:
+                main_subfiletype = 0
             # Try to get ICC if not passed
             if icc_data is None:
                 try:
@@ -1248,6 +1294,8 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 'photometric': main_photometric,
                 'compression': tiff_comp,
             }
+            if main_subfiletype:
+                kwargs_main['subfiletype'] = main_subfiletype
             if main_data.ndim == 3 and main_data.shape[2] == 4:
                 kwargs_main['extrasamples'] = 'UNASSALPHA'
             if icc_data:
@@ -1422,6 +1470,9 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
         return pixels, original_icc, reason, mode
 
     elif mode == 'matrix':
+        # PPM has no alpha channel: RGBA sources lose alpha in matrix mode.
+        # (Use roundtrip/basic/none to preserve it.)
+        logger.info(f" >Matrix mode note: alpha channels are not preserved (PPM path)")
         decode_rec2020_linear(jxl_path, ppm_path, djxl_icc_path)
         pixels = read_ppm_to_numpy(ppm_path)
         djxl_icc = djxl_icc_path.read_bytes() if djxl_icc_path.exists() else None
@@ -1570,8 +1621,15 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                     if entry_grayscale or pixels.ndim == 2:
                         # Restore single-channel grayscale page as 2D
                         if pixels.ndim == 3:
-                            pixels = pixels[:, :, 0]
-                        kwargs['photometric'] = 'minisblack'
+                            if pixels.shape[2] == 2:
+                                # Grayscale + alpha: keep both, alpha as extrasample
+                                kwargs['photometric'] = 'minisblack'
+                                kwargs['extrasamples'] = 'UNASSALPHA'
+                            else:
+                                pixels = pixels[:, :, 0]
+                                kwargs['photometric'] = 'minisblack'
+                        else:
+                            kwargs['photometric'] = 'minisblack'
                     elif pixels.ndim == 3 and pixels.shape[2] == 4:
                         # Preserve RGBA (alpha channel) in the output TIFF
                         kwargs['photometric'] = 'RGB'
@@ -1613,18 +1671,30 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage)
                 cleanup_xmp_icc(write_path)
             else:
-                # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Also clear
-                # the tifffile-injected Software/ImageDescription tags so they don't
-                # leak when the source JXL has nothing to overwrite them with.
+                # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Clear
+                # the tifffile-injected Software/ImageDescription tags ONLY if
+                # they still hold tifffile defaults — a legitimate value copied
+                # from the source JXL must survive.
                 _run_exiftool_argfile(
                     ["-overwrite_original", "-tagsfromfile", str(main_jxl),
                      "-exif:all", str(write_path)], timeout=180
                 )
-                _run_exiftool_argfile(
-                    ["-overwrite_original",
-                     "-IFD1:ImageDescription=", "-ImageDescription=",
-                     "-IFD0:Software=", "-Software=", str(write_path)], timeout=60
+                r_sw0 = _run_exiftool_argfile(
+                    ["-s", "-s", "-s", "-IFD0:Software", str(write_path)], timeout=30
                 )
+                if r_sw0.returncode == 0 and r_sw0.stdout and 'tifffile' in r_sw0.stdout:
+                    _run_exiftool_argfile(
+                        ["-overwrite_original", "-IFD0:Software=", "-Software=", str(write_path)], timeout=60
+                    )
+                r_id0 = _run_exiftool_argfile(
+                    ["-ImageDescription", str(write_path)], timeout=30
+                )
+                if r_id0.returncode == 0 and r_id0.stdout:
+                    _desc0 = r_id0.stdout.split(":", 1)[1].strip() if ":" in r_id0.stdout else r_id0.stdout.strip()
+                    if _desc0.startswith('{"shape"') or _desc0.startswith("{'shape'"):
+                        _run_exiftool_argfile(
+                            ["-overwrite_original", "-IFD1:ImageDescription=", "-ImageDescription=", str(write_path)], timeout=60
+                        )
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -1874,7 +1944,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                                  dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
                     argfile = af.name
-                    af.write("-j\n-s\n-s\n-XMP-dc:Relation\n-charset\nFileName=UTF8\n")
+                    af.write("-j\n-s\n-s\n-XMP-dc:Relation\n-charset\nFileName=UTF8\n-charset\nUTF8\n")
                     for j in chunk:
                         af.write(str(j) + "\n")
                 r = subprocess.run(
@@ -1925,6 +1995,10 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 if key in markers:
                     markers[key] = info
                 else:
+                    # Normalization mismatch (drive-letter case, \\?\ prefix):
+                    # the file falls back to standalone — make it visible
+                    # instead of silent.
+                    logger.warning(f"Marker read: path mismatch, treated as standalone | {src}")
                     markers[src] = info
         except Exception as e:
             # On any batch failure, leave those files as standalone (safe default)
@@ -2084,8 +2158,8 @@ Examples:
                       help="TIFF compression")
     parser.add_argument("--staging", type=str, default=None,
                         help="Staging directory for output files")
-    parser.add_argument("--export-marker", type=str, default="_EXPORT",
-                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
+    parser.add_argument("--export-marker", type=str, default=None,
+                        help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
     parser.add_argument("--delete-source", action="store_true",
                         help="Delete source JXLs after successful decode (mode 8 only)")
     parser.add_argument("--delete-confirm-off", action="store_true",
@@ -2107,7 +2181,7 @@ Examples:
     parser.add_argument("--no-reconstruct-multipage", action="store_true",
                         help="Disable multi-page reconstruction; decode every JXL to its own TIFF. "
                              "(Only marker-tagged split files are ever merged; this fully disables even that.)")
-    parser.add_argument("--depth-policy", type=str, default="preserve_thumbnails",
+    parser.add_argument("--depth-policy", type=str, default=None,
                         choices=["force16", "preserve_thumbnails", "preserve_original"],
                         help="Bit depth policy per page: force16 = always 16-bit; "
                              "preserve_thumbnails = 8-bit only for thumbnails originally 8-bit (default); "
@@ -2129,6 +2203,11 @@ Examples:
             Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
         except OSError as e:
             parser.error(f"TEMP_DIR is not usable: {TEMP_DIR} ({e})")
+    if args.staging is not None:
+        try:
+            Path(args.staging).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            parser.error(f"staging directory is not usable: {args.staging} ({e})")
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE

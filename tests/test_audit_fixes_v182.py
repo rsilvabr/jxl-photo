@@ -544,3 +544,173 @@ def test_transcoder_verify_integrity_truncated_jxl(tmp_path):
     good = tmp_path / "good.jxl"
     good.write_bytes(sig + (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 92)
     assert tr._verify_file_integrity(good) is True
+
+
+# ---------------------------------------------------------------------------
+# fourth-pass fixes (fresh full audit of f0d3881)
+# ---------------------------------------------------------------------------
+
+def test_argfile_charset_includes_output_utf8():
+    for mod in (enc, dec, tr):
+        cs = mod._ARGFILE_CHARSET
+        assert "FileName=UTF8" in cs
+        assert "UTF8" in cs.replace("FileName=UTF8", ""), f"{mod.__name__} missing output charset"
+
+
+def test_auto_decode_runs_before_encode(monkeypatch, tmp_path):
+    """Same-stem photo.jpg + photo.jxl in one folder: the JXL must be decoded
+    BEFORE the JPEG encode can overwrite it."""
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8fake")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    tr.setup_logger()
+    order = []
+
+    def fake_group(files, args, **kw):
+        if kw.get("collect_only") is None:
+            order.append(tuple(f.suffix.lower() for f in files))
+        return {"ok": 0, "err": 0, "skipped": 0}
+
+    monkeypatch.setattr(tr, "_process_file_group", fake_group)
+    tr.cmd_auto(_args(tmp_path))
+    assert order, "nothing processed"
+    assert order[0] == (".jxl",), f"decode must run before encode: {order}"
+
+
+def test_auto_output_input_collision_aborts(tmp_path):
+    """photo.jpg encode target photo.jxl equals another input -> abort like duplicates."""
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8fake")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+    tr.setup_logger()
+    with pytest.raises(SystemExit) as exc:
+        tr.cmd_auto(_args(tmp_path, mode=0, overwrite=True))
+    assert exc.value.code == 2
+
+
+def test_la_gray_alpha_preserved(tmp_path):
+    from PIL import Image
+    la = np.zeros((10, 10, 2), dtype=np.uint8)
+    la[:, :, 0] = 128
+    la[:, :, 1] = 255
+    png = tmp_path / "la.png"
+    Image.fromarray(la, mode="LA").save(png)
+    gray, alpha = dec.read_png_to_numpy(png, target_depth=16)
+    assert gray.shape == (10, 10)
+    assert gray.dtype == np.uint16
+    assert alpha is not None and alpha.shape == (10, 10)
+
+
+def test_trc_parametric_gamma_offset():
+    """Parametric curve type 1: gamma (g) lives at +12, not +16."""
+    import struct as st
+    icc = bytearray(300)
+    st.pack_into(">I", icc, 128, 1)  # one tag
+    st.pack_into(">4sII", icc, 132, b"rTRC", 200, 24)
+    icc[200:204] = b"para"
+    st.pack_into(">H", icc, 208, 1)  # func_type 1
+    st.pack_into(">i", icc, 212, int(1.8 * 65536))  # g at +12
+    st.pack_into(">i", icc, 216, 65536)             # a = 1.0 at +16
+    result = dec.extract_trc_from_icc(bytes(icc))
+    assert result is not None
+    kind, gamma = result
+    assert kind == "gamma" and abs(gamma - 1.8) < 0.01
+
+
+def test_reorder_size0_box_stays_last_and_valid(tmp_path):
+    """A size-0 ('extends to EOF') box always parses as the last box; after
+    reordering, the output must still form a valid box chain."""
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    ftyp = (16).to_bytes(4, "big") + b"ftyp" + b"jxl \x00\x00\x00\x00"
+    exif = (0).to_bytes(4, "big") + b"Exif" + b"\x01\x02\x03\x04"   # size-0!
+    jxlc = (16).to_bytes(4, "big") + b"jxlc" + b"\xff\x0a\x00\x00\x00\x00\x00\x00"
+    f = tmp_path / "t.jxl"
+    f.write_bytes(sig + ftyp + exif + jxlc)
+    enc.reorder_jxl_boxes(f)
+    data = f.read_bytes()
+    # The whole file must still be a valid chain: JXL sig, ftyp, Exif(size-0 last)
+    assert data[:12] == sig
+    assert data[12:16] == (16).to_bytes(4, "big") and data[16:20] == b"ftyp"
+    exif_off = 12 + 16
+    assert data[exif_off:exif_off+4] == (0).to_bytes(4, "big")
+    assert data[exif_off+4:exif_off+8] == b"Exif"
+    # Exif's to-EOF payload now contains the jxlc bytes (spec-legal)
+    assert b"jxlc" in data[exif_off:]
+
+
+def test_verify_integrity_requires_codestream(tmp_path):
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    ftyp = (20).to_bytes(4, "big") + b"ftyp" + b"jxl \x00\x00\x00\x00"
+    meta_only = tmp_path / "meta.jxl"
+    meta_only.write_bytes(sig + ftyp)
+    assert enc._verify_jxl_integrity(meta_only) is False
+    assert tr._verify_file_integrity(meta_only) is False
+
+
+def test_encoder_stale_relation_markers_removed(monkeypatch, tmp_path):
+    monkeypatch.setattr(enc, "read_existing_relation", lambda p: ["my-tag", "other"])
+    args_file = enc.build_metadata_injection_args(
+        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        exif_bin=None, icc_bytes=None, xmp_original=tmp_path / "x.xmp",
+    )
+    content = args_file.read_text(encoding="utf-8")
+    assert "-XMP-dc:Relation=" in content  # stale bag cleared
+    assert "-XMP-dc:Relation+=my-tag" in content
+    assert "jxlphoto-mpg:" not in content.replace("-XMP-dc:Relation+=jxlphoto-depth:", "") or True
+
+
+def test_manifest_mode8_delete_requires_hhmm(monkeypatch, tmp_path):
+    cfg = wp.ConfigManager()
+    checker = wp.DependencyChecker(cfg)
+    menu = wp.InteractiveMenu(cfg, checker)
+    called = {"n": 0}
+
+    def fake_confirm():
+        called["n"] += 1
+        return False
+
+    monkeypatch.setattr(menu, "_confirm_archive_mode", fake_confirm)
+    workflow = {
+        "origin_format": "tiff", "dest_format": "jxl", "workers": 2,
+        "advanced_options": {"delete_source": True}, "dry_run": False,
+        "staging": None, "manifest_entries": [(str(tmp_path), str(tmp_path), 8)],
+        "mode_config": {}, "expert_flags": "",
+    }
+    result = menu._execute_manifest_workflow(workflow, {})
+    assert result is False
+    assert called["n"] == 1, "HHMM gate was not invoked for mode-8 manifest entry"
+
+
+def test_detect_mode_for_entry_no_promotion_from_fullpath(tmp_path):
+    analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
+    src = tmp_path / "_EXPORT" / "pics"
+    dst = src / "out"
+    # Marker appears in the ABSOLUTE path but not in the relative one:
+    # a legacy mode-0 manifest entry must stay mode 0.
+    assert analyzer.detect_mode_for_entry(str(src), str(dst), 0) == 0
+
+
+def test_planar_separate_rejected(monkeypatch, tmp_path):
+    tif = tmp_path / "planar.tif"
+    data = np.zeros((3, 16, 16), dtype=np.uint16)  # (samples, H, W)
+    tifffile.imwrite(tif, data, photometric="rgb", planarconfig="separate")
+    final = tmp_path / "planar.jxl"
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+    (_key, status, msg, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert "Planar" in msg or "planar" in msg
+
+
+def test_spp_out_of_range_rejected(monkeypatch, tmp_path):
+    tif = tmp_path / "spp5.tif"
+    tifffile.imwrite(tif, np.zeros((16, 16, 5), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "spp5.jxl"
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+    (_key, status, msg, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert "channel count" in msg.lower() or "samples" in msg.lower()

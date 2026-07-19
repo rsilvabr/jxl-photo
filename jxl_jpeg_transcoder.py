@@ -70,10 +70,11 @@ def _verify_file_integrity(file_path: Path) -> bool:
             if header != b'\x00\x00\x00\x0cJXL \r\n\x87\n':
                 return False
             # Walk the box chain: every box must be well-formed and the chain
-            # must end exactly at EOF (same strength as the TIFF encoder's
-            # integrity check — both guard source deletion).
+            # must end exactly at EOF. A codestream box (jxlc/jxlp) must be
+            # present — a metadata-only file must never pass the delete gate.
             file_size = stat.st_size
             i = 12
+            has_codestream = False
             with open(file_path, 'rb') as f:
                 while i < file_size:
                     if i + 8 > file_size:
@@ -81,8 +82,10 @@ def _verify_file_integrity(file_path: Path) -> bool:
                     f.seek(i)
                     box_header = f.read(8)
                     size = int.from_bytes(box_header[0:4], "big")
+                    if box_header[4:8] in (b"jxlc", b"jxlp"):
+                        has_codestream = True
                     if size == 0:
-                        return True
+                        return has_codestream
                     if size == 1:
                         if i + 16 > file_size:
                             return False
@@ -94,7 +97,7 @@ def _verify_file_integrity(file_path: Path) -> bool:
                     if i + size > file_size:
                         return False
                     i += size
-            return i == file_size
+            return has_codestream and i == file_size
         
         elif ext in ('.jpg', '.jpeg'):
             # JPEG starts with SOI marker 0xFFD8
@@ -246,8 +249,11 @@ def _abort_on_duplicate_outputs(pairs):
                      "Rename inputs or pick another mode/folder to avoid silent overwrites.")
         sys.exit(2)
 
-# Charset directive that must precede any non-ASCII file path in an argfile.
-_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n"
+# Charset directives for exiftool argfiles:
+# - FileName=UTF8: file paths in the argfile are UTF-8.
+# - UTF8: tag VALUES read/written are UTF-8 (non-ASCII metadata round-trips
+#   without codepage corruption).
+_ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
 
 
 def _run_exiftool_argfile(args_lines, timeout=60):
@@ -267,7 +273,7 @@ def _run_exiftool_argfile(args_lines, timeout=60):
             af.write("\n")
         return subprocess.run(
             [_get_exiftool_cmd(), "-@", argfile],
-            capture_output=True, timeout=timeout
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
         )
     finally:
         if argfile:
@@ -302,7 +308,9 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
             )
             if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
                 content = r.stdout.strip()
-                clean = re.sub(r'ICC:[A-Za-z0-9+/=\s]+', '', content).strip()
+                # Blob is bounded: base64 chars only up to the next pipe or EOL,
+                # so a trailing " | Real App" segment is never eaten.
+                clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
                 clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
                 clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
                 clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
@@ -395,6 +403,9 @@ def setup_logger():
     return log_file
 
 
+_rejected_log_lock = threading.Lock()
+
+
 def _log_rejected_file(file_path, reason):
     """Log rejected files to Logs/jxl_jpeg_transcoder/rejected_files.log for easy review."""
     try:
@@ -402,8 +413,10 @@ def _log_rejected_file(file_path, reason):
         rej_dir.mkdir(parents=True, exist_ok=True)
         rej_file = rej_dir / "rejected_files.log"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(rej_file, "a", encoding="utf-8") as f:
-            f.write(f"{timestamp} | {reason} | {file_path}\n")
+        # Locked: called from worker threads; concurrent appends would interleave.
+        with _rejected_log_lock:
+            with open(rej_file, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} | {reason} | {file_path}\n")
     except Exception:
         pass
 
@@ -576,14 +589,19 @@ def reorder_jxl_boxes(jxl_path: Path):
         else:
             other_boxes.append((name, h, p))
 
+    # Final order: structure -> metadata -> codestream -> others
+    ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
+
+    # A box that declared size 0 ("extends to EOF") is only valid as the LAST
+    # box in the file. If regrouping moved it earlier, rewrite its header with
+    # the real computed size, otherwise everything after it becomes payload
+    # and the file is corrupt.
     out = b""
-    for _, h, p in meta_order_boxes:
-        out += h + p
-    for _, h, p in meta_extra_boxes:
-        out += h + p
-    for _, h, p in codestream_boxes:
-        out += h + p
-    for _, h, p in other_boxes:
+    for idx, (name, h, p) in enumerate(ordered):
+        declared = int.from_bytes(h[0:4], "big")
+        if declared == 0 and idx < len(ordered) - 1:
+            real_size = 8 + len(p)
+            h = real_size.to_bytes(4, "big") + h[4:8]
         out += h + p
     jxl_path.write_bytes(out)
 
@@ -1887,21 +1905,34 @@ def cmd_auto(args):
     _process_file_group(jxl_convert_files, args, use_transcode=False, collect_only=all_pairs)
     _abort_on_duplicate_outputs(all_pairs)
 
-    # Process JPEG files (lossless encode to JXL)
+    # Output-vs-input collision: e.g. photo.jpg (encode) + photo.jxl (decode) in
+    # the same folder. Encoding first would overwrite the decode source before
+    # it is ever read — refuse loudly instead of silently losing the original.
+    import os as _os
+    inputs_norm = set()
+    for f in jpeg_files + png_files + jxl_transcode_files + jxl_convert_files:
+        inputs_norm.add(_os.path.normcase(str(f)))
+    collisions = []
+    for src, out in all_pairs:
+        if _os.path.normcase(str(out)) in inputs_norm and _os.path.normcase(str(out)) != _os.path.normcase(str(src)):
+            collisions.append((src, out))
+    if collisions:
+        for src, out in collisions[:10]:
+            logger.error(f"Output would overwrite another input: {src.name} -> {out.name}")
+        if len(collisions) > 10:
+            logger.error(f"... and {len(collisions) - 10} more")
+        logger.error("Aborting: an output path equals another file that must be processed. "
+                     "Rename files or use a different mode/folder.")
+        sys.exit(2)
+
+    # Decode groups run BEFORE encode groups, so a same-stem pair can never
+    # have its JXL source overwritten before decoding (extra belt on top of
+    # the collision guard above).
     totals = {"ok": 0, "err": 0, "skipped": 0}
 
     def _merge(tally):
         for k in totals:
             totals[k] += tally.get(k, 0)
-
-    if jpeg_files:
-        logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
-        _merge(_process_file_group(jpeg_files, args, use_transcode=True))
-
-    # Process PNG files (convert encode to JXL; no lossless transcode for PNG)
-    if png_files:
-        logger.info(f"\n--- Processing {len(png_files)} PNG files (convert encode) ---")
-        _merge(_process_file_group(png_files, args, use_transcode=False, direction="to_jxl"))
 
     # Process JXL transcode files (lossless decode to JPEG)
     if jxl_transcode_files:
@@ -1912,6 +1943,16 @@ def cmd_auto(args):
     if jxl_convert_files:
         logger.info(f"\n--- Processing {len(jxl_convert_files)} JXL files without jbrd (lossy) ---")
         _merge(_process_file_group(jxl_convert_files, args, use_transcode=False))
+
+    # Process JPEG files (lossless encode to JXL)
+    if jpeg_files:
+        logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
+        _merge(_process_file_group(jpeg_files, args, use_transcode=True))
+
+    # Process PNG files (convert encode to JXL; no lossless transcode for PNG)
+    if png_files:
+        logger.info(f"\n--- Processing {len(png_files)} PNG files (convert encode) ---")
+        _merge(_process_file_group(png_files, args, use_transcode=False, direction="to_jxl"))
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"AUTO MODE complete | Total: {total_files} files | "
@@ -2139,8 +2180,8 @@ Examples:
     parser.add_argument("--rename-to", type=str, default="", help="Rename replacement")
 
     # Export marker (must match wrapper's configured marker)
-    parser.add_argument("--export-marker", type=str, default="_EXPORT",
-                        help="Folder name marker for modes 6/7 (default: _EXPORT)")
+    parser.add_argument("--export-marker", type=str, default=None,
+                        help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
 
     # Force override
     parser.add_argument("--force-transcode", action="store_true",
@@ -2157,6 +2198,13 @@ Examples:
     if args.workers < 1:
         print("ERROR: --workers must be >= 1")
         sys.exit(1)
+
+    if args.staging is not None:
+        try:
+            Path(args.staging).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"ERROR: staging directory is not usable: {args.staging} ({e})")
+            sys.exit(1)
 
     # --decode only makes sense for JXL inputs; reject it for other single
     # files instead of silently misrouting (e.g. djxl on a PNG).
