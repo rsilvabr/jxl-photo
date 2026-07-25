@@ -34,7 +34,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 > - **Everything exiftool goes through UTF-8 argfiles** — unicode paths, `[ ]` in folder names, and non-ASCII metadata all round-trip correctly on Windows.
 > - **The original third-pass audit** — mode 6 aborts on duplicate output destinations, `--delete-source` propagates through all wizard paths, multipage marker batch uses an argfile, decoder deletes partial outputs, `--decode` works on directories.
 >
-> Full notes: [docs/RELEASE_v1.8.1.md](docs/RELEASE_v1.8.1.md) · [Bug tracking](docs/bug_tracking_since_v1.0.md)
+> Full notes: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md)
 
 ### libjxl v0.12 Support (auto-detected)
 The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.
