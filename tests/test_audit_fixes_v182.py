@@ -17,6 +17,7 @@ Regression tests for the v1.8.2 audit fixes:
 
 import argparse
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -962,7 +963,8 @@ def test_staging_move_failure_does_not_abort(monkeypatch, tmp_path):
     assert results[0][1] == "ok"  # returned normally, no propagation
 
 
-def test_readonly_source_delete_does_not_abort(tmp_path):
+@pytest.mark.skipif(os.name != "nt", reason="read-only unlink protection is Windows semantics; root/Linux can delete read-only files")
+def test_readonly_source_delete_does_not_abort(tmp_path, monkeypatch):
     """Windows PermissionError on unlink (read-only file) must not crash the
     delete-source path."""
     src = tmp_path / "a.jxl"
@@ -970,9 +972,10 @@ def test_readonly_source_delete_does_not_abort(tmp_path):
     final = tmp_path / "a.jpg"
     final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
     monkeypatch.setattr(tr, "STORE_MD5", False)
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
     src.chmod(0o444)  # read-only -> unlink raises PermissionError on Windows
     try:
         results = [(str(src), "ok", str(final), None)]
@@ -980,15 +983,14 @@ def test_readonly_source_delete_does_not_abort(tmp_path):
         # call the real function with mocked worker results
         monkeypatch.setattr(tr, "decode_one_transcode",
                             lambda *a, **k: results[0])
-        monkeypatch.setattr(tr, "TEMP2_DIR", None)
-        tr.DELETE_SOURCE = True
         tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
         # No exception propagated; the read-only source is kept
         assert src.exists()
     finally:
-        src.chmod(0o666)
-        tr.DELETE_SOURCE = False
-        monkeypatch.undo()
+        try:
+            src.chmod(0o666)
+        except OSError:
+            pass
 
 
 def test_stream_child_healthy_long_run_not_killed():
@@ -1010,7 +1012,8 @@ def test_stream_child_silent_hang_killed():
     assert rc == -1
 
 
-def test_manifest_mode_excel_float_format(tmp_path):
+@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches wp.Confirm which requires rich")
+def test_manifest_mode_excel_float_format(tmp_path, monkeypatch):
     """Excel writes integers as '7.0' — that must parse as mode 7, not 0."""
     import csv
     manifest = tmp_path / "manifest_test.csv"
@@ -1022,13 +1025,12 @@ def test_manifest_mode_excel_float_format(tmp_path):
     menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
     menu._pick_manifest = lambda: str(manifest)
     workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(menu, "_print_error", lambda m: (_ for _ in ()).throw(AssertionError(m)))
+    monkeypatch.setattr(menu, "_print_error",
+                        lambda m: (_ for _ in ()).throw(AssertionError(m)))
     # Patch Confirm.ask to auto-proceed
-    monkey.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    monkeypatch.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
     assert menu._wizard_run_from_manifest(workflow) is True
     assert workflow["manifest_entries"][0][2] == 7
-    monkey.undo()
 
 
 def test_transcoder_reorder_raises_on_truncated_extended(tmp_path):
@@ -1039,3 +1041,98 @@ def test_transcoder_reorder_raises_on_truncated_extended(tmp_path):
     f.write_bytes(sig + ftyp + ext_box)
     with pytest.raises(RuntimeError):
         tr.reorder_jxl_boxes(f)
+
+
+# ---------------------------------------------------------------------------
+# eighth-pass fixes
+# ---------------------------------------------------------------------------
+
+def test_read_png_unexpected_shape_raises(monkeypatch, tmp_path):
+    """The shape check must NOT be swallowed by the imagecodecs fallback:
+    an unsupported shape is a hard per-file error, not a silent PIL degrade."""
+    png = tmp_path / "x.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    import imagecodecs
+    monkeypatch.setattr(imagecodecs, "png_decode",
+                        lambda b: np.zeros((4, 4, 5), dtype=np.uint8))
+    with pytest.raises(ValueError, match="Unsupported PNG array shape"):
+        dec.read_png_to_numpy(png, target_depth=16)
+
+
+def test_gray_alpha_without_marker_decodes(monkeypatch, tmp_path):
+    """Gray+alpha JXL WITHOUT the encoder's grayscale marker must still write
+    a valid TIFF (minisblack + extrasample), not die on 'expected 3, got 2'."""
+    src = tmp_path / "ga.jxl"
+    src.write_bytes(b"\x00" * 32)
+    out = tmp_path / "ga.tif"
+    dec.setup_logger()
+    dec.OVERWRITE = True
+
+    ga = np.dstack([np.full((8, 8), 300, dtype=np.uint16),
+                    np.full((8, 8), 65535, dtype=np.uint16)])
+    monkeypatch.setattr(dec, "decode_jxl_to_numpy",
+                        lambda *a, **k: (ga, None, "x", "roundtrip"))
+    monkeypatch.setattr(dec, "copy_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(dec, "cleanup_xmp_icc", lambda *a, **k: None)
+    monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", False)
+
+    main, status, _ = dec.convert_multipage_jxl_group(
+        src, [(src, 0, False, False, 0, False, None)], out, out)
+    assert status == "ok"
+    with tifffile.TiffFile(str(out)) as t:
+        pg = t.pages[0]
+        assert pg.samplesperpixel == 2
+        assert pg.photometric == tifffile.PHOTOMETRIC.MINISBLACK
+
+
+def test_mode7_resolver_case_insensitive(monkeypatch, tmp_path):
+    """Finder admits '_EXPORT/jxl' for subfolder 'JXL' — resolver must too
+    (Linux: Path.relative_to is case-sensitive)."""
+    f = tmp_path / "_EXPORT" / "jxl" / "photo.jxl"
+    monkeypatch.setattr(dec, "EXPORT_JXL_SUBFOLDER", "JXL")
+    out = dec.resolve_output(f, 7, tmp_path)
+    assert out is not None
+    monkeypatch.setattr(dec, "EXPORT_JXL_SUBFOLDER", "")
+
+    f2 = tmp_path / "_EXPORT" / "jxl" / "photo.tif"
+    monkeypatch.setattr(enc, "EXPORT_TIFF_SUBFOLDER", "JXL")
+    out2 = enc.resolve_output(f2, 7, tmp_path)
+    assert out2 is not None
+    monkeypatch.setattr(enc, "EXPORT_TIFF_SUBFOLDER", "")
+
+
+def test_marker_matches_underscore_boundary():
+    for mod in (enc, dec, tr, wp):
+        m = mod._marker_matches
+        assert not m("_exports", "_export"), f"{mod.__name__}: _EXPORTS must not match"
+        assert m("_export", "_export")
+        assert m("my_export", "_export")
+        assert m("_export_2024", "_export")
+        assert m("export_lightroom", "_export")
+        assert not m("reexport", "_export")
+
+
+def test_finders_exclude_tool_output_folders(tmp_path):
+    (tmp_path / "recovered_jpeg").mkdir()
+    (tmp_path / "recovered_jpeg" / "photo.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "converted_jxl").mkdir()
+    (tmp_path / "converted_jxl" / "photo.jxl").write_bytes(b"\x00" * 16)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "photo.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "real" / "photo.jxl").write_bytes(b"\x00" * 16)
+    (tmp_path / "real" / "photo.tif").write_bytes(b"\x00" * 16)
+
+    assert [f.name for f in tr.find_jpegs_recursive(tmp_path)] == ["photo.jpg"]
+    assert [f.name for f in tr.find_jxls_recursive(tmp_path)] == ["photo.jxl"]
+    assert [f.name for f in dec.find_jxls_recursive(tmp_path)] == ["photo.jxl"]
+    assert [f.name for f in enc.find_tiffs_recursive(tmp_path)] == ["photo.tif"]
+
+
+def test_magick_icc_args_srgb_uses_profile():
+    args = tr._magick_icc_args("sRGB", ["-quality", "95"])
+    assert args[0] == "-profile"
+    assert args[1].endswith(".icc")
+    assert Path(args[1]).exists()
+    # file path input passes through
+    args2 = tr._magick_icc_args(r"C:\icc\AdobeRGB.icc", ["-depth", "16"])
+    assert args2 == ["-profile", r"C:\icc\AdobeRGB.icc", "-depth", "16"]

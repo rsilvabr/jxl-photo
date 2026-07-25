@@ -113,7 +113,14 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
     documentation promises.
     """
-    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
+    # (a backup folder, different thing) would match the '_EXPORT' marker.
+    # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if part_lower.startswith(marker_lower):
+        rest = part_lower[len(marker_lower):]
+        if not rest or rest[0] in '_- ':
+            return True
+    if part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
@@ -705,10 +712,13 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_TIFF_SUBFOLDER:
-            anchor = export_dir / EXPORT_TIFF_SUBFOLDER
-            if not _is_relative_to(tiff_path, anchor):
+            # Case-insensitive like find_tiffs_mode7: the finder admits
+            # '_EXPORT/jxl' for subfolder 'JXL', so the resolver must too
+            # (Path.relative_to is case-sensitive on Linux).
+            rel_parts = tiff_path.relative_to(export_dir).parts
+            if not rel_parts or rel_parts[0].lower() != EXPORT_TIFF_SUBFOLDER.lower():
                 return None  # Not inside the specific subfolder
-            rel = tiff_path.relative_to(anchor)
+            rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(tiff_path.name)
         else:
             rel_parts = tiff_path.relative_to(export_dir).parts
             if not rel_parts:
@@ -2204,11 +2214,28 @@ def find_files_mode0(input_path: Path):
                 files.append(f)
     return files
 
+# Folder names produced by this toolkit (all scripts). Recursive scans skip
+# them, otherwise a second run would re-process the toolkit's own outputs
+# (e.g. TIFFs decoded into converted_tiff/ being re-encoded).
+_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
+    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
+    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
+    "jxl_jpeg", "jpeg_recovered",
+})
+
+
+def _is_tool_output_path(p: Path) -> bool:
+    """True if any folder component is a known toolkit output folder."""
+    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
+
+
 def find_tiffs_recursive(input_path: Path):
     seen = set()
     files = []
     for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
         for f in input_path.rglob(ext):
+            if _is_tool_output_path(f):
+                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)

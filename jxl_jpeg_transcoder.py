@@ -54,12 +54,13 @@ def _verify_file_integrity(file_path: Path) -> bool:
         stat = file_path.stat()
         if stat.st_size == 0:
             return False
-        
+
         ext = file_path.suffix.lower()
-        
+
+        # Read the header once; the JXL box walk below reuses the same handle.
         with open(file_path, 'rb') as f:
             header = f.read(12)
-        
+
         if len(header) < 2:
             return False
         
@@ -75,6 +76,7 @@ def _verify_file_integrity(file_path: Path) -> bool:
             file_size = stat.st_size
             i = 12
             has_codestream = False
+            # Box walk re-opens the file only on the delete-gate path (JXL).
             with open(file_path, 'rb') as f:
                 while i < file_size:
                     if i + 8 > file_size:
@@ -162,7 +164,14 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
     documentation promises.
     """
-    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
+    # (a backup folder, different thing) would match the '_EXPORT' marker.
+    # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if part_lower.startswith(marker_lower):
+        rest = part_lower[len(marker_lower):]
+        if not rest or rest[0] in '_- ':
+            return True
+    if part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
@@ -568,6 +577,7 @@ def has_jbrd_box(jxl_path: Path) -> bool:
 
                 if payload > 0:
                     f.seek(payload, 1)
+        return False
     except Exception:
         return False
 
@@ -676,10 +686,27 @@ def find_jpegs_flat(input_path: Path):
                 files.append(f)
     return files
 
+# Folder names produced by this toolkit (all scripts). Recursive scans skip
+# them, otherwise auto mode re-processes its own outputs on every rerun
+# (recovered_jpeg/*.jpg -> converted_jxl/*.jxl -> recovered_jpeg/*.jpg ...).
+_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
+    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
+    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
+    "jxl_jpeg", "jpeg_recovered",
+})
+
+
+def _is_tool_output_path(p: Path) -> bool:
+    """True if any folder component is a known toolkit output folder."""
+    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
+
+
 def find_jpegs_recursive(input_path: Path):
     seen, files = set(), []
     for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
         for f in input_path.rglob(ext):
+            if _is_tool_output_path(f):
+                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
@@ -700,6 +727,8 @@ def find_jxls_recursive(input_path: Path):
     seen, files = set(), []
     for ext in ("*.jxl", "*.JXL"):
         for f in input_path.rglob(ext):
+            if _is_tool_output_path(f):
+                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
@@ -710,6 +739,8 @@ def find_pngs_recursive(input_path: Path):
     seen, files = set(), []
     for ext in ("*.png", "*.PNG"):
         for f in input_path.rglob(ext):
+            if _is_tool_output_path(f):
+                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
@@ -892,10 +923,12 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
             rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
         else:
             if EXPORT_JPEG_SUBFOLDER:
-                anchor = export_dir / EXPORT_JPEG_SUBFOLDER
-                if not _is_relative_to(src_path, anchor):
+                # Case-insensitive match on the subfolder component
+                # (Path.relative_to is case-sensitive on Linux).
+                rel_parts = src_path.relative_to(export_dir).parts
+                if not rel_parts or rel_parts[0].lower() != EXPORT_JPEG_SUBFOLDER.lower():
                     return None
-                rel = src_path.relative_to(anchor)
+                rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(src_path.name)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
                 if not rel_parts:
@@ -1381,10 +1414,13 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         else:
             # Mode 7: only files inside export marker / EXPORT_JPEG_SUBFOLDER
             if EXPORT_JPEG_SUBFOLDER:
-                anchor = export_dir / EXPORT_JPEG_SUBFOLDER
-                if not _is_relative_to(src_path, anchor):
+                # Case-insensitive match on the subfolder component
+                # (Path.relative_to is case-sensitive on Linux; the encoder/
+                # decoder resolvers use the same rule).
+                rel_parts = src_path.relative_to(export_dir).parts
+                if not rel_parts or rel_parts[0].lower() != EXPORT_JPEG_SUBFOLDER.lower():
                     return None  # Not in the specific subfolder
-                rel = src_path.relative_to(anchor)
+                rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(src_path.name)
             else:
                 rel_parts = src_path.relative_to(export_dir).parts
                 if not rel_parts:
@@ -1461,6 +1497,49 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
 
+_srgb_icc_cache = None
+
+
+def _get_srgb_icc_path() -> Optional[str]:
+    """Generate (once per process) a real sRGB ICC profile via Pillow's
+    LittleCMS and return its path, or None if unavailable.
+
+    Used for --to-srgb: `magick -colorspace sRGB` is a mathematical color-model
+    conversion, not an ICC-managed transform — for wide-gamut sources
+    (ProPhoto/AdobeRGB) it reinterprets more than it converts. `-profile` with
+    a real sRGB ICC performs the proper gamut mapping.
+    """
+    global _srgb_icc_cache
+    if _srgb_icc_cache is not None:
+        return _srgb_icc_cache
+    try:
+        from PIL import ImageCms
+        profile_bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        fd, tmp_name = tempfile.mkstemp(suffix=".icc", prefix="srgb_", dir=TEMP_DIR)
+        with os.fdopen(fd, "wb") as f:
+            f.write(profile_bytes)
+        _srgb_icc_cache = tmp_name
+    except Exception:
+        _srgb_icc_cache = False  # do not retry every file
+    return _srgb_icc_cache or None
+
+
+def _magick_icc_args(output_icc: str, extra: list, tmp_dir: Path = None) -> list:
+    """Build the ImageMagick color args for an output ICC.
+
+    File path -> `-profile <file>`. The 'sRGB' built-in alias prefers a real
+    sRGB profile via `-profile` (proper ICC transform); falls back to
+    `-colorspace sRGB` if Pillow is unavailable.
+    """
+    if output_icc == "sRGB":
+        icc_path = _get_srgb_icc_path()
+        if icc_path:
+            return ["-profile", icc_path] + extra
+        logger.debug("Pillow/ImageCms unavailable for sRGB profile; using -colorspace fallback")
+        return ["-colorspace", "sRGB"] + extra
+    return ["-profile", output_icc] + extra
+
+
 def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     quality: int, fmt: str, bit_depth: int,
                     output_icc: str, use_ram: bool, reconvert_val: bool, smart: bool) -> tuple:
@@ -1497,15 +1576,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         if is_png:
             # PNG output
             if output_icc and MAGICK_AVAILABLE:
-                # Handle built-in color spaces vs ICC file paths
-                builtins = ('sRGB',)
-                if output_icc in builtins:
-                    cs_name = output_icc.replace(' ', '')
-                    magick_output = ["-colorspace", cs_name, "-depth", str(bit_depth)]
-                    logger.debug(f"Using colorspace conversion: {cs_name}")
-                else:
-                    magick_output = ["-profile", output_icc, "-depth", str(bit_depth)]
-                    logger.debug(f"Using ICC profile: {output_icc}")
+                # Color conversion: real ICC profile via -profile when possible
+                # (proper ICC transform, not a color-model reinterpretation).
+                magick_output = _magick_icc_args(output_icc, ["-depth", str(bit_depth)])
+                logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                 # djxl does not support --output_format; write a temporary PNG (format by
                 # extension) and then convert with ImageMagick. Same as the --no-ram path.
                 # capture_output keeps worker logs clean and preserves stderr for errors.
@@ -1525,17 +1599,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         else:
             # JPEG output via djxl directly (no magick needed unless ICC conversion)
             if output_icc and MAGICK_AVAILABLE:
-                # Handle built-in color spaces vs ICC file paths
-                builtins = ('sRGB',)
-                if output_icc in builtins:
-                    # Use colorspace conversion (no ICC file needed)
-                    cs_name = output_icc.replace(' ', '')  # 'Adobe RGB' -> 'AdobeRGB'
-                    magick_output = ["-colorspace", cs_name, "-quality", str(quality)]
-                    logger.debug(f"Using colorspace conversion: {cs_name}")
-                else:
-                    # Use ICC profile file
-                    magick_output = ["-profile", output_icc, "-quality", str(quality)]
-                    logger.debug(f"Using ICC profile: {output_icc}")
+                # Color conversion: real ICC profile via -profile when possible
+                # (proper ICC transform, not a color-model reinterpretation).
+                magick_output = _magick_icc_args(output_icc, ["-quality", str(quality)])
+                logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                 # djxl does not support --output_format; decode to a temporary PNG (format by
                 # extension) and let ImageMagick convert to the final JPEG.
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:

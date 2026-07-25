@@ -299,7 +299,7 @@ Generate a CSV to edit before running:
 ```csv
 Source,Destination,Mode,Direction
 F:\2025\Tokyo\_Export\TIFF,F:\2025\Tokyo\_Export\TIFF,6,tiff2jxl
-F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL,7,tiff2jxl
+F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\16B_JXL,7,tiff2jxl
 # F:\2025\Osaka\RAW,F:\2025\Osaka\JXL,0,tiff2jxl
 ```
 
@@ -307,6 +307,7 @@ F:\2025\Kyoto\_EXPORT\16bit,F:\2025\Kyoto\_EXPORT\JXL,7,tiff2jxl
 - Comment with `#` to skip
 - Rerun same manifest anytime
 - The `Direction` column binds the manifest to the workflow that generated it — running it from a different direction (e.g. a `tiff2jxl` manifest in a `jxl2tiff` session) is refused with a clear error instead of running the wrong script. Manifests without the column (older format) still run, with a warning.
+- **Destination column:** only modes **0 and 2** honor it. Modes 1/3/4/5/6/7/8 compute their own output locations from each script's settings (`16B_JXL`, `converted_jxl`, ...) — the wrapper prints a warning when a manifest entry's Destination is ignored.
 - **Manifest compatibility:** manifests are guaranteed to work with the version that generated them. Backward compatibility with older 2-column manifests is not guaranteed; regenerate the manifest if upgrading from a previous version.
 
 ---

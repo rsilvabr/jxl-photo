@@ -97,7 +97,14 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
     documentation promises. Same rule as the three backend scripts.
     """
-    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
+    # (a backup folder, different thing) would match the '_EXPORT' marker.
+    # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if part_lower.startswith(marker_lower):
+        rest = part_lower[len(marker_lower):]
+        if not rest or rest[0] in '_- ':
+            return True
+    if part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
@@ -2811,6 +2818,22 @@ class InteractiveMenu:
         workers = workflow['workers']
         advanced = workflow.get('advanced_options', {})
         dry_run = workflow.get('dry_run', False)
+
+        # The Destination column is only honored by modes 0 and 2 — every other
+        # mode computes its own output location from constants (_EXPORT/16B_JXL,
+        # converted_jxl/, ...). Warn once per diverging entry instead of letting
+        # the user believe their edited destinations took effect.
+        ignored_dests = [(s, d, m) for s, d, m in manifest_entries
+                         if m not in (0, 2) and d and Path(d) != Path(s)]
+        if ignored_dests:
+            warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
+                    f"Destination column (only modes 0/2 honor it) — outputs follow the mode rules.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{warn}[/yellow]")
+            else:
+                print(f"WARNING: {warn}")
+            for s, d, m in ignored_dests[:5]:
+                print(f"  mode {m}: {d} (ignored)")
 
         # Determine which script to use
         if origin == 'tiff' and dest == 'jxl':

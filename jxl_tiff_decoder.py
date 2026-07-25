@@ -67,7 +67,14 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
     documentation promises.
     """
-    if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
+    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
+    # (a backup folder, different thing) would match the '_EXPORT' marker.
+    # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if part_lower.startswith(marker_lower):
+        rest = part_lower[len(marker_lower):]
+        if not rest or rest[0] in '_- ':
+            return True
+    if part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
@@ -653,9 +660,21 @@ def read_png_to_numpy(png_path, target_depth=16):
     16-bit RGB/RGBA PNGs (it returns uint8 data even for 16-bit files).
     """
     # Try imagecodecs first for faithful 16-bit RGB/RGBA support.
+    # Only the DECODE call lives in this try: an unexpected array shape is a
+    # hard error (unsupported/corrupt PNG) and must NOT fall through to the
+    # 8-bit PIL path silently.
+    arr = None
     try:
         import imagecodecs
         arr = imagecodecs.png_decode(Path(png_path).read_bytes())
+    except Exception:
+        # imagecodecs not available or failed; fall through to PIL.
+        # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
+        if target_depth == 16:
+            logger.warning("imagecodecs not available or failed; falling back to PIL. "
+                           "16-bit RGB/RGBA PNG precision will be degraded to 8-bit.")
+
+    if arr is not None:
         if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[2] == 1):
             # Grayscale — keep it 2D so single-channel JXLs decode back to
             # single-channel TIFF pages instead of being expanded to RGB.
@@ -691,17 +710,9 @@ def read_png_to_numpy(png_path, target_depth=16):
                     alpha = np.rint(alpha / 257).astype(np.uint8)
             return rgb, alpha
         else:
-            # Unexpected shape from imagecodecs — fail loudly instead of
-            # silently degrading through the PIL fallback (which would lose
-            # 16-bit precision without even the warning below).
+            # Unexpected shape from imagecodecs — fail loudly (per-file error)
+            # instead of silently degrading through the PIL fallback.
             raise ValueError(f"Unsupported PNG array shape from imagecodecs: {arr.shape}")
-    except Exception:
-        # imagecodecs not available or failed; fall through to PIL.
-        # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
-        if target_depth == 16:
-            logger.warning("imagecodecs not available or failed; falling back to PIL. "
-                           "16-bit RGB/RGBA PNG precision will be degraded to 8-bit.")
-        pass
 
     with Image.open(png_path) as img:
         # Handle 16-bit modes (I;16, I) - return as 2D uint16 grayscale
@@ -1453,10 +1464,13 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         export_dir = Path(*parts[:export_idx + 1])
 
         if EXPORT_JXL_SUBFOLDER:
-            anchor = export_dir / EXPORT_JXL_SUBFOLDER
-            if not _is_relative_to(jxl_path, anchor):
+            # Case-insensitive like find_jxls_mode7: the finder admits
+            # '_EXPORT/jxl' for subfolder 'JXL', so the resolver must too
+            # (Path.relative_to is case-sensitive on Linux).
+            rel_parts = jxl_path.relative_to(export_dir).parts
+            if not rel_parts or rel_parts[0].lower() != EXPORT_JXL_SUBFOLDER.lower():
                 return None  # Not inside the specific subfolder
-            rel = jxl_path.relative_to(anchor)
+            rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(jxl_path.name)
         else:
             rel_parts = jxl_path.relative_to(export_dir).parts
             if not rel_parts:
@@ -1677,6 +1691,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                                 kwargs['photometric'] = 'minisblack'
                         else:
                             kwargs['photometric'] = 'minisblack'
+                    elif pixels.ndim == 3 and pixels.shape[2] == 2:
+                        # Gray+alpha from a JXL WITHOUT the encoder's grayscale
+                        # marker (third-party files, --strip): same handling,
+                        # otherwise tifffile would reject "expected 3, got 2".
+                        kwargs['photometric'] = 'minisblack'
+                        kwargs['extrasamples'] = 'UNASSALPHA'
                     elif pixels.ndim == 3 and pixels.shape[2] == 4:
                         # Preserve RGBA (alpha channel) in the output TIFF
                         kwargs['photometric'] = 'RGB'
@@ -1893,12 +1913,29 @@ def find_jxls_flat(path):
                 files.append(f)
     return files
 
+# Folder names produced by this toolkit (all scripts). Recursive scans skip
+# them, otherwise a second run would re-process the toolkit's own outputs
+# (e.g. JXLs encoded into converted_jxl/ being re-decoded).
+_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
+    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
+    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
+    "jxl_jpeg", "jpeg_recovered",
+})
+
+
+def _is_tool_output_path(p: Path) -> bool:
+    """True if any folder component is a known toolkit output folder."""
+    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
+
+
 def find_jxls_recursive(path):
     """Find all JXL files recursively"""
     seen = set()
     files = []
     for ext in ("*.jxl", "*.JXL"):
         for f in path.rglob(ext):
+            if _is_tool_output_path(f):
+                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
