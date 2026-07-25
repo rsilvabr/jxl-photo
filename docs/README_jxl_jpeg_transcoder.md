@@ -527,7 +527,7 @@ File progress examples:
 [14:23:01] | INFO | [1/100] OK | photo.jpg → photo.jxl
 [14:23:01] | INFO | [2/100] OVERWRITE | photo.jpg → photo.jxl
 [14:23:01] | INFO | [3/100] SKIP (exists) | photo.jpg
-[14:23:01] | INFO | [4/100] SKIP (destination newer) | photo.jpg  # --sync mode only
+[14:23:01] | INFO | [4/100] SKIP (up to date) | photo.jpg  # --sync mode only
 [14:23:01] | INFO | [5/100] OK ✓ MD5 PASS | photo.jxl
 ```
 
@@ -539,7 +539,7 @@ File progress examples:
 
 Use `--overwrite` to force overwriting existing files, or `--sync` to only overwrite if source is newer.
 
-### "SKIP (destination newer)" in --sync mode
+### "SKIP (up to date)" in --sync mode
 
 This means the existing output file has a more recent modification time than the source. The script assumes the output is up-to-date and skips processing. Use `--overwrite` to force processing regardless of timestamps.
 

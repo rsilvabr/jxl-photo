@@ -1682,7 +1682,9 @@ class InteractiveMenu:
             for row in rows:
                 if row and len(row) >= 1:
                     source = row[0].strip()
-                    dest = row[1].strip() if len(row) > 1 else source
+                    # Empty Destination cell must fall back to Source, not to
+                    # "" — Path("") becomes "." (the CWD) downstream.
+                    dest = (row[1].strip() or source) if len(row) > 1 else source
                     # Mode cell: Excel often formats integers as "7.0" — a
                     # naive isdigit() check would silently turn that into
                     # mode 0 and scatter outputs next to the sources.
@@ -3015,7 +3017,12 @@ class InteractiveMenu:
                                    origin: str, dest: str, workers: int,
                                    workflow: Dict, advanced: Dict) -> Optional[List]:
         """Build command line for a single manifest entry."""
-        cmd = [sys.executable, script, source, dest_path, '--mode', str(mode), '--workers', str(workers)]
+        cmd = [sys.executable, script, source]
+        # Only append the output positional when it is non-empty — an empty
+        # Destination would become Path('.') (the wrapper's CWD) downstream.
+        if dest_path:
+            cmd.append(dest_path)
+        cmd.extend(['--mode', str(mode), '--workers', str(workers)])
 
         # Pass configured export marker so scripts match the wrapper's detection.
         export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker

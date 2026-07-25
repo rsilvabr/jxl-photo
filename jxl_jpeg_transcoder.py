@@ -1022,6 +1022,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         # From this point the tool writes to write_path; on failure the
         # partial output must be removed (see except below).
         output_dirty = False
+        _pre_identity = _capture_output_identity(write_path, final_path)
         if is_jpeg_encode:
             output_dirty = True
             r = subprocess.run(
@@ -1058,13 +1059,11 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), src_md5)
     except Exception as e:
-        # Remove any partial output produced by THIS run so the next run does
-        # not mistake it for a completed conversion and skip it.
-        try:
-            if output_dirty and write_path.exists():
-                write_path.unlink()
-        except (OSError, UnboundLocalError):
-            pass
+        # Remove any partial output produced by THIS run (identity-checked) so
+        # the next run does not mistake it for a completed conversion — but
+        # never a good pre-existing file the codec never touched.
+        if output_dirty:
+            _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
@@ -1090,6 +1089,11 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     # lossless, risking data loss (especially with --delete-source). Reject these
     # files early and log them for review.
     overwritten = final_path.exists()
+
+    # Initialized before ANY early raise (jbrd check, mkdir) so the except
+    # handler never hits unbound variables.
+    output_dirty = False
+    _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
         if is_jxl_decode and not has_jbrd_box(jxl_path):
@@ -1149,16 +1153,47 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         status = "reconvert" if overwritten else "ok"
         return (str(jxl_path), status, str(final_path), md5_verified)
     except Exception as e:
-        # Remove any partial output produced by THIS run so the next run does
-        # not mistake it for a completed conversion and skip it.
-        try:
-            if output_dirty and write_path.exists():
-                write_path.unlink()
-        except (OSError, UnboundLocalError):
-            pass
+        # Remove any partial output produced by THIS run (identity-checked) so
+        # the next run does not mistake it for a completed conversion — but
+        # never a good pre-existing file the codec never touched.
+        if output_dirty:
+            _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         return (str(jxl_path), "error", str(e), None)
+
+def _capture_output_identity(write_path: Path, final_path: Path):
+    """Capture (mtime_ns, size) of a pre-existing output (non-staging only).
+    Returns None for staging paths or nonexistent outputs."""
+    if write_path != final_path or not final_path.exists():
+        return None
+    try:
+        st = final_path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity) -> None:
+    """Delete write_path ONLY if this run actually wrote to it.
+
+    - Staging (write != final): always this run's file -> delete.
+    - No pre-existing identity: anything there is this run's partial -> delete.
+    - Identity changed: this run truncated/rewrote it -> delete.
+    - Identity UNCHANGED: this run never touched it (e.g. the codec failed at
+    startup with rc!=0) -> the good pre-existing file is KEPT.
+    """
+    try:
+        if write_path != final_path or pre_identity is None:
+            if write_path.exists():
+                write_path.unlink()
+            return
+        st = write_path.stat()
+        if (st.st_mtime_ns, st.st_size) != pre_identity:
+            write_path.unlink()
+    except OSError:
+        pass
+
 
 def process_group_transcode(group_pairs: list, workers: int, decode: bool, 
                             verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
@@ -1561,6 +1596,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         cmd += _cjxl_buffering_flag()
 
         output_dirty = True
+        _pre_identity = _capture_output_identity(write_path, final_path)
         r = subprocess.run(cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -1582,13 +1618,11 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), None)
     except Exception as e:
-        # Remove any partial output produced by THIS run so the next run does
-        # not mistake it for a completed conversion and skip it.
-        try:
-            if output_dirty and write_path.exists():
-                write_path.unlink()
-        except (OSError, UnboundLocalError):
-            pass
+        # Remove any partial output produced by THIS run (identity-checked) so
+        # the next run does not mistake it for a completed conversion — but
+        # never a good pre-existing file the codec never touched.
+        if output_dirty:
+            _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
         return (str(src_path), "error", str(e), None)
@@ -1661,6 +1695,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
     # unbound variable (e.g. if mkdir itself raises).
     output_dirty = False
     actual_out = write_path
+    _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
         write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1745,16 +1780,14 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
     except Exception as e:
-        # Remove any partial output produced by THIS run (including an
-        # alternate-extension orphan from the bit_depth fallback) so the next
-        # run does not mistake it for a completed conversion and skip it.
+        # Remove any partial output produced by THIS run (identity-checked),
+        # including an alternate-extension orphan from the bit_depth fallback —
+        # but never a good pre-existing file the codec never touched.
         if output_dirty:
             for candidate in {actual_out, write_path}:
-                try:
-                    if candidate.exists():
-                        candidate.unlink()
-                except OSError:
-                    pass
+                _delete_partial_if_written(
+                    candidate, final_path if candidate == actual_out else write_path,
+                    _pre_identity if candidate == actual_out else None)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         return (str(jxl_path), "error", str(e), None)

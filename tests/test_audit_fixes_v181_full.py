@@ -1439,7 +1439,6 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
     tif = tmp_path / "photo.tif"
     tifffile.imwrite(tif, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
     final = tmp_path / "photo.jxl"
-    final.write_bytes(b"")  # simulate the empty output
 
     monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
     monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
@@ -1448,8 +1447,9 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
     monkeypatch.setattr(enc, "reorder_jxl_boxes", lambda p: None)
 
     def fake_run(cmd, **kw):
-        if cmd[0] in ("cjxl", "cjxl.exe") or "cjxl" in str(cmd[0]):
-            return _FakeRun()  # rc=0, but file stays 0 bytes
+        if "cjxl" in str(cmd[0]):
+            final.write_bytes(b"")  # cjxl "succeeds" but wrote 0 bytes
+            return _FakeRun()
         return _FakeRun()
 
     monkeypatch.setattr(enc.subprocess, "run", fake_run)
@@ -1459,7 +1459,6 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
     (_k, status, msg, _) = enc.convert_one(tif, final, final)
     assert status == "error"
     assert "integrity" in msg.lower()
-    assert not final.exists() or final.stat().st_size > 0 or not final.exists()
     assert not final.exists(), "invalid output must be deleted"
 
 
@@ -1635,3 +1634,116 @@ def test_bare_codestream_rejected_at_gates(tmp_path):
     stub.write_bytes(b"\xff\x0a" + b"\x00" * 64)
     assert enc._verify_jxl_integrity(stub) is False
     assert tr._verify_file_integrity(stub) is False
+
+
+# ---------------------------------------------------------------------------
+# thirteenth-pass: never delete a good pre-existing output
+# ---------------------------------------------------------------------------
+
+def test_failing_reconvert_keeps_preexisting_output_encoder(monkeypatch, tmp_path):
+    """--overwrite on an existing good JXL + cjxl failing at startup: the good
+    file must SURVIVE (this run never wrote a byte)."""
+    tif = tmp_path / "photo.tif"
+    tifffile.imwrite(tif, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "photo.jxl"
+    good = b"\x00\x00\x00\x0cJXL \r\n\x87\n" + (8).to_bytes(4, "big") + b"jxlc"
+    final.write_bytes(good)
+
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    monkeypatch.setattr(enc.subprocess, "run",
+                        lambda *a, **k: _FakeRun(stderr=b"boom", returncode=1))
+    enc.setup_logger()
+    enc.OVERWRITE = True
+
+    (_k, status, _, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert final.read_bytes() == good, "pre-existing good JXL was deleted by a failed reconvert"
+
+
+def test_failing_reconvert_keeps_preexisting_output_decoder(monkeypatch, tmp_path):
+    """Decoder with djxl failing before TiffWriter ever opens the output:
+    the original TIFF must survive."""
+    jxl = tmp_path / "photo.jxl"
+    jxl.write_bytes(b"\x00" * 32)
+    final = tmp_path / "photo.tif"
+    good = b"II\x2a\x00" + b"\x00" * 1000
+    final.write_bytes(good)
+
+    monkeypatch.setattr(dec, "decode_jxl_to_numpy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("djxl auto failed: boom")))
+    dec.setup_logger()
+    dec.OVERWRITE = True
+
+    (_m, status, _) = dec.convert_multipage_jxl_group(
+        jxl, [(jxl, 0, False, False, 0, False, None)], final, final)
+    assert status == "error"
+    assert final.read_bytes() == good, "pre-existing good TIFF was deleted by a failed reconvert"
+
+
+def test_failing_reconvert_keeps_preexisting_output_transcoder(monkeypatch, tmp_path):
+    src = tmp_path / "photo.jxl"
+    src.write_bytes(b"\x00" * 32)
+    final = tmp_path / "photo.jpg"
+    good = b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9"
+    final.write_bytes(good)
+
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
+    monkeypatch.setattr(tr.subprocess, "run",
+                        lambda *a, **k: _FakeRun(stderr=b"boom", returncode=1))
+    tr.setup_logger()
+
+    (_, status, _, _) = tr.decode_one_transcode(src, final, final, False, True, False)
+    assert status == "error"
+    assert final.read_bytes() == good, "pre-existing good JPEG was deleted by a failed reconvert"
+
+
+def test_identity_helper_deletes_changed_and_keeps_unchanged(tmp_path):
+    f = tmp_path / "out.bin"
+    f.write_bytes(b"original")
+    pre = tr._capture_output_identity(f, f)
+    # unchanged -> keep
+    tr._delete_partial_if_written(f, f, pre)
+    assert f.read_bytes() == b"original"
+    # changed -> delete
+    f.write_bytes(b"changed-and-larger")
+    tr._delete_partial_if_written(f, f, pre)
+    assert not f.exists()
+    # no pre-existing -> delete whatever is there
+    f.write_bytes(b"partial")
+    tr._delete_partial_if_written(f, f, tr._capture_output_identity(f, f))
+    assert f.exists()  # identity was captured after write, unchanged
+    f.unlink()
+    f.write_bytes(b"partial")
+    tr._delete_partial_if_written(f, f, None)
+    assert not f.exists()
+
+
+def test_encoder_single_file_modes_3_4_5(monkeypatch, tmp_path):
+    src = tmp_path / "photo.tif"
+    tifffile.imwrite(src, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
+    enc.setup_logger()
+    for mode in (3, 4, 5):
+        monkeypatch.setattr(sys, "argv",
+                            ["jxl_tiff_encoder.py", str(src), "--mode", str(mode), "--dry-run"])
+        enc.main()  # must NOT find 0 files / crash
+
+
+def test_manifest_empty_destination_falls_back_to_source(tmp_path):
+    import csv
+    manifest = tmp_path / "m.csv"
+    with open(manifest, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Source", "Destination", "Mode", "Direction"])
+        w.writerow([str(tmp_path), "", "0", "tiff2jxl"])
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    menu._pick_manifest = lambda: str(manifest)
+    workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    assert menu._wizard_run_from_manifest(workflow) is True
+    assert workflow["manifest_entries"][0][1] == str(tmp_path), \
+        "empty Destination must fall back to Source, never Path('.')"
+    monkey.undo()

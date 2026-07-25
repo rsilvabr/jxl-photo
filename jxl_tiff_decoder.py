@@ -1673,6 +1673,19 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     except OSError:
         pass
 
+    # Identity of a pre-existing output (non-staging only). The error handler
+    # compares against this: a file whose identity is UNCHANGED was never
+    # touched by this run (e.g. djxl failed before TiffWriter ever opened the
+    # output — in that case the original TIFF is still intact on disk) and
+    # must be KEPT, not deleted.
+    _pre_identity = None
+    if write_path == final_path and already_exists:
+        try:
+            _st = final_path.stat()
+            _pre_identity = (_st.st_mtime_ns, _st.st_size)
+        except OSError:
+            pass
+
     with tempfile.TemporaryDirectory(prefix="tiff_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
         try:
@@ -1833,15 +1846,33 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             return str(main_jxl), status, str(final_path)
 
         except Exception as e:
-            # Remove any partial output so the next smart-sync run does not
-            # mistake it for a fresh, up-to-date TIFF and skip it forever.
-            # (If the file pre-existed, TiffWriter already truncated it, so the
-            # partial on disk is never the original.)
-            try:
-                if write_path.exists():
-                    write_path.unlink()
-            except OSError:
-                pass
+            # Remove any partial output produced by THIS run so the next
+            # smart-sync run does not mistake it for a fresh, up-to-date TIFF
+            # and skip it forever. The delete only happens when THIS run
+            # actually wrote: staging UUID file, no pre-existing file, or the
+            # on-disk identity changed. A pre-existing TIFF that was never
+            # touched (e.g. djxl/decode failed before TiffWriter opened the
+            # output) is KEPT — the old comment claiming "TiffWriter already
+            # truncated it" was only true for failures inside the writer.
+            if write_path != final_path:
+                try:
+                    if write_path.exists():
+                        write_path.unlink()
+                except OSError:
+                    pass
+            elif _pre_identity is None:
+                try:
+                    if write_path.exists():
+                        write_path.unlink()
+                except OSError:
+                    pass
+            else:
+                try:
+                    _st = write_path.stat()
+                    if (_st.st_mtime_ns, _st.st_size) != _pre_identity:
+                        write_path.unlink()
+                except OSError:
+                    pass
             n, total = next_count()
             logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
             return str(main_jxl), "error", str(e)

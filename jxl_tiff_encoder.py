@@ -1680,6 +1680,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
     # pre-existing JXL is never touched when we failed before writing.
     output_dirty = False
 
+    # Identity of a pre-existing output (non-staging only). The error handler
+    # compares against this: a file whose identity is UNCHANGED was never
+    # touched by this run (e.g. cjxl failed at startup) and must be kept.
+    _pre_identity = None
+    if write_path == final_path and final_path.exists():
+        try:
+            _st = final_path.stat()
+            _pre_identity = (_st.st_mtime_ns, _st.st_size)
+        except OSError:
+            pass
+
     with tempfile.TemporaryDirectory(prefix="jxl_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
         try:
@@ -2013,11 +2024,27 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
         except Exception as e:
             # Remove any partial/corrupt output produced by THIS run so the
             # next smart-sync run does not mistake it for a fresh, up-to-date
-            # JXL and skip it forever. A pre-existing JXL (output_dirty=False,
-            # i.e. we failed before cjxl started writing) is left untouched.
-            if output_dirty:
+            # JXL and skip it forever. The delete only happens when THIS run
+            # actually wrote (staging UUID file, or the on-disk identity
+            # changed): a pre-existing JXL that cjxl never touched (e.g. it
+            # failed at startup with rc!=0) is KEPT.
+            if output_dirty and write_path != final_path:
                 try:
                     if write_path.exists():
+                        write_path.unlink()
+                except OSError:
+                    pass
+            elif output_dirty and _pre_identity is None:
+                # No pre-existing file: anything at write_path is this run's partial
+                try:
+                    if write_path.exists():
+                        write_path.unlink()
+                except OSError:
+                    pass
+            elif output_dirty and _pre_identity is not None:
+                try:
+                    _st = write_path.stat()
+                    if (_st.st_mtime_ns, _st.st_size) != _pre_identity:
                         write_path.unlink()
                 except OSError:
                     pass
@@ -2529,7 +2556,12 @@ def main():
             tiffs = find_tiffs_recursive(args.input)
         output_root = args.input
     else:
-        tiffs = find_tiffs_recursive(args.input)
+        # Modes 3/4/5: a single FILE input is valid too (find_tiffs_recursive
+        # only works on directories and would silently find nothing).
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
         output_root = args.input
 
     logger.info(f"Files found: {len(tiffs)}")

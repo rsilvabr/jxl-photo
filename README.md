@@ -668,6 +668,10 @@ exiftool -Make -Model roundtrip.tif
 
 ## Known Limitations
 
+### Matrix decode mode is 8-bit internally
+
+The decoder's Matrix mode (`--matrix`, for color-space conversion via LittleCMS) quantizes pixels to 8-bit for the transform and scales the result back to 16-bit. Effective precision is 8 bits in that mode only — use **Roundtrip mode** (the default) for full 16-bit fidelity.
+
 ### eciRGB v2 and Special ICC Profiles
 
 The cjxl/dxjl converters were optimized for:
