@@ -430,7 +430,9 @@ FORCE_CONTAINER_FOR_LOSSY = True
 
 SCRIPT_DIR = Path(__file__).parent
 LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
-logger = None
+# Module-level logger (same pattern as the other scripts): resolvers must be
+# safe to call before setup_logger() (tests, isolated imports).
+logger = logging.getLogger("jxl_jpeg_transcoder")
 counter_lock = threading.Lock()
 _md5_db_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
@@ -1507,29 +1509,36 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         return (str(src_path), "error", str(e), None)
 
 _srgb_icc_cache = None
+_srgb_icc_lock = threading.Lock()
 
 
 def _get_srgb_icc_path() -> Optional[str]:
-    """Generate (once per process) a real sRGB ICC profile via Pillow's
-    LittleCMS and return its path, or None if unavailable.
+    """Return the path of a real sRGB ICC profile generated via Pillow's
+    LittleCMS, or None if unavailable.
 
     Used for --to-srgb: `magick -colorspace sRGB` is a mathematical color-model
     conversion, not an ICC-managed transform — for wide-gamut sources
     (ProPhoto/AdobeRGB) it reinterprets more than it converts. `-profile` with
     a real sRGB ICC performs the proper gamut mapping.
+
+    The profile is written once to a STABLE path (no per-process temp leak)
+    and created under a lock (workers may race here).
     """
     global _srgb_icc_cache
     if _srgb_icc_cache is not None:
         return _srgb_icc_cache
-    try:
-        from PIL import ImageCms
-        profile_bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        fd, tmp_name = tempfile.mkstemp(suffix=".icc", prefix="srgb_", dir=TEMP_DIR)
-        with os.fdopen(fd, "wb") as f:
-            f.write(profile_bytes)
-        _srgb_icc_cache = tmp_name
-    except Exception:
-        _srgb_icc_cache = False  # do not retry every file
+    with _srgb_icc_lock:
+        if _srgb_icc_cache is not None:  # re-check after acquiring the lock
+            return _srgb_icc_cache
+        try:
+            from PIL import ImageCms
+            icc_path = Path(tempfile.gettempdir()) / "jxl_photo_sRGB.icc" if TEMP_DIR is None else Path(TEMP_DIR) / "jxl_photo_sRGB.icc"
+            if not icc_path.exists():
+                profile_bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+                icc_path.write_bytes(profile_bytes)
+            _srgb_icc_cache = str(icc_path)
+        except Exception:
+            _srgb_icc_cache = False  # do not retry every file
     return _srgb_icc_cache or None
 
 
@@ -1834,11 +1843,15 @@ def cmd_convert(args, from_jxl: bool = True):
     # Build pairs
     pairs = []
     for f in files:
+        # Mode 2: output_root must be the EXPLICIT output (or None) so the
+        # suffix-folder branch in resolve_output_convert can fire — passing
+        # args.input here makes --output-suffix dead code.
+        resolve_root = args.output if args.mode == 2 else output_root
         if direction == "to_jxl":
             out = resolve_output_convert(f, args.mode, args.output_name,
                                          args.output_suffix, "jxl",
                                          args.rename_from, args.rename_to,
-                                         output_root, decode=False)
+                                         resolve_root, decode=False)
         else:
             # Default to jpg if format is somehow None, else use specified
             fmt = args.format if args.format else "jpeg"
@@ -1846,7 +1859,7 @@ def cmd_convert(args, from_jxl: bool = True):
             out = resolve_output_convert(f, args.mode, args.output_name,
                                          args.output_suffix, ext,
                                          args.rename_from, args.rename_to,
-                                         output_root, decode=True)
+                                         resolve_root, decode=True)
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
@@ -2129,8 +2142,12 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     'to_jxl' (encode image to JXL, e.g. PNG inputs in auto mode).
     collect_only: when a list is given, only build output pairs into it and
     return (pre-pass for cross-group duplicate detection)."""
-    # Use explicit output directory if provided, otherwise fall back to input root
+    # Use explicit output directory if provided, otherwise fall back to input
+    # root. Mode 2 convert is the exception: it needs the RAW args.output
+    # (possibly None) so the suffix-folder branch in resolve_output_convert
+    # can fire (see cmd_convert).
     output_root = args.output if args.output is not None else args.input
+    resolve_root = args.output if args.mode == 2 else output_root
 
     # Build output pairs
     pairs = []
@@ -2163,7 +2180,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             out = resolve_output_convert(
                 f, args.mode, args.output_name, args.output_suffix,
                 out_ext, args.rename_from, args.rename_to,
-                output_root, decode=(direction == "from_jxl")
+                resolve_root, decode=(direction == "from_jxl")
             )
         if out:
             pairs.append((f, out))

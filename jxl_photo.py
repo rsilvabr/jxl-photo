@@ -790,8 +790,11 @@ class FolderAnalyzer:
                     src = str(self.root / folder)
                     if mode == 4:
                         # Replace origin in folder name with dest — same rule as
-                        # the scripts: first occurrence only, uppercase suffix.
+                        # the scripts: first occurrence only, uppercase suffix;
+                        # if the origin is absent, APPEND the suffix (fallback).
                         new_name = re.sub(re.escape(self.origin), self.dest.upper(), folder, count=1, flags=re.IGNORECASE)
+                        if new_name == folder:
+                            new_name = folder + "_" + self.dest.upper()
                         dest = str(self.root / new_name)
                     else:
                         dest = str(Path(src).parent / sibling_name)
@@ -885,10 +888,12 @@ class FolderAnalyzer:
                 for p in rel.parts
             )
             if marker_in_dest:
-                # Distinguish mode 7 (subfolder) from mode 6 (same export folder).
+                # Marker IS the destination (src/_EXPORT): whole-marker mode 6.
+                # Marker + subfolder below it (src/_EXPORT/sub): mode 7.
+                # (These were inverted before.)
                 if src_path == dst_path.parent:
-                    return 7
-                return 6
+                    return 6
+                return 7
         except ValueError:
             pass
 
@@ -2888,15 +2893,9 @@ class InteractiveMenu:
             else:
                 print(f"[{i}/{total_entries}] Mode {detected_mode} | {source} → {dest_path}")
 
-            if dry_run:
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [blue]DRY: would process[/blue]")
-                else:
-                    print(f"  DRY: would process")
-                skip_count += 1
-                continue
-
-            # Build command for this entry
+            # Build command for this entry (the builder appends --dry-run when
+            # workflow['dry_run'] is set, so the child prints the REAL output
+            # paths instead of a vague "would process").
             cmd = self._build_manifest_entry_cmd(
                 script=script,
                 source=source,

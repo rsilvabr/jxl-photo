@@ -1169,3 +1169,77 @@ def test_magick_icc_args_srgb_uses_profile():
     # file path input passes through
     args2 = tr._magick_icc_args(r"C:\icc\AdobeRGB.icc", ["-depth", "16"])
     assert args2 == ["-profile", r"C:\icc\AdobeRGB.icc", "-depth", "16"]
+
+
+# ---------------------------------------------------------------------------
+# 9f40d3d regression revert + commit-2 items
+# ---------------------------------------------------------------------------
+
+def test_convert_mode2_explicit_output_flat(tmp_path):
+    src = tmp_path / "a" / "photo.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"x")
+    out_dir = tmp_path / "explicit"
+    out = tr.resolve_output_convert(src, 2, "converted", "_conv", "jxl", "", "",
+                                    out_dir, decode=False)
+    assert out == out_dir / "photo.jxl"
+
+
+def test_convert_mode2_suffix_folder_without_explicit_output(tmp_path):
+    """--output-suffix is alive: mode 2 with no explicit output uses
+    <parent><suffix>/ next to the source folder."""
+    src = tmp_path / "photos" / "photo.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"x")
+    out = tr.resolve_output_convert(src, 2, "converted", "_converted", "jxl", "", "",
+                                    None, decode=False)
+    assert out == tmp_path / "photos_converted" / "photo.jxl"
+
+
+def test_detect_mode_for_entry_marker_shapes(tmp_path):
+    analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
+    src = tmp_path / "a"
+    # marker IS the destination -> whole-marker mode 6
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT"), 0) == 6
+    # marker + subfolder below it -> mode 7
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT" / "sub"), 0) == 7
+
+
+def test_grayscale_flag_from_array_not_metadata(monkeypatch, tmp_path):
+    """A 3-channel array must NEVER be flagged grayscale, even if planning
+    metadata said samples=1 (decoder would discard G and B)."""
+    tif = tmp_path / "rgb.tif"
+    tifffile.imwrite(tif, np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "rgb.jxl"
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+
+    written = []
+    monkeypatch.setattr(enc.subprocess, "run", lambda *a, **k: _FakeRun())
+    # samples=1 (lying planning metadata) with a 3-channel array
+    enc.convert_one(tif, final, final, samples=1)
+    # The grayscale marker must NOT have been written
+    gray_calls = [a for a in written if enc.GRAYSCALE_XMP_FLAG in str(a)]
+    assert gray_calls == []
+
+
+def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
+    """add_jpeg_preview on a gray+alpha TIFF: preview written (not LA-fail)
+    and never larger than the source."""
+    la_tiff = tmp_path / "la.tif"
+    img = np.dstack([np.full((48, 64), 300, dtype=np.uint16),
+                     np.full((48, 64), 65535, dtype=np.uint16)])
+    with tifffile.TiffWriter(str(la_tiff)) as t:
+        t.write(img, photometric="minisblack", extrasamples=["unassalpha"])
+    dec.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
+    dec.add_jpeg_preview(la_tiff, tmp_path, None)
+    with tifffile.TiffFile(str(la_tiff)) as t:
+        assert len(t.pages) == 2, "preview page was not added"
+        prev = t.pages[1]
+        assert prev.imagewidth <= 64 and prev.imagelength <= 48, \
+            f"preview upscaled: {prev.imagewidth}x{prev.imagelength}"
+    monkeypatch.undo()

@@ -1702,11 +1702,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
                 else:
                     img = img.astype(np.uint16)
-            # Grayscale detection is driven by the ACTUAL array, not just the
-            # planning-time samples-per-pixel (which falls back to 3 when page
-            # probing fails). A 2D array or a single-channel 3D array is
-            # grayscale regardless of what the plan said.
-            is_grayscale = (samples == 1) or (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
+            # Grayscale detection is driven ONLY by the ACTUAL array: a 2D
+            # array or a single-channel 3D array is grayscale. The
+            # planning-time samples-per-pixel is deliberately NOT consulted —
+            # if metadata said 1 channel but the pixels are RGB, flagging the
+            # JXL as grayscale would make the decoder discard G and B.
+            is_grayscale = (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
             if img.ndim == 2:
                 img = img[:, :, np.newaxis]
 
