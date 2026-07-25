@@ -686,31 +686,36 @@ def find_jpegs_flat(input_path: Path):
                 files.append(f)
     return files
 
-# Folder names produced by this toolkit (all scripts). Recursive scans skip
-# them, otherwise auto mode re-processes its own outputs on every rerun
-# (recovered_jpeg/*.jpg -> converted_jxl/*.jxl -> recovered_jpeg/*.jpg ...).
-_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
-    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
-    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
-    "jxl_jpeg", "jpeg_recovered",
+# Folder names created ONLY by this tool's DECODE direction (recovered JPEGs
+# and generic convert outputs). ENCODE-direction scans (JPEG/PNG -> JXL) skip
+# them, otherwise auto mode re-encodes its own recovered files on every rerun
+# (ping-pong). JXL finders are deliberately NOT filtered: encoder-produced
+# folders (converted_jxl/, 16B_JXL/, ...) are legitimate decode sources.
+_TOOL_DECODE_OUTPUT_FOLDERS = frozenset({
+    "recovered_jpeg", "jpeg_recovered", "converted",
 })
 
 
 def _is_tool_output_path(p: Path) -> bool:
-    """True if any folder component is a known toolkit output folder."""
-    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
+    """True if any folder component is a known decode-output folder."""
+    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in p.parts[:-1])
 
 
 def find_jpegs_recursive(input_path: Path):
     seen, files = set(), []
+    skipped = 0
     for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
         for f in input_path.rglob(ext):
             if _is_tool_output_path(f):
+                skipped += 1
                 continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
                 files.append(f)
+    if skipped:
+        logger.info(f"Skipped {skipped} JPEG file(s) inside toolkit output folders "
+                    f"({', '.join(sorted(_TOOL_DECODE_OUTPUT_FOLDERS))})")
     return files
 
 def find_jxls_flat(input_path: Path):
@@ -724,11 +729,11 @@ def find_jxls_flat(input_path: Path):
     return sorted(files)
 
 def find_jxls_recursive(input_path: Path):
+    # Unfiltered on purpose: encoder/transcoder-produced JXL folders are
+    # legitimate decode sources (the round-trip depends on finding them).
     seen, files = set(), []
     for ext in ("*.jxl", "*.JXL"):
         for f in input_path.rglob(ext):
-            if _is_tool_output_path(f):
-                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
@@ -737,14 +742,18 @@ def find_jxls_recursive(input_path: Path):
 
 def find_pngs_recursive(input_path: Path):
     seen, files = set(), []
+    skipped = 0
     for ext in ("*.png", "*.PNG"):
         for f in input_path.rglob(ext):
             if _is_tool_output_path(f):
+                skipped += 1
                 continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
                 files.append(f)
+    if skipped:
+        logger.info(f"Skipped {skipped} PNG file(s) inside toolkit output folders")
     return files
 
 def find_pngs_flat(input_path: Path):

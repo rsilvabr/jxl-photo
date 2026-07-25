@@ -1112,7 +1112,10 @@ def test_marker_matches_underscore_boundary():
         assert not m("reexport", "_export")
 
 
-def test_finders_exclude_tool_output_folders(tmp_path):
+def test_finders_exclude_only_decode_outputs_from_encode_scans(tmp_path):
+    """The exclusion applies ONLY to the transcoder's JPEG/PNG (encode) scans
+    and ONLY to tool-created decode folders. JXL finders stay unfiltered —
+    encoder outputs are legitimate decode sources (the round-trip)."""
     (tmp_path / "recovered_jpeg").mkdir()
     (tmp_path / "recovered_jpeg" / "photo.jpg").write_bytes(b"\xff\xd8")
     (tmp_path / "converted_jxl").mkdir()
@@ -1122,10 +1125,40 @@ def test_finders_exclude_tool_output_folders(tmp_path):
     (tmp_path / "real" / "photo.jxl").write_bytes(b"\x00" * 16)
     (tmp_path / "real" / "photo.tif").write_bytes(b"\x00" * 16)
 
+    # encode-direction: recovered JPEGs skipped, everything else found
     assert [f.name for f in tr.find_jpegs_recursive(tmp_path)] == ["photo.jpg"]
-    assert [f.name for f in tr.find_jxls_recursive(tmp_path)] == ["photo.jxl"]
-    assert [f.name for f in dec.find_jxls_recursive(tmp_path)] == ["photo.jxl"]
+    # decode-direction: encoder outputs in converted_jxl/ ARE found (round-trip!)
+    assert sorted(f.name for f in tr.find_jxls_recursive(tmp_path)) == ["photo.jxl", "photo.jxl"]
+    assert sorted(f.name for f in dec.find_jxls_recursive(tmp_path)) == ["photo.jxl", "photo.jxl"]
     assert [f.name for f in enc.find_tiffs_recursive(tmp_path)] == ["photo.tif"]
+
+
+def test_roundtrip_mode7_decoder_finds_encoder_output(tmp_path):
+    """Regression for the 9f40d3d breakage: encoder mode 7 writes
+    _EXPORT/16B_JXL/photo.jxl; the decoder mode 7 must FIND it."""
+    session = tmp_path / "c1" / "Kyoto" / "_EXPORT"
+    (session / "16bit").mkdir(parents=True)
+    tifffile.imwrite(session / "16bit" / "photo.tif",
+                     np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
+
+    enc.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(enc, "OVERWRITE", True)
+    monkeypatch.setattr(enc, "TEMP2_DIR", None)
+    # Run the encoder planning+finder exactly as main() does (mode 7)
+    tiffs = enc.find_tiffs_mode7(tmp_path / "c1")
+    assert [t.name for t in tiffs] == ["photo.tif"]
+    main_jxl = enc.resolve_output(tiffs[0], 7, tmp_path / "c1")
+    assert main_jxl.parent.name == enc.EXPORT_JXL_FOLDER
+    # Simulate the encode having happened (file now exists on disk)
+    main_jxl.parent.mkdir(parents=True, exist_ok=True)
+    main_jxl.write_bytes(b"\x00" * 32)
+
+    # The decoder's own finder must see it — before the fix it returned []
+    found = dec.find_jxls_mode7(tmp_path / "c1")
+    assert [f.name for f in found] == ["photo.jxl"], \
+        f"decoder lost the encoder's output: {found}"
+    monkeypatch.undo()
 
 
 def test_magick_icc_args_srgb_uses_profile():

@@ -1227,6 +1227,11 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             # JPEG preview cannot carry alpha; drop the alpha channel before
             # generating the preview. The main image retains alpha in the TIFF.
             img_data = img_data[:, :, :3]
+        elif img_data.ndim == 3 and img_data.shape[2] == 2:
+            # Gray+alpha (LA): keep only the gray channel for the preview —
+            # Image.save() cannot write mode LA as JPEG. The main image
+            # retains the alpha extrasample in the TIFF.
+            img_data = img_data[:, :, 0]
 
         if img_data.ndim == 2:
             h, w = img_data.shape
@@ -1238,8 +1243,9 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             logger.warning(f" >Skipping JPEG preview: empty image dimensions ({h}x{w})")
             return
 
-        # Calculate resize dimensions
-        max_dim = JPEG_PREVIEW_SIZE
+        # Calculate resize dimensions — never UPSCALE a small image for a
+        # "preview" (a preview larger than the source is always wrong).
+        max_dim = min(JPEG_PREVIEW_SIZE, max(w, h))
         if w >= h:
             new_w = max_dim
             new_h = max(1, int(h * max_dim / w))
@@ -1348,6 +1354,9 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             # Windows Explorer uses this page for thumbnail with ICC
             if main_data.ndim == 2 or (main_data.ndim == 3 and main_data.shape[2] == 1):
                 main_photometric = 'MINISBLACK'
+            elif main_data.ndim == 3 and main_data.shape[2] == 2:
+                # Gray+alpha page
+                main_photometric = 'MINISBLACK'
             else:
                 main_photometric = 'RGB'
             kwargs_main = {
@@ -1356,7 +1365,7 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             }
             if main_subfiletype:
                 kwargs_main['subfiletype'] = main_subfiletype
-            if main_data.ndim == 3 and main_data.shape[2] == 4:
+            if main_data.ndim == 3 and main_data.shape[2] in (2, 4):
                 kwargs_main['extrasamples'] = 'UNASSALPHA'
             if icc_data:
                 kwargs_main['iccprofile'] = icc_data
@@ -1913,29 +1922,12 @@ def find_jxls_flat(path):
                 files.append(f)
     return files
 
-# Folder names produced by this toolkit (all scripts). Recursive scans skip
-# them, otherwise a second run would re-process the toolkit's own outputs
-# (e.g. JXLs encoded into converted_jxl/ being re-decoded).
-_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
-    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
-    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
-    "jxl_jpeg", "jpeg_recovered",
-})
-
-
-def _is_tool_output_path(p: Path) -> bool:
-    """True if any folder component is a known toolkit output folder."""
-    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
-
-
 def find_jxls_recursive(path):
     """Find all JXL files recursively"""
     seen = set()
     files = []
     for ext in ("*.jxl", "*.JXL"):
         for f in path.rglob(ext):
-            if _is_tool_output_path(f):
-                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)

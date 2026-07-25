@@ -1813,10 +1813,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                             if img.mode != 'RGB':
                                 img = img.convert('RGB')
                         
-                        # Calculate thumbnail size (max 256px)
+                        # Calculate thumbnail size (max 256px, never upscale)
                         max_size = 256
-                        ratio = min(max_size / img.width, max_size / img.height)
-                        new_size = (int(img.width * ratio), int(img.height * ratio))
+                        ratio = min(1.0, max_size / img.width, max_size / img.height)
+                        new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
                         thumb = img.resize(new_size, Image.Resampling.LANCZOS)
                         # Save as JPEG temporary (sRGB, no ICC embedded)
                         thumb_path = tmp_dir / "thumbnail.jpg"
@@ -1874,10 +1874,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                                 except Exception as e:
                                     logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
 
-                            # Calculate thumbnail size (max 256px)
+                            # Calculate thumbnail size (max 256px, never upscale)
                             max_size = 256
-                            ratio = min(max_size / pil_img.width, max_size / pil_img.height)
-                            new_size = (int(pil_img.width * ratio), int(pil_img.height * ratio))
+                            ratio = min(1.0, max_size / pil_img.width, max_size / pil_img.height)
+                            new_size = (max(1, int(pil_img.width * ratio)), max(1, int(pil_img.height * ratio)))
                             thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
 
                             # Save as JPEG temporary (sRGB, no ICC embedded)
@@ -2214,28 +2214,11 @@ def find_files_mode0(input_path: Path):
                 files.append(f)
     return files
 
-# Folder names produced by this toolkit (all scripts). Recursive scans skip
-# them, otherwise a second run would re-process the toolkit's own outputs
-# (e.g. TIFFs decoded into converted_tiff/ being re-encoded).
-_TOOL_OUTPUT_FOLDER_NAMES = frozenset({
-    "converted_jxl", "converted_tiff", "converted", "recovered_jpeg",
-    "jxl_16bits", "tiff_16bits", "16b_jxl", "16b_tiff",
-    "jxl_jpeg", "jpeg_recovered",
-})
-
-
-def _is_tool_output_path(p: Path) -> bool:
-    """True if any folder component is a known toolkit output folder."""
-    return any(part.lower() in _TOOL_OUTPUT_FOLDER_NAMES for part in p.parts[:-1])
-
-
 def find_tiffs_recursive(input_path: Path):
     seen = set()
     files = []
     for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
         for f in input_path.rglob(ext):
-            if _is_tool_output_path(f):
-                continue
             key = f.resolve()
             if key not in seen:
                 seen.add(key)
