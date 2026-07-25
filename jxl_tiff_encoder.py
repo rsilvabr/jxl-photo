@@ -656,6 +656,14 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     # Mode 0: single file in-place — handled in main() before calling this
     # Mode 1: single file -> converted_jxl/ subfolder — handled in main() before calling this
 
+    def _warn_if_outside(result: Path) -> Path:
+        # Modes 4/5 (and 6/7) can land OUTSIDE the selected input tree for
+        # files at its root — surface that once per file instead of surprising
+        # the user later.
+        if result is not None and not _is_relative_to(result, input_root):
+            logger.warning(f"Output outside input tree: {tiff_path.name} -> {result}")
+        return result
+
     if mode == 2:
         # Flat directory: input_root/photo.jxl
         return input_root / tiff_path.with_suffix(".jxl").name
@@ -672,11 +680,11 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         if new_name == old_name:
             new_name = old_name + "_" + JXL_SUFFIX_REPLACE
             logger.warning(f"'{TIFF_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
-        return tiff_path.parent.parent / new_name / tiff_path.with_suffix(".jxl").name
+        return _warn_if_outside(tiff_path.parent.parent / new_name / tiff_path.with_suffix(".jxl").name)
 
     elif mode == 5:
         # Sibling folder next to each TIFF folder
-        return tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name
+        return _warn_if_outside(tiff_path.parent.parent / JXL_FOLDER_NAME / tiff_path.with_suffix(".jxl").name)
 
     elif mode == 6:
         # EXPORT_MARKER anchor — only TIFFs INSIDE export marker folder
@@ -2226,6 +2234,15 @@ def find_tiffs_recursive(input_path: Path):
                 files.append(f)
     return files
 
+# Default output folder names of the DECODER (jxl_tiff_decoder.py). After a
+# decode, those folders live INSIDE the export tree, and modes 6/7 collapse
+# the first subfolder level — so scanning them would either collide with the
+# original exports (duplicate output -> abort) or silently re-encode decoded
+# TIFFs (generational loss at d>0). Only the decoder's names are skipped:
+# TIFFs in 16bit/ or any user folder are still found normally.
+_DECODER_OUTPUT_FOLDERS = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
+
+
 def find_tiffs_mode6(input_path: Path):
     """Mode 6: only TIFFs inside folders containing EXPORT_MARKER in their path (any subfolder)."""
     all_tiffs = find_tiffs_recursive(input_path)
@@ -2238,6 +2255,10 @@ def find_tiffs_mode6(input_path: Path):
         export_idx = next((i for i, p in enumerate(parts_str)
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
+            # Skip decoder output folders (16B_TIFF etc.) below the marker
+            below = [p.lower() for p in parts_str[export_idx + 1:]]
+            if any(b in _DECODER_OUTPUT_FOLDERS for b in below):
+                continue
             filtered.append(t)
     return filtered
 
@@ -2253,6 +2274,10 @@ def find_tiffs_mode7(input_path: Path):
         export_idx = next((i for i, p in enumerate(parts_str)
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
+            continue
+        # Skip decoder output folders (16B_TIFF etc.) below the marker
+        below = [p.lower() for p in parts_str[export_idx + 1:]]
+        if any(b in _DECODER_OUTPUT_FOLDERS for b in below):
             continue
         if EXPORT_TIFF_SUBFOLDER:
             if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
@@ -2415,7 +2440,9 @@ def main():
         STRIP_METADATA = True
     log_file = setup_logger()
 
-    if _get_cjxl_cmd() is None:
+    # cjxl availability is checked AFTER the dry-run block (a simulation
+    # never invokes cjxl, so it must not require it). See below.
+    if not args.dry_run and _get_cjxl_cmd() is None:
         logger.error("cjxl not found in PATH. Install libjxl and add cjxl to PATH.")
         sys.exit(1)
 

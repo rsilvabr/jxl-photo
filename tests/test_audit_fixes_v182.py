@@ -1243,3 +1243,76 @@ def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
         assert prev.imagewidth <= 64 and prev.imagelength <= 48, \
             f"preview upscaled: {prev.imagewidth}x{prev.imagelength}"
     monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# ninth-pass fixes
+# ---------------------------------------------------------------------------
+
+def test_tool_output_filter_is_relative_to_scan_root(tmp_path):
+    """Pointing AT a folder named 'converted' must work (natural re-archive
+    case); only files NESTED below such a folder under the root are skipped."""
+    root = tmp_path / "converted"
+    root.mkdir()
+    (root / "a.jpg").write_bytes(b"\xff\xd8")
+    assert [f.name for f in tr.find_jpegs_recursive(root)] == ["a.jpg"]
+
+    tree = tmp_path / "photos"
+    (tree / "converted").mkdir(parents=True)
+    (tree / "converted" / "b.jpg").write_bytes(b"\xff\xd8")
+    (tree / "c.jpg").write_bytes(b"\xff\xd8")
+    assert [f.name for f in tr.find_jpegs_recursive(tree)] == ["c.jpg"]
+
+
+def test_encoder_mode67_skips_decoder_output(tmp_path):
+    """After a decode into _EXPORT/16B_TIFF, the encoder must not see the
+    decoded TIFF (collision abort / silent lossy re-encode)."""
+    session = tmp_path / "_EXPORT"
+    (session / "16bit").mkdir(parents=True)
+    (session / "16B_TIFF").mkdir(parents=True)
+    (session / "16bit" / "photo.tif").write_bytes(b"x")
+    (session / "16B_TIFF" / "photo.tif").write_bytes(b"x")
+    assert [f.name for f in enc.find_tiffs_mode6(tmp_path)] == ["photo.tif"]
+    found = enc.find_tiffs_mode6(tmp_path)
+    assert all("16B_TIFF" not in str(f) for f in found)
+
+
+def test_auto_rerun_is_idempotent(monkeypatch, tmp_path):
+    """Second auto run over a completed batch (photo.jpg + photo.jxl present)
+    must NOT abort: every colliding pair would be skipped anyway."""
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    tr.setup_logger()
+    seen = []
+
+    def fake_group(files, args, **kw):
+        if kw.get("collect_only") is None:
+            seen.extend(f.name for f in files)
+        return {"ok": 0, "err": 0, "skipped": 0}
+
+    monkeypatch.setattr(tr, "_process_file_group", fake_group)
+    # First "run": outputs don't exist -> collision WOULD fire. Simulate the
+    # completed state by creating the outputs, then run again.
+    err, _ = tr.cmd_auto(_args(tmp_path, mode=0))
+    # No SystemExit raised — idempotent
+    assert err == 0
+
+
+def test_auto_collision_still_aborts_when_overwriting(tmp_path):
+    """With --overwrite, the encode WOULD write -> the guard still aborts."""
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+    tr.setup_logger()
+    with pytest.raises(SystemExit) as exc:
+        tr.cmd_auto(_args(tmp_path, mode=0, overwrite=True))
+    assert exc.value.code == 2
+
+
+def test_encoder_dry_run_works_without_cjxl(monkeypatch, tmp_path):
+    (tmp_path / "a.tif").write_bytes(b"x")
+    enc.setup_logger()
+    monkeypatch.setattr(enc, "_get_cjxl_cmd", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(tmp_path), "--mode", "0", "--dry-run"])
+    # Must NOT sys.exit(1) — a simulation never calls cjxl
+    enc.main()

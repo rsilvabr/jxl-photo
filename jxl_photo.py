@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # Initialize wrapper logger early so manifest/path validation code can log safely.
+# Without a handler these messages would hit Python's lastResort (raw stderr,
+# unformatted, outside the rich flow).
 logger = logging.getLogger("jxl_photo")
+if not logger.handlers:
+    _lh = logging.StreamHandler()
+    _lh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.addHandler(_lh)
 
 # The wrapper prints unicode icons (✓/✗/⚠); on legacy Windows consoles or
 # redirected stdout (cp1252) they would crash with UnicodeEncodeError.
@@ -298,16 +304,6 @@ class ConfigManager:
         self.config.dependencies_checked = True
         self.save_config()
 
-    def get_available_features(self) -> Dict[str, bool]:
-        return {
-            'cjxl': self.config.cjxl_path is not None,
-            'djxl': self.config.djxl_path is not None,
-            'exiftool': self.config.exiftool_path is not None,
-            'magick': self.config.magick_path is not None,
-            'icc_profiles': self.config.magick_path is not None,
-            'tiff': self._check_tiff_support(),
-        }
-
     def _check_tiff_support(self) -> bool:
         try:
             import tifffile
@@ -576,19 +572,33 @@ class FolderAnalyzer:
             export_paths = result['export_marker_paths']
             reasoning.append(f"Found {len(export_paths)} folder(s) with '{self.export_marker}' in name")
 
-            # Check if there's a JXL subfolder inside _EXPORT (mode 7)
+            # Check if there's a source-format subfolder inside _EXPORT (mode 7).
+            # Only subfolders that contain ORIGIN files count — the toolkit's
+            # own output folders (16B_JXL etc.) must not trigger this, or every
+            # run after the first would recommend mode 7 for the wrong reason.
             has_jxl_subfolder = False
+            origin_exts = self._get_extensions(self.origin)
             for export_path in export_paths[:3]:
                 export_dir = Path(export_path)
-                for subdir in export_dir.iterdir():
-                    if subdir.is_dir() and 'jxl' in subdir.name.lower():
-                        has_jxl_subfolder = True
-                        break
+                try:
+                    subdirs = [d for d in export_dir.iterdir() if d.is_dir()]
+                except OSError:
+                    continue  # unreadable/removed mid-scan: skip, don't kill analysis
+                for subdir in subdirs:
+                    try:
+                        if any(f.is_file() and f.suffix.lower() in origin_exts
+                               for f in subdir.rglob('*')):
+                            has_jxl_subfolder = True
+                            break
+                    except OSError:
+                        continue
+                if has_jxl_subfolder:
+                    break
 
             if has_jxl_subfolder:
                 result['recommended_mode'] = 7
                 confidence = 'high'
-                reasoning.append("Detected JXL subfolder inside export folder — Mode 7 recommended (specific subfolder)")
+                reasoning.append(f"Detected {self.origin.upper()} subfolder inside export folder — Mode 7 recommended (specific subfolder)")
             else:
                 result['recommended_mode'] = 6
                 confidence = 'high'
@@ -1380,6 +1390,13 @@ class InteractiveMenu:
 
         if choice == "Y":
             workflow['mode'] = rec_mode
+            # Mode 7: propagate the auto-detected subfolder shown in the
+            # preview, otherwise the run behaves like mode 6 (all subfolders)
+            # and the preview lied.
+            if rec_mode == 7 and mappings:
+                sub_names = {Path(src).name for src, _, _ in mappings}
+                if len(sub_names) == 1:
+                    workflow.setdefault('mode_config', {})['export_subfolder'] = sub_names.pop()
             workflow['auto_mode_used'] = True
 
             if RICH_AVAILABLE and console:
@@ -1954,7 +1971,7 @@ class InteractiveMenu:
              f"Use when you keep different color-space variants in separate subfolders."),
 
             ("8", "DELETE originals",
-             f"[bold red]DANGEROUS![/bold red] Same as mode 0 (recursive), but...\n"
+             f"[bold red]DANGEROUS![/bold red] In-place RECURSIVE (walks all subfolders) — and\n"
              f"[bold red]DELETES the original {origin.upper()} files after successful conversion.[/bold red]\n"
              f"This is IRREVERSIBLE. Always test with a small batch first."),
         ]
@@ -2043,8 +2060,11 @@ class InteractiveMenu:
 
             if mode == 7:
                 # Mode 7 processes only one subfolder of the export marker.
-                # Empty = all subfolders (identical to mode 6).
-                last_sub = (self.config.config.last_mode_config or {}).get('export_subfolder', '')
+                # Empty = all subfolders (identical to mode 6). Default comes
+                # from this workflow's config (auto-mode detection) first,
+                # then the last saved session.
+                last_sub = mode_config.get('export_subfolder') or \
+                    (self.config.config.last_mode_config or {}).get('export_subfolder', '')
                 if RICH_AVAILABLE and console:
                     sub = Prompt.ask(
                         "Subfolder inside export marker to process (empty = all, same as mode 6)",

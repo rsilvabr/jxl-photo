@@ -1407,6 +1407,13 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
 def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
     """Resolve output TIFF path based on mode (0-8)"""
 
+    def _warn_if_outside(result: Path) -> Path:
+        # Modes 4/5 can land OUTSIDE the selected input tree for files at its
+        # root — surface that instead of surprising the user later.
+        if result is not None and not _is_relative_to(result, input_root):
+            logger.warning(f"Output outside input tree: {jxl_path.name} -> {result}")
+        return result
+
     if mode == 0:
         # Mode 0: Single file in-place or flat directory
         if input_root != jxl_path.parent:
@@ -1433,11 +1440,11 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
         if new_name == old_name:
             new_name = old_name + "_" + TIFF_SUFFIX_REPLACE
             logger.warning(f"'{JXL_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
-        return jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name
+        return _warn_if_outside(jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name)
 
     elif mode == 5:
         # Mode 5: Sibling folder next to each JXL folder
-        return jxl_path.parent.parent / TIFF_FOLDER_NAME / jxl_path.with_suffix(".tif").name
+        return _warn_if_outside(jxl_path.parent.parent / TIFF_FOLDER_NAME / jxl_path.with_suffix(".tif").name)
 
     elif mode == 6:
         # Mode 6: EXPORT anchor - only JXLs INSIDE export marker folder

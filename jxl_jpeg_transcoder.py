@@ -698,9 +698,18 @@ _TOOL_DECODE_OUTPUT_FOLDERS = frozenset({
 })
 
 
-def _is_tool_output_path(p: Path) -> bool:
-    """True if any folder component is a known decode-output folder."""
-    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in p.parts[:-1])
+def _is_tool_output_path(p: Path, root: Path) -> bool:
+    """True if any folder component BETWEEN the scan root and the file is a
+    known decode-output folder. Evaluated RELATIVE to the scan root, so
+    pointing the tool directly AT a folder named 'converted'/'recovered_jpeg'
+    (e.g. to re-archive recovered JPEGs) still works — only files NESTED
+    inside such folders below the root are skipped.
+    """
+    try:
+        rel = p.relative_to(root)
+    except ValueError:
+        rel = p
+    return any(part.lower() in _TOOL_DECODE_OUTPUT_FOLDERS for part in rel.parts[:-1])
 
 
 def find_jpegs_recursive(input_path: Path):
@@ -708,7 +717,7 @@ def find_jpegs_recursive(input_path: Path):
     skipped = 0
     for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
         for f in input_path.rglob(ext):
-            if _is_tool_output_path(f):
+            if _is_tool_output_path(f, input_path):
                 skipped += 1
                 continue
             key = f.resolve()
@@ -747,7 +756,7 @@ def find_pngs_recursive(input_path: Path):
     skipped = 0
     for ext in ("*.png", "*.PNG"):
         for f in input_path.rglob(ext):
-            if _is_tool_output_path(f):
+            if _is_tool_output_path(f, input_path):
                 skipped += 1
                 continue
             key = f.resolve()
@@ -1021,8 +1030,9 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
 
 def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                          verify: bool, reconvert_val: bool, smart: bool) -> tuple:
-    # This function now also handles JPEG -> JXL encode in auto mode; the
-    # verification path only applies to JXL decode.
+    # Lossless JXL -> JPEG recovery (djxl, jbrd-gated below). Only .jxl inputs
+    # ever reach this function — _process_file_group splits encode (JPEG ->
+    # encode_one_transcode) from decode before submitting.
     is_jxl_decode = jxl_path.suffix.lower() == '.jxl'
 
     # Check if should process - pass both smart and reconvert_val
@@ -1292,6 +1302,8 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
+    if len(pairs) != len(files):
+        logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
 
@@ -1727,9 +1739,15 @@ def cmd_convert(args, from_jxl: bool = True):
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
 
-    if args.icc_profile and not MAGICK_AVAILABLE:
+    if from_jxl and args.icc_profile and not MAGICK_AVAILABLE:
         print("ERROR: --icc-profile requires ImageMagick (magick) in PATH.")
         sys.exit(1)
+    if not from_jxl and args.icc_profile:
+        # The encode pipeline (image -> cjxl) has no ICC-conversion step:
+        # without this warning the flag would be silently inert after passing
+        # validation.
+        print("WARNING: --icc-profile/--to-srgb only applies to the JXL decode "
+              "direction and is IGNORED for JPEG/PNG -> JXL encodes.")
 
     TEMP2_DIR = args.staging
     smart_mode = args.sync
@@ -1866,6 +1884,8 @@ def cmd_convert(args, from_jxl: bool = True):
 
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
+    if len(pairs) != len(files):
+        logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
 
@@ -2040,6 +2060,10 @@ def cmd_auto(args):
     total_files = len(jpeg_files) + len(png_files) + len(jxl_transcode_files) + len(jxl_convert_files)
     _counter["total"] = total_files
 
+    # Used by the output-vs-input collision check below (would-write test)
+    smart_mode = args.sync
+    reconvert_explicit = args.overwrite
+
     # Confirm source deletion BEFORE any processing. Lossy conversion requires
     # stricter confirmation than lossless transcode. Only meaningful in mode 8.
     # Skipped on dry runs (nothing is converted, so nothing would be deleted)
@@ -2083,6 +2107,9 @@ def cmd_auto(args):
     # Output-vs-input collision: e.g. photo.jpg (encode) + photo.jxl (decode) in
     # the same folder. Encoding first would overwrite the decode source before
     # it is ever read — refuse loudly instead of silently losing the original.
+    # BUT: if EVERY colliding pair would be skipped anyway (outputs exist and
+    # are up to date — i.e. a re-run of a completed batch), it is not a
+    # collision at all: log and continue, keeping auto mode idempotent.
     import os as _os
     inputs_norm = set()
     for f in jpeg_files + png_files + jxl_transcode_files + jxl_convert_files:
@@ -2090,7 +2117,10 @@ def cmd_auto(args):
     collisions = []
     for src, out in all_pairs:
         if _os.path.normcase(str(out)) in inputs_norm and _os.path.normcase(str(out)) != _os.path.normcase(str(src)):
-            collisions.append((src, out))
+            # Would this pair actually WRITE? (same rule as should_process:
+            # smart mode writes only when the source is newer)
+            if should_process(src, out, smart_mode, reconvert_explicit):
+                collisions.append((src, out))
     if collisions:
         for src, out in collisions[:10]:
             logger.error(f"Output would overwrite another input: {src.name} -> {out.name}")
