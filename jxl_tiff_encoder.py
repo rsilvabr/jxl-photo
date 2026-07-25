@@ -116,9 +116,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
-    return bool(bare) and bare != marker_lower and (
-        part_lower.startswith(bare) or part_lower.endswith(bare)
-    )
+    if not bare or bare == marker_lower:
+        return False
+    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
+    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
+    # would falsely match the default '_EXPORT' marker.
+    import re as _re
+    for m in _re.finditer(_re.escape(bare), part_lower):
+        s, e = m.span()
+        left_ok = s == 0 or part_lower[s - 1] in '_- '
+        right_ok = e == len(part_lower) or part_lower[e] in '_- '
+        if left_ok and right_ok:
+            return True
+    return False
 
 
 # ExifTool detection - try multiple name variants
@@ -393,6 +403,15 @@ DEPTH_XMP_PREFIX = "jxlphoto-depth:"
 # Prefix for the original BitsPerSample value stored in dc:Relation. The decoder
 # uses this to restore the original bit depth per page according to the user's
 # --depth-policy (force16 / preserve_thumbnails / preserve_original).
+
+PAGE_XMP_PREFIX = "jxlphoto-page:"
+# Prefix for the TIFF page index stored in dc:Relation on split pages. Without
+# it the decoder infers the page index from the FILENAME, which breaks when the
+# source TIFF itself is named *_page<N> or *_thumbnail.
+
+THUMB_XMP_FLAG = "jxlphoto-thumb"
+# Marker appended to dc:Relation on thumbnail pages of a split (instead of
+# relying on the _thumbnail filename suffix).
 
 
 # ─────────────────────────────────────────────
@@ -938,64 +957,6 @@ def _clear_icc_cache() -> bool:
         return False
 
 
-def _read_ppm(path: Path) -> np.ndarray:
-    """Read a binary P5/P6 PPM/PGM file."""
-    with open(path, "rb") as f:
-        tokens = []
-        while len(tokens) < 4:
-            tok = b""
-            while True:
-                b = f.read(1)
-                if not b:
-                    raise ValueError("PPM header truncated")
-                if b == b"#":
-                    # skip comment
-                    while f.read(1) not in (b"\n", b""):
-                        pass
-                    continue
-                if b.isspace():
-                    if tok:
-                        tokens.append(tok)
-                        break
-                else:
-                    tok += b
-        magic = tokens[0].decode("ascii")
-        width = int(tokens[1])
-        height = int(tokens[2])
-        maxval = int(tokens[3])
-        if magic == "P6":
-            channels = 3
-        elif magic == "P5":
-            channels = 1
-        else:
-            raise ValueError(f"Unsupported PPM magic {magic}")
-        bytes_per_channel = 2 if maxval > 255 else 1
-        dtype = np.uint16 if bytes_per_channel == 2 else np.uint8
-        total = width * height * channels * bytes_per_channel
-        buf = f.read(total)
-        if len(buf) < total:
-            raise ValueError("PPM data truncated")
-        arr = np.frombuffer(buf, dtype=dtype).reshape((height, width, channels))
-        return arr
-
-
-def _write_ppm(path: Path, arr: np.ndarray) -> None:
-    """Write a binary P6 RGB PPM file. 8-bit or 16-bit depending on dtype."""
-    if arr.dtype == np.uint8:
-        maxval = 255
-    elif arr.dtype == np.uint16:
-        maxval = 65535
-    else:
-        raise ValueError(f"Unsupported PPM dtype {arr.dtype}")
-    h, w, c = arr.shape
-    if c != 3:
-        raise ValueError("Only RGB PPM supported")
-    header = f"P6\n{w} {h}\n{maxval}\n".encode("ascii")
-    with open(path, "wb") as f:
-        f.write(header)
-        f.write(arr.tobytes())
-
-
 def _synthetic_image_for_icc(depth: int) -> np.ndarray:
     """Create a small neutral RGB gradient image with no true black values.
 
@@ -1194,8 +1155,6 @@ def extract_xmp_original(tiff_path, tmp_dir):
         return xmp_path
     return None
 
-import re
-
 def read_existing_description(xmp_path):
     """Read existing dc:description from XMP file if present.
     Returns empty string if not found."""
@@ -1233,8 +1192,10 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-mpg:",
     "jxlphoto-subfiletype:",
     "jxlphoto-depth:",
+    "jxlphoto-page:",
     "jxlphoto-icc:inherited",
     "jxlphoto-grayscale",
+    "jxlphoto-thumb",
 )
 
 
@@ -1536,8 +1497,11 @@ def reorder_jxl_boxes(jxl_path):
 
     # Split boxes into groups: metadata (before codestream) and codestream
     CODESTREAM = {b"jxlc", b"jxlp"}
-    META_ORDER = [b"JXL ", b"ftyp", b"jxll"]  # required structure first
-    META_EXTRA = [b"Exif", b"xml "]            # metadata we want before codestream
+    META_ORDER = {b"JXL ", b"ftyp", b"jxll"}       # required structure first
+    META_EXTRA = {b"Exif", b"xml ", b"jbrd", b"brob"}  # metadata before codestream
+    # brob is the Brotli-compressed metadata box libjxl/exiftool may write;
+    # leaving it after the codestream is exactly the bug this function exists
+    # to fix (IrfanView stops reading at the codestream).
 
     # Group by type preserving appearance order (important for multiple jxlp)
     meta_order_boxes  = []
@@ -1546,9 +1510,9 @@ def reorder_jxl_boxes(jxl_path):
     other_boxes       = []
 
     for name, h, p in boxes:
-        if name in {b"JXL ", b"ftyp", b"jxll"}:
+        if name in META_ORDER:
             meta_order_boxes.append((name, h, p))
-        elif name in {b"Exif", b"xml "}:
+        elif name in META_EXTRA:
             meta_extra_boxes.append((name, h, p))
         elif name in CODESTREAM:
             codestream_boxes.append((name, h, p))
@@ -1925,7 +1889,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 try:
                     relation_args = [
                         "-XMP-dc:Relation+=" + MULTIPAGE_XMP_MARKER + multipage_group,
+                        # Page index and thumbnail role are stored as markers,
+                        # not inferred from the filename: a source TIFF named
+                        # *_page<N> or *_thumbnail would otherwise corrupt the
+                        # reconstruction order/naming.
+                        "-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx),
                     ]
+                    if is_thumbnail:
+                        relation_args.append("-XMP-dc:Relation+=" + THUMB_XMP_FLAG)
                     if icc_inherited and page_idx > 0:
                         relation_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
                     if subfiletype != 0:

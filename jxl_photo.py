@@ -39,7 +39,6 @@ try:
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE
     from rich.prompt import Prompt, IntPrompt, Confirm
-    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
     RICH_AVAILABLE = True
     # No force_terminal: when stdout is redirected to a file/pipe, rich must
     # not emit ANSI escape sequences.
@@ -47,13 +46,6 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
     console = None
-
-try:
-    from prompt_toolkit import prompt
-    from prompt_toolkit.completion import PathCompleter
-    PROMPT_TOOLKIT_AVAILABLE = True
-except ImportError:
-    PROMPT_TOOLKIT_AVAILABLE = False
 
 
 # Backport of Path.is_relative_to for Python < 3.9
@@ -108,9 +100,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
-    return bool(bare) and bare != marker_lower and (
-        part_lower.startswith(bare) or part_lower.endswith(bare)
-    )
+    if not bare or bare == marker_lower:
+        return False
+    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
+    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
+    # would falsely match the default '_EXPORT' marker.
+    import re as _re
+    for m in _re.finditer(_re.escape(bare), part_lower):
+        s, e = m.span()
+        left_ok = s == 0 or part_lower[s - 1] in '_- '
+        right_ok = e == len(part_lower) or part_lower[e] in '_- '
+        if left_ok and right_ok:
+            return True
+    return False
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -1339,8 +1341,6 @@ class InteractiveMenu:
     def _wizard_auto_mode_menu(self, workflow: Dict, analyzer: FolderAnalyzer, analysis: Dict, 
                                rec_mode: int, mode_names: Dict, mappings: List) -> bool:
         """Show the auto mode menu and handle user choice."""
-        origin = workflow['origin_format']
-        dest = workflow['dest_format']
         input_dir = Path(workflow['input_dir'])
         rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
         
@@ -1718,9 +1718,9 @@ class InteractiveMenu:
              f"Replaces {origin.upper()} with {dest.upper()} in folder name"),
             ("5", "Sibling folder",
              f"Creates a sibling folder (e.g. [green]JXL_16bits[/green]) next to each source folder"),
-            ("6", f"Marker [green]export[/green] (full)",
-             f"ONLY files INSIDE folders with 'export' in name — ignores everything outside"),
-            ("7", f"Marker [green]export[/green] (specific subfolder)",
+            ("6", f"Marker [green]{export_marker}[/green] (full)",
+             f"ONLY files INSIDE folders matching '{export_marker}' — ignores everything outside"),
+            ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
              f"Like mode 6, but only one subfolder of the export marker (asked in Step 5; empty = all = mode 6)"),
             ("8", "DELETE originals ⚠️",
              "DELETES source files after conversion - IRREVERSIBLE")
@@ -1848,8 +1848,8 @@ class InteractiveMenu:
             ("3", "Recursive", f"'{m3_name}' in each subfolder"),
             ("4", "Rename", f"Renames folder {origin}→{dest}"),
             ("5", "Sibling", f"Creates sibling folder next to source"),
-            ("6", f"Marker export (full)", f"Only inside folders with 'export' in name"),
-            ("7", f"Marker export (subfolder)", f"Only .../Export/JXL style subfolder"),
+            ("6", f"Marker {export_marker} (full)", f"Only inside folders matching '{export_marker}'"),
+            ("7", f"Marker {export_marker} (subfolder)", f"Only one subfolder of '{export_marker}'"),
             ("8", "DELETE originals ⚠️", "DELETES source files!"),
         ]
 
@@ -1918,13 +1918,13 @@ class InteractiveMenu:
              f"Creates a sibling folder next to each source folder, without renaming it.\n"
              f"[cyan]F:/Photos/Raw/[/cyan] -> [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
 
-            ("6", f"Marker export (full)",
-             f"ONLY processes files INSIDE folders containing 'export' in the name.\n"
-             f"Recursively finds ALL export folders and processes everything under each.\n"
-             f"Ignores ALL files outside export folders.\n"
+            ("6", f"Marker {export_marker} (full)",
+             f"ONLY processes files INSIDE folders matching '{export_marker}' (prefix/suffix token).\n"
+             f"Recursively finds ALL matching folders and processes everything under each.\n"
+             f"Ignores ALL files outside matching folders.\n"
              f"Works with _EXPORT, Export_Lightroom, Lightroom_Export, etc. (case-insensitive)."),
 
-            ("7", f"Marker export (specific subfolder)",
+            ("7", f"Marker {export_marker} (specific subfolder)",
              f"Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
              f"The subfolder name is asked in Step 5 (empty = all subfolders = same as mode 6).\n"
              f"Files in other subfolders within export folders are ignored.\n"
@@ -2128,7 +2128,6 @@ class InteractiveMenu:
             workflow['workers'] = max(1, workers)
 
             if origin == 'tiff' and dest == 'jxl':
-                dist_choice = workflow.get('distance_choice', '')
                 q = workflow.get('distance', 0.1)
                 console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
                 console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
@@ -2320,7 +2319,6 @@ class InteractiveMenu:
 
     def _wizard_parameters_advanced(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Step 6A: Advanced Options (optional)"""
-        conv_type = workflow['conversion_type']
         origin = workflow['origin_format']
         dest = workflow['dest_format']
 
@@ -2392,7 +2390,7 @@ class InteractiveMenu:
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     delete_src = Confirm.ask("Delete source TIFFs after conversion? (mode 8)", default=False)
             else:
                 strip_input = input("Strip metadata? [y/N]: ").strip().lower()
@@ -2418,7 +2416,7 @@ class InteractiveMenu:
                     thumbnail_suffix = ts_input if ts_input else ts_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     delete_src_input = input("Delete source TIFFs after conversion? [y/N]: ").strip().lower()
                     delete_src = delete_src_input.startswith('y')
 
@@ -2487,7 +2485,7 @@ class InteractiveMenu:
                 )
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
                 _prev = workflow.get('advanced_options', {})
@@ -2538,7 +2536,7 @@ class InteractiveMenu:
                 depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
                     delete_src = delete_src_input.startswith('y')
 
@@ -2568,7 +2566,7 @@ class InteractiveMenu:
                 no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     delete_src = Confirm.ask("Delete source after conversion?", default=False)
                 output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
             else:
@@ -2578,7 +2576,7 @@ class InteractiveMenu:
                 no_verify = verify_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src:
+                if not delete_src and workflow.get('mode') == 8:
                     del_input = input("Delete source after? [y/N]: ").strip().lower()
                     delete_src = del_input.startswith('y')
                 output_suffix = input("Output suffix (e.g., _converted): ").strip()
@@ -2802,7 +2800,6 @@ class InteractiveMenu:
         workers = workflow['workers']
         advanced = workflow.get('advanced_options', {})
         dry_run = workflow.get('dry_run', False)
-        staging = workflow.get('staging')
 
         # Determine which script to use
         if origin == 'tiff' and dest == 'jxl':

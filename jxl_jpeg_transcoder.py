@@ -141,9 +141,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
-    return bool(bare) and bare != marker_lower and (
-        part_lower.startswith(bare) or part_lower.endswith(bare)
-    )
+    if not bare or bare == marker_lower:
+        return False
+    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
+    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
+    # would falsely match the default '_EXPORT' marker.
+    import re as _re
+    for m in _re.finditer(_re.escape(bare), part_lower):
+        s, e = m.span()
+        left_ok = s == 0 or part_lower[s - 1] in '_- '
+        right_ok = e == len(part_lower) or part_lower[e] in '_- '
+        if left_ok and right_ok:
+            return True
+    return False
 
 
 # --------------------------------------------─
@@ -1341,6 +1351,10 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
                 if not rel_parts:
                     return None  # The marker matched the filename itself
                 rel = Path(*rel_parts[1:]) if len(rel_parts) > 1 else Path(rel_parts[0])
+        # The renamed stem (rename_from/rename_to, computed at the top of this
+        # function) must replace the filename component of rel — otherwise
+        # modes 6/7 silently ignore the rename.
+        rel = rel.parent / f"{stem}{rel.suffix}"
         return export_dir / exp_out / rel.with_suffix(f".{ext}")
     elif mode == 8:
         # In-place (same as mode 0)
@@ -1422,11 +1436,13 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "skipped", str(final_path), None)
     
     overwritten = final_path.exists()
+    # Initialized before the try so the except handler can never hit an
+    # unbound variable (e.g. if mkdir itself raises).
+    output_dirty = False
+    actual_out = write_path
 
     try:
         write_path.parent.mkdir(parents=True, exist_ok=True)
-        output_dirty = False
-        actual_out = write_path
 
         is_png = (fmt == "png")
         if fmt == "jpeg" and bit_depth == 16:

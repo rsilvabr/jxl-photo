@@ -70,9 +70,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     if part_lower.startswith(marker_lower) or part_lower.endswith(marker_lower):
         return True
     bare = marker_lower.strip('_')
-    return bool(bare) and bare != marker_lower and (
-        part_lower.startswith(bare) or part_lower.endswith(bare)
-    )
+    if not bare or bare == marker_lower:
+        return False
+    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
+    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
+    # would falsely match the default '_EXPORT' marker.
+    import re as _re
+    for m in _re.finditer(_re.escape(bare), part_lower):
+        s, e = m.span()
+        left_ok = s == 0 or part_lower[s - 1] in '_- '
+        right_ok = e == len(part_lower) or part_lower[e] in '_- '
+        if left_ok and right_ok:
+            return True
+    return False
 
 
 def _argfile_safe(value) -> str:
@@ -229,6 +239,15 @@ GRAYSCALE_FLAG = "jxlphoto-grayscale"
 DEPTH_FLAG = "jxlphoto-depth:"
 # Must match the encoder's DEPTH_XMP_PREFIX. Carries the original BitsPerSample
 # value (8 or 16) for the page so the decoder can honor --depth-policy.
+
+PAGE_PREFIX = "jxlphoto-page:"
+# Must match the encoder's PAGE_XMP_PREFIX. Carries the TIFF page index of the
+# split page so reconstruction does not depend on the filename (which breaks
+# for sources named *_page<N> or *_thumbnail).
+
+THUMB_FLAG = "jxlphoto-thumb"
+# Must match the encoder's THUMB_XMP_FLAG. Marks thumbnail pages of a split
+# without relying on the _thumbnail filename suffix.
 
 TEMP_DIR = None
 # Temporary directory for intermediate files.
@@ -458,11 +477,15 @@ def extract_icc_from_xmp(jxl_path):
 def extract_icc_native(jxl_path, tmp_dir):
     """Extract ICC profile directly from JXL (for lossless files).
     Returns ICC bytes or None.
+    NOTE: -o must come BEFORE the input file (exiftool is order-sensitive;
+    the reversed order fails with 'No writable tags set'). Some exiftool
+    versions do not expose ICC_Profile from JXL at all — this is a
+    best-effort fallback; the XMP blob (encoder) is the primary path.
     """
     try:
         icc_path = tmp_dir / "native.icc"
         _run_exiftool_argfile(
-            ["-b", "-ICC_Profile", str(jxl_path), "-o", str(icc_path)], timeout=30
+            ["-o", str(icc_path), "-b", "-ICC_Profile", str(jxl_path)], timeout=30
         )
         if icc_path.exists() and icc_path.stat().st_size > 128:
             return icc_path.read_bytes()
@@ -1094,8 +1117,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
                             t.startswith(MULTIPAGE_MARKER_PREFIX)
                             or t.startswith(SUBFILETYPE_PREFIX)
                             or t.startswith(DEPTH_FLAG)
+                            or t.startswith(PAGE_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
+                            or t == THUMB_FLAG
                         )
                     kept = [str(v).strip() for v in _values
                             if str(v).strip() and not _is_internal_marker(str(v))]
@@ -1302,8 +1327,6 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             # Windows Explorer uses this page for thumbnail with ICC
             if main_data.ndim == 2 or (main_data.ndim == 3 and main_data.shape[2] == 1):
                 main_photometric = 'MINISBLACK'
-            elif main_data.ndim == 3 and main_data.shape[2] == 4:
-                main_photometric = 'RGB'
             else:
                 main_photometric = 'RGB'
             kwargs_main = {
@@ -1580,7 +1603,6 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
         try:
             page_arrays = []
             page_icc = None
-            reason = "unknown"
             strategy = "unknown"
 
             for jxl_path, page_idx, is_thumb, icc_inherited, subfiletype, grayscale, depth in page_entries:
@@ -1603,7 +1625,6 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # Use ICC/strategy from the first (main/anchor) page for the whole TIFF
                 if not is_thumb and page_icc is None:
                     page_icc = icc_data
-                    reason = page_reason
                     strategy = page_strategy
 
             if not page_arrays:
@@ -1948,7 +1969,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False} for j in jxls}
     if not jxls:
         return markers
 
@@ -1993,7 +2014,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     values = rel
                 else:
                     values = str(rel).replace(";", ",").split(",")
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False}
                 for token in values:
                     token = str(token).strip()
                     if token.startswith(MULTIPAGE_MARKER_PREFIX):
@@ -2012,6 +2033,13 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                             info['depth'] = int(token[len(DEPTH_FLAG):])
                         except ValueError:
                             pass
+                    elif token.startswith(PAGE_PREFIX):
+                        try:
+                            info['page'] = int(token[len(PAGE_PREFIX):])
+                        except ValueError:
+                            pass
+                    elif token == THUMB_FLAG:
+                        info['thumb'] = True
                 # Match back to our path key (exiftool may normalize separators)
                 key = str(Path(src))
                 if key in markers:
@@ -2052,12 +2080,14 @@ def collect_multipage_groups(jxls: list) -> dict:
     # so that per-file metadata (inheritance, grayscale, depth) is available.
     marker_map = _read_multipage_markers_batch(jxls)
 
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False}
+
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
-            info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
+            info = marker_map.get(str(j), _DEFAULT_INFO)
             # Thumbnail role only counts when the file carries an internal
             # marker — a third-party *_thumbnail.jxl is a REAL photo to us.
-            is_thumb = _is_thumbnail_jxl(j) and _has_internal_markers(info)
+            is_thumb = (info['thumb'] or _is_thumbnail_jxl(j)) and _has_internal_markers(info)
             groups[j] = [(j, 0, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth'])]
         return groups
 
@@ -2065,9 +2095,20 @@ def collect_multipage_groups(jxls: list) -> dict:
     standalone: list = []
 
     for j in jxls:
-        info = marker_map.get(str(j), {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None})
-        _stem, page_idx, is_thumb = _parse_jxl_page_suffix(j.stem)
+        info = marker_map.get(str(j), _DEFAULT_INFO)
+        _stem, parsed_page, parsed_thumb = _parse_jxl_page_suffix(j.stem)
         if info['group']:
+            # Page index and thumbnail role come from the MARKERS when present
+            # (the encoder writes jxlphoto-page:/jxlphoto-thumb and they are
+            # authoritative); the filename is only a fallback for files
+            # encoded before those markers existed — it breaks for sources
+            # named *_page<N> or *_thumbnail.
+            if info['page'] is not None:
+                page_idx = info['page']
+                is_thumb = info['thumb']
+            else:
+                page_idx = parsed_page
+                is_thumb = parsed_thumb
             # Group key is (folder, group_id), NOT just group_id: the id is a
             # hash of the SOURCE TIFF path, so two encodes of the same TIFF to
             # different folders share it. Merging across folders would produce
@@ -2081,7 +2122,7 @@ def collect_multipage_groups(jxls: list) -> dict:
             # thumbnail role. A third-party *_thumbnail.jxl must decode as a
             # normal full image (not be skipped by --thumbnail-handling ignore
             # or tagged subfiletype=1).
-            standalone.append((j, page_idx, False, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+            standalone.append((j, parsed_page, False, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
 
 
     # Marked groups: reconstruct multi-page TIFFs

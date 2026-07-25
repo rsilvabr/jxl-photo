@@ -408,12 +408,19 @@ def test_orientation_preserved(tmp_path):
 # third-pass fixes (external review of fd59f12)
 # ---------------------------------------------------------------------------
 
-def _fake_markers(group_per_file):
+def _fake_markers(group_per_file, page_per_file=None, thumb_files=()):
+    page_per_file = page_per_file or {}
+    thumb_files = set(thumb_files)
+
     def _read(jxls):
         base = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0,
-                         'grayscale': False, 'depth': None} for j in jxls}
+                         'grayscale': False, 'depth': None, 'page': None, 'thumb': False} for j in jxls}
         for k, g in group_per_file.items():
             base[str(k)]['group'] = g
+        for k, p in page_per_file.items():
+            base[str(k)]['page'] = p
+        for k in thumb_files:
+            base[str(k)]['thumb'] = True
         return base
     return _read
 
@@ -512,6 +519,9 @@ def test_transcoder_metadata_strips_icc_blob(monkeypatch, tmp_path):
             writes.append(args_lines)
         return _FakeRun()
 
+    # _copy_metadata exits early when exiftool is not in PATH — stub the check
+    # so the test does not depend on the host environment.
+    monkeypatch.setattr(tr.shutil, "which", lambda cmd: cmd)
     monkeypatch.setattr(tr, "_run_exiftool_argfile", fake_argfile)
     tr._copy_metadata(src, dst)
     assert writes, "CreatorTool was not rewritten"
@@ -737,6 +747,7 @@ def test_transcoder_metadata_strips_bare_icc_blob(monkeypatch, tmp_path):
             writes.append(args_lines)
         return _FakeRun()
 
+    monkeypatch.setattr(tr.shutil, "which", lambda cmd: cmd)
     monkeypatch.setattr(tr, "_run_exiftool_argfile", fake_argfile)
     tr._copy_metadata(src, dst)
     assert writes, "bare ICC blob was not rewritten (if-clean bug)"
@@ -802,3 +813,92 @@ def test_no_materialized_rglob_list(tmp_path):
     analysis = analyzer.analyze()
     assert analysis['total_files'] == 2
     assert analysis['file_distribution']['sub'] == 1
+
+
+# ---------------------------------------------------------------------------
+# sixth-pass fixes (external review of c4058f2)
+# ---------------------------------------------------------------------------
+
+def test_marker_matches_rejects_non_tokens():
+    for mod in (enc, dec, tr):
+        m = mod._marker_matches
+        assert not m("exports", "_export")
+        assert not m("exported_raws", "_export")
+        assert not m("reexport", "_export")
+        assert not m("sports_exports", "_export")
+        # documented/token cases still match
+        assert m("export_lightroom", "_export")
+        assert m("lightroom_export", "_export")
+        assert m("sports_export", "_export")
+        assert m("export_2024", "_export")
+
+
+def test_encoder_reorder_moves_brob(tmp_path):
+    """brob (Brotli-compressed metadata) must come BEFORE the codestream —
+    the exact case reorder_jxl_boxes exists for."""
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    ftyp = (16).to_bytes(4, "big") + b"ftyp" + b"jxl \x00\x00\x00\x00"
+    jxlc = (16).to_bytes(4, "big") + b"jxlc" + b"\xff\x0a\x00\x00\x00\x00\x00\x00"
+    brob = (12).to_bytes(4, "big") + b"brob" + b"Exif"
+    f = tmp_path / "t.jxl"
+    f.write_bytes(sig + ftyp + jxlc + brob)
+    enc.reorder_jxl_boxes(f)
+    data = f.read_bytes()
+    assert data.index(b"brob") < data.index(b"jxlc"), "brob left after codestream"
+
+
+def test_multipage_markers_authoritative_over_filename(monkeypatch, tmp_path):
+    """Source TIFF named *_page<N>: reconstruction must follow the
+    jxlphoto-page markers, not the misleading filenames."""
+    files = [tmp_path / "scan_page3.jxl", tmp_path / "scan_page3_page1.jxl"]
+    monkeypatch.setattr(
+        dec, "_read_multipage_markers_batch",
+        _fake_markers(
+            {f: "gid123" for f in files},
+            page_per_file={tmp_path / "scan_page3.jxl": 0,
+                           tmp_path / "scan_page3_page1.jxl": 1},
+        ))
+    groups = dec.collect_multipage_groups(files)
+    assert len(groups) == 1
+    main, entries = next(iter(groups.items()))
+    assert main.name == "scan_page3.jxl", f"wrong anchor page: {main.name}"
+    assert [e[1] for e in entries] == [0, 1]
+
+
+def test_multipage_thumb_marker_overrides_filename(monkeypatch, tmp_path):
+    """Source named *_thumbnail.tif: page 0 is REAL (marker says so), the
+    misleading filename must not mark it as a thumbnail."""
+    files = [tmp_path / "holiday_thumbnail.jxl", tmp_path / "holiday_thumbnail_page1.jxl"]
+    monkeypatch.setattr(
+        dec, "_read_multipage_markers_batch",
+        _fake_markers(
+            {f: "gid123" for f in files},
+            page_per_file={tmp_path / "holiday_thumbnail.jxl": 0,
+                           tmp_path / "holiday_thumbnail_page1.jxl": 1},
+        ))
+    groups = dec.collect_multipage_groups(files)
+    entries = next(iter(groups.values()))
+    assert all(not e[2] for e in entries), "real page 0 misclassified as thumbnail"
+
+
+def test_old_files_without_page_marker_use_filename(monkeypatch, tmp_path):
+    """JXLs encoded before the page marker existed: filename fallback still works."""
+    files = [tmp_path / "photo.jxl", tmp_path / "photo_page1.jxl"]
+    monkeypatch.setattr(dec, "_read_multipage_markers_batch",
+                        _fake_markers({f: "gid123" for f in files}))
+    groups = dec.collect_multipage_groups(files)
+    entries = next(iter(groups.values()))
+    assert [e[1] for e in entries] == [0, 1]
+
+
+def test_convert_mode6_applies_rename(tmp_path):
+    src = tmp_path / "_EXPORT" / "sub" / "DSC_0001.jpg"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"x")
+    out = tr.resolve_output_convert(
+        src, 6, "converted", "_c", "jpg", "DSC", "PHOTO", tmp_path, decode=True)
+    assert out is not None
+    assert out.name == "PHOTO_0001.jpg"
+    out7 = tr.resolve_output_convert(
+        src, 7, "converted", "_c", "jpg", "DSC", "PHOTO", tmp_path, decode=True)
+    assert out7.name == "PHOTO_0001.jpg"
