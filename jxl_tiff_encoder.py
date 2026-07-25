@@ -105,6 +105,24 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
+    """Replace the FIRST occurrence of suffix_from in a folder name, but only
+    when it is a complete token (bounded by _, -, space, or string edges) —
+    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
+    returns the name unchanged (caller applies the append fallback).
+    """
+    import re as _re
+    pat = _re.compile(
+        _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
+    m = pat.search(name)
+    if not m:
+        return name
+    left_ok = m.start() == 0 or name[m.start() - 1] in '_- '
+    if not left_ok:
+        return name
+    return name[:m.start()] + suffix_to + name[m.end():]
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -522,30 +540,36 @@ _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_n
 _d50_patched_hashes = set()
 _d50_patch_lock = threading.Lock()
 
-def _abort_on_duplicate_outputs(dests):
+def _abort_on_duplicate_outputs(pairs):
     """Abort the run if two outputs map to the same destination file.
 
     Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
     files in different recipe subfolders would silently overwrite each other
     (and with mode 8 + delete, a single validated output could justify deleting
     several distinct sources). Better to stop loudly than to lose data.
+
+    pairs: list of (source_path, dest_path) tuples (dest may be None-filtered).
     """
-    from collections import Counter
-    # Case-insensitive comparison: on Windows/macOS, photo.jxl and PHOTO.jxl
-    # are the same file but different strings. Map the normalized form back to
-    # an original path for display.
+    from collections import Counter, defaultdict
     norm = {}
-    for d in dests:
-        norm.setdefault(os.path.normcase(str(d)), str(d))
-    counts = Counter(os.path.normcase(str(d)) for d in dests)
+    by_dest = defaultdict(list)
+    for src, dst in pairs:
+        norm.setdefault(os.path.normcase(str(dst)), str(dst))
+        by_dest[os.path.normcase(str(dst))].append(str(src))
+    counts = Counter(os.path.normcase(str(d)) for _, d in pairs)
     dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
     if dupes:
         for d in dupes[:10]:
+            srcs = by_dest[os.path.normcase(d)]
             logger.error(f"Duplicate output destination: {d}")
+            for s in srcs[:4]:
+                logger.error(f"    <- from: {s}")
+            if len(srcs) > 4:
+                logger.error(f"    <- ... and {len(srcs) - 4} more source(s)")
         if len(dupes) > 10:
             logger.error(f"... and {len(dupes) - 10} more")
         logger.error("Aborting: multiple inputs map to the same output file. "
-                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+                     "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
         sys.exit(2)
 
 def setup_logger():
@@ -675,11 +699,10 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 4:
         # Rename folder replacing TIFF suffix with JXL suffix
         old_name = tiff_path.parent.name
-        new_name = re.sub(re.escape(TIFF_SUFFIX_TO_REPLACE), JXL_SUFFIX_REPLACE,
-                          old_name, count=1, flags=re.IGNORECASE)
+        new_name = _replace_suffix_token(old_name, TIFF_SUFFIX_TO_REPLACE, JXL_SUFFIX_REPLACE)
         if new_name == old_name:
             new_name = old_name + "_" + JXL_SUFFIX_REPLACE
-            logger.warning(f"'{TIFF_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
+            logger.warning(f"'{TIFF_SUFFIX_TO_REPLACE}' not found as a token in '{old_name}', using '{new_name}'")
         return _warn_if_outside(tiff_path.parent.parent / new_name / tiff_path.with_suffix(".jxl").name)
 
     elif mode == 5:
@@ -1965,6 +1988,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # because each exiftool edit can re-append boxes after the codestream.
             reorder_jxl_boxes(write_path)
 
+            # Validate EVERY successful output, not just mode-8 delete gates:
+            # cjxl returning 0 does not guarantee a well-formed file (disk
+            # full, AV truncation, killed mid-write). A corrupt output marked
+            # OK would be skipped forever by the next smart-sync run.
+            # (The except handler deletes it via output_dirty.)
+            if not _verify_jxl_integrity(write_path):
+                raise RuntimeError("cjxl returned 0 but the output failed the JXL integrity check")
+
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
             label  = "OVERWRITE" if overwritten else "OK"
@@ -2551,7 +2582,7 @@ def main():
     planned_msg += ")"
     logger.info(planned_msg)
 
-    _abort_on_duplicate_outputs([item[1] for item in all_items])
+    _abort_on_duplicate_outputs([(item[0], item[1]) for item in all_items])
     _counter["total"] = len(all_items)
 
     # Dry run

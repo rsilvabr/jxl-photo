@@ -156,6 +156,24 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
+    """Replace the FIRST occurrence of suffix_from in a folder name, but only
+    when it is a complete token (bounded by _, -, space, or string edges) —
+    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
+    returns the name unchanged (caller applies the append fallback).
+    """
+    import re as _re
+    pat = _re.compile(
+        _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
+    m = pat.search(name)
+    if not m:
+        return name
+    left_ok = m.start() == 0 or name[m.start() - 1] in '_- '
+    if not left_ok:
+        return name
+    return name[:m.start()] + suffix_to + name[m.end():]
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -290,22 +308,29 @@ def _abort_on_duplicate_outputs(pairs):
     files in different recipe subfolders would silently overwrite each other
     (and with mode 8 + delete, a single validated output could justify deleting
     several distinct sources). Better to stop loudly than to lose data.
+
+    pairs: list of (source_path, dest_path) tuples.
     """
-    from collections import Counter
-    # Case-insensitive comparison: on Windows/macOS, photo.jxl and PHOTO.jxl
-    # are the same file but different strings.
+    from collections import Counter, defaultdict
     norm = {}
-    for _, out in pairs:
-        norm.setdefault(os.path.normcase(str(out)), str(out))
+    by_dest = defaultdict(list)
+    for src, dst in pairs:
+        norm.setdefault(os.path.normcase(str(dst)), str(dst))
+        by_dest[os.path.normcase(str(dst))].append(str(src))
     counts = Counter(os.path.normcase(str(out)) for _, out in pairs)
     dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
     if dupes:
         for d in dupes[:10]:
+            srcs = by_dest[os.path.normcase(d)]
             logger.error(f"Duplicate output destination: {d}")
+            for s in srcs[:4]:
+                logger.error(f"    <- from: {s}")
+            if len(srcs) > 4:
+                logger.error(f"    <- ... and {len(srcs) - 4} more source(s)")
         if len(dupes) > 10:
             logger.error(f"... and {len(dupes) - 10} more")
         logger.error("Aborting: multiple inputs map to the same output file. "
-                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+                     "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
         sys.exit(2)
 
 # Charset directives for exiftool argfiles:
@@ -915,10 +940,10 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
     elif mode == 4:
         # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
-        new_name = re.sub(re.escape(sfx_from), sfx_to, old_name, count=1, flags=re.IGNORECASE)
+        new_name = _replace_suffix_token(old_name, sfx_from, sfx_to)
         if new_name == old_name:
             new_name = old_name + "_" + sfx_to
-            logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
+            logger.warning(f"'{sfx_from}' not found as a token in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
     elif mode == 5:
         # Sibling folder (aligned with encoder/decoder mode 5)
@@ -1006,6 +1031,12 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         if is_jpeg_encode:
             reorder_jxl_boxes(write_path)
 
+        # Validate EVERY successful output (a tool returning 0 does not
+        # guarantee a well-formed file); only then record the checksum —
+        # the MD5 db must never claim coverage of an invalid output.
+        if not _verify_file_integrity(write_path):
+            raise RuntimeError("tool returned 0 but the output failed the integrity check")
+
         if src_md5:
             # Use write_path directory but final_path name (no UUID) for checksum entry
             # This ensures checksums.md5 has correct filenames even with staging
@@ -1071,6 +1102,12 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         r = subprocess.run(djxl_cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+
+        # Validate the decoded output itself (rc=0 does not guarantee a
+        # well-formed file). The MD5 comparison below is an even stronger
+        # check, but only runs when a checksum was stored.
+        if not _verify_file_integrity(write_path):
+            raise RuntimeError("djxl returned 0 but the output failed the integrity check")
 
         n, total = next_count()
 
@@ -1215,6 +1252,18 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             if STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
                 if src_md5 is None or read_md5_db(final_file) is None:
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
+                    continue
+            if decode and not _tool_at_least("djxl", 0, 12):
+                # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
+                # is NOT guaranteed by the tool. Without a stored MD5 to
+                # verify against, deleting the source rests on the structural
+                # SOI/EOI check alone — too weak for an irreversible gate.
+                # (The checksum is keyed by the JXL's own name = the source.)
+                if not STORE_MD5:
+                    logger.warning(f" KEEP (djxl<0.12 and MD5 disabled) | {src_path.name}")
+                    continue
+                if read_md5_db(src_path) is None:
+                    logger.warning(f" KEEP (djxl<0.12, no stored MD5 for source) | {src_path.name}")
                     continue
             if not _verify_file_integrity(final_file):
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
@@ -1407,10 +1456,10 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
     elif mode == 4:
         # Folder suffix replacement (aligned with encoder/decoder mode 4)
         old_name = src_path.parent.name
-        new_name = re.sub(re.escape(sfx_from), sfx_to, old_name, count=1, flags=re.IGNORECASE)
+        new_name = _replace_suffix_token(old_name, sfx_from, sfx_to)
         if new_name == old_name:
             new_name = old_name + "_" + sfx_to
-            logger.warning(f"'{sfx_from}' not found in '{old_name}', using '{new_name}'")
+            logger.warning(f"'{sfx_from}' not found as a token in '{old_name}', using '{new_name}'")
         return src_path.parent.parent / new_name / f"{stem}.{ext}"
     elif mode == 5:
         # Sibling folder (e.g., JXL_jpeg/ or JPEG_recovered/) — aligned with
@@ -1503,6 +1552,11 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
         reorder_jxl_boxes(write_path)
+
+        # Validate EVERY successful output (rc=0 does not guarantee a
+        # well-formed file).
+        if not _verify_file_integrity(write_path):
+            raise RuntimeError("cjxl returned 0 but the output failed the integrity check")
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
@@ -1660,6 +1714,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
 
         # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop
         _copy_metadata(jxl_path, actual_out)
+
+        # Validate EVERY successful output (rc=0 does not guarantee a
+        # well-formed file).
+        if not _verify_file_integrity(actual_out):
+            raise RuntimeError("decode returned 0 but the output failed the integrity check")
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
@@ -1861,9 +1920,10 @@ def cmd_convert(args, from_jxl: bool = True):
     else:
         mode_str = "reconvert=OFF (skip existing)"
 
+    _bd_label = str(args.bit_depth) if direction == "from_jxl" else "n/a"
     logger.info(f"{op_type} | Mode: {args.mode} | "
                 f"Format: {args.format} | Quality: {args.quality} | "
-                f"Bit depth: {args.bit_depth} | ICC: {icc_label} | "
+                f"Bit depth: {_bd_label} | ICC: {icc_label} | "
                 f"RAM: {args.ram} | delete_source={DELETE_SOURCE} | {mode_str} | "
                 f"Staging: {TEMP2_DIR or 'disabled'} | Workers: {args.workers}")
     if args.rename_from:
@@ -2092,12 +2152,22 @@ def cmd_auto(args):
 
     # Cross-group duplicate detection: the groups below are processed in separate
     # calls, so per-group checks cannot see collisions across them (e.g.
-    # photo.jpg + photo.png both -> converted_jxl/photo.jxl).
+    # photo.jpg + photo.png both -> converted_jxl/photo.jxl). The per-group
+    # pair lists are kept so empty groups (everything filtered by mode 6/7)
+    # never print a "Processing N" header.
+    groups_plan = [
+        ("JPEG", jpeg_files, dict(use_transcode=True)),
+        ("PNG", png_files, dict(use_transcode=False, direction="to_jxl")),
+        ("JXL-jbrd", jxl_transcode_files, dict(use_transcode=True)),
+        ("JXL-lossy", jxl_convert_files, dict(use_transcode=False)),
+    ]
+    planned = {}
     all_pairs = []
-    _process_file_group(jpeg_files, args, use_transcode=True, collect_only=all_pairs)
-    _process_file_group(png_files, args, use_transcode=False, direction="to_jxl", collect_only=all_pairs)
-    _process_file_group(jxl_transcode_files, args, use_transcode=True, collect_only=all_pairs)
-    _process_file_group(jxl_convert_files, args, use_transcode=False, collect_only=all_pairs)
+    for key, files, kw in groups_plan:
+        lst = []
+        _process_file_group(files, args, collect_only=lst, **kw)
+        planned[key] = lst
+        all_pairs.extend(lst)
     _abort_on_duplicate_outputs(all_pairs)
 
     # Output-vs-input collision: e.g. photo.jpg (encode) + photo.jxl (decode) in
@@ -2153,24 +2223,25 @@ def cmd_auto(args):
         for k in totals:
             totals[k] += tally.get(k, 0)
 
-    # Process JXL transcode files (lossless decode to JPEG)
-    if jxl_transcode_files:
-        logger.info(f"\n--- Processing {len(jxl_transcode_files)} JXL files with jbrd (lossless) ---")
+    # Process JXL transcode files (lossless decode to JPEG) — only when the
+    # mode filter left something to do (otherwise the header lies).
+    if planned["JXL-jbrd"]:
+        logger.info(f"\n--- Processing {len(planned['JXL-jbrd'])} JXL files with jbrd (lossless) ---")
         _merge(_process_file_group(jxl_transcode_files, args, use_transcode=True))
 
     # Process JXL convert files (lossy)
-    if jxl_convert_files:
-        logger.info(f"\n--- Processing {len(jxl_convert_files)} JXL files without jbrd (lossy) ---")
+    if planned["JXL-lossy"]:
+        logger.info(f"\n--- Processing {len(planned['JXL-lossy'])} JXL files without jbrd (lossy) ---")
         _merge(_process_file_group(jxl_convert_files, args, use_transcode=False))
 
     # Process JPEG files (lossless encode to JXL)
-    if jpeg_files:
-        logger.info(f"\n--- Processing {len(jpeg_files)} JPEG files (lossless encode) ---")
+    if planned["JPEG"]:
+        logger.info(f"\n--- Processing {len(planned['JPEG'])} JPEG files (lossless encode) ---")
         _merge(_process_file_group(jpeg_files, args, use_transcode=True))
 
     # Process PNG files (convert encode to JXL; no lossless transcode for PNG)
-    if png_files:
-        logger.info(f"\n--- Processing {len(png_files)} PNG files (convert encode) ---")
+    if planned["PNG"]:
+        logger.info(f"\n--- Processing {len(planned['PNG'])} PNG files (convert encode) ---")
         _merge(_process_file_group(png_files, args, use_transcode=False, direction="to_jxl"))
 
     logger.info(f"\n{'-'*50}")

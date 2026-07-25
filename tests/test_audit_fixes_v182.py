@@ -141,7 +141,7 @@ def test_transcoder_md5_fail_deletes_output(monkeypatch, tmp_path):
     monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
 
     def fake_djxl(cmd, **kw):
-        Path(cmd[-1]).write_bytes(b"\xff\xd8recovered")
+        Path(cmd[-1]).write_bytes(b"\xff\xd8recovered" + b"\xff\xd9")  # valid SOI..EOI
         return _FakeRun()
 
     monkeypatch.setattr(tr.subprocess, "run", fake_djxl)
@@ -212,7 +212,9 @@ def test_auto_from_jxl_ignores_jpegs_and_pngs(monkeypatch, tmp_path):
     processed = []
 
     def fake_group(files, args, **kw):
-        if kw.get("collect_only") is None:
+        if kw.get("collect_only") is not None:
+            kw["collect_only"].extend((f, f.parent / (f.name + ".out")) for f in files)
+        else:
             processed.extend(f.name for f in files)
         return {"ok": 0, "err": 0, "skipped": 0}
 
@@ -578,7 +580,9 @@ def test_auto_decode_runs_before_encode(monkeypatch, tmp_path):
     order = []
 
     def fake_group(files, args, **kw):
-        if kw.get("collect_only") is None:
+        if kw.get("collect_only") is not None:
+            kw["collect_only"].extend((f, f.parent / (f.name + ".out")) for f in files)
+        else:
             order.append(tuple(f.suffix.lower() for f in files))
         return {"ok": 0, "err": 0, "skipped": 0}
 
@@ -1418,3 +1422,129 @@ def test_collision_check_before_delete_confirmation(monkeypatch, tmp_path):
         tr.cmd_auto(_args(tmp_path, mode=8, overwrite=True, delete_source=True))
     assert exc.value.code == 2
     assert called["n"] == 0, "confirmation was asked before the collision abort"
+
+
+# ---------------------------------------------------------------------------
+# eleventh-pass fixes (integrity validation on every OK output)
+# ---------------------------------------------------------------------------
+
+def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
+    """cjxl returns 0 but writes 0 bytes -> per-file ERROR, partial deleted."""
+    tif = tmp_path / "photo.tif"
+    tifffile.imwrite(tif, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "photo.jxl"
+    final.write_bytes(b"")  # simulate the empty output
+
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "get_page_icc", lambda *a, **k: (None, False))
+    monkeypatch.setattr(enc, "apply_d50_policy", lambda icc, p: icc)
+    monkeypatch.setattr(enc, "reorder_jxl_boxes", lambda p: None)
+
+    def fake_run(cmd, **kw):
+        if cmd[0] in ("cjxl", "cjxl.exe") or "cjxl" in str(cmd[0]):
+            return _FakeRun()  # rc=0, but file stays 0 bytes
+        return _FakeRun()
+
+    monkeypatch.setattr(enc.subprocess, "run", fake_run)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+
+    (_k, status, msg, _) = enc.convert_one(tif, final, final)
+    assert status == "error"
+    assert "integrity" in msg.lower()
+    assert not final.exists() or final.stat().st_size > 0 or not final.exists()
+    assert not final.exists(), "invalid output must be deleted"
+
+
+def test_zero_byte_output_no_md5_entry(monkeypatch, tmp_path):
+    """Invalid encode output -> no checksums.md5 entry (M3)."""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8fake")
+    final = tmp_path / "a.jxl"
+
+    def fake_run(cmd, **kw):
+        # cjxl "succeeds" but writes nothing
+        return _FakeRun()
+
+    monkeypatch.setattr(tr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tr, "reorder_jxl_boxes", lambda p: None)
+    tr.setup_logger()
+    (s, status, _, _) = tr.encode_one_transcode(src, final, final, False, 7, False)
+    assert status == "error"
+    assert not (tmp_path / "checksums.md5").exists(), "md5 entry written for invalid output"
+
+
+def test_decode_delete_requires_md5_on_old_djxl(tmp_path):
+    """djxl < 0.12 + no stored MD5 -> source kept even when output looks fine."""
+    src = tmp_path / "a.jxl"
+    src.write_bytes(b"\x00" * 32)
+    final = tmp_path / "a.jpg"
+    final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
+    monkeypatch.setattr(tr, "STORE_MD5", True)
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    results = [(str(src), "ok", str(final), None)]
+    monkeypatch.setattr(tr, "decode_one_transcode", lambda *a, **k: results[0])
+    tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
+    assert src.exists(), "source deleted without MD5 on old djxl"
+    monkeypatch.undo()
+
+
+def test_mode4_token_replace():
+    assert dec._replace_suffix_token("C1_Export_JXL", "JXL", "TIFF") == "C1_Export_TIFF"
+    assert dec._replace_suffix_token("C1_Export_jXl", "JXL", "TIFF") == "C1_Export_TIFF"
+    # substring-but-not-token: unchanged (caller appends fallback)
+    assert dec._replace_suffix_token("MyJXLArchive", "JXL", "TIFF") == "MyJXLArchive"
+    # first token only
+    assert dec._replace_suffix_token("JXL_JXL", "JXL", "TIFF") == "TIFF_JXL"
+
+
+def test_duplicate_abort_lists_sources(tmp_path, caplog):
+    s1 = tmp_path / "_EXPORT" / "a" / "photo.tif"
+    s2 = tmp_path / "_EXPORT" / "b" / "photo.tif"
+    s1.parent.mkdir(parents=True)
+    s2.parent.mkdir(parents=True)
+    s1.write_bytes(b"x")
+    s2.write_bytes(b"x")
+    enc.setup_logger()
+    with caplog.at_level("ERROR", logger="jxl_convert"):
+        with pytest.raises(SystemExit):
+            enc._abort_on_duplicate_outputs([(s1, tmp_path / "out" / "photo.jxl"),
+                                             (s2, tmp_path / "out" / "photo.jxl")])
+    assert str(s1) in caplog.text and str(s2) in caplog.text
+
+
+def test_thumbnail_ignore_sources_deleted_in_mode8(tmp_path):
+    """--thumbnail-handling ignore + mode 8 + delete: ignored _thumbnail.jxl
+    files must be deleted with the group (no permanent orphans)."""
+    main = tmp_path / "scan.jxl"
+    thumb = tmp_path / "scan_page1_thumbnail.jxl"
+    main.write_bytes(b"\x00" * 16)
+    thumb.write_bytes(b"\x00" * 16)
+    final = tmp_path / "scan.tif"
+    tifffile.imwrite(final, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
+
+    dec.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(dec, "DELETE_SOURCE", True)
+    monkeypatch.setattr(dec, "TEMP2_DIR", None)
+    monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
+
+    task = {
+        "type": "multi",
+        "main_jxl": main,
+        "entries": [(main, 0, False, False, 0, False, None)],
+        "ignored_thumbs": [(thumb, 1, True, False, 0, False, None)],
+        "final_tiff": final,
+    }
+    results = [(str(main), "ok", str(final))]
+    monkeypatch.setattr(dec, "convert_multipage_jxl_group",
+                        lambda *a, **k: results[0])
+    dec.process_group([task], 1, 8)
+    assert not main.exists()
+    assert not thumb.exists(), "ignored thumbnail source was left behind"
+    monkeypatch.undo()

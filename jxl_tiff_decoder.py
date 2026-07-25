@@ -59,6 +59,24 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
+    """Replace the FIRST occurrence of suffix_from in a folder name, but only
+    when it is a complete token (bounded by _, -, space, or string edges) —
+    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
+    returns the name unchanged (caller applies the append fallback).
+    """
+    import re as _re
+    pat = _re.compile(
+        _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
+    m = pat.search(name)
+    if not m:
+        return name
+    left_ok = m.start() == 0 or name[m.start() - 1] in '_- '
+    if not left_ok:
+        return name
+    return name[:m.start()] + suffix_to + name[m.end():]
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -400,29 +418,36 @@ def next_count():
         _counter["done"] += 1
         return _counter["done"], _counter["total"]
 
-def _abort_on_duplicate_outputs(dests):
+def _abort_on_duplicate_outputs(pairs):
     """Abort the run if two outputs map to the same destination file.
 
     Modes 6/7 drop the first subfolder level under EXPORT_MARKER, so same-named
     files in different recipe subfolders would silently overwrite each other
     (and with mode 8 + delete, a single validated output could justify deleting
     several distinct sources). Better to stop loudly than to lose data.
+
+    pairs: list of (source_path, dest_path) tuples.
     """
-    from collections import Counter
-    # Case-insensitive comparison: on Windows/macOS, photo.tif and PHOTO.tif
-    # are the same file but different strings.
+    from collections import Counter, defaultdict
     norm = {}
-    for d in dests:
-        norm.setdefault(os.path.normcase(str(d)), str(d))
-    counts = Counter(os.path.normcase(str(d)) for d in dests)
+    by_dest = defaultdict(list)
+    for src, dst in pairs:
+        norm.setdefault(os.path.normcase(str(dst)), str(dst))
+        by_dest[os.path.normcase(str(dst))].append(str(src))
+    counts = Counter(os.path.normcase(str(d)) for _, d in pairs)
     dupes = sorted(norm[d] for d, c in counts.items() if c > 1)
     if dupes:
         for d in dupes[:10]:
+            srcs = by_dest[os.path.normcase(d)]
             logger.error(f"Duplicate output destination: {d}")
+            for s in srcs[:4]:
+                logger.error(f"    <- from: {s}")
+            if len(srcs) > 4:
+                logger.error(f"    <- ... and {len(srcs) - 4} more source(s)")
         if len(dupes) > 10:
             logger.error(f"... and {len(dupes) - 10} more")
         logger.error("Aborting: multiple inputs map to the same output file. "
-                     "Rename inputs or pick another mode/folder to avoid silent overwrites.")
+                     "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
         sys.exit(2)
 
 def confirm_deletion_jxl():
@@ -1253,9 +1278,10 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             new_h = max_dim
             new_w = max(1, int(w * max_dim / h))
 
-        # Convert to 8-bit for JPEG preview
+        # Convert to 8-bit for JPEG preview (rounded, like the rest of the
+        # pipeline — not a bit-shift truncation)
         if img_data.dtype == np.uint16:
-            img_8bit = (img_data >> 8).astype(np.uint8)
+            img_8bit = np.rint(img_data / 257).astype(np.uint8)
         elif img_data.dtype == np.uint8:
             img_8bit = img_data
         else:
@@ -1435,11 +1461,10 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
     elif mode == 4:
         # Mode 4: Rename folder replacing JXL suffix with TIFF suffix
         old_name = jxl_path.parent.name
-        new_name = re.sub(re.escape(JXL_SUFFIX_TO_REPLACE), TIFF_SUFFIX_REPLACE,
-                          old_name, count=1, flags=re.IGNORECASE)
+        new_name = _replace_suffix_token(old_name, JXL_SUFFIX_TO_REPLACE, TIFF_SUFFIX_REPLACE)
         if new_name == old_name:
             new_name = old_name + "_" + TIFF_SUFFIX_REPLACE
-            logger.warning(f"'{JXL_SUFFIX_TO_REPLACE}' not found in '{old_name}', using '{new_name}'")
+            logger.warning(f"'{JXL_SUFFIX_TO_REPLACE}' not found as a token in '{old_name}', using '{new_name}'")
         return _warn_if_outside(jxl_path.parent.parent / new_name / jxl_path.with_suffix(".tif").name)
 
     elif mode == 5:
@@ -1779,6 +1804,14 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                             ["-overwrite_original", "-IFD1:ImageDescription=", "-ImageDescription=", str(write_path)], timeout=60
                         )
 
+            # Validate EVERY successful output, not just mode-8 delete gates:
+            # a tool returning 0 does not guarantee a well-formed file (disk
+            # full, AV truncation). A corrupt output marked OK would be
+            # skipped forever by the next smart-sync run.
+            # (The except handler deletes it.)
+            if not _verify_tiff_integrity(write_path):
+                raise RuntimeError("output TIFF failed the integrity check")
+
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
             thumb_count = sum(1 for _, _, is_thumb, _, _, _, _ in page_entries if is_thumb)
@@ -1829,6 +1862,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
         tasks.append({
             "main_jxl": main_jxl,
             "entries": task["entries"],
+            "ignored_thumbs": task.get("ignored_thumbs", []),
             "write_path": write_tiff_path,
             "final_tiff": final_tiff,
         })
@@ -1904,8 +1938,12 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             if not _verify_tiff_integrity(final_tiff):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
-            # Delete all source JXLs in this group
-            for jxl_path, _, _, _, _, _, _ in task["entries"]:
+            # Delete all source JXLs in this group — including thumbnails
+            # excluded by --thumbnail-handling ignore: mode 8 replaces the
+            # whole original archive, and keeping them would leave permanent
+            # orphans that form skip-forever thumbnail-only groups next run.
+            all_sources = list(task["entries"]) + list(task.get("ignored_thumbs", []))
+            for jxl_path, _, _, _, _, _, _ in all_sources:
                 try:
                     jxl_path.unlink()
                     logger.info(f" DELETED source | {jxl_path.name}")
@@ -2435,8 +2473,13 @@ Examples:
     # Build tasks: each task represents one output TIFF
     tasks = []
     for main_jxl, entries in mp_groups.items():
-        # Filter thumbnail pages if requested
+        # Filter thumbnail pages if requested — but KEEP the ignored entries
+        # in the task so mode-8 delete can remove them with the group
+        # (otherwise they become permanent orphans: next run they form a
+        # thumbnails-only group that is skipped forever).
+        ignored_thumbs = []
         if THUMBNAIL_HANDLING == "ignore":
+            ignored_thumbs = [e for e in entries if e[2]]
             entries = [e for e in entries if not e[2]]
             if not entries:
                 logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
@@ -2449,13 +2492,14 @@ Examples:
             "type": "multi",
             "main_jxl": main_jxl,
             "entries": entries,
+            "ignored_thumbs": ignored_thumbs,
             "final_tiff": tiff,
         })
 
     logger.info(f"TIFF outputs planned: {len(tasks)} (from {len(jxls)} JXLs, {len(mp_groups)} group(s))")
     _counter["total"] = len(tasks)
 
-    _abort_on_duplicate_outputs([task["final_tiff"] for task in tasks])
+    _abort_on_duplicate_outputs([(task["main_jxl"], task["final_tiff"]) for task in tasks])
 
     # Dry run
     if args.dry_run:

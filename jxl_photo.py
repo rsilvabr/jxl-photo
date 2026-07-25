@@ -1999,10 +1999,11 @@ class InteractiveMenu:
                 console.print(Panel.fit(desc, border_style=style))
                 console.print()
 
-            valid_choices = [d[0] for d in details] + ["A", "M"]
+            valid_choices = [d[0] for d in details] + ["A", "M", "a", "m"]
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice in valid_choices:
+                    choice = choice.upper()
                     break
         else:
             print("\n=== Mode Detailed Explanations ===\n")
@@ -2190,7 +2191,7 @@ class InteractiveMenu:
                 workflow['use_ram'] = use_ram
 
             workers = IntPrompt.ask("Workers", default=workflow['workers'])
-            workflow['workers'] = max(1, workers)
+            workflow['workers'] = max(1, min(workers, 32))
 
             if origin == 'tiff' and dest == 'jxl':
                 q = workflow.get('distance', 0.1)
@@ -2228,12 +2229,13 @@ class InteractiveMenu:
             else:
                 workflow['staging'] = _strip_surrounding_quotes(staging_input)
 
-            # Quality and ICC settings for JPEG output (only for lossy conversion)
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
             if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
                 quality = IntPrompt.ask("Quality (1-100)", default=workflow.get('quality', 95))
                 workflow['quality'] = max(1, min(quality, 100))
-                
+
+            # ICC conversion applies to both JPEG and PNG outputs
+            if origin == 'jxl' and dest in ('jpeg', 'png'):
                 if status.get('magick'):
                     convert_icc = Confirm.ask("Convert to sRGB?", default=False)
                     if convert_icc:
@@ -2328,13 +2330,14 @@ class InteractiveMenu:
             elif staging_input:
                 workflow['staging'] = _strip_surrounding_quotes(staging_input)
 
-            # Quality and ICC settings for JPEG output (only for lossy conversion)
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
             if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
                 quality = input(f"Quality (1-100) [{workflow.get('quality', 95)}]: ").strip()
                 if quality.isdigit():
                     workflow['quality'] = max(1, min(int(quality), 100))
-                
+
+            # ICC conversion applies to both JPEG and PNG outputs
+            if origin == 'jxl' and dest in ('jpeg', 'png'):
                 if status.get('magick'):
                     icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
                     if icc_input.startswith('y'):
@@ -3148,9 +3151,9 @@ class InteractiveMenu:
             eline = _escape(line)
             if "[OK]" in line or "✓" in line or "Processing" in line:
                 console.print(f"  [green]{eline}[/green]")
-            elif "[ERROR]" in line or "Error" in line or "✗" in line:
+            elif "[ERROR]" in line or "| ERROR |" in line or "Error" in line or "✗" in line:
                 console.print(f"  [red]{eline}[/red]")
-            elif "[WARNING]" in line or "⚠" in line:
+            elif "[WARNING]" in line or "| WARNING |" in line or "⚠" in line:
                 console.print(f"  [yellow]{eline}[/yellow]")
             elif "DRY" in line or "simulation" in line.lower():
                 console.print(f"  [blue]{eline}[/blue]")

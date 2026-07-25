@@ -116,10 +116,16 @@ def test_encode_to_jxl_cmd_includes_buffering(monkeypatch, tmp_path):
     write = tmp_path / "out" / "a.jxl"
     final = tmp_path / "out" / "a.jxl"
 
+    # Minimal valid JXL container for the integrity check (sig + jxlc box)
+    _FAKE_JXL = (b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+                 + (8).to_bytes(4, "big") + b"jxlc")
+
     calls = []
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        Path(cmd[2]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[2]).write_bytes(_FAKE_JXL)
         return _FakeRun()
 
     monkeypatch.setattr(tr.subprocess, "run", fake_run)
@@ -157,6 +163,9 @@ def _run_decode(monkeypatch, tmp_path, version, name="a"):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
+        # Simulate djxl writing a valid (structurally) JPEG output
+        Path(cmd[-1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[-1]).write_bytes(b"\xff\xd8" + b"\x00" * 8 + b"\xff\xd9")
         return _FakeRun()
 
     monkeypatch.setattr(tr.subprocess, "run", fake_run)
