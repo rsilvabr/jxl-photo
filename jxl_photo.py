@@ -576,29 +576,34 @@ class FolderAnalyzer:
             # Only subfolders that contain ORIGIN files count — the toolkit's
             # own output folders (16B_JXL etc.) must not trigger this, or every
             # run after the first would recommend mode 7 for the wrong reason.
-            has_jxl_subfolder = False
+            # Mode 7 is only recommended when a SINGLE subfolder name holds the
+            # origin files; with several names the choice would be arbitrary
+            # (and the preview would lie) — fall back to mode 6.
+            origin_sub_names = set()
             origin_exts = self._get_extensions(self.origin)
             for export_path in export_paths[:3]:
                 export_dir = Path(export_path)
                 try:
-                    subdirs = [d for d in export_dir.iterdir() if d.is_dir()]
+                    subdirs = sorted((d for d in export_dir.iterdir() if d.is_dir()),
+                                     key=lambda d: d.name.lower())
                 except OSError:
                     continue  # unreadable/removed mid-scan: skip, don't kill analysis
                 for subdir in subdirs:
                     try:
                         if any(f.is_file() and f.suffix.lower() in origin_exts
                                for f in subdir.rglob('*')):
-                            has_jxl_subfolder = True
-                            break
+                            origin_sub_names.add(subdir.name)
                     except OSError:
                         continue
-                if has_jxl_subfolder:
-                    break
 
-            if has_jxl_subfolder:
+            if len(origin_sub_names) == 1:
                 result['recommended_mode'] = 7
                 confidence = 'high'
-                reasoning.append(f"Detected {self.origin.upper()} subfolder inside export folder — Mode 7 recommended (specific subfolder)")
+                reasoning.append(f"Origin files live in subfolder '{next(iter(origin_sub_names))}' of the export folder — Mode 7 recommended (specific subfolder)")
+            elif len(origin_sub_names) > 1:
+                result['recommended_mode'] = 6
+                confidence = 'medium'
+                reasoning.append(f"Origin files spread across {len(origin_sub_names)} subfolders ({', '.join(sorted(origin_sub_names))}) — Mode 6 recommended (all export files; pick a subfolder manually for mode 7)")
             else:
                 result['recommended_mode'] = 6
                 confidence = 'high'
@@ -740,14 +745,19 @@ class FolderAnalyzer:
                     for f in jxl_subfolder.rglob('*')
                 ):
                     # Auto-detect first subfolder containing origin files
-                    for subdir in export_dir.iterdir():
-                        if subdir.is_dir():
-                            if any(
-                                f.is_file() and f.suffix.lower() in origin_exts
-                                for f in subdir.rglob('*')
-                            ):
-                                jxl_subfolder = subdir
-                                break
+                    # (sorted for deterministic previews/manifests)
+                    try:
+                        candidates = sorted((d for d in export_dir.iterdir() if d.is_dir()),
+                                            key=lambda d: d.name.lower())
+                    except OSError:
+                        candidates = []
+                    for subdir in candidates:
+                        if any(
+                            f.is_file() and f.suffix.lower() in origin_exts
+                            for f in subdir.rglob('*')
+                        ):
+                            jxl_subfolder = subdir
+                            break
                     else:
                         jxl_subfolder = export_dir / subfolder_name  # fallback
                 origin_files = [
@@ -841,14 +851,19 @@ class FolderAnalyzer:
                     for f in jxl_subfolder.rglob('*')
                 ):
                     # Auto-detect first subfolder containing origin files
-                    for subdir in export_dir.iterdir():
-                        if subdir.is_dir():
-                            if any(
-                                f.is_file() and f.suffix.lower() in origin_exts
-                                for f in subdir.rglob('*')
-                            ):
-                                jxl_subfolder = subdir
-                                break
+                    # (sorted for deterministic previews/manifests)
+                    try:
+                        candidates = sorted((d for d in export_dir.iterdir() if d.is_dir()),
+                                            key=lambda d: d.name.lower())
+                    except OSError:
+                        candidates = []
+                    for subdir in candidates:
+                        if any(
+                            f.is_file() and f.suffix.lower() in origin_exts
+                            for f in subdir.rglob('*')
+                        ):
+                            jxl_subfolder = subdir
+                            break
                     else:
                         jxl_subfolder = export_dir / subfolder_name  # fallback
                 origin_files = [
@@ -2028,7 +2043,10 @@ class InteractiveMenu:
     def _wizard_mode_specific_config(self, workflow: Dict) -> bool:
         """Step 5: Mode-specific configuration"""
         mode = workflow['mode']
-        mode_config = {}
+        # Preserve anything the Auto Mode already seeded (export_subfolder
+        # detection for mode 7) — a fresh dict would silently drop it and the
+        # run would behave like mode 6 while the preview said mode 7.
+        mode_config = dict(workflow.get('mode_config') or {})
         origin = workflow['origin_format']
         dest = workflow['dest_format']
 
@@ -2081,6 +2099,10 @@ class InteractiveMenu:
                             console.print(console_msg)
                         else:
                             print("Note: subfolder set manually after Auto Mode — preview used auto-detection.")
+                else:
+                    # Empty answer = "all subfolders": drop any seeded value so
+                    # the intent is explicit, not inherited.
+                    mode_config.pop('export_subfolder', None)
 
         elif mode == 2:
             default_out = Path(workflow['input_dir']).parent / "output"
@@ -2820,7 +2842,9 @@ class InteractiveMenu:
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get('add_preview', True) else "No"
                 print(f"JPEG Preview: {preview_status}")
-            print(f"Effort: {workflow['effort']}")
+            # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
+            if not (origin == 'jxl' and dest == 'tiff'):
+                print(f"Effort: {workflow['effort']}")
 
             if extra_info:
                 print(f"Config: {', '.join(extra_info)}")
@@ -3492,6 +3516,9 @@ class InteractiveMenu:
             return True
         elif returncode == 3:
             self._print_error("\n✗ Conversion cancelled (confirmation declined)")
+            return False
+        elif returncode == 2:
+            self._print_error("\n✗ Aborted by a safety check (see log above — e.g. duplicate output destinations or output/input collisions)")
             return False
         else:
             self._print_error(f"\n✗ Conversion failed (code {returncode})")

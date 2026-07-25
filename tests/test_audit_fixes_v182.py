@@ -1316,3 +1316,105 @@ def test_encoder_dry_run_works_without_cjxl(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(tmp_path), "--mode", "0", "--dry-run"])
     # Must NOT sys.exit(1) — a simulation never calls cjxl
     enc.main()
+
+
+# ---------------------------------------------------------------------------
+# tenth-pass fixes
+# ---------------------------------------------------------------------------
+
+def test_step5_preserves_auto_mode_subfolder_seed():
+    """The Auto Mode seed of export_subfolder must survive Step 5 — before
+    the fix, a fresh dict wiped it and mode 7 silently ran as mode 6."""
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    workflow = {
+        'mode': 7, 'mode_config': {'export_subfolder': '16bit'},
+        'origin_format': 'tiff', 'dest_format': 'jxl',
+        'auto_mode_used': True,
+    }
+    # Simulate the rich Step-5 path non-interactively: the prompt default must
+    # come from the workflow seed
+    mc = dict(workflow.get('mode_config') or {})
+    assert mc.get('export_subfolder') == '16bit'
+    # And the actual function must not drop it
+    import jxl_photo
+    orig_ask = jxl_photo.Prompt.ask if jxl_photo.RICH_AVAILABLE else None
+    if orig_ask is not None:
+        answers = iter([jxl_photo.console and "_EXPORT", "16bit"])
+        jxl_photo.Prompt.ask = lambda *a, **k: next(answers)
+        try:
+            assert menu._wizard_mode_specific_config(workflow) is True
+        finally:
+            jxl_photo.Prompt.ask = orig_ask
+        assert workflow['mode_config'].get('export_subfolder') == '16bit'
+
+
+def test_icc_guard_after_direction_flip(monkeypatch, tmp_path):
+    """--force-convert on a JXL-only folder without ImageMagick must exit 1
+    (the direction flips to from_jxl during file collection)."""
+    (tmp_path / "a.jxl").write_bytes(b"\x00" * 32)
+    tr.setup_logger()
+    monkeypatch.setattr(tr, "MAGICK_AVAILABLE", False)
+    with pytest.raises(SystemExit) as exc:
+        tr.cmd_convert(_args(tmp_path, icc_profile="sRGB"), from_jxl=False)
+    assert exc.value.code == 1
+
+
+def test_icc_warn_only_on_encode_direction(monkeypatch, tmp_path):
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8")
+    tr.setup_logger()
+    monkeypatch.setattr(tr, "MAGICK_AVAILABLE", True)
+    seen = []
+
+    def fake_pgc(group_pairs, workers, *a, **k):
+        return []
+
+    monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
+    monkeypatch.setattr(tr.logger, "warning", lambda m, *a: seen.append(str(m)))
+    err, _ = tr.cmd_convert(_args(tmp_path, icc_profile="sRGB"), from_jxl=False)
+    assert err == 0
+    assert any("ignored" in m.lower() for m in seen), f"no encode-ignore warning: {seen}"
+
+
+def test_decode_to_image_fails_without_magick(tmp_path):
+    jxl = tmp_path / "a.jxl"
+    jxl.write_bytes(b"\x00" * 32)
+    out = tmp_path / "a.jpg"
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "MAGICK_AVAILABLE", False)
+    monkeypatch.setattr(tr, "should_process", lambda *a, **k: True)
+    (_s, status, msg, _) = tr.decode_to_image(jxl, out, out, 95, "jpeg", 8, "sRGB", True, False, False)
+    assert status == "error"
+    assert "ImageMagick" in msg
+    monkeypatch.undo()
+
+
+def test_mode7_recommend_single_vs_multiple_subfolders(tmp_path):
+    exp = tmp_path / "_EXPORT"
+    (exp / "16bit").mkdir(parents=True)
+    (exp / "16bit" / "a.tif").write_bytes(b"x")
+    analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
+    analysis = analyzer.analyze()
+    assert analysis['recommended_mode'] == 7
+
+    (exp / "AdobeRGB").mkdir()
+    (exp / "AdobeRGB" / "b.tif").write_bytes(b"x")
+    analysis2 = analyzer.analyze()
+    assert analysis2['recommended_mode'] == 6
+    assert analysis2['confidence'] == 'medium'
+
+
+def test_collision_check_before_delete_confirmation(monkeypatch, tmp_path):
+    """A run doomed by a collision must abort BEFORE asking for the HHMM token."""
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
+    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    tr.setup_logger()
+    called = {"n": 0}
+    monkeypatch.setattr(tr, "confirm_deletion_jpeg", lambda: called.__setitem__("n", 1) or True)
+    monkeypatch.setattr(tr, "confirm_deletion_lossy", lambda: called.__setitem__("n", 1) or True)
+    with pytest.raises(SystemExit) as exc:
+        tr.cmd_auto(_args(tmp_path, mode=8, overwrite=True, delete_source=True))
+    assert exc.value.code == 2
+    assert called["n"] == 0, "confirmation was asked before the collision abort"

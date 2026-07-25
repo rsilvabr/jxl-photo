@@ -966,7 +966,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     if not should_process(src_path, final_path, smart, reconvert_val):
         n, total = next_count()
         if smart:
-            logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {src_path.name}")
+            logger.info(f"[{n}/{total}] SKIP (up to date) | {src_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {src_path.name}")
         return (str(src_path), "skipped", str(final_path), None)
@@ -1039,7 +1039,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     if not should_process(jxl_path, final_path, smart, reconvert_val):
         n, total = next_count()
         if smart:
-            logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {jxl_path.name}")
+            logger.info(f"[{n}/{total}] SKIP (up to date) | {jxl_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         return (str(jxl_path), "skipped", str(final_path), None)
@@ -1467,7 +1467,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
     if not should_process(src_path, final_path, smart, reconvert_val):
         n, total = next_count()
         if smart:
-            logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {src_path.name}")
+            logger.info(f"[{n}/{total}] SKIP (up to date) | {src_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {src_path.name}")
         return (str(src_path), "skipped", str(final_path), None)
@@ -1578,7 +1578,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
     if not should_process(jxl_path, final_path, smart, reconvert_val):
         n, total = next_count()
         if smart:
-            logger.info(f"[{n}/{total}] SKIP (destination newer or exists) | {jxl_path.name}")
+            logger.info(f"[{n}/{total}] SKIP (up to date) | {jxl_path.name}")
         else:
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
         return (str(jxl_path), "skipped", str(final_path), None)
@@ -1598,6 +1598,14 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             is_png = True
             actual_out = write_path.with_suffix(".png")
             final_path = final_path.with_suffix(".png")
+
+        if output_icc and not MAGICK_AVAILABLE:
+            # Fail loudly: silently keeping the embedded ICC would deliver
+            # files in the wrong color space while the log says "converting".
+            # (Before output_dirty is set: a pre-existing output is NOT touched.)
+            raise RuntimeError(
+                "ICC conversion requested but ImageMagick (magick) is not in PATH. "
+                "Install ImageMagick or drop --icc-profile/--to-srgb.")
 
         # From here on, a tool writes to actual_out; on failure the partial
         # output must be removed (see except below).
@@ -1739,15 +1747,9 @@ def cmd_convert(args, from_jxl: bool = True):
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
 
-    if from_jxl and args.icc_profile and not MAGICK_AVAILABLE:
-        print("ERROR: --icc-profile requires ImageMagick (magick) in PATH.")
-        sys.exit(1)
-    if not from_jxl and args.icc_profile:
-        # The encode pipeline (image -> cjxl) has no ICC-conversion step:
-        # without this warning the flag would be silently inert after passing
-        # validation.
-        print("WARNING: --icc-profile/--to-srgb only applies to the JXL decode "
-              "direction and is IGNORED for JPEG/PNG -> JXL encodes.")
+    # NOTE: the --icc-profile guards live AFTER direction auto-detection
+    # below (a --force-convert on a JXL folder flips from_jxl at file
+    # collection; validating here would check the wrong direction).
 
     TEMP2_DIR = args.staging
     smart_mode = args.sync
@@ -1824,6 +1826,17 @@ def cmd_convert(args, from_jxl: bool = True):
     if not files:
         logger.warning("No input files found.")
         return (0, False)
+
+    # --icc-profile guards, AFTER direction auto-detection is final.
+    # Decode + ICC conversion without ImageMagick would silently produce
+    # unconverted files — hard fail. Encode + ICC has no conversion step —
+    # warn instead of silently ignoring.
+    if direction == "from_jxl" and args.icc_profile and not MAGICK_AVAILABLE:
+        logger.error("--icc-profile/--to-srgb requires ImageMagick (magick) in PATH.")
+        sys.exit(1)
+    if direction == "to_jxl" and args.icc_profile:
+        logger.warning("--icc-profile/--to-srgb is ignored for JPEG/PNG -> JXL encodes "
+                       "(no ICC-conversion step on that pipeline).")
 
     # JPEG does not support 16-bit. Switch format to PNG before building output
     # pairs so that staging files and final paths use the correct extension.
@@ -2064,23 +2077,6 @@ def cmd_auto(args):
     smart_mode = args.sync
     reconvert_explicit = args.overwrite
 
-    # Confirm source deletion BEFORE any processing. Lossy conversion requires
-    # stricter confirmation than lossless transcode. Only meaningful in mode 8.
-    # Skipped on dry runs (nothing is converted, so nothing would be deleted)
-    # and when DELETE_CONFIRM is off (script setting for automation).
-    if args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
-        # PNG -> JXL convert re-encodes pixels (not bit-recoverable): treat as lossy.
-        has_lossy = bool(jxl_convert_files) or bool(png_files)
-        has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
-        if has_lossy:
-            if not confirm_deletion_lossy():
-                logger.info("Deletion not confirmed -- exiting.")
-                return (0, True)
-        elif has_lossless:
-            if not confirm_deletion_jpeg():
-                logger.info("Deletion not confirmed -- exiting.")
-                return (0, True)
-
     logger.info(f"AUTO MODE | Directory: {args.input}")
     logger.info(f"JPEG files (lossless encode): {len(jpeg_files)}")
     logger.info(f"PNG files (convert encode): {len(png_files)}")
@@ -2129,6 +2125,24 @@ def cmd_auto(args):
         logger.error("Aborting: an output path equals another file that must be processed. "
                      "Rename files or use a different mode/folder.")
         sys.exit(2)
+
+    # Confirm source deletion BEFORE any processing — but AFTER the collision
+    # checks above, so a doomed run never asks for the token in vain.
+    # Lossy conversion requires stricter confirmation than lossless transcode.
+    # Only meaningful in mode 8. Skipped on dry runs (nothing is converted, so
+    # nothing would be deleted) and when DELETE_CONFIRM is off.
+    if args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
+        # PNG -> JXL convert re-encodes pixels (not bit-recoverable): treat as lossy.
+        has_lossy = bool(jxl_convert_files) or bool(png_files)
+        has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
+        if has_lossy:
+            if not confirm_deletion_lossy():
+                logger.info("Deletion not confirmed -- exiting.")
+                return (0, True)
+        elif has_lossless:
+            if not confirm_deletion_jpeg():
+                logger.info("Deletion not confirmed -- exiting.")
+                return (0, True)
 
     # Decode groups run BEFORE encode groups, so a same-stem pair can never
     # have its JXL source overwritten before decoding (extra belt on top of

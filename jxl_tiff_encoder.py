@@ -657,9 +657,9 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
     # Mode 1: single file -> converted_jxl/ subfolder — handled in main() before calling this
 
     def _warn_if_outside(result: Path) -> Path:
-        # Modes 4/5 (and 6/7) can land OUTSIDE the selected input tree for
-        # files at its root — surface that once per file instead of surprising
-        # the user later.
+        # Modes 4/5 can land OUTSIDE the selected input tree for files at its
+        # root — surface that once per file instead of surprising the user
+        # later.
         if result is not None and not _is_relative_to(result, input_root):
             logger.warning(f"Output outside input tree: {tiff_path.name} -> {result}")
         return result
