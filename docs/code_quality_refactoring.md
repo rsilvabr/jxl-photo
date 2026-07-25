@@ -4,6 +4,25 @@ This document tracks changes that improve code maintainability, compatibility, a
 
 ---
 
+## v1.8.1 — Audit-cycle cleanups
+
+**Files:** all four scripts
+
+**Dead code removed:**
+- `_read_ppm` / `_write_ppm` (encoder, unused since the cautious-ICC test moved to PNG)
+- `decode_auto` (decoder), `original_final_path` (transcoder), `get_available_features` (wrapper, key diverged from `check_dependencies`), prompt_toolkit + `rich.progress` imports (unused), ~15 dead variables across all scripts (`direction_str`, `is_decode`, `reason`, `dist_choice`, `conv_type`, `staging`, `smart_mode`/`reconvert_explicit` in `cmd_auto`, `_is_relative_to` call in a dead branch)
+
+**Logging hygiene:**
+- All three backend loggers clear previous handlers in `setup_logger()` (no duplicate lines on re-entry); the transcoder's module logger is initialized at import (resolvers no longer crash before `setup_logger()`); the wrapper logger gets a real handler instead of Python's lastResort.
+
+**Helpers duplicated across the 4 files** (`_marker_matches`, `_replace_suffix_token`, `_verify_*_integrity`, `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_is_relative_to`): behavior is intentionally kept byte-identical — the audit cycle showed exactly the class of divergence this creates (mode-4 preview vs script behavior, marker matching in the analyzer vs finders). A future consolidation into a shared module is logged here as desirable but deliberately not done mid-audit.
+
+**Test hygiene:**
+- `tests/test_audit_fixes_v182.py` renamed to `test_audit_fixes_v181_full.py` (release consolidation).
+- Environment-dependent tests use the `monkeypatch` fixture and `skipif` (exiftool presence, rich presence, root/Windows semantics) — no more cross-test monkeypatch leaks.
+
+---
+
 ## Python Compatibility
 
 ### Python 3.8+ Backports

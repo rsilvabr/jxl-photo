@@ -26,9 +26,15 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New in v1.8
 
-> **v1.8.2:** full-audit fixes — failed conversions now **delete their partial outputs** (smart sync can't skip corrupt JXL/JPEGs anymore), modes 6/7 no longer crash when a *filename* matches the `_EXPORT` marker, JXL→JPEG Auto in the wrapper **only processes .jxl files** (new `--from-jxl` flag — JPEGs in the folder used to be silently transcoded *into* JXL), mode-8 delete confirmation no longer double-prompts/hangs when run from the wrapper (new `--delete-confirm-off` flag), mode 7 gets a real `--export-subfolder` option, exit codes are now meaningful (`0` ok / `1` errors / `2` abort / `3` cancelled), ICC cautious-cache is thread-safe, exiftool calls are argfile-based everywhere (unicode + `[` paths), `--force-transcode` on a JXL routes to decode as documented, manifests gain a `Direction` guard column, and ~30 smaller fixes. New regression tests in `tests/test_audit_fixes_v182.py`.
-
-> **v1.8.1:** third-pass audit fixes — mode 6 now **aborts** on duplicate output destinations (same-named files in different `_EXPORT` subfolders), `--delete-source` propagates through all wizard paths, multipage marker batch uses exiftool argfile (no more command-line limit or `[` wildcard issues), decoder deletes partial outputs so smart sync can't skip corrupt TIFFs, `--decode` works on directories, plus ~15 smaller fixes. See the [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1).
+> **v1.8.1 — the audit release.** Months of incremental code audits (independent reviews + full test batteries on real Capture One exports and film scans), consolidated into one release: **~120 bugs fixed and 130+ regression tests added** (`tests/`, 137 passing). Highlights:
+>
+> - **Data-safety first** — failed or invalid outputs (including `cjxl`/`djxl` returning 0 with an empty/truncated file) are now always deleted and marked as errors, so smart sync can't skip corrupt files forever; every successful output passes an integrity check (box-chain for JXL, EOI for JPEG, IEND for PNG, forced pixel read for TIFF); source deletion requires a *real* verification (MD5-verified recovery or `djxl --reconstruct_jpeg`).
+> - **Multi-page reconstruction hardened** — grouping is keyed by (folder, marker id), page index/thumbnail role come from authoritative `jxlphoto-page:`/`jxlphoto-thumb` XMP markers (filenames like `scan_page3.tif` or `holiday_thumbnail.tif` can't corrupt order/roles anymore), gray+alpha pages round-trip correctly.
+> - **Wrapper honesty** — JXL→JPEG Auto only touches `.jxl` files (`--from-jxl`), JPEG→JXL lossy only touches JPEGs (`--from-jpeg`), mode 8 delete asks HHMM once (no double/hidden prompts, new `--delete-confirm-off` for automation), mode 7 gets a real `--export-subfolder`, manifests gain a `Direction` guard column and a file picker, exit codes are meaningful (`0` ok / `1` errors / `2` abort / `3` cancelled), and the auto-mode preview matches what actually runs.
+> - **Everything exiftool goes through UTF-8 argfiles** — unicode paths, `[ ]` in folder names, and non-ASCII metadata all round-trip correctly on Windows.
+> - **The original third-pass audit** — mode 6 aborts on duplicate output destinations, `--delete-source` propagates through all wizard paths, multipage marker batch uses an argfile, decoder deletes partial outputs, `--decode` works on directories.
+>
+> Full notes: [docs/RELEASE_v1.8.1.md](docs/RELEASE_v1.8.1.md) · [Bug tracking](docs/bug_tracking_since_v1.0.md)
 
 ### libjxl v0.12 Support (auto-detected)
 The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.

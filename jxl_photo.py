@@ -1727,7 +1727,7 @@ class InteractiveMenu:
                 return False
         else:
             # Legacy manifest without a Direction column: allow, but warn.
-            warn = (f"Manifest has no Direction column (pre-v1.8.2 format). "
+            warn = (f"Manifest has no Direction column (pre-v1.8.1 format). "
                     f"Assuming it matches the current workflow ({current_direction}).")
             if RICH_AVAILABLE and console:
                 console.print(f"[yellow]{warn}[/yellow]")

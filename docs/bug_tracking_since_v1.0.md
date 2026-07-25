@@ -8,8 +8,84 @@ v1.5 Final: 2026-04-12 (third pass)
 v1.5.2: 2026-04-13 (critical 8-bit fix)
 v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd_auto, and wrapper integration
 v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore and thumbnail handling
+v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.8.1 — The Audit Release (2026-07)
+
+Twelve full audit rounds on the 4 scripts, each verified with reproductions and real-data batteries (Capture One 16-bit exports, 700 MB RGB+IR film scans). All fixes ship with regression tests (137 passing in `tests/`). Only the highest-impact bugs are detailed individually here; the full list is in `docs/RELEASE_v1.8.1.md`.
+
+### Critical / data-safety
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 172 | `--no-verify` + djxl < 0.12: source deleted with a stored-but-never-compared MD5 — no verification at all | transcoder | ✅ FIXED (delete gate requires `md5_verified` from the same run, or djxl ≥ 0.12's `--reconstruct_jpeg`) |
+| 173 | Invalid output recorded as OK: `cjxl`/`djxl` returning 0 with an empty/truncated file; smart sync then skipped it forever | all 3 | ✅ FIXED (every successful output passes an integrity check; failures deleted + per-file error) |
+| 174 | Bare JXL codestream passed the delete gate on a 2-byte signature | encoder + transcoder | ✅ FIXED (container required; every toolkit output is one) |
+| 175 | Partial/corrupt output left at destination on failure, then treated as "up to date" by smart sync | encoder + transcoder | ✅ FIXED (partial deleted on error; pre-existing outputs preserved) |
+| 176 | MD5-failed decode output kept at destination and skipped on re-run | transcoder | ✅ FIXED (bad output deleted immediately) |
+| 177 | `checksums.md5` recorded coverage for unvalidated outputs | transcoder | ✅ FIXED (written only after integrity passes) |
+| 178 | Multipage groups merged across folders (same marker id) — one TIFF with duplicated pages, mode 8 deleted all copies | decoder | ✅ FIXED (group key is `(folder, group-id)`; duplicates demoted to standalone) |
+| 179 | Source TIFF named `*_page<N>` / `*_thumbnail` corrupted page order and thumbnail roles on reconstruction | encoder + decoder | ✅ FIXED (authoritative `jxlphoto-page:` / `jxlphoto-thumb` XMP markers; filename is fallback only) |
+| 180 | Modes 6/7 crashed with `IndexError` when a *filename* matched the `_EXPORT` marker | all 3 | ✅ FIXED (marker matches directory parts only) |
+| 181 | Wizard "JXL → JPEG Auto" also converted folder JPEGs/PNGs *into* JXL (and could delete them in mode 8) | wrapper + transcoder | ✅ FIXED (`--from-jxl` flag) |
+| 182 | Wizard "JPEG → JXL lossy" also converted (and in mode 8 deleted) folder PNGs | wrapper + transcoder | ✅ FIXED (`--from-jpeg` flag) |
+| 183 | Auto mode encoded before decoding: `photo.jpg` + `photo.jxl` in one folder → JXL source overwritten before decoding | transcoder | ✅ FIXED (decode runs first + output==input abort when a write would happen; reruns are idempotent) |
+| 184 | `shutdown`/locked-file `shutil.move` or `unlink()` aborted the whole batch mid-run | all 3 | ✅ FIXED (guarded; kept with warning) |
+| 185 | TIFF integrity gate accepted truncated TIFFs (header-only check) | decoder + transcoder | ✅ FIXED (forced read of the last pixel of the last page) |
+| 186 | JPEG/PNG integrity gates accepted truncation (SOI/signature only) | transcoder | ✅ FIXED (EOI / IEND required) |
+| 187 | Wizard mode 8: double delete confirmation — wrapper HHMM + invisible child prompt → apparent infinite hang | wrapper + all 3 | ✅ FIXED (`--delete-confirm-off`; wrapper confirms once) |
+| 188 | Manifest entries with mode 8 deleted without any HHMM gate | wrapper | ✅ FIXED |
+
+### High
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 189 | ICC cautious-cache read-modify-write race across workers (corrupted/lost cache) | encoder | ✅ FIXED (lock + atomic write + cjxl-versioned key) |
+| 190 | exiftool calls with raw paths in argv: `[ ]` treated as wildcards, non-ASCII paths broken on Windows | all 3 | ✅ FIXED (UTF-8 argfiles everywhere, `FileName=UTF8` + value charset) |
+| 191 | Multi-line `dc:Description` injected bogus argfile lines | encoder | ✅ FIXED (newline sanitization) |
+| 192 | Wizard passed `--delete-source` without suppressing child prompt; child blocked on stdin forever (timeout was dead code) | wrapper | ✅ FIXED (idle-timeout runner; HHMM in wrapper + confirm-off in child) |
+| 193 | Multipage/grayscale XMP marker writes never checked exiftool's return code — silent round-trip corruption | encoder | ✅ FIXED (failure = per-file error) |
+| 194 | `--force-transcode` on a `.jxl` routed to *encode* (`djxl file.jxl file.jxl`) | transcoder | ✅ FIXED (routes to jbrd-gated decode) |
+| 195 | Auto + `--force-convert --format png` produced 8-bit PNGs on the JXL fallback | transcoder | ✅ FIXED (PNG default 16-bit preserved) |
+| 196 | Convert modes 1/3 flattened the tree into one `converted/` folder (cross-folder collisions) | transcoder | ✅ FIXED (per-folder subfolders, aligned with transcode) |
+| 197 | `copy_metadata` wiped legitimate user `ImageDescription`/`Software` (substring match on "shape"/"tifffile") | decoder | ✅ FIXED (only tifffile shaped-JSON/defaults cleared) |
+| 198 | Delivered JPEG/PNG carried the `ICC:<base64>` CreatorTool blob (incl. the bare-blob common case) | transcoder | ✅ FIXED (stripped; wrong-profile pointer after sRGB conversion eliminated) |
+| 199 | Gray+alpha JXLs failed TIFF writing (`expected 3, got 2`) when unmarked; LA preview failed with "cannot write mode LA as JPEG" | decoder | ✅ FIXED (minisblack + extrasample; LA→L preview) |
+| 200 | Mode-7 Auto Mode preview promised one subfolder but the run processed all (seed wiped in Step 5) | wrapper | ✅ FIXED (seed preserved; recommendation requires a single origin subfolder) |
+| 201 | `--icc-profile`/`--to-srgb` validated but silently inert: decode without ImageMagick delivered unconverted files | transcoder | ✅ FIXED (guard after direction auto-detect; hard failure) |
+| 202 | `--to-srgb` used `magick -colorspace` (mathematical reinterpretation, wrong for wide gamut) | transcoder | ✅ FIXED (real sRGB ICC via `-profile`) |
+
+### Medium (selection)
+
+- Exit codes (`0/1/2/3`) implemented across all scripts; wrapper distinguishes safety-abort from failure and cancelled.
+- exiftool timeouts on big files (10 s) raised to 60–180 s; djxl timeouts 120 → 600 s.
+- Worker exceptions can no longer kill a batch in any script (futures guarded; TOCTOU `stat()` guarded).
+- Mode 4 folder rename: case-insensitive, first-token-only, `name_DEST` fallback; wrapper preview matches.
+- `_marker_matches`: token boundaries (`exports`/`EXPORTED_RAWS`/`reexport` rejected; `Export_Lightroom`/`Lightroom_Export` accepted).
+- Orientation tag round-trips (pipeline never rotates pixels).
+- Duplicate-output abort is case-insensitive and lists conflicting source files.
+- Finder filters: JPEG/PNG scans skip only toolkit decode-output folders *relative to scan root*; encoder modes 6/7 skip decoder output folders; JXL scans unfiltered (no round-trip breakage).
+- `reorder_jxl_boxes`: `brob`/`jbrd` moved before codestream; size-0 box header rewritten when regrouped; raises on truncated extended boxes.
+- `--delete-source` confirmations never fire on dry runs; dry runs never create folders or require cjxl.
+- Palette/CMYK/planar-separate/spp∉{1,3,4} TIFFs rejected early with a rejected-files log.
+- Grayscale detection driven by the actual array, not TIFF metadata.
+- `_verify_jxl_integrity`/`_verify_file_integrity` walk the full box chain and require a codestream box.
+- `read_png_to_numpy`: imagecodecs shape errors are hard per-file errors (no silent 16→8-bit degrade); LA PNGs preserved.
+- `extract_trc_from_icc`: gamma read at the correct ICC offset (+12) for parametric curve types 1/2.
+- `--output-suffix` revived in convert mode 2 (explicit output vs suffix folder).
+- `extract_icc_native`: `-o` placed before the input file (exiftool is order-sensitive).
+- Repeat-last: HHMM re-asked for mode 8; mode-2 output dir only reused for the same input folder; no live-config mutation; JXL→JPEG defaults to auto (jbrd-safe).
+- Wrapper: idle-timeout child runner, Ctrl+C kills child, markup escaped, cp1252-safe stdout, quoted pasted paths, clamps in both UIs, Step-7 shows mode config + DELETE flag, mode-7 subfolder asked in Step 5.
+- Manifest: `Direction` guard column, picker, Excel `7.0` mode parsing, header-row detection, `..` path-part check, Destination-ignored warning, dry-run forwarded to children.
+- Stale `jxlphoto-*` relation markers cleaned on re-encode; stale ICC blob removed from existing CreatorTool.
+- JPEG preview rewrite no longer injects tifffile default tags; previews never upscale.
+- `read_ppm_to_numpy` accepts single-line PNM headers and validates truncation.
+- TRC/gamma offsets, D50 dedup stats, uppercase extension finders, `--container=1` lossy-only.
+- Test-suite hygiene: tests no longer depend on exiftool/rich/root semantics (fixtures + `skipif`).
 
 ---
 

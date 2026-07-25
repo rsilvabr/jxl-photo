@@ -623,7 +623,9 @@ Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new
 
 ## Multi-Page TIFF Reconstruction (v1.7.0+)
 
-`jxl_tiff_decoder.py` reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder.
+`jxl_tiff_decoder.py` reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder. Groups are keyed by `(folder, group-id)`, so two encodes of the same TIFF to different folders are never merged either.
+
+Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thumb` markers when present (v1.8.1+); the filename suffix is only a fallback for older JXLs. A third-party `portrait_thumbnail.jxl` without markers is treated as a normal photo, never as a thumbnail.
 
 - `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)

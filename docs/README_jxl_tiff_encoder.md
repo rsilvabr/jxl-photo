@@ -643,6 +643,8 @@ Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced`
 
 Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so `jxl_tiff_decoder.py` can reconstruct the original multi-page TIFF only from genuinely split files. Independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged.
 
+Since v1.8.1, split pages also carry `jxlphoto-page:<N>` (the TIFF page index) and `jxlphoto-thumb` (thumbnail role) in `dc:Relation`. The decoder treats these as **authoritative** — the filename is only a fallback for JXLs encoded before v1.8.1. This makes reconstruction safe even when the source TIFF itself is named like a page (`scan_page3.tif`, `holiday_thumbnail.tif`).
+
 ### Per-Page ICC Preservation (v1.7.0)
 
 When splitting, each page is encoded with its own effective ICC profile (read from the page's own ICC tag 34675; if absent, page N > 0 inherits IFD0's profile for color interpretation). Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`, so the decoder can reconstruct them without an ICC tag when the original page also had none.

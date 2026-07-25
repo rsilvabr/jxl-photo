@@ -1,5 +1,42 @@
 # New Features Since v1.0
 
+## v1.8.1
+
+Date: 2026-07 (the audit release)
+
+### Output integrity verification on every conversion
+Every successful output is validated before being reported OK — JXL: full box-chain walk to EOF requiring a codestream box (bare codestream refused); JPEG: SOI+EOI; PNG: signature+IEND; TIFF: tifffile open + forced last-pixel read. Previously only mode-8 delete gates checked anything, and only signatures.
+
+### Direction-restriction flags
+- `--from-jxl` (transcoder auto mode): only `.jxl` files are processed — used by the wrapper's "JXL → JPEG Auto" so folder JPEGs/PNGs are never transcoded into JXL.
+- `--from-jpeg` (transcoder convert): only JPEGs are converted to JXL — used by "JPEG → JXL lossy" so folder PNGs are never converted or deleted.
+
+### `--delete-confirm-off`
+Skips the interactive delete confirmation for wrappers/automation that already asked the user (the wrapper passes it after its own HHMM gate). The wizard never leaves a hidden child prompt again.
+
+### `--export-subfolder` (mode 7, all 3 scripts)
+Mode 7 can finally filter a specific subfolder of the export marker from the CLI; the wizard asks for it (default from Auto Mode detection).
+
+### Authoritative multipage page markers
+New `jxlphoto-page:<N>` and `jxlphoto-thumb` XMP markers on split pages make reconstruction independent of filenames (sources named `*_page<N>` / `*_thumbnail` are now safe). Older JXLs keep the filename fallback.
+
+### Manifest `Direction` column + picker
+Manifests are bound to the workflow that generated them (`tiff2jxl`, `jxl2tiff`, ...) — replaying one from the wrong direction is refused. Multiple manifests get a file picker. Excel's `7.0` mode cells parse correctly.
+
+### Idle-timeout subprocess runner (wrapper)
+Healthy long batches are never killed by a wall-clock limit; a child stuck on a hidden prompt is detected via output silence and killed. Ctrl+C kills the child.
+
+### Real sRGB conversion for delivery
+`--to-srgb` converts via `magick -profile` with a Pillow-generated sRGB ICC (proper gamut mapping), replacing `-colorspace` reinterpretation.
+
+### Gray+alpha (LA) end-to-end
+Gray+alpha JXLs decode to single-channel TIFF pages with an alpha extrasample — with or without the encoder's markers — and the JPEG preview degrades to L instead of failing.
+
+### `--output-suffix` (revived)
+Convert mode 2: with an explicit output dir → flat into it; without → `<parent><suffix>/` sibling folder. Was dead code since v1.5.
+
+---
+
 ## v1.8.0
 
 Date: 2026-07-18

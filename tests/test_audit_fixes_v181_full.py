@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Regression tests for the v1.8.2 audit fixes:
+Regression tests for the v1.8.1 audit fixes (full-audit rounds):
 
 - modes 6/7: a filename that matches the export marker no longer crashes
   resolve_output (IndexError) and is ignored instead
