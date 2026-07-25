@@ -902,3 +902,140 @@ def test_convert_mode6_applies_rename(tmp_path):
     out7 = tr.resolve_output_convert(
         src, 7, "converted", "_c", "jpg", "DSC", "PHOTO", tmp_path, decode=True)
     assert out7.name == "PHOTO_0001.jpg"
+
+
+# ---------------------------------------------------------------------------
+# seventh-pass fixes (integrity gates + batch resilience)
+# ---------------------------------------------------------------------------
+
+def test_integrity_rejects_truncated_jpeg(tmp_path):
+    good = tmp_path / "good.jpg"
+    good.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    assert tr._verify_file_integrity(good) is True
+    truncated = tmp_path / "half.jpg"
+    truncated.write_bytes(b"\xff\xd8" + b"\x00" * 100)  # no EOI
+    assert tr._verify_file_integrity(truncated) is False
+    stub = tmp_path / "stub.jpg"
+    stub.write_bytes(b"\xff\xd8")
+    assert tr._verify_file_integrity(stub) is False
+
+
+def test_integrity_rejects_truncated_png(tmp_path):
+    good = tmp_path / "good.png"
+    good.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20 + (12).to_bytes(4, "big") + b"IEND" + b"\x00" * 4)
+    assert tr._verify_file_integrity(good) is True
+    truncated = tmp_path / "half.png"
+    truncated.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+    assert tr._verify_file_integrity(truncated) is False
+
+
+def test_integrity_rejects_truncated_tiff(tmp_path):
+    good = tmp_path / "good.tif"
+    tifffile.imwrite(good, np.zeros((32, 32, 3), dtype=np.uint16), photometric="rgb")
+    assert tr._verify_file_integrity(good) is True
+    assert dec._verify_tiff_integrity(good) is True
+    data = good.read_bytes()
+    truncated = tmp_path / "half.tif"
+    truncated.write_bytes(data[: len(data) // 4])  # header intact, pixels gone
+    assert tr._verify_file_integrity(truncated) is False
+    assert dec._verify_tiff_integrity(truncated) is False
+
+
+def test_staging_move_failure_does_not_abort(monkeypatch, tmp_path):
+    """OSError during the staging move must not kill the batch."""
+    src = tmp_path / "a.jxl"
+    src.write_bytes(b"\x00" * 32)
+    dec.setup_logger()
+    entries = [(src, 0, False, False, 0, False, None)]
+
+    def fake_convert(main_jxl, entries, write_path, final_path, target_icc=None):
+        write_path.write_bytes(b"II\x2a\x00fake")
+        return (str(main_jxl), "ok", str(final_path))
+
+    monkeypatch.setattr(dec, "convert_multipage_jxl_group", fake_convert)
+    monkeypatch.setattr(dec.shutil, "move",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("locked")))
+    dec.TEMP2_DIR = str(tmp_path / "staging")
+    results = dec.process_group(
+        [{"type": "multi", "main_jxl": src, "entries": entries,
+          "final_tiff": tmp_path / "out" / "a.tif"}], 1, 0)
+    assert results[0][1] == "ok"  # returned normally, no propagation
+
+
+def test_readonly_source_delete_does_not_abort(tmp_path):
+    """Windows PermissionError on unlink (read-only file) must not crash the
+    delete-source path."""
+    src = tmp_path / "a.jxl"
+    src.write_bytes(b"\x00" * 32)
+    final = tmp_path / "a.jpg"
+    final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
+    monkeypatch.setattr(tr, "STORE_MD5", False)
+    src.chmod(0o444)  # read-only -> unlink raises PermissionError on Windows
+    try:
+        results = [(str(src), "ok", str(final), None)]
+        # Simulate the delete loop directly via process_group_transcode pieces:
+        # call the real function with mocked worker results
+        monkeypatch.setattr(tr, "decode_one_transcode",
+                            lambda *a, **k: results[0])
+        monkeypatch.setattr(tr, "TEMP2_DIR", None)
+        tr.DELETE_SOURCE = True
+        tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
+        # No exception propagated; the read-only source is kept
+        assert src.exists()
+    finally:
+        src.chmod(0o666)
+        tr.DELETE_SOURCE = False
+        monkeypatch.undo()
+
+
+def test_stream_child_healthy_long_run_not_killed():
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    # Child prints 5 lines over ~2.5s, never idle > 1s -> must survive idle_timeout=2
+    rc = menu._stream_child(
+        [sys.executable, "-c",
+         "import time\nfor i in range(5):\n print('line', i, flush=True)\n time.sleep(0.5)"],
+        idle_timeout=2)
+    assert rc == 0
+
+
+def test_stream_child_silent_hang_killed():
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    rc = menu._stream_child([sys.executable, "-c", "import time; time.sleep(30)"],
+                            idle_timeout=1)
+    assert rc == -1
+
+
+def test_manifest_mode_excel_float_format(tmp_path):
+    """Excel writes integers as '7.0' — that must parse as mode 7, not 0."""
+    import csv
+    manifest = tmp_path / "manifest_test.csv"
+    with open(manifest, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Source", "Destination", "Mode", "Direction"])
+        w.writerow([str(tmp_path), str(tmp_path), "7.0", "tiff2jxl"])
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    menu._pick_manifest = lambda: str(manifest)
+    workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(menu, "_print_error", lambda m: (_ for _ in ()).throw(AssertionError(m)))
+    # Patch Confirm.ask to auto-proceed
+    monkey.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    assert menu._wizard_run_from_manifest(workflow) is True
+    assert workflow["manifest_entries"][0][2] == 7
+    monkey.undo()
+
+
+def test_transcoder_reorder_raises_on_truncated_extended(tmp_path):
+    sig = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+    ftyp = (16).to_bytes(4, "big") + b"ftyp" + b"jxl \x00\x00\x00\x00"
+    ext_box = (1).to_bytes(4, "big") + b"Exif" + b"\x00" * 3  # extended size, truncated header
+    f = tmp_path / "t.jxl"
+    f.write_bytes(sig + ftyp + ext_box)
+    with pytest.raises(RuntimeError):
+        tr.reorder_jxl_boxes(f)

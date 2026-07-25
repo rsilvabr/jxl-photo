@@ -161,8 +161,13 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
 
         # Try to open with tifffile to verify structure
         with tifffile.TiffFile(str(tiff_path)) as tif:
-            # Just accessing pages validates the structure
-            _ = len(tif.pages)
+            if len(tif.pages) == 0:
+                return False
+            # Force a REAL read of the last page's last pixel — tifffile is
+            # lazy, so a truncated TIFF can pass a header-only open while its
+            # pixel data is missing. Only the last strip/tile is decoded.
+            last = tif.pages[-1].asarray()
+            _ = last.flat[-1]
 
         return True
     except Exception:
@@ -685,6 +690,11 @@ def read_png_to_numpy(png_path, target_depth=16):
                 elif target_depth == 8 and alpha.dtype == np.uint16:
                     alpha = np.rint(alpha / 257).astype(np.uint8)
             return rgb, alpha
+        else:
+            # Unexpected shape from imagecodecs — fail loudly instead of
+            # silently degrading through the PIL fallback (which would lose
+            # 16-bit precision without even the warning below).
+            raise ValueError(f"Unsupported PNG array shape from imagecodecs: {arr.shape}")
     except Exception:
         # imagecodecs not available or failed; fall through to PIL.
         # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
@@ -1830,9 +1840,14 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             if not write_path.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_path.name}")
                 continue
-            final_tiff.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(write_path), str(final_tiff))
-            moved += 1
+            try:
+                final_tiff.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(write_path), str(final_tiff))
+                moved += 1
+            except OSError as e:
+                # A locked/readonly destination must not abort the whole batch:
+                # keep the file in staging and log it for manual recovery.
+                logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> {final_tiff} | {e}")
         if moved:
             logger.info(f" >Moved {moved} file(s) from staging to final")
 

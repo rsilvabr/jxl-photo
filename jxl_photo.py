@@ -1240,7 +1240,6 @@ class InteractiveMenu:
 
     def _wizard_select_files(self, workflow: Dict) -> bool:
         """Step 3: Files"""
-        origin = workflow['origin_format']
         default_dir = self.config.config.last_input_dir or os.getcwd()
 
         if RICH_AVAILABLE and console:
@@ -1617,7 +1616,19 @@ class InteractiveMenu:
                 if row and len(row) >= 1:
                     source = row[0].strip()
                     dest = row[1].strip() if len(row) > 1 else source
-                    entry_mode = int(row[2].strip()) if len(row) > 2 and row[2].strip().isdigit() else 0
+                    # Mode cell: Excel often formats integers as "7.0" — a
+                    # naive isdigit() check would silently turn that into
+                    # mode 0 and scatter outputs next to the sources.
+                    entry_mode = 0
+                    if len(row) > 2 and row[2].strip():
+                        try:
+                            entry_mode = int(float(row[2].strip()))
+                        except ValueError:
+                            self._print_error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
+                            return False
+                        if not 0 <= entry_mode <= 8:
+                            self._print_error(f"Mode out of range (0-8) in manifest: {entry_mode} (row: {source})")
+                            return False
                     if len(row) > 3 and row[3].strip():
                         directions.add(row[3].strip())
                     if source and not source.startswith('#'):
@@ -3082,14 +3093,14 @@ class InteractiveMenu:
         else:
             print(f"  {line}")
 
-    def _stream_child(self, cmd: List, timeout: int = 3600) -> int:
-        """Run a child script, streaming stdout live, with a REAL deadline.
+    def _stream_child(self, cmd: List, idle_timeout: int = 1800) -> int:
+        """Run a child script, streaming stdout live, with an IDLE deadline.
 
-        The old pattern (`for line in process.stdout` then `wait(timeout)`)
-        could hang forever if the child blocked on an interactive stdin
-        prompt: the read loop never reached wait(), so the timeout was dead
-        code. Here a daemon reader thread drains stdout while the main thread
-        enforces the deadline and kills the child on expiry.
+        The deadline resets every time the child prints a line: a long healthy
+        batch (large collections at effort 7+) is never killed, while a child
+        stuck on an interactive stdin prompt (no output) is detected and
+        killed. (The previous absolute 1-hour wall-clock limit could kill
+        healthy long batches mid-run.)
 
         Exit code contract: 0 = success, 1 = some files failed, 2 = aborted,
         3 = user declined a confirmation. Returns -1 on timeout/launch failure.
@@ -3127,13 +3138,15 @@ class InteractiveMenu:
         reader = threading.Thread(target=_reader, daemon=True)
         reader.start()
 
-        deadline = time.time() + timeout
+        deadline = time.time() + idle_timeout
         try:
             while True:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     process.kill()
-                    self._print_error("Timeout: process killed (possible hidden prompt or hang)")
+                    self._print_error(
+                        f"No output for {idle_timeout // 60} min: process killed "
+                        f"(possible hidden prompt or hang)")
                     return -1
                 try:
                     line = q.get(timeout=min(1.0, max(remaining, 0.1)))
@@ -3143,6 +3156,8 @@ class InteractiveMenu:
                     continue
                 if line is None:
                     break
+                # Progress resets the idle deadline
+                deadline = time.time() + idle_timeout
                 self._print_child_line(line)
         except KeyboardInterrupt:
             # Ctrl+C must also take the child down, not leave it running.

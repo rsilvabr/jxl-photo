@@ -100,18 +100,42 @@ def _verify_file_integrity(file_path: Path) -> bool:
             return has_codestream and i == file_size
         
         elif ext in ('.jpg', '.jpeg'):
-            # JPEG starts with SOI marker 0xFFD8
-            return header[0:2] == b'\xff\xd8'
-        
+            # SOI at the start AND EOI (0xFFD9) at the end — a truncated or
+            # short-written JPEG must never pass the delete gate.
+            if header[0:2] != b'\xff\xd8':
+                return False
+            with open(file_path, 'rb') as f:
+                f.seek(-2, os.SEEK_END)
+                return f.read(2) == b'\xff\xd9'
+
         elif ext == '.png':
-            # PNG signature: 0x89PNG\r\n\x1a\n
-            return header[0:8] == b'\x89PNG\r\n\x1a\n'
-        
+            # PNG signature AND the IEND chunk closing the stream.
+            if header[0:8] != b'\x89PNG\r\n\x1a\n':
+                return False
+            if stat.st_size < 20:
+                return False
+            with open(file_path, 'rb') as f:
+                f.seek(-12, os.SEEK_END)
+                return f.read(12)[4:8] == b'IEND'
+
         elif ext in ('.tif', '.tiff'):
-            # TIFF: II (little) or MM (big) followed by 42
+            # TIFF: signature, then force a real read of the last page's last
+            # pixel — tifffile is lazy and a truncated file can pass a
+            # header-only check.
             if header[0:2] not in (b'II', b'MM'):
                 return False
-            return header[2:4] in (b'\x2a\x00', b'\x00\x2a')
+            if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+                return False
+            try:
+                import tifffile
+                with tifffile.TiffFile(str(file_path)) as tif:
+                    if len(tif.pages) == 0:
+                        return False
+                    last = tif.pages[-1].asarray()
+                    _ = last.flat[-1]
+                return True
+            except Exception:
+                return False
         
         # Unknown extension — refuse deletion. The old "conservative allow"
         # was inverted: an unverifiable output must keep its source.
@@ -584,7 +608,9 @@ def reorder_jxl_boxes(jxl_path: Path):
         if size == 1:
             # Extended size (64-bit)
             if i + 16 > file_size:
-                break
+                # Do NOT rewrite the file with only the parsed boxes — that
+                # would silently discard the rest (same rule as the encoder).
+                raise RuntimeError(f"Truncated extended box at offset {i}: file too short for 16-byte header")
             ext_size = int.from_bytes(data[i+8:i+16], "big")
             if ext_size > MAX_JXL_SIZE:
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
@@ -1072,9 +1098,14 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             if not write_out.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_out.name}")
                 continue
-            final_out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(write_out), str(final_out))
-            moved += 1
+            try:
+                final_out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(write_out), str(final_out))
+                moved += 1
+            except OSError as e:
+                # A locked/readonly destination must not abort the whole batch:
+                # keep the file in staging and log it for manual recovery.
+                logger.error(f"  MOVE FAILED, kept in staging | {write_out.name} -> {final_out} | {e}")
 
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
             staging_db = staging_dir / CHECKSUMS_FILENAME
@@ -1108,7 +1139,10 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     with _md5_db_lock:
                         with open(final_db, "a", encoding="utf-8") as dst:
                             dst.writelines(lines)
-                staging_db.unlink()
+                try:
+                    staging_db.unlink()
+                except OSError:
+                    pass
 
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to destination")
@@ -1131,9 +1165,14 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             if not _verify_file_integrity(final_file):
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                 continue
-            src_path.unlink()
-            deleted += 1
-            logger.info(f" DELETED source | {src_path.name}")
+            try:
+                src_path.unlink()
+                deleted += 1
+                logger.info(f" DELETED source | {src_path.name}")
+            except OSError as e:
+                # PermissionError is common on Windows (AV, Explorer preview,
+                # open viewer) — warn and continue instead of killing the batch.
+                logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
         if deleted:
             logger.info(f" -> Deleted {deleted} source file(s)")
 
@@ -1581,9 +1620,14 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         for src, write_out, final_out in tasks:
             status = status_map.get(str(src), "error")
             if status in ("ok", "reconvert", "overwrite") and write_out.exists():
-                final_out.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(write_out), str(final_out))
-                moved += 1
+                try:
+                    final_out.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(write_out), str(final_out))
+                    moved += 1
+                except OSError as e:
+                    # A locked/readonly destination must not abort the batch:
+                    # keep the file in staging and log it for manual recovery.
+                    logger.error(f"  MOVE FAILED, kept in staging | {write_out.name} -> {final_out} | {e}")
             elif write_out.exists():
                 # Failed conversion: do not promote a partial/corrupt file to the
                 # final destination. Leave it in staging so the user can inspect.
@@ -1800,9 +1844,12 @@ def cmd_convert(args, from_jxl: bool = True):
                 if final_file is None or not _verify_file_integrity(final_file):
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                     continue
-                src_path.unlink()
-                deleted += 1
-                logger.info(f" DELETED source | {src_path.name}")
+                try:
+                    src_path.unlink()
+                    deleted += 1
+                    logger.info(f" DELETED source | {src_path.name}")
+                except OSError as e:
+                    logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
             if deleted:
                 logger.info(f" -> Deleted {deleted} source file(s)")
 
@@ -2123,9 +2170,12 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     if final_file is None or not _verify_file_integrity(final_file):
                         logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                         continue
-                    src_path.unlink()
-                    deleted += 1
-                    logger.info(f" DELETED source | {src_path.name}")
+                    try:
+                        src_path.unlink()
+                        deleted += 1
+                        logger.info(f" DELETED source | {src_path.name}")
+                    except OSError as e:
+                        logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
                 if deleted:
                     logger.info(f" -> Deleted {deleted} source file(s)")
 

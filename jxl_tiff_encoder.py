@@ -934,12 +934,20 @@ def _save_icc_cache(cache: Dict[str, Any]) -> None:
     path = _icc_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write: temp file + os.replace so a concurrent reader (or a
-        # crash mid-write) never sees a truncated JSON file.
-        tmp_path = path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2)
-        os.replace(tmp_path, path)
+        # Atomic write: unique temp file + os.replace so a concurrent reader
+        # (or ANOTHER jxl-photo process — the thread lock is per-process)
+        # never sees a truncated JSON file.
+        fd, tmp_name = tempfile.mkstemp(suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2)
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     except Exception as e:
         logger.warning(f"Failed to save ICC cache: {e}")
 
@@ -1147,7 +1155,7 @@ def extract_xmp_original(tiff_path, tmp_dir):
     # Correct order: -o output.xmp -b -XMP input.tif
     arg_file = tmp_dir / "xmp_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-o\n{xmp_path}\n-b\n-XMP\n{tiff_path}\n", encoding="utf-8")
-    r = subprocess.run(
+    subprocess.run(
         [_get_exiftool_cmd(), "-@", str(arg_file)],
         capture_output=True, timeout=60
     )
@@ -1731,7 +1739,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
-                cjxl_cmd = ["cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
                 del png_input
@@ -1741,7 +1749,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = ["cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = subprocess.run(cjxl_cmd, capture_output=True, timeout=600)
 
