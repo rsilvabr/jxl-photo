@@ -817,14 +817,18 @@ def read_ppm_to_numpy(ppm_path):
     Validates that file is complete (not truncated).
     """
     with open(ppm_path, 'rb') as f:
-        magic = f.readline().strip()
+        # Read header tokens, skipping comment-only lines/inline comments, until
+        # we have magic, width, height and maxval. The magic line may carry
+        # MORE tokens on the same line (single-line headers like
+        # "P6 640 480 65535\n" are valid PNM).
+        first = f.readline().strip().split()
+        if not first:
+            raise ValueError(f"Invalid PPM header: empty first line in {ppm_path}")
+        magic = first[0]
         if magic not in (b'P6', b'P5'):
             raise ValueError(f"Unsupported PPM/PGM format: {magic}")
 
-        # Read header tokens, skipping comment-only lines/inline comments, until
-        # we have magic, width, height and maxval. This handles PPMs that split
-        # dimensions across multiple lines or include comments.
-        tokens = [magic]
+        tokens = list(first)
         while len(tokens) < 4:
             line = f.readline()
             if not line:
@@ -1388,6 +1392,12 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             kwargs_main = {
                 'photometric': main_photometric,
                 'compression': tiff_comp,
+                # Same anti-default-tag treatment as the main writer: without
+                # these, tifffile injects Software=tifffile.py and a shaped-JSON
+                # ImageDescription on single-page outputs whenever exiftool is
+                # missing/slow.
+                'metadata': None,
+                'software': '',
             }
             if main_subfiletype:
                 kwargs_main['subfiletype'] = main_subfiletype

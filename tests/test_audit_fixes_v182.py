@@ -277,10 +277,16 @@ def test_verify_jxl_integrity_truncated_container(tmp_path):
     good.write_bytes(sig + (100).to_bytes(4, "big") + b"jxlc" + b"\x00" * 92)
     assert enc._verify_jxl_integrity(good) is True
 
-    # Bare codestream signature still accepted (header-only check)
+    # Bare codestream is REFUSED at the delete gate: every output this
+    # toolkit produces is a container, so bare = broken mid-write, and bare
+    # gets no structural validation at all.
     bare = tmp_path / "bare.jxl"
     bare.write_bytes(b"\xff\x0a" + b"\x00" * 64)
-    assert enc._verify_jxl_integrity(bare) is True
+    assert enc._verify_jxl_integrity(bare) is False
+    stub = tmp_path / "stub.jxl"
+    stub.write_bytes(b"\xff\x0a")  # 2 bytes — passed before the fix
+    assert enc._verify_jxl_integrity(stub) is False
+    assert tr._verify_file_integrity(stub) is False
 
 
 # ---------------------------------------------------------------------------
@@ -1548,3 +1554,84 @@ def test_thumbnail_ignore_sources_deleted_in_mode8(tmp_path):
     assert not main.exists()
     assert not thumb.exists(), "ignored thumbnail source was left behind"
     monkeypatch.undo()
+
+
+# ---------------------------------------------------------------------------
+# twelfth-pass fixes
+# ---------------------------------------------------------------------------
+
+def test_no_verify_with_stored_wrong_md5_keeps_source(tmp_path):
+    """--no-verify + djxl<0.12: an 'ok' result with NO md5 verification must
+    NOT allow deletion — even if a (wrong) MD5 entry exists on disk."""
+    src = tmp_path / "photo.jxl"
+    src.write_bytes(b"\x00" * 32)
+    (tmp_path / "checksums.md5").write_text("deadbeefdeadbeefdeadbeefdeadbeef  photo.jxl\n", encoding="utf-8")
+    final = tmp_path / "photo.jpg"
+    final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)  # simulate djxl 0.11
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    # decode_one_transcode with verify=False returns result[3] = None
+    monkeypatch.setattr(tr, "decode_one_transcode",
+                        lambda *a, **k: (str(src), "ok", str(final), None))
+    tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
+    assert src.exists(), "source deleted without a passing MD5 verification"
+    monkeypatch.undo()
+
+
+def test_md5_verified_result_allows_delete_on_old_djxl(tmp_path):
+    """djxl<0.12 + MD5 PASS this run (result[3] is truthy) -> deletion allowed."""
+    src = tmp_path / "photo.jxl"
+    src.write_bytes(b"\x00" * 32)
+    final = tmp_path / "photo.jpg"
+    final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    monkeypatch.setattr(tr, "decode_one_transcode",
+                        lambda *a, **k: (str(src), "ok", str(final), True))
+    tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
+    assert not src.exists(), "MD5-verified recovery should allow deletion"
+    monkeypatch.undo()
+
+
+def test_ppm_single_line_header(tmp_path):
+    ppm = tmp_path / "x.ppm"
+    ppm.write_bytes(b"P6 2 2 255\n" + b"\x00" * 12)
+    img = dec.read_ppm_to_numpy(ppm)
+    assert img.shape == (2, 2, 3)
+    assert img.dtype == np.uint16
+
+
+def test_wrapper_mode4_preview_matches_token_rule():
+    assert wp._replace_suffix_token("MyTIFFArchive", "tiff", "JXL") == "MyTIFFArchive"
+    assert wp._replace_suffix_token("Export_TIFF", "tiff", "JXL") == "Export_JXL"
+
+
+def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path):
+    """add_jpeg_preview must write metadata=None/software='' so the TIFF
+    carries no tifffile default Software/ImageDescription."""
+    src_tiff = tmp_path / "x.tif"
+    tifffile.imwrite(src_tiff, np.zeros((32, 32, 3), dtype=np.uint16), photometric="rgb")
+    dec.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
+    dec.add_jpeg_preview(src_tiff, tmp_path, None)
+    with tifffile.TiffFile(str(src_tiff)) as t:
+        pg = t.pages[0]
+        sw = pg.tags.get('Software')
+        desc = pg.tags.get('ImageDescription')
+        assert sw is None, f"tifffile Software tag leaked: {sw and sw.value!r}"
+        assert desc is None, f"shaped-JSON ImageDescription leaked"
+    monkeypatch.undo()
+
+
+def test_bare_codestream_rejected_at_gates(tmp_path):
+    stub = tmp_path / "stub.jxl"
+    stub.write_bytes(b"\xff\x0a" + b"\x00" * 64)
+    assert enc._verify_jxl_integrity(stub) is False
+    assert tr._verify_file_integrity(stub) is False

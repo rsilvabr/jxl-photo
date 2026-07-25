@@ -95,6 +95,22 @@ def _strip_surrounding_quotes(value: str) -> str:
     return value
 
 
+def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
+    """Replace the FIRST occurrence of suffix_from in a folder name, but only
+    when it is a complete token (bounded by _, -, space, or string edges) —
+    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
+    returns the name unchanged (caller applies the append fallback).
+    Same rule as the three backend scripts.
+    """
+    pat = re.compile(re.escape(suffix_from) + r'(?=$|[_\- ])', re.IGNORECASE)
+    m = pat.search(name)
+    if not m:
+        return name
+    if m.start() != 0 and name[m.start() - 1] not in '_- ':
+        return name
+    return name[:m.start()] + suffix_to + name[m.end():]
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -723,12 +739,16 @@ class FolderAnalyzer:
         origin_exts = self._get_extensions(self.origin)
 
         if mode == 6:
-            # Process all files inside export folders
+            # Process all files inside export folders. Skip the decoder's own
+            # output folders (16B_TIFF etc.) — find_tiffs_mode6 filters them
+            # too, so the preview count must match what the child will do.
+            _decoder_outs = {"16b_tiff", "tiff_16bits", "converted_tiff"}
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
                 origin_files = [
                     f for f in export_dir.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
+                    and not any(part.lower() in _decoder_outs for part in f.relative_to(export_dir).parts[:-1])
                 ]
                 if origin_files:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files)))
@@ -810,9 +830,9 @@ class FolderAnalyzer:
                     src = str(self.root / folder)
                     if mode == 4:
                         # Replace origin in folder name with dest — same rule as
-                        # the scripts: first occurrence only, uppercase suffix;
-                        # if the origin is absent, APPEND the suffix (fallback).
-                        new_name = re.sub(re.escape(self.origin), self.dest.upper(), folder, count=1, flags=re.IGNORECASE)
+                        # the scripts: first complete token only, uppercase
+                        # suffix; if the origin is absent, APPEND the suffix.
+                        new_name = _replace_suffix_token(folder, self.origin, self.dest.upper())
                         if new_name == folder:
                             new_name = folder + "_" + self.dest.upper()
                         dest = str(self.root / new_name)
@@ -831,12 +851,15 @@ class FolderAnalyzer:
         origin_exts = self._get_extensions(self.origin)
 
         if mode == 6:
-            # For mode 6/7, generate one entry per export folder
+            # For mode 6/7, generate one entry per export folder (skipping the
+            # decoder's own output folders, like the child's finder does)
+            _decoder_outs = {"16b_tiff", "tiff_16bits", "converted_tiff"}
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
                 origin_files = [
                     f for f in export_dir.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
+                    and not any(part.lower() in _decoder_outs for part in f.relative_to(export_dir).parts[:-1])
                 ]
                 if origin_files:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files), 6))
@@ -2705,8 +2728,14 @@ class InteractiveMenu:
         extra_info.append(f"Staging: {staging_display}")
         if workflow.get('auto_mode_used'):
             extra_info.append("Auto Mode: Yes")
-        if workflow.get('advanced_options'):
+        # "Advanced" only when something beyond the always-present defaults
+        # (overwrite/sync/delete_source) was actually configured
+        _adv = workflow.get('advanced_options') or {}
+        _default_keys = {'overwrite', 'sync', 'delete_source'}
+        if any(k not in _default_keys and v not in (None, False, "") for k, v in _adv.items()):
             extra_info.append("Advanced: Yes")
+        if _adv.get('delete_source'):
+            extra_info.append("DELETE SOURCE: ON (!)")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes")
         if workflow.get('dry_run'):

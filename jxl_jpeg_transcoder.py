@@ -65,9 +65,12 @@ def _verify_file_integrity(file_path: Path) -> bool:
             return False
         
         if ext == '.jxl':
-            # Bare JXL: 0xFF 0x0A, Container: ISOBMFF
+            # Bare JXL: 0xFF 0x0A. Every output this toolkit produces is a
+            # CONTAINER (metadata boxes are always injected), so a bare
+            # codestream here means a broken mid-write — and bare files get no
+            # structural validation (a 2-byte stub would pass). Refuse.
             if header[0:2] == b'\xff\x0a':
-                return True
+                return False
             if header != b'\x00\x00\x00\x0cJXL \r\n\x87\n':
                 return False
             # Walk the box chain: every box must be well-formed and the chain
@@ -927,6 +930,13 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
     sfx_from = JXL_SUFFIX_TO_REPLACE if decode else JPEG_SUFFIX_TO_REPLACE
     sfx_to = JPEG_SUFFIX_REPLACE_DEC if decode else JXL_SUFFIX_REPLACE
 
+    def _warn_if_outside(result: Path) -> Path:
+        # Modes 4/5 can land OUTSIDE the input tree for files at its root —
+        # surface that (same warning as the TIFF encoder/decoder).
+        if result is not None and not _is_relative_to(result, input_root):
+            logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
+        return result
+
     if mode == 0:
         if input_root != src_path.parent:
             return input_root / src_path.with_suffix(out_ext).name
@@ -944,10 +954,10 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         if new_name == old_name:
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found as a token in '{old_name}', using '{new_name}'")
-        return src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name
+        return _warn_if_outside(src_path.parent.parent / new_name / src_path.with_suffix(out_ext).name)
     elif mode == 5:
         # Sibling folder (aligned with encoder/decoder mode 5)
-        return src_path.parent.parent / sibling_jxl / src_path.with_suffix(out_ext).name
+        return _warn_if_outside(src_path.parent.parent / sibling_jxl / src_path.with_suffix(out_ext).name)
     elif mode in (6, 7):
         # Match only path *directory* parts (parts[:-1]); a file whose own
         # name happens to start/end with the marker is not an anchor.
@@ -1111,12 +1121,17 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
 
         n, total = next_count()
 
+        # result[3] carries "md5 verified this run" for the delete gate:
+        # the source may only be deleted without djxl>=0.12's authoritative
+        # --reconstruct_jpeg when the MD5 comparison actually ran AND passed.
+        md5_verified = None
         if verify:
             if stored_md5 is None:
                 logger.warning(f"[{n}/{total}] OK (no MD5 stored) | {jxl_path.name}")
             else:
                 recovered_md5 = md5_of_file(write_path)
                 if recovered_md5 == stored_md5:
+                    md5_verified = True
                     logger.info(f"[{n}/{total}] OK [MD5 PASS] | {jxl_path.name}")
                 else:
                     # Verification failed: delete the bad output so a re-run is
@@ -1132,7 +1147,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
             logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
 
         status = "reconvert" if overwritten else "ok"
-        return (str(jxl_path), status, str(final_path), None)
+        return (str(jxl_path), status, str(final_path), md5_verified)
     except Exception as e:
         # Remove any partial output produced by THIS run so the next run does
         # not mistake it for a completed conversion and skip it.
@@ -1255,15 +1270,13 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     continue
             if decode and not _tool_at_least("djxl", 0, 12):
                 # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
-                # is NOT guaranteed by the tool. Without a stored MD5 to
-                # verify against, deleting the source rests on the structural
-                # SOI/EOI check alone — too weak for an irreversible gate.
-                # (The checksum is keyed by the JXL's own name = the source.)
-                if not STORE_MD5:
-                    logger.warning(f" KEEP (djxl<0.12 and MD5 disabled) | {src_path.name}")
-                    continue
-                if read_md5_db(src_path) is None:
-                    logger.warning(f" KEEP (djxl<0.12, no stored MD5 for source) | {src_path.name}")
+                # is NOT guaranteed by the tool. The source may only be
+                # deleted when the MD5 comparison ran AND passed THIS run
+                # (result[3]). --no-verify skips that comparison entirely —
+                # without it, deletion would rest on the structural SOI/EOI
+                # check alone: too weak for an irreversible gate.
+                if not result[3]:
+                    logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
                     continue
             if not _verify_file_integrity(final_file):
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
@@ -1460,11 +1473,17 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         if new_name == old_name:
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found as a token in '{old_name}', using '{new_name}'")
-        return src_path.parent.parent / new_name / f"{stem}.{ext}"
+        result = src_path.parent.parent / new_name / f"{stem}.{ext}"
+        if output_root and not _is_relative_to(result, Path(output_root)):
+            logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
+        return result
     elif mode == 5:
         # Sibling folder (e.g., JXL_jpeg/ or JPEG_recovered/) — aligned with
         # encoder/decoder mode 5
-        return src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
+        result = src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
+        if output_root and not _is_relative_to(result, Path(output_root)):
+            logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
+        return result
     elif mode in (6, 7):
         # Export marker modes - only process files INSIDE export marker folder
         # Match only path *directory* parts (parts[:-1]); a file whose own
@@ -2202,9 +2221,10 @@ def cmd_auto(args):
     # Only meaningful in mode 8. Skipped on dry runs (nothing is converted, so
     # nothing would be deleted) and when DELETE_CONFIRM is off.
     if args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
-        # PNG -> JXL convert re-encodes pixels (not bit-recoverable): treat as lossy.
-        has_lossy = bool(jxl_convert_files) or bool(png_files)
-        has_lossless = bool(jpeg_files) or bool(jxl_transcode_files)
+        # Lossiness from the PLANNED pairs (post mode-6/7 filter), not the raw
+        # lists — otherwise a fully filtered-out group still asks for the token.
+        has_lossy = bool(planned["JXL-lossy"]) or bool(planned["PNG"])
+        has_lossless = bool(planned["JPEG"]) or bool(planned["JXL-jbrd"])
         if has_lossy:
             if not confirm_deletion_lossy():
                 logger.info("Deletion not confirmed -- exiting.")

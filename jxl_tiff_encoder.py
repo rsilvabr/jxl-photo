@@ -52,9 +52,14 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
         if len(header) < 2:
             return False
 
-        # Bare JXL starts with 0xFF 0x0A
+        # Bare JXL starts with 0xFF 0x0A. Every output this toolkit produces
+        # is a CONTAINER (exiftool always injects metadata boxes), so a bare
+        # codestream at the delete gate means something went wrong mid-write —
+        # and a bare file gets no structural validation at all, so a 2-byte
+        # stub would pass. Refuse deletion: the source stays.
         if header[0:2] == b'\xff\x0a':
-            return True
+            logger.warning(f"Integrity check: bare codestream (no container boxes) — refusing | {jxl_path.name}")
+            return False
 
         # Container format starts with 0x00 0x00 0x00 0x0C 0x4A 0x58 0x4C 0x20 0x0D 0x0A 0x87 0x0A
         if header != b'\x00\x00\x00\x0cJXL \r\n\x87\n':
@@ -1882,9 +1887,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                                 except Exception:
                                     pass
 
-                            # Convert 16-bit to 8-bit if necessary
+                            # Convert 16-bit to 8-bit if necessary (rounded,
+                            # like the rest of the pipeline)
                             if img_array.dtype == np.uint16:
-                                img_8bit = (img_array / 257).astype(np.uint8)  # 65535/255 = 257
+                                img_8bit = np.rint(img_array / 257).astype(np.uint8)
                             else:
                                 img_8bit = img_array
 
