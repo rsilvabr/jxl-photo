@@ -64,6 +64,13 @@ def _is_relative_to(path: Path, anchor: Path) -> bool:
         return False
 
 
+def _display_cmd(cmd: List) -> List[str]:
+    """Command line for DISPLAY only: omits --delete-confirm-off so a
+    copy-pasted command always keeps the child's own confirmation gate
+    (the actual subprocess call keeps the real flag)."""
+    return [a for a in cmd if a != "--delete-confirm-off"]
+
+
 def _split_expert_flags(flags: str) -> List[str]:
     """Split a free-form expert-flags string into argv tokens.
 
@@ -131,15 +138,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
         return False
-    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
-    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
-    # would falsely match the default '_EXPORT' marker.
+    # The bare word must be a complete TOKEN at the START or END of the name
+    # (bounded by _, -, space, or the string edges). This keeps the documented
+    # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
+    # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
+    # 'backup_export_old'.
     import re as _re
-    for m in _re.finditer(_re.escape(bare), part_lower):
-        s, e = m.span()
-        left_ok = s == 0 or part_lower[s - 1] in '_- '
-        right_ok = e == len(part_lower) or part_lower[e] in '_- '
-        if left_ok and right_ok:
+    if part_lower.startswith(bare):
+        e = len(bare)
+        if e == len(part_lower) or part_lower[e] in '_- ':
+            return True
+    if part_lower.endswith(bare):
+        s = len(part_lower) - len(bare)
+        if s == 0 or part_lower[s - 1] in '_- ':
             return True
     return False
 
@@ -187,6 +198,7 @@ class ToolConfig:
     last_add_preview: Optional[bool] = None
     last_mode_config: Optional[Dict] = None
     last_icc_profile: Optional[str] = None
+    last_expert_flags: Optional[str] = None
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -239,6 +251,7 @@ class ConfigManager:
                           dest_format: Optional[str] = None,
                           conversion_type: Optional[str] = None,
                           icc_profile: Optional[str] = None,
+                          expert_flags: Optional[str] = None,
                           d50_patch: Optional[str] = None,
                           encode_tag: Optional[str] = None,
                           jpeg_thumbnail: Optional[bool] = None,
@@ -279,6 +292,8 @@ class ConfigManager:
             self.config.last_conversion_type = conversion_type
         if icc_profile is not None:
             self.config.last_icc_profile = icc_profile
+        if expert_flags is not None:
+            self.config.last_expert_flags = expert_flags
         if d50_patch is not None:
             self.config.last_d50_patch = d50_patch
         if encode_tag is not None:
@@ -2224,17 +2239,14 @@ class InteractiveMenu:
                 # No effort parameter for JXL decoding - djxl doesn't use it
                 pass
             elif 'lossy' in conv_type:
-                if conv_type == 'convert_lossy':
-                    # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
-                    try:
-                        distance = float(Prompt.ask("Distance (0=lossless, 0.1=near-lossless, 1=visually lossless)", default=str(workflow.get('distance', 0.5))))
-                        workflow['distance'] = max(0.0, min(distance, 15.0))
-                    except ValueError:
-                        workflow['distance'] = workflow.get('distance', 0.5)
-                        console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
-                else:
-                    quality = IntPrompt.ask("Quality (1-100)", default=workflow['quality'])
-                    workflow['quality'] = max(1, min(quality, 100))
+                # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
+                # (convert_lossy is the only conversion type containing 'lossy')
+                try:
+                    distance = float(Prompt.ask("Distance (0=lossless, 0.1=near-lossless, 1=visually lossless)", default=str(workflow.get('distance', 0.5))))
+                    workflow['distance'] = max(0.0, min(distance, 15.0))
+                except ValueError:
+                    workflow['distance'] = workflow.get('distance', 0.5)
+                    console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
                 effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
                 workflow['effort'] = max(1, min(effort, 10))
             else:
@@ -2924,10 +2936,11 @@ class InteractiveMenu:
 
         # The Destination column is only honored by modes 0 and 2 — every other
         # mode computes its own output location from constants (_EXPORT/16B_JXL,
-        # converted_jxl/, ...). Warn once per diverging entry instead of letting
-        # the user believe their edited destinations took effect.
+        # converted_jxl/, ...). Modes 6/7 generate Destination == Source, which
+        # is why they need the warning even without a divergence.
         ignored_dests = [(s, d, m) for s, d, m in manifest_entries
-                         if m not in (0, 2) and d and Path(d) != Path(s)]
+                         if (m not in (0, 2) and d and Path(d) != Path(s))
+                         or m in (6, 7)]
         if ignored_dests:
             warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
                     f"Destination column (only modes 0/2 honor it) — outputs follow the mode rules.")
@@ -2979,8 +2992,11 @@ class InteractiveMenu:
                 print("DRY RUN MODE")
             print()
 
-        # Create analyzer once outside the loop for efficiency
-        analyzer = FolderAnalyzer(Path("."), origin, dest, self.config.config.export_marker)
+        # Create analyzer once outside the loop for efficiency — prefer the
+        # workflow's mode_config marker (a manifest run with a custom marker
+        # must detect modes with the same marker the children will use).
+        _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
+        analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
         
         for i, (source, dest_path, entry_mode) in enumerate(manifest_entries, 1):
             # Preserve the mode the manifest was generated with (important for modes 6/7)
@@ -3573,9 +3589,9 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing:[/bold cyan]")
-            console.print(f"[dim]{' '.join(cmd)}[/dim]\n")
+            console.print(f"[dim]{' '.join(_display_cmd(cmd))}[/dim]\n")
         else:
-            print(f"\nExecuting: {' '.join(cmd)}\n")
+            print(f"\nExecuting: {' '.join(_display_cmd(cmd))}\n")
 
         returncode = self._stream_child(cmd)
 
@@ -3664,6 +3680,7 @@ def main():
                         workflow['dest_format'],
                         workflow['conversion_type'],
                         workflow.get('icc_profile'),
+                        workflow.get('expert_flags'),
                         workflow.get('advanced_options', {}).get('d50_patch'),
                         workflow.get('advanced_options', {}).get('encode_tag'),
                         # The advanced-options dict stores it as 'embed_thumbnail'
@@ -3803,6 +3820,14 @@ def main():
             else:
                 overwrite, sync = False, True
 
+            # Ask dry-run explicitly — the original run may have been a
+            # simulation, and hardcoding False would turn a repeat into a REAL
+            # conversion without any notice.
+            if RICH_AVAILABLE and console:
+                dry_choice = Confirm.ask("Dry run? (simulate without converting)", default=False)
+            else:
+                dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
+
             if RICH_AVAILABLE and console:
                 proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)
             else:
@@ -3845,13 +3870,13 @@ def main():
                     workflow['mode_config'] = {'output_dir': saved_out}
                 else:
                     workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
-            elif workflow['mode'] in (6, 7):
-                # Preserve the full saved mode_config (export_marker AND
-                # export_subfolder) — dropping keys here silently turns a
-                # saved mode-7 run into a mode-6-equivalent one.
-                workflow['mode_config'] = dict(config.config.last_mode_config or {})
             else:
-                workflow['mode_config'] = dict(config.config.last_mode_config or {})
+                # mode_config is mode-SPECIFIC: a stale export_subfolder from a
+                # previous mode-7 run must not leak into mode 0/3/6 repeats
+                # (it changes child behavior, e.g. the decoder-output filter).
+                _keep = {6: ('export_marker',), 7: ('export_marker', 'export_subfolder')}
+                _src = config.config.last_mode_config or {}
+                workflow['mode_config'] = {k: _src[k] for k in _keep.get(workflow['mode'], ()) if k in _src}
 
             workflow['origin_format'] = origin
             workflow['dest_format'] = last_dest
@@ -3859,7 +3884,7 @@ def main():
             workflow['icc_profile'] = config.config.last_icc_profile
             workflow['compression'] = config.config.last_compression or 'zip'
             workflow['bit_depth'] = config.config.last_bit_depth or 16
-            workflow['dry_run'] = False
+            workflow['dry_run'] = dry_choice
             workflow['add_preview'] = config.config.last_add_preview if config.config.last_add_preview is not None else True
             fallback_advanced = {
                 'overwrite': overwrite,
@@ -3884,7 +3909,7 @@ def main():
             # not a stale value from a previous session's last_advanced_options.
             workflow['advanced_options']['overwrite'] = overwrite
             workflow['advanced_options']['sync'] = sync
-            workflow['expert_flags'] = ''
+            workflow['expert_flags'] = config.config.last_expert_flags or ''
             workflow['auto_mode_used'] = False
             
             # Use saved conversion type or fallback to defaults
@@ -3906,11 +3931,10 @@ def main():
             else:
                 workflow['conversion_type'] = 'jxl_to_jpeg_force'
 
-            # Repeat-last must pass through the same safety gate as the wizard:
-            # mode 8 + delete_source requires the HHMM confirmation.
-            if workflow['mode'] == 8 and workflow.get('advanced_options', {}).get('delete_source'):
-                if not menu._confirm_archive_mode():
-                    continue
+            # NOTE: no HHMM gate here — execute_workflow() has the single
+            # execution-time gate (which also honors dry_run). A gate here
+            # would ask for the token TWICE in a row (and the second prompt
+            # could roll into the next minute and fail spuriously).
 
             menu.execute_workflow(workflow, status)
 

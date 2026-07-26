@@ -97,15 +97,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
         return False
-    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
-    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
-    # would falsely match the default '_EXPORT' marker.
+    # The bare word must be a complete TOKEN at the START or END of the name
+    # (bounded by _, -, space, or the string edges). This keeps the documented
+    # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
+    # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
+    # 'backup_export_old'.
     import re as _re
-    for m in _re.finditer(_re.escape(bare), part_lower):
-        s, e = m.span()
-        left_ok = s == 0 or part_lower[s - 1] in '_- '
-        right_ok = e == len(part_lower) or part_lower[e] in '_- '
-        if left_ok and right_ok:
+    if part_lower.startswith(bare):
+        e = len(bare)
+        if e == len(part_lower) or part_lower[e] in '_- ':
+            return True
+    if part_lower.endswith(bare):
+        s = len(part_lower) - len(bare)
+        if s == 0 or part_lower[s - 1] in '_- ':
             return True
     return False
 
@@ -1212,6 +1216,11 @@ def cleanup_xmp_icc(tiff_path):
             # Blob is bounded: base64 chars only up to the next pipe or EOL,
             # so a trailing " | Real App" segment is never eaten.
             clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
+            if 'ICC:' in clean and '|' not in content:
+                # No pipe separators: the lookahead could not fire, but a
+                # long base64 blob is unambiguous (real words are never
+                # 64+ base64 chars).
+                clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
             clean = re.sub(r'\s*\|\s*$', '', clean)   # trailing pipe
             clean = re.sub(r'^\s*\|\s*', '', clean)   # leading pipe (ICC was mid-string)
             if not clean:
@@ -1802,8 +1811,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # so it must run BEFORE copy_metadata or all EXIF/XMP would be wiped.
             # Multi-page TIFFs skip it (add_jpeg_preview operates on series[0]),
             # and None mode skips it to preserve the v1.6.0 minimal-output contract.
+            # ICC: when the anchor page was ICC-INHERITED, pass None — the
+            # preview rewrite must not re-attach an ICC tag that the original
+            # page never had (the main writer deliberately omits it).
             if ADD_JPEG_PREVIEW and not is_multipage and strategy != 'none':
-                add_jpeg_preview(write_path, tmp_dir, page_icc)
+                _anchor_inherited = page_arrays[0][4] if page_arrays else False
+                add_jpeg_preview(write_path, tmp_dir, None if _anchor_inherited else page_icc)
             elif ADD_JPEG_PREVIEW and is_multipage:
                 logger.info(f" >Skipping JPEG preview for multi-page TIFF ({len(page_arrays)} pages)")
 

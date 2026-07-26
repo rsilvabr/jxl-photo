@@ -148,15 +148,19 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
         return False
-    # The bare word must be a complete TOKEN (bounded by _, -, space, or the
-    # string edges) — otherwise 'exports', 'EXPORTED_RAWS' and 'reexport'
-    # would falsely match the default '_EXPORT' marker.
+    # The bare word must be a complete TOKEN at the START or END of the name
+    # (bounded by _, -, space, or the string edges). This keeps the documented
+    # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
+    # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
+    # 'backup_export_old'.
     import re as _re
-    for m in _re.finditer(_re.escape(bare), part_lower):
-        s, e = m.span()
-        left_ok = s == 0 or part_lower[s - 1] in '_- '
-        right_ok = e == len(part_lower) or part_lower[e] in '_- '
-        if left_ok and right_ok:
+    if part_lower.startswith(bare):
+        e = len(bare)
+        if e == len(part_lower) or part_lower[e] in '_- ':
+            return True
+    if part_lower.endswith(bare):
+        s = len(part_lower) - len(bare)
+        if s == 0 or part_lower[s - 1] in '_- ':
             return True
     return False
 
@@ -260,6 +264,8 @@ PIL_MAX_IMAGE_PIXELS = None
 # PIL's decompression bomb protection limit (prevents DOS attacks with malicious images).
 # None  -> Disable the limit completely (recommended for trusted local files/panoramas)
 # N     -> Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
+# Applied module-wide right below (not only inside the thumbnail branch).
+Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
 
 TEMP_DIR = None
 # Temporary directory for small intermediate files (EXIF binary, PNG if USE_RAM_FOR_PNG=False).
@@ -1413,6 +1419,11 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
                 # Blob is bounded: base64 chars only up to the next pipe or EOL,
                 # so a trailing " | Real App" segment is never eaten.
                 existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', existing_creator, flags=re.MULTILINE).strip()
+                if 'ICC:' in existing_creator and '|' not in existing_creator:
+                    # No pipe separators: the lookahead could not fire, but a
+                    # long base64 blob is unambiguous (real words are never
+                    # 64+ base64 chars).
+                    existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', existing_creator).strip()
                 existing_creator = re.sub(r'\s*\|\s*$', '', existing_creator).strip()
                 existing_creator = re.sub(r'^\s*\|\s*', '', existing_creator).strip()
                 existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
@@ -1740,7 +1751,6 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _log_rejected_file(str(tiff_path), f"unsupported samples-per-pixel: {spp}")
                     raise ValueError(f"Unsupported channel count: {spp}. Expected 1 (gray), 2 (gray+alpha), 3 (RGB) or 4 (RGBA).")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
-                icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
                 # Reject float/double and other unsupported integer dtypes before casting.
                 if img.dtype.kind == 'f':
@@ -1773,6 +1783,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 icc_original = None
                 icc_inherited = True
                 icc_bytes = None
+            else:
+                # D50 policy/counters only when the ICC is actually used —
+                # discarded (grayscale-inherited) profiles must not inflate
+                # the "D50 patch applied" summary.
+                icc_bytes = apply_d50_policy(icc_original, tiff_path)
 
             # 5. Encode PNG with optional ICC in iCCP chunk (for cjxl encoding)
             # --container=1 is required for lossy JXL (d>0): without it, cjxl outputs a raw
@@ -1839,7 +1854,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 raise RuntimeError(f"exiftool failed: {err_msg}")
 
             # 7. Embed JPEG thumbnail if enabled
-            if EMBED_JPEG_THUMBNAIL:
+            # 7. Embed JPEG thumbnail if enabled (suppressed under --strip:
+            # "strip all metadata" must not leave an EXIF thumbnail behind)
+            if EMBED_JPEG_THUMBNAIL and not STRIP_METADATA:
                 try:
                     from PIL import Image, ImageCms
                     import io
@@ -2246,6 +2263,12 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             key = result[0][0]  # str(tiff_path)
             results_by_tiff.setdefault(key, []).append(result)
 
+        # Index tasks by final path ONCE (the old nested loop was O(n^2)
+        # and rebuilt the result set for every source TIFF).
+        by_final = {}
+        for _, _, final_jxl, _, _, _, _, _ in tasks:
+            by_final[str(final_jxl)] = final_jxl
+
         for tiff_key, tiff_results in results_by_tiff.items():
             # Every page must have freshly succeeded. Skipped pages (r[3] is None)
             # intentionally block deletion: if a page was skipped we can't be sure
@@ -2258,8 +2281,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 
             # All final JXLs must exist and pass integrity check
             can_delete = True
-            for _, _, final_jxl, _, _, _, _, _ in tasks:
-                if str(final_jxl) not in {r[2] for r in tiff_results}:
+            for expected in {r[2] for r in tiff_results}:
+                final_jxl = by_final.get(expected)
+                if final_jxl is None:
                     continue
                 if not Path(final_jxl).exists():
                     can_delete = False

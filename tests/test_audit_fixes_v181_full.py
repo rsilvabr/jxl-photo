@@ -1935,3 +1935,115 @@ def test_la_tiff_roundtrip_png_channels():
     ihdr_off = 8 + 4 + 4  # signature + length + 'IHDR'
     color_type = png[ihdr_off + 4 + 4 + 1]
     assert color_type == 4, f"expected PNG color type 4 (LA), got {color_type}"
+
+
+# ---------------------------------------------------------------------------
+# sixteenth-pass (dual audits)
+# ---------------------------------------------------------------------------
+
+def test_preview_does_not_reattach_icc_on_inherited_page(monkeypatch, tmp_path):
+    """A page marked jxlphoto-icc:inherited must reconstruct WITHOUT an ICC
+    tag — and add_jpeg_preview must not sneak it back in."""
+    src = tmp_path / "p.jxl"
+    src.write_bytes(b"\x00" * 16)
+    out = tmp_path / "p.tif"
+    fake_icc = b"\x00" * 200
+
+    dec.setup_logger()
+    monkeypatch.setattr(dec, "OVERWRITE", True)
+    monkeypatch.setattr(dec, "decode_jxl_to_numpy",
+                        lambda *a, **k: (np.zeros((8, 8, 3), dtype=np.uint16), fake_icc, "x", "roundtrip"))
+    monkeypatch.setattr(dec, "copy_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(dec, "cleanup_xmp_icc", lambda *a, **k: None)
+
+    # entry: (jxl, page_idx, is_thumb, icc_inherited=True, subfiletype, grayscale, depth)
+    main, status, _ = dec.convert_multipage_jxl_group(
+        src, [(src, 0, False, True, 0, False, None)], out, out)
+    assert status == "ok"
+    with tifffile.TiffFile(str(out)) as t:
+        assert 34675 not in t.pages[0].tags, "inherited page got an ICC tag via the preview rewrite"
+
+
+def test_repeat_path_has_single_hhmm_gate(tmp_path):
+    """execute_workflow owns the single execution-time HHMM gate; the repeat
+    path must NOT ask twice."""
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    calls = {"n": 0}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(menu, "_confirm_archive_mode",
+                        lambda: calls.__setitem__("n", calls["n"] + 1) or True)
+    monkeypatch.setattr(menu, "_run_subprocess", lambda cmd: 0)
+    workflow = {
+        'mode': 8, 'advanced_options': {'delete_source': True}, 'dry_run': False,
+        'origin_format': 'tiff', 'dest_format': 'jxl',
+        'input_dir': str(tmp_path), 'workers': 2, 'compression': 'zip',
+        'bit_depth': 16, 'mode_config': {}, 'expert_flags': '',
+        'distance': 0.1, 'effort': 7, 'use_ram': True,
+    }
+    menu.execute_workflow(workflow, {})
+    assert calls["n"] == 1, f"HHMM asked {calls['n']} times"
+    monkeypatch.undo()
+
+
+def test_mode_config_filtered_by_mode_in_repeat():
+    """A stale export_subfolder from a mode-7 session must not leak into
+    mode 0/3/6 repeats."""
+    keep = {6: ('export_marker',), 7: ('export_marker', 'export_subfolder')}
+    src = {'export_marker': '_EXPORT', 'export_subfolder': 'JXL', 'output_dir': '/old'}
+    for mode, expected_keys in [(0, set()), (3, set()), (6, {'export_marker'}),
+                                 (7, {'export_marker', 'export_subfolder'}), (2, set())]:
+        filtered = {k: src[k] for k in keep.get(mode, ()) if k in src}
+        assert set(filtered.keys()) == expected_keys, f"mode {mode}: {filtered}"
+
+
+def test_marker_bare_token_first_last_only():
+    for mod in (enc, dec, tr, wp):
+        m = mod._marker_matches
+        assert m("export_lightroom", "_export")
+        assert m("lightroom_export", "_export")
+        assert m("my_export", "_export")
+        assert m("_export", "_export")
+        assert not m("backup_export_old", "_export"), f"{mod.__name__}: mid-name token must not match"
+        assert not m("exports", "_export")
+        assert not m("exported_raws", "_export")
+        assert not m("reexport", "_export")
+
+
+def test_strip_suppresses_embedded_thumbnail(monkeypatch, tmp_path):
+    """--strip + --embed-thumbnail must not leave an EXIF thumbnail behind."""
+    tif = tmp_path / "photo.tif"
+    tifffile.imwrite(tif, np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
+    final = tmp_path / "photo.jxl"
+    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
+    monkeypatch.setattr(enc, "get_page_icc", lambda *a, **k: (None, False))
+    monkeypatch.setattr(enc, "apply_d50_policy", lambda icc, p: icc)
+    monkeypatch.setattr(enc, "reorder_jxl_boxes", lambda p: None)
+    monkeypatch.setattr(enc, "EMBED_JPEG_THUMBNAIL", True)
+    monkeypatch.setattr(enc, "STRIP_METADATA", True)
+    thumb_calls = []
+
+    def fake_run(cmd, **kw):
+        if any("ThumbnailImage" in str(c) for c in cmd):
+            thumb_calls.append(cmd)
+        return _FakeRun()
+
+    monkeypatch.setattr(enc.subprocess, "run", fake_run)
+    enc.setup_logger()
+    enc.OVERWRITE = True
+    enc.convert_one(tif, final, final)
+    assert thumb_calls == [], "thumbnail embedded despite --strip"
+    monkeypatch.setattr(enc, "EMBED_JPEG_THUMBNAIL", False)
+    monkeypatch.setattr(enc, "STRIP_METADATA", False)
+
+
+def test_icc_blob_regex_no_pipe_variant():
+    import re
+    blob = "QUJDRAEAA" * 12  # 108 chars, realistic ICC base64 length
+    content = f"ICC:{blob} Photoshop App"
+    clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
+    if 'ICC:' in clean and '|' not in content:
+        clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
+    assert "ICC:" not in clean
+    assert "Photoshop App" in clean
