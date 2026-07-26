@@ -57,7 +57,7 @@ Full release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 ### v1.8.1
 
-Bug-fix release driven by an extended code-audit cycle — **100+ fixes** across the four scripts, with a large new regression suite (160+ tests). Highlights include stricter output validation, hardened multi-page reconstruction, more accurate Auto Mode behavior (both in the scripts and the wizard), and many small correctness and performance improvements. Full list: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md).
+Bug-fix release driven by an extended code-audit cycle — **100+ fixes** across the four scripts, with a large new regression suite (170+ tests). Highlights include stricter output validation, hardened multi-page reconstruction, more accurate Auto Mode behavior (both in the scripts and the wizard), and many small correctness and performance improvements. Full list: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md).
 
 **Recommended version** — if you're on v1.8.0, upgrade: v1.8.1 is the most stable and most tested release of this toolkit.
 
@@ -672,6 +672,10 @@ exiftool -Make -Model roundtrip.tif
 ---
 
 ## Known Limitations
+
+### Default re-run behavior differs per script
+
+The TIFF encoder/decoder default to **smart sync** (reconvert when the source is newer than the existing output — there is no plain "skip existing" CLI mode), while the JPEG transcoder **skips existing outputs** by default. Use `--overwrite` (always) or `--sync` (source newer) to control it explicitly. See each script's README for details.
 
 ### Matrix decode mode is 8-bit internally
 

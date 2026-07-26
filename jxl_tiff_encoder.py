@@ -835,12 +835,13 @@ def extract_exif_raw(tiff_path, tmp_dir):
         return p
     return None
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=1024)
 def get_exif_software(tiff_path_str):
     """Extracts Software field from EXIF metadata.
     Returns software string or empty string if not found.
     Cached per path: D50 auto-detection calls this once per PAGE, so a
-    split_all scan would otherwise spawn one exiftool per page."""
+    split_all scan would otherwise spawn one exiftool per page. Bounded so
+    a huge library scan cannot grow the cache without limit."""
     tiff_path = Path(tiff_path_str)
     try:
         # Use -@ argument file to avoid wildcard expansion issues with brackets in paths

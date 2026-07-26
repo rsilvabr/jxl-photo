@@ -16,7 +16,7 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ## v1.8.1 — The Audit Release (2026-07)
 
-Twelve full audit rounds on the 4 scripts, each verified with reproductions and real-data batteries (Capture One 16-bit exports, 700 MB RGB+IR film scans). All fixes ship with regression tests (137 passing in `tests/`). Only the highest-impact bugs are detailed individually here; the full list is in `docs/RELEASE_v1.8.1.md`.
+Twelve full audit rounds on the 4 scripts, each verified with reproductions and real-data batteries (Capture One 16-bit exports, 700 MB RGB+IR film scans). All fixes ship with regression tests (174 passing in `tests/`). Only the highest-impact bugs are detailed individually here; the full list is in `docs/RELEASE_v1.8.1.md`.
 
 ### Critical / data-safety
 
@@ -58,6 +58,11 @@ Twelve full audit rounds on the 4 scripts, each verified with reproductions and 
 | 200 | Mode-7 Auto Mode preview promised one subfolder but the run processed all (seed wiped in Step 5) | wrapper | ✅ FIXED (seed preserved; recommendation requires a single origin subfolder) |
 | 201 | `--icc-profile`/`--to-srgb` validated but silently inert: decode without ImageMagick delivered unconverted files | transcoder | ✅ FIXED (guard after direction auto-detect; hard failure) |
 | 202 | `--to-srgb` used `magick -colorspace` (mathematical reinterpretation, wrong for wide gamut) | transcoder | ✅ FIXED (real sRGB ICC via `-profile`) |
+| 203 | Integrity gate rejected (and deleted!) bit-exact JPEGs with trailing data after the EOI (Motion Photos, appended payloads — preserved by jbrd on purpose); MD5 check never ran | transcoder | ✅ FIXED (EOI/IEND searched in the last 64 KB instead of required at EOF) |
+| 204 | Without `imagecodecs`, JXL→TIFF decode silently quantized 16-bit RGB/RGBA PNGs to 8-bit (output still "16-bit", data degraded) | decoder + wrapper | ✅ FIXED (hard per-file error for 16-bit RGB/RGBA/LA PNGs without imagecodecs; wrapper shows ✗ + required-for-16-bit message) |
+| 205 | Auto Mode → [P] manifest → [Y] on mode 7 lost the auto-detected export subfolder (ran as mode 6; C1 trees aborted on duplicate destination) | wrapper | ✅ FIXED (same propagation as the direct [Y] path) |
+| 206 | "Repeat last workflow" silently reapplied `delete_source` and expert flags without showing them | wrapper | ✅ FIXED (Last Workflow Settings table now shows DELETE SOURCE: ON and expert flags) |
+| 207 | `.jfif`/`.jpe` outputs refused by the integrity gate (unknown extension) | transcoder | ✅ FIXED (added to the JPEG branch) |
 
 ### Medium (selection)
 
@@ -86,6 +91,7 @@ Twelve full audit rounds on the 4 scripts, each verified with reproductions and 
 - `read_ppm_to_numpy` accepts single-line PNM headers and validates truncation.
 - TRC/gamma offsets, D50 dedup stats, uppercase extension finders, `--container=1` lossy-only.
 - Test-suite hygiene: tests no longer depend on exiftool/rich/root semantics (fixtures + `skipif`).
+- 18th round hygiene: `default_depth` initialized on all paths (no latent `UnboundLocalError`); ICC sniff checks `srgb` before `adobe` (log label); `get_exif_software` cache bounded (1024); 3 tests skip cleanly without imagecodecs (`importorskip`).
 
 ---
 

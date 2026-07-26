@@ -1060,6 +1060,7 @@ def test_transcoder_reorder_raises_on_truncated_extended(tmp_path):
 def test_read_png_unexpected_shape_raises(monkeypatch, tmp_path):
     """The shape check must NOT be swallowed by the imagecodecs fallback:
     an unsupported shape is a hard per-file error, not a silent PIL degrade."""
+    pytest.importorskip("imagecodecs")
     png = tmp_path / "x.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
     import imagecodecs
@@ -1240,6 +1241,7 @@ def test_grayscale_flag_from_array_not_metadata(monkeypatch, tmp_path):
 def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
     """add_jpeg_preview on a gray+alpha TIFF: preview written (not LA-fail)
     and never larger than the source."""
+    pytest.importorskip("imagecodecs")
     la_tiff = tmp_path / "la.tif"
     img = np.dstack([np.full((48, 64), 300, dtype=np.uint16),
                      np.full((48, 64), 65535, dtype=np.uint16)])
@@ -1616,6 +1618,7 @@ def test_wrapper_mode4_preview_matches_token_rule():
 def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path):
     """add_jpeg_preview must write metadata=None/software='' so the TIFF
     carries no tifffile default Software/ImageDescription."""
+    pytest.importorskip("imagecodecs")
     src_tiff = tmp_path / "x.tif"
     tifffile.imwrite(src_tiff, np.zeros((32, 32, 3), dtype=np.uint16), photometric="rgb")
     dec.setup_logger()
@@ -2100,3 +2103,92 @@ def test_wizard_seeds_defaults_from_last_session():
     assert workflow['compression'] == "lzw"
     assert workflow['add_preview'] is False
     assert workflow['use_ram'] is False
+
+# ---------------------------------------------------------------------------
+# 18th audit round: integrity gate vs trailing data, imagecodecs 16-bit
+# hard-fail, post-manifest mode-7 subfolder propagation
+# ---------------------------------------------------------------------------
+
+def test_integrity_jpeg_with_trailing_data_passes(tmp_path):
+    """jbrd preserves trailing data after the EOI (Motion Photos, appended
+    payloads): such JPEGs are valid and must pass the gate."""
+    p = tmp_path / "b.jpg"
+    p.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9" + b"TRAILING")
+    assert tr._verify_file_integrity(p) is True
+
+
+def test_integrity_jpeg_truncated_still_fails(tmp_path):
+    """A truncated JPEG (no EOI anywhere near the end) must still fail."""
+    p = tmp_path / "b.jpg"
+    p.write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    assert tr._verify_file_integrity(p) is False
+
+
+def test_integrity_jfif_extension_accepted(tmp_path):
+    p = tmp_path / "b.jfif"
+    p.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
+    assert tr._verify_file_integrity(p) is True
+
+
+def test_integrity_png_with_trailing_data_passes(tmp_path):
+    sig = b"\x89PNG\r\n\x1a\n"
+    iend = b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    p = tmp_path / "x.png"
+    p.write_bytes(sig + b"\x00" * 20 + iend + b"APPENDED")
+    assert tr._verify_file_integrity(p) is True
+
+
+def test_integrity_png_without_iend_fails(tmp_path):
+    sig = b"\x89PNG\r\n\x1a\n"
+    p = tmp_path / "x.png"
+    p.write_bytes(sig + b"\x00" * 64)
+    assert tr._verify_file_integrity(p) is False
+
+
+def _png_header(bit_depth, color_type):
+    """Minimal PNG: signature + IHDR (enough for the decoder's IHDR sniff)."""
+    import struct
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr_data = struct.pack(">IIBBBBB", 1, 1, bit_depth, color_type, 0, 0, 0)
+    ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + b"\x00\x00\x00\x00"
+    return sig + ihdr
+
+
+def test_read_png_16bit_rgb_without_imagecodecs_raises(monkeypatch, tmp_path):
+    """Without imagecodecs, a 16-bit RGB/RGBA/LA PNG must fail loudly instead
+    of being silently quantized to 8-bit by PIL."""
+    monkeypatch.setitem(sys.modules, "imagecodecs", None)
+    for ctype in (2, 4, 6):
+        png = tmp_path / f"rgb16_t{ctype}.png"
+        png.write_bytes(_png_header(16, ctype))
+        with pytest.raises(RuntimeError, match="imagecodecs is required"):
+            dec.read_png_to_numpy(png, target_depth=16)
+
+
+def test_read_png_16bit_gray_without_imagecodecs_allowed(monkeypatch, tmp_path):
+    """16-bit grayscale (color type 0) is faithful through PIL — no raise."""
+    pytest.importorskip("PIL")
+    monkeypatch.setitem(sys.modules, "imagecodecs", None)
+    png = tmp_path / "g16.png"
+    png.write_bytes(_png_header(16, 0))
+    try:
+        dec.read_png_to_numpy(png, target_depth=16)
+    except RuntimeError as e:
+        pytest.fail(f"gray 16-bit PNG must not hard-fail: {e}")
+    except Exception:
+        pass  # PIL may choke on the minimal file; just not the RuntimeError
+
+
+def test_post_manifest_yes_propagates_mode7_subfolder(monkeypatch, tmp_path):
+    """[P] generate manifest -> [Y] use mode 7 must keep the auto-detected
+    export subfolder, same as the direct [Y] path."""
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    monkeypatch.setattr("builtins.input", lambda *a: "Y")
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(wp, "console", None)
+    workflow = {}
+    mappings = [(str(tmp_path / "_EXPORT" / "TIFF16"), "out", 7)]
+    assert menu._wizard_auto_mode_post_manifest(workflow, None, {}, 7, {7: "x"}, mappings) is True
+    assert workflow["mode"] == 7
+    assert workflow["mode_config"]["export_subfolder"] == "TIFF16"

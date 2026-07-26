@@ -300,8 +300,9 @@ Options:
   --icc-png-strategy cautious|heuristic|always|skip
                     How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
   --strip           Strip all metadata from output (no EXIF/XMP preservation;
-                    also disables the multi-page reconstruction markers, so
-                    split pages decode as standalone files)
+                    also disables the multi-page reconstruction and grayscale
+                    markers, so split pages decode as standalone files and
+                    faithful multipage/grayscale reconstruction is not possible)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
 ```

@@ -448,7 +448,7 @@ class DependencyChecker:
             'exiftool': '✓' if status.get('exiftool') else '✗',
             'magick': '✓' if status.get('magick') else '⚠',
             'tifffile': '✓' if status.get('tifffile') else '✗',
-            'imagecodecs': '✓' if status.get('imagecodecs') else '⚠',
+            'imagecodecs': '✓' if status.get('imagecodecs') else '✗',
             'pillow': '✓' if status.get('pillow') else '✗',
             'rich': '✓' if status.get('rich') else '✗',
         }
@@ -468,7 +468,7 @@ class DependencyChecker:
         if not status.get('tifffile'):
             parts[3] += " (TIFF off)"
         if not status.get('imagecodecs'):
-            parts[4] += " (LZW/ZIP TIFFs need: pip install imagecodecs)"
+            parts[4] += " (16-bit decode & JPEG previews need: pip install imagecodecs)"
         if not status.get('pillow'):
             parts[5] += " (JPG previews off)"
         if not status.get('rich'):
@@ -1519,6 +1519,12 @@ class InteractiveMenu:
 
         if choice == "Y":
             workflow['mode'] = rec_mode
+            # Mode 7: same propagation as the main auto-mode menu — without the
+            # detected subfolder, mode 7 behaves like mode 6 (all subfolders).
+            if rec_mode == 7 and mappings:
+                sub_names = {Path(src).name for src, _, _ in mappings}
+                if len(sub_names) == 1:
+                    workflow.setdefault('mode_config', {})['export_subfolder'] = sub_names.pop()
             workflow['auto_mode_used'] = True
             return True
         elif choice == "M":
@@ -3771,6 +3777,13 @@ def main():
                 elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
                     settings.append(["Quality", str(last_quality)])
                 settings.append(["Staging", last_staging or "(none)"])
+                # Surface silently-reapplied dangerous settings (they are NOT
+                # re-asked on this path, so the user must see them here).
+                _last_adv = last.last_advanced_options or {}
+                if _last_adv.get('delete_source'):
+                    settings.append(["Delete source", "ON"])
+                if last.last_expert_flags:
+                    settings.append(["Expert flags", last.last_expert_flags])
                 
                 t = Table(box=BOX_SIMPLE, show_header=False, pad_edge=False)
                 t.add_column("", style="cyan")
@@ -3794,6 +3807,11 @@ def main():
                 elif last_origin == 'jxl' and last_quality is not None:
                     print(f"  Quality:      {last_quality}")
                 print(f"  Staging:      {last_staging or '(none)'}")
+                _last_adv = last.last_advanced_options or {}
+                if _last_adv.get('delete_source'):
+                    print(f"  Delete source: ON")
+                if last.last_expert_flags:
+                    print(f"  Expert flags: {last.last_expert_flags}")
                 print()
 
             if RICH_AVAILABLE and console:

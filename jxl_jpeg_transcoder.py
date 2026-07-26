@@ -104,24 +104,29 @@ def _verify_file_integrity(file_path: Path) -> bool:
                     i += size
             return has_codestream and i == file_size
         
-        elif ext in ('.jpg', '.jpeg'):
-            # SOI at the start AND EOI (0xFFD9) at the end — a truncated or
-            # short-written JPEG must never pass the delete gate.
+        elif ext in ('.jpg', '.jpeg', '.jfif', '.jpe'):
+            # SOI at the start AND an EOI (0xFFD9) near the end — a truncated
+            # or short-written JPEG must never pass the delete gate. The EOI
+            # does NOT have to be the last two bytes: jbrd bit-exact
+            # reconstruction preserves trailing data after the EOI (Motion
+            # Photos, appended thumbnails, scanner payloads), so search the
+            # tail instead of requiring EOI at EOF.
             if header[0:2] != b'\xff\xd8':
                 return False
             with open(file_path, 'rb') as f:
-                f.seek(-2, os.SEEK_END)
-                return f.read(2) == b'\xff\xd9'
+                f.seek(max(0, stat.st_size - 65536))
+                return b'\xff\xd9' in f.read()
 
         elif ext == '.png':
-            # PNG signature AND the IEND chunk closing the stream.
+            # PNG signature AND the IEND chunk closing the stream (search the
+            # tail: PNGs with appended data are valid too).
             if header[0:8] != b'\x89PNG\r\n\x1a\n':
                 return False
             if stat.st_size < 20:
                 return False
             with open(file_path, 'rb') as f:
-                f.seek(-12, os.SEEK_END)
-                return f.read(12)[4:8] == b'IEND'
+                f.seek(max(0, stat.st_size - 65536))
+                return b'IEND' in f.read()
 
         elif ext in ('.tif', '.tiff'):
             # TIFF: signature, then force a real read of the last page's last
@@ -2381,6 +2386,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
 
     # Build output pairs
     pairs = []
+    default_depth = 8  # safe default; refined below for lossy convert output
     if not use_transcode:
         if direction == "to_jxl":
             out_ext = "jxl"

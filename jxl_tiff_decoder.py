@@ -600,10 +600,10 @@ def analyze_icc_profile(icc_data):
 
         if 'prophoto' in data_str or 'kodak' in data_str or 'romm' in data_str:
             return 'prophoto'
-        elif 'adobe' in data_str and 'rgb' in data_str:
-            return 'adobe'
         elif 'srgb' in data_str:
             return 'srgb'
+        elif 'adobe' in data_str and 'rgb' in data_str:
+            return 'adobe'
         elif '2020' in data_str or 'bt2020' in data_str or 'rec.2020' in data_str:
             return '2020'
         elif 'p3' in data_str or 'display p3' in data_str or 'dci-p3' in data_str:
@@ -698,15 +698,36 @@ def read_png_to_numpy(png_path, target_depth=16):
     # hard error (unsupported/corrupt PNG) and must NOT fall through to the
     # 8-bit PIL path silently.
     arr = None
+    imagecodecs_missing = False
     try:
         import imagecodecs
         arr = imagecodecs.png_decode(Path(png_path).read_bytes())
+    except ImportError:
+        imagecodecs_missing = True
     except Exception:
-        # imagecodecs not available or failed; fall through to PIL.
+        # imagecodecs decode failed; fall through to PIL.
         # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
         if target_depth == 16:
             logger.warning("imagecodecs not available or failed; falling back to PIL. "
                            "16-bit RGB/RGBA PNG precision will be degraded to 8-bit.")
+
+    if imagecodecs_missing and target_depth == 16:
+        # Without imagecodecs, PIL silently quantizes 16-bit RGB/RGBA/LA PNGs
+        # to 8-bit — the output TIFF would still be "16-bit" but with degraded
+        # data, breaking the 16-bit fidelity promise. Detect it from the IHDR
+        # and fail loudly instead of degrading in silence.
+        try:
+            head = Path(png_path).read_bytes()[:26]
+            if (len(head) == 26 and head[:8] == b'\x89PNG\r\n\x1a\n'
+                    and head[24] == 16 and head[25] in (2, 4, 6)):
+                raise RuntimeError(
+                    "imagecodecs is required for faithful 16-bit RGB/RGBA decoding "
+                    "(PIL would degrade to 8-bit). Install it: pip install imagecodecs")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+        logger.warning("imagecodecs not available; falling back to PIL.")
 
     if arr is not None:
         if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[2] == 1):
