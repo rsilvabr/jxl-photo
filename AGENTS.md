@@ -1,8 +1,11 @@
 # jxl-photo — agent notes
 
-## Do NOT touch (dead side project)
+## Do NOT touch (dead code)
 - `jxl_jpeg_transcoder_HDR.py` and `hdr/` — abandoned HDR side project, kept
-  untracked. Do not read, edit, analyze, or commit these files.
+  untracked at the repo root (gitignored). Do not read, edit, analyze, or
+  commit these files.
+- `deprecated/` — superseded scripts, tracked only for history. Out of scope
+  for audits, refactors and edits.
 
 ## Active scripts
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)

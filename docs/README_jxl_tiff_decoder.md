@@ -190,6 +190,8 @@ TIFF with transformed ICC
 
 > **Limitation**: Pillow's LittleCMS path currently processes the transform in 8-bit precision, so 16-bit output in Matrix mode is created by scaling 8-bit data. This is a known limitation of the Pillow/LittleCMS route; use Roundtrip mode for full 16-bit fidelity.
 
+> **Limitation**: Matrix mode decodes through PPM and transforms via an RGB-only LittleCMS pipeline, so **alpha channels are dropped** and **grayscale pages are expanded to 3-channel RGB** (three times the size, and a different page structure than the original). Both are logged when they happen. Roundtrip, Basic and None modes preserve alpha and keep grayscale single-channel.
+
 ---
 
 ## Key settings

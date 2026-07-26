@@ -1535,8 +1535,12 @@ def reorder_jxl_boxes(jxl_path):
     
     while i < file_size:
         if i + 8 > file_size:
-            break
-        
+            # Do NOT rewrite the file with only the parsed boxes — that would
+            # silently drop the trailing bytes and turn a file that fails the
+            # integrity gate into one that passes it (this runs BEFORE
+            # _verify_jxl_integrity, and mode 8 deletes the source on pass).
+            raise RuntimeError(f"Truncated box header at offset {i}: {file_size - i} trailing byte(s)")
+
         size = int.from_bytes(data[i:i+4], "big")
         name = data[i+4:i+8]
         
@@ -2291,7 +2295,11 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             for expected in {r[2] for r in tiff_results}:
                 final_jxl = by_final.get(expected)
                 if final_jxl is None:
-                    continue
+                    # No task matched this result's final path (path-format
+                    # divergence would be the cause). Deletion is irreversible:
+                    # an unverifiable page must block it, never wave it through.
+                    can_delete = False
+                    break
                 if not Path(final_jxl).exists():
                     can_delete = False
                     break

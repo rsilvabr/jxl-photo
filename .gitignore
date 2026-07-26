@@ -32,3 +32,7 @@ Thumbs.db
 
 # Release notes kept locally but not published (posted as GitHub Releases instead)
 docs/RELEASE_v*.md
+
+# Abandoned HDR side project — kept locally, never committed (see AGENTS.md)
+jxl_jpeg_transcoder_HDR.py
+hdr/

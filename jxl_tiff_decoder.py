@@ -698,26 +698,32 @@ def read_png_to_numpy(png_path, target_depth=16):
     # hard error (unsupported/corrupt PNG) and must NOT fall through to the
     # 8-bit PIL path silently.
     arr = None
-    imagecodecs_missing = False
+    imagecodecs_unusable = False
     try:
         import imagecodecs
         arr = imagecodecs.png_decode(Path(png_path).read_bytes())
     except ImportError:
-        imagecodecs_missing = True
-    except Exception:
-        # imagecodecs decode failed; fall through to PIL.
-        # PIL cannot faithfully read 16-bit RGB/RGBA PNGs (it downgrades to 8-bit).
-        if target_depth == 16:
-            logger.warning("imagecodecs not available or failed; falling back to PIL. "
-                           "16-bit RGB/RGBA PNG precision will be degraded to 8-bit.")
+        imagecodecs_unusable = True
+    except Exception as e:
+        # A failed decode (MemoryError, unsupported PNG variant, version
+        # mismatch) leaves us exactly as helpless as a missing import: the only
+        # remaining reader is PIL, which downgrades 16-bit RGB/RGBA to 8-bit.
+        # Flag it as unusable so the IHDR hard-fail below also runs here,
+        # instead of degrading precision behind a warning.
+        imagecodecs_unusable = True
+        logger.warning(f"imagecodecs png_decode failed ({e}); falling back to PIL.")
 
-    if imagecodecs_missing and target_depth == 16:
+    if imagecodecs_unusable and target_depth == 16:
         # Without imagecodecs, PIL silently quantizes 16-bit RGB/RGBA/LA PNGs
         # to 8-bit — the output TIFF would still be "16-bit" but with degraded
         # data, breaking the 16-bit fidelity promise. Detect it from the IHDR
         # and fail loudly instead of degrading in silence.
         try:
-            head = Path(png_path).read_bytes()[:26]
+            # Only the 26-byte signature+IHDR is needed; reading the whole file
+            # would allocate hundreds of MB per worker on large 16-bit PNGs —
+            # in exactly the low-resource scenario that got us here.
+            with open(png_path, 'rb') as f:
+                head = f.read(26)
             if (len(head) == 26 and head[:8] == b'\x89PNG\r\n\x1a\n'
                     and head[24] == 16 and head[25] in (2, 4, 6)):
                 raise RuntimeError(
@@ -727,7 +733,7 @@ def read_png_to_numpy(png_path, target_depth=16):
             raise
         except Exception:
             pass
-        logger.warning("imagecodecs not available; falling back to PIL.")
+        logger.warning("imagecodecs unavailable; falling back to PIL.")
 
     if arr is not None:
         if arr.ndim == 2 or (arr.ndim == 3 and arr.shape[2] == 1):
@@ -843,8 +849,14 @@ def read_ppm_to_numpy(ppm_path):
     """
     Read PPM/PGM file and convert to numpy array.
     Supports P6 (RGB) and P5 (grayscale) with 8-bit or 16-bit depth.
-    Returns uint16 numpy array (always 3-channel for RGB, 2D for grayscale).
     Validates that file is complete (not truncated).
+
+    Returns a uint16 array that is ALWAYS 3-channel: this feeds matrix mode
+    only, whose LittleCMS transform is RGB-only, so a P5 grayscale page is
+    expanded to RGB. Grayscale pages therefore come back as 3-channel RGB in
+    matrix mode — like the alpha and 8-bit-precision losses, that is a
+    known matrix-mode limitation; roundtrip/basic/none keep grayscale 2D via
+    read_png_to_numpy().
     """
     with open(ppm_path, 'rb') as f:
         # Read header tokens, skipping comment-only lines/inline comments, until
@@ -908,7 +920,10 @@ def read_ppm_to_numpy(ppm_path):
             else:
                 pixel_data = np.frombuffer(raw, dtype=np.dtype('>u2')).astype(np.uint16)
                 img = pixel_data.reshape((height, width))
-            # Expand grayscale → RGB so the rest of the pipeline stays uniform
+            # Expand grayscale → RGB: the matrix-mode ICC transform downstream
+            # is RGB-only. Say so instead of silently tripling the page size.
+            logger.info(" >Matrix mode note: grayscale page expanded to RGB (PPM path); "
+                        "use roundtrip/basic/none to keep it single-channel")
             return np.stack([img, img, img], axis=2)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2174,10 +2189,20 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                         os.unlink(argfile)
                     except OSError:
                         pass
-            if r.returncode != 0 or not r.stdout:
+            if not r.stdout:
                 logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} file(s) (rc={r.returncode}); treating them as standalone")
                 continue
+            # exiftool exits non-zero when it fails on ANY file of the batch,
+            # but still prints valid JSON for the rest. Discarding that JSON
+            # would strip the markers from up to 399 healthy files because of
+            # one unreadable one — multi-page groups would split into single
+            # pages and grayscale/depth/subfiletype flags would be lost.
+            # Parse what it did return; files absent from the JSON keep the
+            # standalone defaults already seeded in `markers`.
             data = _json.loads(r.stdout)
+            if r.returncode != 0:
+                logger.warning(f"Marker read: exiftool rc={r.returncode} on a batch of {len(chunk)} file(s); "
+                               f"using the {len(data)} entry/entries it returned, the rest are standalone")
             for entry in data:
                 src = entry.get("SourceFile")
                 rel = entry.get("Relation")

@@ -659,8 +659,12 @@ def reorder_jxl_boxes(jxl_path: Path):
     
     while i < file_size:
         if i + 8 > file_size:
-            break
-        
+            # Do NOT rewrite the file with only the parsed boxes — that would
+            # silently drop the trailing bytes and turn a file that fails the
+            # integrity gate into one that passes it (same rule as the extended
+            # box branch below, and as the encoder).
+            raise RuntimeError(f"Truncated box header at offset {i}: {file_size - i} trailing byte(s)")
+
         size = int.from_bytes(data[i:i+4], "big")
         name = data[i+4:i+8]
         
@@ -2228,6 +2232,15 @@ def cmd_auto(args):
         jpeg_files = []
         png_files = []
 
+    # --from-jpeg: the mirror image — restrict the encode direction to JPEG
+    # sources and leave PNGs untouched. Honoured here too, not just in convert
+    # mode: silently ignoring a direction flag would convert (and, under
+    # --mode 8, delete) PNGs the user explicitly scoped out.
+    elif getattr(args, "from_jpeg", False):
+        if png_files:
+            logger.info(f"--from-jpeg: ignoring {len(png_files)} PNG file(s)")
+        png_files = []
+
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")
         return (0, False)
@@ -2580,7 +2593,7 @@ Examples:
                         help="[Auto mode] Restrict processing to .jxl files only "
                              "(JPEG/PNG files in the folder are left untouched).")
     parser.add_argument("--from-jpeg", action="store_true",
-                        help="[Convert mode] Restrict JPEG->JXL conversion to JPEG "
+                        help="[Convert/Auto mode] Restrict JPEG->JXL conversion to JPEG "
                              "files only (PNGs in the folder are left untouched).")
     parser.add_argument("--effort", type=int, default=CJXL_EFFORT, choices=range(1, 11),
                         help="cjxl effort 1-10")
