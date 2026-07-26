@@ -735,15 +735,40 @@ def reorder_jxl_boxes(jxl_path: Path):
 # FILE FINDERS
 # --------------------------------------------─
 
-def find_jpegs_flat(input_path: Path):
-    seen, files = set(), []
-    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
-        for f in input_path.glob(ext):
+# Matched case-insensitively against f.suffix.lower(): globbing each spelling
+# ("*.jpg", "*.JPG", ...) missed mixed case like "Photo.Jpg" on case-sensitive
+# filesystems (Linux/macOS) — the file was skipped in silence.
+JPEG_EXTS = frozenset({".jpg", ".jpeg", ".jfif", ".jpe"})
+JXL_EXTS = frozenset({".jxl"})
+PNG_EXTS = frozenset({".png"})
+
+
+def _iter_by_ext(paths, exts, root=None, skip_tool_output=False):
+    seen, files, skipped = set(), [], 0
+    for f in paths:
+        if f.suffix.lower() not in exts:
+            continue
+        try:
+            if not f.is_file():
+                continue
+        except OSError:
+            continue
+        if skip_tool_output and root is not None and _is_tool_output_path(f, root):
+            skipped += 1
+            continue
+        try:
             key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            files.append(f)
+    return sorted(files), skipped
+
+
+def find_jpegs_flat(input_path: Path):
+    files, _ = _iter_by_ext(input_path.glob("*"), JPEG_EXTS)
+    return files
 
 # Folder names created ONLY by this tool's DECODE direction (recovered JPEGs
 # and generic convert outputs). ENCODE-direction scans (JPEG/PNG -> JXL) skip
@@ -770,69 +795,33 @@ def _is_tool_output_path(p: Path, root: Path) -> bool:
 
 
 def find_jpegs_recursive(input_path: Path):
-    seen, files = set(), []
-    skipped = 0
-    for ext in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG", "*.jfif", "*.JFIF", "*.jpe", "*.JPE"):
-        for f in input_path.rglob(ext):
-            if _is_tool_output_path(f, input_path):
-                skipped += 1
-                continue
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
+    files, skipped = _iter_by_ext(input_path.rglob("*"), JPEG_EXTS,
+                                  root=input_path, skip_tool_output=True)
     if skipped:
         logger.info(f"Skipped {skipped} JPEG file(s) inside toolkit output folders "
                     f"({', '.join(sorted(_TOOL_DECODE_OUTPUT_FOLDERS))})")
-    return sorted(files)
+    return files
 
 def find_jxls_flat(input_path: Path):
-    seen, files = set(), []
-    for ext in ("*.jxl", "*.JXL"):
-        for f in input_path.glob(ext):
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+    files, _ = _iter_by_ext(input_path.glob("*"), JXL_EXTS)
+    return files
 
 def find_jxls_recursive(input_path: Path):
     # Unfiltered on purpose: encoder/transcoder-produced JXL folders are
     # legitimate decode sources (the round-trip depends on finding them).
-    seen, files = set(), []
-    for ext in ("*.jxl", "*.JXL"):
-        for f in input_path.rglob(ext):
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+    files, _ = _iter_by_ext(input_path.rglob("*"), JXL_EXTS)
+    return files
 
 def find_pngs_recursive(input_path: Path):
-    seen, files = set(), []
-    skipped = 0
-    for ext in ("*.png", "*.PNG"):
-        for f in input_path.rglob(ext):
-            if _is_tool_output_path(f, input_path):
-                skipped += 1
-                continue
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
+    files, skipped = _iter_by_ext(input_path.rglob("*"), PNG_EXTS,
+                                  root=input_path, skip_tool_output=True)
     if skipped:
         logger.info(f"Skipped {skipped} PNG file(s) inside toolkit output folders")
-    return sorted(files)
+    return files
 
 def find_pngs_flat(input_path: Path):
-    seen, files = set(), []
-    for ext in ("*.png", "*.PNG"):
-        for f in input_path.glob(ext):
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+    files, _ = _iter_by_ext(input_path.glob("*"), PNG_EXTS)
+    return files
 
 # --------------------------------------------─
 # SMART RECONVERT CHECK
@@ -2677,6 +2666,31 @@ Examples:
             args.mode = TRANSCODE_DEFAULT_MODE  # 0 = in-place
         else:
             args.mode = CONVERT_DEFAULT_MODE     # 0 = in-place
+
+    # Modes 6/7 anchor on an EXPORT folder and scan recursively; over a single
+    # FILE the scan yields nothing and the run exits 0 having done nothing.
+    if args.mode in (6, 7) and args.input.is_file():
+        print(f"ERROR: --mode {args.mode} needs a DIRECTORY: it scans the folder "
+          f"tree for the export marker. Got a file.")
+        sys.exit(2)
+
+    # Required tools, once, before any cmd_* runs. Without this a missing
+    # cjxl/djxl/exiftool turns into N cryptic per-file FileNotFoundError
+    # instead of one clear message. (setup_logger() runs inside each cmd_*,
+    # so print() is the right channel here.)
+    if not args.dry_run:
+        _missing = [n for n in ("cjxl", "djxl") if shutil.which(n) is None]
+        if shutil.which(_get_exiftool_cmd()) is None:
+            _missing.append("exiftool")
+        if _missing:
+            print(f"ERROR: required tool(s) not found in PATH: {', '.join(_missing)}")
+            print("  libjxl (cjxl/djxl): https://github.com/libjxl/libjxl/releases")
+            print("  exiftool:           https://exiftool.org")
+            sys.exit(1)
+        _v = _tool_version("cjxl")
+        if _v is not None and _v[:2] < (0, 11):
+            print(f"WARNING: cjxl {'.'.join(map(str, _v))} is older than the supported "
+                  f"minimum (0.11.2); conversions may fail in confusing ways.")
 
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.

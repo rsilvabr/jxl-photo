@@ -101,6 +101,22 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
         return False
 
 
+def _warn_if_libjxl_too_old(exe: str) -> None:
+    """libjxl < 0.11 is not supported (see README). Say so once, up front.
+
+    The RAM pipeline (default) pipes the PNG through stdin (`cjxl - out.jxl`),
+    which old cjxl builds cannot read: every single file fails with a bare
+    "Reading image data failed" and nothing points at the version.
+    """
+    v = _tool_version(exe)
+    if v is not None and v[:2] < (0, 11):
+        logger.warning(
+            f"{exe} {'.'.join(map(str, v))} is older than the supported minimum "
+            f"(0.11.2). The default in-RAM pipeline needs a cjxl that reads PNG "
+            f"from stdin; on older builds every file fails with "
+            f"'Reading image data failed'. Upgrade libjxl, or use --no-ram.")
+
+
 def _is_relative_to(path: Path, anchor: Path) -> bool:
     """Backport of Path.is_relative_to for Python < 3.9."""
     try:
@@ -2351,27 +2367,35 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 
     return results
 
-def find_files_mode0(input_path: Path):
+# Matched case-insensitively against f.suffix.lower(). Globbing the four
+# spellings ("*.tif", "*.TIF", ...) missed mixed case like "Photo.Tif" on
+# case-sensitive filesystems (Linux/macOS) — the file was skipped in silence.
+TIFF_EXTS = frozenset({".tif", ".tiff"})
+
+
+def _iter_tiffs(paths):
     seen = set()
     files = []
-    for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
-        for f in input_path.glob(ext):
+    for f in paths:
+        if f.suffix.lower() not in TIFF_EXTS:
+            continue
+        try:
+            if not f.is_file():
+                continue
             key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            files.append(f)
     return sorted(files)
 
+
+def find_files_mode0(input_path: Path):
+    return _iter_tiffs(input_path.glob("*"))
+
 def find_tiffs_recursive(input_path: Path):
-    seen = set()
-    files = []
-    for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
-        for f in input_path.rglob(ext):
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+    return _iter_tiffs(input_path.rglob("*"))
 
 # Default output folder names of the DECODER (jxl_tiff_decoder.py). After a
 # decode, those folders live INSIDE the export tree, and modes 6/7 collapse
@@ -2531,6 +2555,14 @@ def main():
     if args.workers < 1:
         parser.error("--workers must be >= 1")
 
+    # Modes 6/7 anchor on an EXPORT *folder* in the path and scan recursively.
+    # rglob() over a FILE yields nothing, so a single-file input reported
+    # "Files found: 0" and exited 0 — a silent no-op that looks like success.
+    if args.mode in (6, 7) and args.input.is_file():
+        parser.error(f"--mode {args.mode} needs a DIRECTORY: it scans the folder "
+                     f"tree for the export marker. Got a file. "
+                     f"Use --mode 0 or 8 for a single file.")
+
     # Validate the temp dir up front: a bad TEMP_DIR would otherwise crash a
     # worker mid-batch (TemporaryDirectory(dir=TEMP_DIR)).
     if TEMP_DIR is not None:
@@ -2605,6 +2637,16 @@ def main():
     if not args.dry_run and _get_cjxl_cmd() is None:
         logger.error("cjxl not found in PATH. Install libjxl and add cjxl to PATH.")
         sys.exit(1)
+    # exiftool is just as required: without it no ICC/EXIF is preserved and the
+    # multi-page/grayscale markers are never written, so the decoder cannot
+    # reconstruct anything. Failing here beats N cryptic per-file errors.
+    if not args.dry_run and shutil.which(_get_exiftool_cmd()) is None:
+        logger.error("exiftool not found in PATH. It is REQUIRED: without it ICC/EXIF "
+                     "are not preserved and the round-trip markers are never written. "
+                     "https://exiftool.org")
+        sys.exit(1)
+    if not args.dry_run:
+        _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
 
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"

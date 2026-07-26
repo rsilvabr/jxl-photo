@@ -1527,9 +1527,20 @@ def test_duplicate_abort_lists_sources(tmp_path, caplog):
     assert str(s1) in caplog.text and str(s2) in caplog.text
 
 
-def test_thumbnail_ignore_sources_deleted_in_mode8(tmp_path):
-    """--thumbnail-handling ignore + mode 8 + delete: ignored _thumbnail.jxl
-    files must be deleted with the group (no permanent orphans)."""
+def test_thumbnail_ignore_sources_kept_in_mode8(tmp_path, monkeypatch):
+    """--thumbnail-handling ignore + mode 8 + delete: the ignored _thumbnail.jxl
+    must be KEPT.
+
+    Its pixels are deliberately not in the reconstructed TIFF, so deleting it
+    destroys data the user never got back — "don't put it in the TIFF" is not
+    "erase it". (This test previously asserted the opposite: the sources were
+    deleted to avoid skip-forever orphan groups. That traded a noisy warning
+    for silent data loss.)
+
+    Uses the `monkeypatch` FIXTURE, not a manual MonkeyPatch()+undo(): with the
+    manual form a failing assert skips the undo and leaks DELETE_SOURCE=True
+    into every test that runs after it.
+    """
     main = tmp_path / "scan.jxl"
     thumb = tmp_path / "scan_page1_thumbnail.jxl"
     main.write_bytes(b"\x00" * 16)
@@ -1538,7 +1549,6 @@ def test_thumbnail_ignore_sources_deleted_in_mode8(tmp_path):
     tifffile.imwrite(final, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
 
     dec.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(dec, "DELETE_SOURCE", True)
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
@@ -1554,9 +1564,8 @@ def test_thumbnail_ignore_sources_deleted_in_mode8(tmp_path):
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda *a, **k: results[0])
     dec.process_group([task], 1, 8)
-    assert not main.exists()
-    assert not thumb.exists(), "ignored thumbnail source was left behind"
-    monkeypatch.undo()
+    assert not main.exists(), "the page that IS in the TIFF is still deleted"
+    assert thumb.exists(), "an ignored thumbnail must never be deleted"
 
 
 # ---------------------------------------------------------------------------

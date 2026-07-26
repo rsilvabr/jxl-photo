@@ -36,3 +36,6 @@ docs/RELEASE_v*.md
 # Abandoned HDR side project — kept locally, never committed (see AGENTS.md)
 jxl_jpeg_transcoder_HDR.py
 hdr/
+
+# PyPI packaging workspace (local only)
+PIP/

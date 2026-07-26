@@ -635,7 +635,11 @@ Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new
 
 Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thumb` markers when present (v1.8.1+); the filename suffix is only a fallback for older JXLs. A third-party `portrait_thumbnail.jxl` without markers is treated as a normal photo, never as a thumbnail.
 
-- `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
+- `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files. Their pixels do
+  not reach the reconstructed TIFF, so with `--mode 8 --delete-source` those
+  source files are **kept** (deleting them would destroy data you never got
+  back) and reported in the log. Delete them yourself if you do not want them;
+  on later runs they form a thumbnail-only group that is skipped with a warning.
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
 - `--thumbnail-handling generate` — reserved for future use; currently falls back to `include`
 - `--no-reconstruct-multipage` — disable multi-page reconstruction entirely

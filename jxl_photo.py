@@ -453,8 +453,13 @@ class DependencyChecker:
             'rich': '✓' if status.get('rich') else '✗',
         }
 
+        # cjxl AND djxl — the label covers both, so it must not report OK when
+        # only one is present. A green "cjxl/djxl" with djxl missing is exactly
+        # the state where the decoder degrades multi-page groups to standalone.
+        _codec_icon = '✓' if (status.get('cjxl') and status.get('djxl')) else '✗'
+
         parts = [
-            f"[{icons['cjxl']}] cjxl/djxl",
+            f"[{_codec_icon}] cjxl/djxl",
             f"[{icons['exiftool']}] exiftool",
             f"[{icons['magick']}] magick",
             f"[{icons['tifffile']}] tifffile",
@@ -463,6 +468,9 @@ class DependencyChecker:
             f"[{icons['rich']}] rich",
         ]
 
+        if _codec_icon == '✗':
+            _missing_codecs = [n for n in ('cjxl', 'djxl') if not status.get(n)]
+            parts[0] += f" ({'/'.join(_missing_codecs)} missing)"
         if not status.get('magick'):
             parts[2] += " (ICC off)"
         if not status.get('tifffile'):

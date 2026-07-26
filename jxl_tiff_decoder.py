@@ -159,6 +159,52 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                 pass
 
 
+def _check_external_tools(dry_run: bool = False) -> None:
+    """Fail fast when a required external program is missing.
+
+    Without this the batch dies file by file with a cryptic FileNotFoundError —
+    or, worse, succeeds in a degraded way: with no exiftool the multi-page
+    markers cannot be read at all, every page decodes as a STANDALONE single
+    page TIFF, and `--mode 8 --delete-source` then removes the JXLs that held
+    those markers. The pixels survive, the multi-page structure does not.
+    """
+    missing = [name for name in ("djxl", "exiftool")
+               if shutil.which(_get_exiftool_cmd() if name == "exiftool" else name) is None]
+    if not missing:
+        return
+    if dry_run:
+        logger.warning(f"Missing external tool(s): {', '.join(missing)} "
+                       f"(dry run continues, but a real run would fail)")
+        return
+    for name in missing:
+        if name == "djxl":
+            logger.error("djxl not found in PATH. Install libjxl and add djxl to PATH.")
+        else:
+            logger.error("exiftool not found in PATH. It is REQUIRED: without it the "
+                         "multi-page markers cannot be read and every page would decode "
+                         "as a separate single-page TIFF. https://exiftool.org")
+    sys.exit(1)
+
+
+def _warn_if_libjxl_too_old(exe: str = "djxl") -> None:
+    """libjxl < 0.11 is not supported (see README). Say so once, up front:
+    the failures it produces otherwise are cryptic and affect every file."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "") + " " + (r.stderr or "")
+    except Exception:
+        return
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
+    if not m:
+        return
+    ver = tuple(int(x) for x in m.groups())
+    if ver[:2] < (0, 11):
+        logger.warning(
+            f"{exe} {'.'.join(map(str, ver))} is older than the supported minimum "
+            f"(0.11.2). Conversions may fail in ways that are hard to diagnose — "
+            f"upgrade libjxl: https://github.com/libjxl/libjxl/releases")
+
+
 def _verify_tiff_integrity(tiff_path: Path) -> bool:
     """Verify TIFF file integrity before deleting source JXL.
 
@@ -2038,12 +2084,20 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             if not _verify_tiff_integrity(final_tiff):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
-            # Delete all source JXLs in this group — including thumbnails
-            # excluded by --thumbnail-handling ignore: mode 8 replaces the
-            # whole original archive, and keeping them would leave permanent
-            # orphans that form skip-forever thumbnail-only groups next run.
-            all_sources = list(task["entries"]) + list(task.get("ignored_thumbs", []))
-            for jxl_path, _, _, _, _, _, _ in all_sources:
+            # Delete only the sources whose pixels actually made it into the
+            # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
+            # in the output, so deleting them destroys data the user never got
+            # back — "don't put it in the TIFF" is not "erase it". They are
+            # kept and reported instead; the cost is a skip-forever
+            # thumbnail-only group on later runs, which is noisy but harmless.
+            _orphan_thumbs = list(task.get("ignored_thumbs", []))
+            if _orphan_thumbs:
+                logger.warning(
+                    f" KEPT {len(_orphan_thumbs)} ignored thumbnail source(s) | "
+                    f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
+                    f"(--thumbnail-handling ignore); delete them yourself if you "
+                    f"do not want them")
+            for jxl_path, _, _, _, _, _, _ in task["entries"]:
                 try:
                     jxl_path.unlink()
                     logger.info(f" DELETED source | {jxl_path.name}")
@@ -2055,29 +2109,36 @@ def process_group(group_tasks, workers, mode, target_icc=None):
 
     return results
 
-def find_jxls_flat(path):
-    """Find JXL files in the top-level directory only (no subfolders) — modes 0 and 1."""
+# Matched case-insensitively: globbing "*.jxl"/"*.JXL" missed "Photo.Jxl" on
+# case-sensitive filesystems (Linux/macOS) — skipped without a word.
+JXL_EXTS = frozenset({".jxl"})
+
+
+def _iter_jxls(paths):
     seen = set()
     files = []
-    for ext in ("*.jxl", "*.JXL"):
-        for f in path.glob(ext):
+    for f in paths:
+        if f.suffix.lower() not in JXL_EXTS:
+            continue
+        try:
+            if not f.is_file():
+                continue
             key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            files.append(f)
     return sorted(files)
+
+
+def find_jxls_flat(path):
+    """Find JXL files in the top-level directory only (no subfolders) — modes 0 and 1."""
+    return _iter_jxls(path.glob("*"))
 
 def find_jxls_recursive(path):
     """Find all JXL files recursively"""
-    seen = set()
-    files = []
-    for ext in ("*.jxl", "*.JXL"):
-        for f in path.rglob(ext):
-            key = f.resolve()
-            if key not in seen:
-                seen.add(key)
-                files.append(f)
-    return sorted(files)
+    return _iter_jxls(path.rglob("*"))
 
 def find_jxls_mode6(input_path):
     """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
@@ -2145,6 +2206,25 @@ def _parse_jxl_page_suffix(name: str):
         stem = stem[:m.start()]
 
     return stem, page_idx, is_thumbnail
+
+def _group_naming_path(main_jxl: Path, entries: list) -> Path:
+    """Path whose NAME should name the reconstructed TIFF.
+
+    The group's anchor is the lowest REAL page, so when page 0 of the original
+    TIFF was a thumbnail the anchor is `scan_page1.jxl` and `scan.tif` came back
+    as `scan_page1.tif`. Strip the page suffix to recover the original stem.
+
+    Only for genuine multi-page groups: a STANDALONE third-party file named
+    `photo_page2.jxl` is a whole image in its own right and must keep its name
+    (renaming it to `photo.tif` could also collide with a real `photo.jxl`).
+    """
+    if len(entries) <= 1:
+        return main_jxl
+    stem, _page, _thumb = _parse_jxl_page_suffix(main_jxl.stem)
+    if stem and stem != main_jxl.stem:
+        return main_jxl.with_name(stem + main_jxl.suffix)
+    return main_jxl
+
 
 def _read_multipage_markers_batch(jxls: list) -> dict:
     """Read the multi-page marker and related flags for many JXLs in as few
@@ -2466,6 +2546,13 @@ Examples:
     if args.workers < 1:
         parser.error("--workers must be >= 1")
 
+    # Modes 6/7 scan a folder tree for the EXPORT marker; rglob() over a FILE
+    # yields nothing, so a single-file input silently found 0 files and exited 0.
+    if args.mode in (6, 7) and args.input.is_file():
+        parser.error(f"--mode {args.mode} needs a DIRECTORY: it scans the folder "
+                     f"tree for the export marker. Got a file. "
+                     f"Use --mode 0 or 8 for a single file.")
+
     # Validate the temp dir up front: a bad TEMP_DIR would otherwise crash a
     # worker mid-batch (TemporaryDirectory(dir=TEMP_DIR)).
     if TEMP_DIR is not None:
@@ -2536,6 +2623,12 @@ Examples:
 
     log_file = setup_logger()
 
+    # Required tools first: a missing djxl/exiftool must be one clear message,
+    # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
+    # to standalone pages).
+    _check_external_tools(dry_run=args.dry_run)
+    _warn_if_libjxl_too_old("djxl")
+
     # Warnings that must go to the configured log file
     if args.target_icc and not USE_MATRIX_MODE:
         logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
@@ -2597,7 +2690,7 @@ Examples:
                 logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
                 continue
 
-        tiff = resolve_output(main_jxl, args.mode, output_root)
+        tiff = resolve_output(_group_naming_path(main_jxl, entries), args.mode, output_root)
         if tiff is None:
             continue
         tasks.append({
