@@ -65,7 +65,7 @@ Full notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) 
 | v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
 | v1.7.0 | 2026-07-12 | Multi-page TIFF support: split/skip/ignore, thumbnail handling, per-page ICC, marker-based reconstruction |
 | v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection |
-| v1.5.x | 2026-04 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix |
+| v1.5.3 | 2026-04-15 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix, stable |
 | v1.4 | 2026-04-11 | JXL → JPEG workflow: lossy/lossless conversion modes |
 | v1.3 | 2026-04-11 | Auto Mode (beta), manifest system, embedded JPEG thumbnail |
 | v1.2 | 2026-04-05 | Basic/None decode modes, ICC mode selector |
