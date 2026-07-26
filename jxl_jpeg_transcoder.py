@@ -2088,14 +2088,15 @@ def cmd_convert(args, from_jxl: bool = True):
     # Determine if operation is lossy based on direction and settings
     if args.mode == 8 and DELETE_SOURCE:
         if DELETE_CONFIRM:
-            is_lossy = False
             if direction == "to_jxl":
                 # PNG/JPEG -> JXL: lossy if distance > 0
                 is_lossy = args.distance > 0
             else:
-                # JXL -> JPEG/PNG: lossy if output is JPEG, or if PNG with ICC conversion
-                fmt = args.format if args.format else "jpeg"
-                is_lossy = (fmt == "jpeg") or (args.icc_profile is not None)
+                # JXL -> JPEG/PNG: the transcode path (lossless recovery) is a
+                # different command; everything on the CONVERT path is a
+                # re-encode that can never reproduce the original JXL, so it
+                # gets the strict HHMM token — same as cmd_auto's rule.
+                is_lossy = True
 
             if is_lossy:
                 if not confirm_deletion_lossy():

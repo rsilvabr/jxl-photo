@@ -835,9 +835,13 @@ def extract_exif_raw(tiff_path, tmp_dir):
         return p
     return None
 
-def get_exif_software(tiff_path):
+@functools.lru_cache(maxsize=None)
+def get_exif_software(tiff_path_str):
     """Extracts Software field from EXIF metadata.
-    Returns software string or empty string if not found."""
+    Returns software string or empty string if not found.
+    Cached per path: D50 auto-detection calls this once per PAGE, so a
+    split_all scan would otherwise spawn one exiftool per page."""
+    tiff_path = Path(tiff_path_str)
     try:
         # Use -@ argument file to avoid wildcard expansion issues with brackets in paths
         with tempfile.TemporaryDirectory(prefix="exiftmp_") as tmp:
@@ -1905,10 +1909,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                             logger.debug(f"  >Thumbnail embedding failed (non-critical)")
                 except Exception as e:
                     logger.debug(f"  >Thumbnail PIL approach failed: {e}")
-                    
-                    # Fallback: try tifffile approach (only if PIL might be available)
-                    if 'Image' not in locals():
-                        logger.debug("  >PIL not available, skipping thumbnail entirely")
+
+                    # Fallback: try tifffile approach (only if PIL AND the
+                    # optional names this block needs are actually available —
+                    # otherwise we'd die with NameError here and hide the cause)
+                    if 'Image' not in locals() or 'ImageCms' not in locals() or 'io' not in locals():
+                        logger.debug("  >PIL/ImageCms not available, skipping thumbnail entirely")
                     else:
                         try:
                             # Read TIFF with tifffile (preserves ICC and bit depth)

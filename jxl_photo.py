@@ -250,7 +250,7 @@ class ConfigManager:
                           origin_format: Optional[str] = None,
                           dest_format: Optional[str] = None,
                           conversion_type: Optional[str] = None,
-                          icc_profile: Optional[str] = None,
+                          icc_profile=_STAGING_UNSET,
                           expert_flags: Optional[str] = None,
                           d50_patch: Optional[str] = None,
                           encode_tag: Optional[str] = None,
@@ -290,7 +290,10 @@ class ConfigManager:
             self.config.last_dest_format = dest_format
         if conversion_type is not None:
             self.config.last_conversion_type = conversion_type
-        if icc_profile is not None:
+        if icc_profile is not self._STAGING_UNSET:
+            # Sentinel-based (same as staging): callers that explicitly said
+            # "no ICC conversion" pass None and CLEAR the saved profile;
+            # callers that didn't ask simply omit it and the value is kept.
             self.config.last_icc_profile = icc_profile
         if expert_flags is not None:
             self.config.last_expert_flags = expert_flags
@@ -506,12 +509,10 @@ class FolderAnalyzer:
         # Collect items by iterating (not materializing the whole tree with
         # list(rglob) — large libraries would blow up RAM and scan time).
         origin_exts = self._get_extensions(self.origin)
-        dest_exts = self._get_extensions(self.dest)
         marker_lower = self.export_marker.lower()
 
         all_folders = []
         origin_files = []
-        dest_files = []
         file_distribution = {}
 
         for p in self.root.rglob('*'):
@@ -528,8 +529,6 @@ class FolderAnalyzer:
                         origin_files.append(p)
                         parent = str(p.parent.relative_to(self.root))
                         file_distribution[parent] = file_distribution.get(parent, 0) + 1
-                    elif ext in dest_exts:
-                        dest_files.append(p)
             except OSError:
                 continue  # unreadable entry (permissions, race with other tools)
 
@@ -566,7 +565,7 @@ class FolderAnalyzer:
         result['file_distribution'] = file_distribution
 
         # Determine recommendation
-        self._recommend(result, origin_files, dest_files)
+        self._recommend(result, origin_files)
 
         return result
 
@@ -593,7 +592,7 @@ class FolderAnalyzer:
         }
         return mapping.get(fmt.lower(), set())
 
-    def _recommend(self, result: Dict, origin_files: List[Path], dest_files: List[Path]):
+    def _recommend(self, result: Dict, origin_files: List[Path]):
         """Determine recommended mode based on analysis."""
         reasoning = []
         confidence = 'low'
@@ -933,8 +932,9 @@ class FolderAnalyzer:
 
         # Preserve the mode stored in the manifest. The manifest was generated with
         # a specific mode, so re-detecting would lose modes 1/2/3/4/5 and could
-        # turn them into 0 or 7 incorrectly.
-        if original_mode is not None and original_mode != 0:
+        # turn them into 0 or 7 incorrectly. original_mode=None means "no Mode
+        # cell" (legacy hand-made manifest) — only THEN do marker detection.
+        if original_mode is not None:
             return original_mode
 
         if src_path == dst_path:
@@ -1128,9 +1128,10 @@ class InteractiveMenu:
             'effort': self.config.config.last_effort or self.config.config.default_effort,
             'staging': last_staging,
             'icc_profile': None,
-            'use_ram': True,
-            'compression': 'zip',
-            'bit_depth': 16,
+            'use_ram': self.config.config.last_use_ram if self.config.config.last_use_ram is not None else True,
+            'compression': self.config.config.last_compression or 'zip',
+            'bit_depth': self.config.config.last_bit_depth or 16,
+            'add_preview': self.config.config.last_add_preview if self.config.config.last_add_preview is not None else True,
             'dry_run': False,
             'advanced_options': {},
             'expert_flags': '',
@@ -1702,7 +1703,9 @@ class InteractiveMenu:
                     # Mode cell: Excel often formats integers as "7.0" — a
                     # naive isdigit() check would silently turn that into
                     # mode 0 and scatter outputs next to the sources.
-                    entry_mode = 0
+                    # None = "no Mode cell" (legacy manifest), which enables
+                    # marker-based detection downstream; an explicit 0 is kept.
+                    entry_mode = None
                     if len(row) > 2 and row[2].strip():
                         try:
                             entry_mode = int(float(row[2].strip()))
@@ -2202,7 +2205,10 @@ class InteractiveMenu:
             print("⚠️  Original files will be DELETED")
             print(f"Enter {token} to confirm:")
 
-        user_input = input("> ").strip()
+        try:
+            user_input = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            user_input = ""
 
         if user_input != token:
             self._print_error("Confirmation failed!")
@@ -2253,12 +2259,12 @@ class InteractiveMenu:
                 effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
                 workflow['effort'] = max(1, min(effort, 10))
 
-            staging_prompt = f"Staging [{staging_display}]"
+            staging_prompt = f"Staging [{staging_display}] (enter to keep, 'none' = system default)"
             staging_input = Prompt.ask(staging_prompt, default=current_staging if current_staging else "")
 
             if staging_input.strip() == "":
-                pass
-            elif staging_input.lower() == 'system default':
+                pass  # Enter keeps the current value
+            elif staging_input.lower() in ('system default', 'none'):
                 workflow['staging'] = None
             else:
                 workflow['staging'] = _strip_surrounding_quotes(staging_input)
@@ -2360,8 +2366,8 @@ class InteractiveMenu:
                 d50_input = input("D50 patch (auto/on/off) [auto]: ").strip().lower() or "auto"
                 workflow['d50_patch'] = d50_input if d50_input in ["auto", "on", "off"] else "auto"
 
-            staging_input = input(f"Staging [{staging_display}]: ").strip()
-            if staging_input.lower() == 'system default':
+            staging_input = input(f"Staging [{staging_display}] (empty=keep, 'none'=system default): ").strip()
+            if staging_input.lower() in ('system default', 'none'):
                 workflow['staging'] = None
             elif staging_input:
                 workflow['staging'] = _strip_surrounding_quotes(staging_input)
@@ -2771,7 +2777,7 @@ class InteractiveMenu:
         if _adv.get('delete_source'):
             extra_info.append("DELETE SOURCE: ON (!)")
         if workflow.get('expert_flags'):
-            extra_info.append("Expert: Yes")
+            extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('dry_run'):
             extra_info.append("DRY RUN")
 
@@ -3669,34 +3675,34 @@ def main():
                 # clobber the saved repeat-workflow state.
                 if workflow['mode'] != 99:
                     config.save_last_session(
-                        workflow['input_dir'],
-                        str(workflow['mode']),
-                        workflow['workers'],
-                        workflow['staging'],
-                        workflow['effort'],
-                        saved_quality,
-                        saved_distance,
-                        workflow['origin_format'],
-                        workflow['dest_format'],
-                        workflow['conversion_type'],
-                        workflow.get('icc_profile'),
-                        workflow.get('expert_flags'),
-                        workflow.get('advanced_options', {}).get('d50_patch'),
-                        workflow.get('advanced_options', {}).get('encode_tag'),
+                        input_dir=workflow['input_dir'],
+                        output_mode=str(workflow['mode']),
+                        workers=workflow['workers'],
+                        staging=workflow['staging'],
+                        effort=workflow['effort'],
+                        quality=saved_quality,
+                        distance=saved_distance,
+                        origin_format=workflow['origin_format'],
+                        dest_format=workflow['dest_format'],
+                        conversion_type=workflow['conversion_type'],
+                        icc_profile=workflow.get('icc_profile'),
+                        expert_flags=workflow.get('expert_flags'),
+                        d50_patch=workflow.get('advanced_options', {}).get('d50_patch'),
+                        encode_tag=workflow.get('advanced_options', {}).get('encode_tag'),
                         # The advanced-options dict stores it as 'embed_thumbnail'
-                        workflow.get('advanced_options', {}).get('embed_thumbnail'),
-                        workflow.get('advanced_options', {}).get('multipage_mode'),
-                        workflow.get('advanced_options', {}).get('thumbnail_mode'),
-                        workflow.get('advanced_options', {}).get('thumbnail_suffix'),
-                        workflow.get('advanced_options', {}).get('thumbnail_handling'),
-                        workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
-                        workflow.get('advanced_options', {}).get('depth_policy'),
-                        workflow.get('advanced_options'),
-                        workflow.get('use_ram') if origin == 'tiff' else None,
-                        workflow.get('compression') if dest == 'tiff' else None,
-                        workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
-                        workflow.get('add_preview') if dest == 'tiff' else None,
-                        workflow.get('mode_config')
+                        jpeg_thumbnail=workflow.get('advanced_options', {}).get('embed_thumbnail'),
+                        multipage_mode=workflow.get('advanced_options', {}).get('multipage_mode'),
+                        thumbnail_mode=workflow.get('advanced_options', {}).get('thumbnail_mode'),
+                        thumbnail_suffix=workflow.get('advanced_options', {}).get('thumbnail_suffix'),
+                        thumbnail_handling=workflow.get('advanced_options', {}).get('thumbnail_handling'),
+                        no_reconstruct_multipage=workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
+                        depth_policy=workflow.get('advanced_options', {}).get('depth_policy'),
+                        advanced_options=workflow.get('advanced_options'),
+                        use_ram=workflow.get('use_ram') if origin == 'tiff' else None,
+                        compression=workflow.get('compression') if dest == 'tiff' else None,
+                        bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
+                        add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
+                        mode_config=workflow.get('mode_config')
                     )
 
                 if RICH_AVAILABLE and console:

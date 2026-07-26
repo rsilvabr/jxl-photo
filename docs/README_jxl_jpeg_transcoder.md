@@ -224,7 +224,7 @@ This allows mixed archives (some lossless-transcodable, some not) to be processe
 - `--force-convert` → Force lossy conversion (e.g., to apply ICC profile to lossless JXL)
 - `--decode` → Force decode direction for JXL files
 
-> **Note:** `--quality`/`--jpeg_quality` has no effect when the input JXL contains a `jbrd` box — djxl reconstructs the original JPEG bit-exactly instead of re-encoding. Use files without jbrd (e.g. from the TIFF encoder) for quality-driven conversions.
+> **Note:** `--quality` has no effect when the input JXL contains a `jbrd` box — djxl reconstructs the original JPEG bit-exactly instead of re-encoding (the quality value is forwarded to djxl internally as `--jpeg_quality`). Use files without jbrd (e.g. from the TIFF encoder) for quality-driven conversions.
 
 * * *
 

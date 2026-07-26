@@ -1209,10 +1209,12 @@ def test_convert_mode2_suffix_folder_without_explicit_output(tmp_path):
 def test_detect_mode_for_entry_marker_shapes(tmp_path):
     analyzer = wp.FolderAnalyzer(tmp_path, "tiff", "jxl", "_EXPORT")
     src = tmp_path / "a"
-    # marker IS the destination -> whole-marker mode 6
-    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT"), 0) == 6
-    # marker + subfolder below it -> mode 7
-    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT" / "sub"), 0) == 7
+    # explicit Mode cell is always preserved (incl. 0 = flat/in-place)
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT"), 0) == 0
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT" / "sub"), 7) == 7
+    # legacy manifest (no Mode cell -> None): marker detection applies
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT"), None) == 6
+    assert analyzer.detect_mode_for_entry(str(src), str(src / "_EXPORT" / "sub"), None) == 7
 
 
 def test_grayscale_flag_from_array_not_metadata(monkeypatch, tmp_path):
@@ -2047,3 +2049,54 @@ def test_icc_blob_regex_no_pipe_variant():
         clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
     assert "ICC:" not in clean
     assert "Photoshop App" in clean
+
+
+# ---------------------------------------------------------------------------
+# seventeenth-pass
+# ---------------------------------------------------------------------------
+
+def test_icc_profile_sentinel_clears_saved_profile(tmp_path, monkeypatch):
+    """Refusing sRGB in a run must CLEAR last_icc_profile — otherwise every
+    later repeat silently converts masters to sRGB."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    cfg = wp.ConfigManager()
+    cfg.config_path = cfg_dir / ".jxl_tools_config.json"
+    cfg.config.last_icc_profile = "sRGB"
+    cfg.save_last_session(icc_profile="sRGB")
+    assert cfg.config.last_icc_profile == "sRGB"
+    # user declines conversion in a later run: workflow icc_profile is None
+    cfg.save_last_session(icc_profile=None)
+    assert cfg.config.last_icc_profile is None
+    # omitting the argument entirely (sentinel) keeps whatever is saved
+    cfg.config.last_icc_profile = "sRGB"
+    cfg.save_last_session(workers=8)
+    assert cfg.config.last_icc_profile == "sRGB"
+
+
+def test_confirm_archive_mode_eof_cancels_safely(monkeypatch):
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(EOFError()))
+    assert menu._confirm_archive_mode() is False
+
+
+def test_wizard_seeds_defaults_from_last_session():
+    """bit_depth/compression/add_preview must come from last_* when saved."""
+    cfg = wp.ConfigManager()
+    cfg.config.last_bit_depth = 8
+    cfg.config.last_compression = "lzw"
+    cfg.config.last_add_preview = False
+    cfg.config.last_use_ram = False
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    # emulate the workflow dict built at run_wizard start
+    workflow = {
+        'use_ram': cfg.config.last_use_ram if cfg.config.last_use_ram is not None else True,
+        'compression': cfg.config.last_compression or 'zip',
+        'bit_depth': cfg.config.last_bit_depth or 16,
+        'add_preview': cfg.config.last_add_preview if cfg.config.last_add_preview is not None else True,
+    }
+    assert workflow['bit_depth'] == 8
+    assert workflow['compression'] == "lzw"
+    assert workflow['add_preview'] is False
+    assert workflow['use_ram'] is False

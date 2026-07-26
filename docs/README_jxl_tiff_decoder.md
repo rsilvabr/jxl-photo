@@ -237,15 +237,21 @@ FORCE_BASIC_MODE = False
 # Force Basic mode for all files, ignoring ICC preservation.
 # Use when you explicitly don't want ICC handling even if present.
 
+FORCE_NONE_MODE = False
+# Force None mode for all files: djxl only, no ICC handling and minimal
+# metadata (EXIF only). Same as passing --none on the CLI.
+# Use for consumer JXLs / web workflows where output assumes sRGB.
+
 CLEANUP_XMP_ICC_MARKER = True
 # Remove ICC:base64 marker from XMP CreatorTool after extraction.
 # True  → cleans up CreatorTool, keeping only human-readable text (default)
 # False → leaves CreatorTool unchanged
 
-TEMP2_DIR = r"E:\staging"
+TEMP2_DIR = None
 # Staging SSD for output TIFFs. Separates read I/O (HDD with JXLs) from write I/O.
+# None (default) → write directly to the final destination.
+# Example: r"E:\staging"
 # Files are moved to their final destination after each folder group completes.
-# Set to None to write directly to the final destination.
 
 OVERWRITE = "smart"
 # False   → skip if TIFF already exists (safe for resuming)

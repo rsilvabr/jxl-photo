@@ -25,8 +25,8 @@ from datetime import datetime
 import argparse
 import numpy as np
 from PIL import Image
-# Disable PIL's decompression bomb warning for large panoramas
-Image.MAX_IMAGE_PIXELS = None
+# PIL_MAX_IMAGE_PIXELS (user setting, below) is applied to Image.MAX_IMAGE_PIXELS
+# right after its definition — not here.
 try:
     from PIL import ImageCms
 except ImportError:

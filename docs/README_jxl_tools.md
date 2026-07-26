@@ -316,6 +316,8 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation for mode 8 delete |
 
+**CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (max compression on libjxl ≥ 0.12), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
+
 #### jxl_tiff_decoder.py
 | Variable | Default | What it does |
 |----------|---------|--------------|

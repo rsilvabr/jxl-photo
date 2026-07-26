@@ -188,10 +188,11 @@ PIL_MAX_IMAGE_PIXELS = None
 # N     → Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
 # The default PIL limit (~89MP) is too low for large panoramas. Set to None for photography workflows.
 
-TEMP2_DIR = r"E:\staging"
+TEMP2_DIR = None
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
+# None (default) → write directly to the final destination.
+# Example: r"E:\staging"
 # Files are moved to their final destination after each folder group completes.
-# Set to None to write directly to the final destination.
 # Can also be set via --staging CLI argument (overrides this variable).
 
 OVERWRITE = "smart"
