@@ -2285,7 +2285,7 @@ def find_files_mode0(input_path: Path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 def find_tiffs_recursive(input_path: Path):
     seen = set()
@@ -2296,7 +2296,7 @@ def find_tiffs_recursive(input_path: Path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 # Default output folder names of the DECODER (jxl_tiff_decoder.py). After a
 # decode, those folders live INSIDE the export tree, and modes 6/7 collapse
@@ -2324,7 +2324,7 @@ def find_tiffs_mode6(input_path: Path):
             if any(b in _DECODER_OUTPUT_FOLDERS for b in below):
                 continue
             filtered.append(t)
-    return filtered
+    return sorted(filtered)
 
 def find_tiffs_mode7(input_path: Path):
     """Mode 7: only TIFFs inside EXPORT_MARKER/EXPORT_TIFF_SUBFOLDER specific subfolder."""
@@ -2348,7 +2348,7 @@ def find_tiffs_mode7(input_path: Path):
                 filtered.append(t)
         else:
             filtered.append(t)
-    return filtered
+    return sorted(filtered)
 
 def main():
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
@@ -2496,6 +2496,8 @@ def main():
     if args.thumbnail_mode is not None:
         THUMBNAIL_MODE = args.thumbnail_mode
     if args.thumbnail_suffix is not None:
+        if not args.thumbnail_suffix.strip():
+            parser.error("--thumbnail-suffix must not be empty (thumbnail names would collide with page 0)")
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
 
     # Handle --strip flag - store in global for use in convert_one

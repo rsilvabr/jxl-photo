@@ -1730,6 +1730,7 @@ def test_encoder_single_file_modes_3_4_5(monkeypatch, tmp_path):
         enc.main()  # must NOT find 0 files / crash
 
 
+@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches wp.Confirm which requires rich")
 def test_manifest_empty_destination_falls_back_to_source(tmp_path):
     import csv
     manifest = tmp_path / "m.csv"
@@ -1747,3 +1748,82 @@ def test_manifest_empty_destination_falls_back_to_source(tmp_path):
     assert workflow["manifest_entries"][0][1] == str(tmp_path), \
         "empty Destination must fall back to Source, never Path('.')"
     monkey.undo()
+
+
+# ---------------------------------------------------------------------------
+# fourteenth-pass
+# ---------------------------------------------------------------------------
+
+def test_encode_paths_report_real_error_not_unbound(monkeypatch, tmp_path):
+    """Failures before output_dirty's assignment must surface the REAL cause."""
+    tr.setup_logger()
+    # missing source file: md5_of_file raises FileNotFoundError inside the try
+    (s, status, msg, _) = tr.encode_one_transcode(
+        tmp_path / "missing.jpg", tmp_path / "o.jxl", tmp_path / "o.jxl", False, 7, False)
+    assert status == "error"
+    assert "UnboundLocalError" not in msg
+    assert "missing.jpg" in msg or "No such file" in msg or "system cannot find" in msg.lower()
+
+    # destination is a FILE, not a folder: mkdir raises
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    src = tmp_path / "in.jpg"
+    src.write_bytes(b"\xff\xd8")
+    (s2, status2, msg2, _) = tr.encode_to_jxl(
+        src, blocker / "sub" / "o.jxl", blocker / "sub" / "o.jxl", 7, 1.0, False, False)
+    assert status2 == "error"
+    assert "UnboundLocalError" not in msg2
+
+
+def test_mode2_convert_flat_by_default_and_suffix_optin(tmp_path):
+    src = tmp_path / "photos" / "a.jpg"
+    src.parent.mkdir()
+    src.write_bytes(b"x")
+    # default (no explicit output, no suffix): flat, matching transcode path
+    out = tr.resolve_output_convert(src, 2, "converted", "", "jxl", "", "", None, decode=False)
+    assert out == src.parent / "a.jxl"
+    # opt-in suffix: sibling <folder><suffix>/
+    out2 = tr.resolve_output_convert(src, 2, "converted", "_converted", "jxl", "", "", None, decode=False)
+    assert out2 == tmp_path / "photos_converted" / "a.jxl"
+
+
+def test_empty_thumbnail_suffix_rejected(tmp_path, monkeypatch):
+    dec.setup_logger()
+    monkeypatch.setattr(sys, "argv",
+                        ["jxl_tiff_decoder.py", str(tmp_path), "--thumbnail-suffix", ""])
+    with pytest.raises(SystemExit) as exc:
+        dec.main()
+    assert exc.value.code == 2
+
+
+def test_thumbnail_helpers_safe_with_empty_suffix(monkeypatch):
+    monkeypatch.setattr(dec, "THUMBNAIL_SUFFIX", "")
+    assert dec._is_thumbnail_jxl(Path("photo.jxl")) is False
+    assert dec._parse_jxl_page_suffix("photo") == ("photo", 0, False)
+
+
+def test_encode_delete_gate_requires_jbrd(tmp_path):
+    """Encode direction: a structurally valid JXL WITHOUT jbrd must not
+    authorize deleting the source JPEG (it is not recoverable)."""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8fake")
+    final = tmp_path / "a.jxl"
+    # structurally valid container with jxlc but NO jbrd
+    final.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + (8).to_bytes(4, "big") + b"jxlc")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
+    monkeypatch.setattr(tr, "STORE_MD5", True)
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    results = [(str(src), "ok", str(final), "deadbeef")]
+    monkeypatch.setattr(tr, "encode_one_transcode", lambda *a, **k: results[0])
+    tr.process_group_transcode([(src, final)], 1, False, False, 8, False, False)
+    assert src.exists(), "source deleted for a JXL without jbrd"
+    monkeypatch.undo()
+
+
+def test_ppm_comment_on_magic_line(tmp_path):
+    ppm = tmp_path / "c.ppm"
+    ppm.write_bytes(b"P6 # created by foo\n2 1 255\n" + b"\x00" * 6)
+    img = dec.read_ppm_to_numpy(ppm)
+    assert img.shape == (1, 2, 3)

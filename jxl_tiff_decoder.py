@@ -820,15 +820,13 @@ def read_ppm_to_numpy(ppm_path):
         # Read header tokens, skipping comment-only lines/inline comments, until
         # we have magic, width, height and maxval. The magic line may carry
         # MORE tokens on the same line (single-line headers like
-        # "P6 640 480 65535\n" are valid PNM).
-        first = f.readline().strip().split()
-        if not first:
-            raise ValueError(f"Invalid PPM header: empty first line in {ppm_path}")
-        magic = first[0]
-        if magic not in (b'P6', b'P5'):
-            raise ValueError(f"Unsupported PPM/PGM format: {magic}")
-
-        tokens = list(first)
+        # "P6 640 480 65535\n" are valid PNM), and may itself contain an
+        # inline comment ("P6 # note\n").
+        tokens = []
+        for part in f.readline().strip().split():
+            if part.startswith(b'#'):
+                break
+            tokens.append(part)
         while len(tokens) < 4:
             line = f.readline()
             if not line:
@@ -839,6 +837,9 @@ def read_ppm_to_numpy(ppm_path):
                 tokens.append(part)
         if len(tokens) < 4:
             raise ValueError(f"Invalid PPM header: could not read magic/width/height/maxval from {ppm_path}")
+        magic = tokens[0]
+        if magic not in (b'P6', b'P5'):
+            raise ValueError(f"Unsupported PPM/PGM format: {magic}")
         width = int(tokens[1])
         height = int(tokens[2])
         maxval = int(tokens[3])
@@ -1236,9 +1237,13 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
     logger.info(f" >Adding JPEG preview to {tiff_path.name}...")
     
     try:
-        # Read the current TIFF (16-bit data that was just written)
+        # Read the current TIFF (16-bit data that was just written). For
+        # single-page files (the only case this function runs) series[0] IS
+        # page 0 — keep the array for the rewrite below instead of decoding
+        # the full image a second time (~2x RAM and I/O on large files).
         with tifffile.TiffFile(str(tiff_path)) as tif:
-            img_data = tif.series[0].asarray()
+            main_data = tif.series[0].asarray()
+            img_data = main_data
             # Preserve page 0's SubfileType for the rewrite below (a restored
             # non-zero SubfileType would otherwise be lost).
             try:
@@ -1352,14 +1357,14 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         # Strategy: write to a temp file, then use tifffile to create proper structure
         temp_tiff = tmp_dir / "output.tif"
 
-        # Read existing TIFF to get image data and ICC
-        with tifffile.TiffFile(str(tiff_path)) as tif:
-            main_data = tif.pages[0].asarray()
-            if icc_data is None:
-                try:
+        # ICC fallback if not passed (uses the already-loaded array above —
+        # no second full-image decode)
+        if icc_data is None:
+            try:
+                with tifffile.TiffFile(str(tiff_path)) as tif:
                     icc_data = tif.pages[0].icc_profile
-                except Exception:
-                    icc_data = None
+            except Exception:
+                icc_data = None
 
         # Write TIFF with main image as page 0 and JPEG preview as page 1
         # Using photometric interpretation for page 0 (RGB, grayscale, or RGBA)
@@ -2006,7 +2011,7 @@ def find_jxls_flat(path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 def find_jxls_recursive(path):
     """Find all JXL files recursively"""
@@ -2018,7 +2023,7 @@ def find_jxls_recursive(path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 def find_jxls_mode6(input_path):
     """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
@@ -2033,7 +2038,7 @@ def find_jxls_mode6(input_path):
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
             filtered.append(j)
-    return filtered
+    return sorted(filtered)
 
 def find_jxls_mode7(input_path):
     """Mode 7: only JXLs inside EXPORT_MARKER/EXPORT_JXL_SUBFOLDER."""
@@ -2053,11 +2058,11 @@ def find_jxls_mode7(input_path):
                 filtered.append(j)
         else:
             filtered.append(j)
-    return filtered
+    return sorted(filtered)
 
 def _is_thumbnail_jxl(jxl_path: Path) -> bool:
     """Return True if the JXL filename ends with the configured thumbnail suffix."""
-    return jxl_path.stem.endswith(THUMBNAIL_SUFFIX)
+    return bool(THUMBNAIL_SUFFIX) and jxl_path.stem.endswith(THUMBNAIL_SUFFIX)
 
 
 def _has_internal_markers(info: dict) -> bool:
@@ -2075,7 +2080,7 @@ def _parse_jxl_page_suffix(name: str):
     """
     stem = name
     is_thumbnail = False
-    if stem.endswith(THUMBNAIL_SUFFIX):
+    if THUMBNAIL_SUFFIX and stem.endswith(THUMBNAIL_SUFFIX):
         is_thumbnail = True
         stem = stem[:-len(THUMBNAIL_SUFFIX)]
 
@@ -2459,6 +2464,8 @@ Examples:
         if THUMBNAIL_HANDLING == "generate":
             THUMBNAIL_HANDLING = "include"
     if args.thumbnail_suffix is not None:
+        if not args.thumbnail_suffix.strip():
+            parser.error("--thumbnail-suffix must not be empty")
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
     if getattr(args, "no_reconstruct_multipage", False):
         RECONSTRUCT_MULTIPAGE = False

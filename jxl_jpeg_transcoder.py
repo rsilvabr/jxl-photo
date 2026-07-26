@@ -445,7 +445,13 @@ EXPORT_JPEG_SUBFOLDER = ""
 # --------------------------------------------─
 
 CONVERT_OUTPUT_FOLDER = "converted"
-CONVERT_OUTPUT_SUFFIX = "_converted"
+CONVERT_OUTPUT_SUFFIX = ""
+# [Convert mode 2] Folder suffix used ONLY when the user explicitly opts in
+# (non-empty here or via --output-suffix). Default "" = flat output to the
+# input root, matching the transcode path and the README mode-2 tables.
+# (A non-empty default used to split a single auto-mode run into two
+# different layouts: transcode outputs flat, convert outputs in
+# <folder>_converted/.)
 
 # Container flag for lossy JXL encoding
 # True = adds --container=1 for IrfanView EXIF compatibility
@@ -714,7 +720,7 @@ def find_jpegs_flat(input_path: Path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 # Folder names created ONLY by this tool's DECODE direction (recovered JPEGs
 # and generic convert outputs). ENCODE-direction scans (JPEG/PNG -> JXL) skip
@@ -755,7 +761,7 @@ def find_jpegs_recursive(input_path: Path):
     if skipped:
         logger.info(f"Skipped {skipped} JPEG file(s) inside toolkit output folders "
                     f"({', '.join(sorted(_TOOL_DECODE_OUTPUT_FOLDERS))})")
-    return files
+    return sorted(files)
 
 def find_jxls_flat(input_path: Path):
     seen, files = set(), []
@@ -793,7 +799,7 @@ def find_pngs_recursive(input_path: Path):
                 files.append(f)
     if skipped:
         logger.info(f"Skipped {skipped} PNG file(s) inside toolkit output folders")
-    return files
+    return sorted(files)
 
 def find_pngs_flat(input_path: Path):
     seen, files = set(), []
@@ -803,7 +809,7 @@ def find_pngs_flat(input_path: Path):
             if key not in seen:
                 seen.add(key)
                 files.append(f)
-    return files
+    return sorted(files)
 
 # --------------------------------------------─
 # SMART RECONVERT CHECK
@@ -1008,6 +1014,12 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     
     overwritten = final_path.exists()
 
+    # Initialized BEFORE any statement that can raise (md5 read, mkdir, the
+    # codec itself) so the except handler always has them (same pattern as
+    # the decode functions).
+    output_dirty = False
+    _pre_identity = _capture_output_identity(write_path, final_path)
+
     try:
         write_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -1021,8 +1033,6 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
 
         # From this point the tool writes to write_path; on failure the
         # partial output must be removed (see except below).
-        output_dirty = False
-        _pre_identity = _capture_output_identity(write_path, final_path)
         if is_jpeg_encode:
             output_dirty = True
             r = subprocess.run(
@@ -1303,6 +1313,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 if src_md5 is None or read_md5_db(final_file) is None:
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
                     continue
+                # Encode direction: structural validity is not enough — the
+                # JXL must also carry jbrd, otherwise the original JPEG can
+                # never be recovered bit-exactly (README's promise).
+                if final_file.suffix.lower() == '.jxl' and not has_jbrd_box(final_file):
+                    logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
+                    continue
             if decode and not _tool_at_least("djxl", 0, 12):
                 # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
                 # is NOT guaranteed by the tool. The source may only be
@@ -1492,8 +1508,12 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
     elif mode == 2:
         if output_root:
             return Path(output_root) / f"{stem}.{ext}"
-        new_folder = src_path.parent.name + suffix
-        return src_path.parent.parent / new_folder / f"{stem}.{ext}"
+        if suffix:
+            # Opt-in: per-folder sibling "<folder><suffix>/"
+            new_folder = src_path.parent.name + suffix
+            return src_path.parent.parent / new_folder / f"{stem}.{ext}"
+        # Default: flat into the input root (same layout as the transcode path)
+        return src_path.parent / f"{stem}.{ext}"
     elif mode == 3:
         # Subfolder inside each source folder, recursive variant (aligned with
         # transcode mode 3). Previously this flattened every recursively-found
@@ -1577,6 +1597,11 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
     
     overwritten = final_path.exists()
 
+    # Initialized BEFORE any statement that can raise (mkdir, the codec
+    # itself) so the except handler always has them.
+    output_dirty = False
+    _pre_identity = _capture_output_identity(write_path, final_path)
+
     try:
         write_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1596,7 +1621,6 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         cmd += _cjxl_buffering_flag()
 
         output_dirty = True
-        _pre_identity = _capture_output_identity(write_path, final_path)
         r = subprocess.run(cmd, capture_output=True, timeout=600)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
@@ -1701,11 +1725,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         write_path.parent.mkdir(parents=True, exist_ok=True)
 
         is_png = (fmt == "png")
-        if fmt == "jpeg" and bit_depth == 16:
-            logger.warning(f" JPEG doesn't support 16-bit, switching to PNG | {jxl_path.name}")
-            is_png = True
-            actual_out = write_path.with_suffix(".png")
-            final_path = final_path.with_suffix(".png")
+        # NOTE: the JPEG+16-bit -> PNG switch happens in the CALLERS
+        # (cmd_convert / _process_file_group) before output pairs are built,
+        # so staging and final paths always agree. A runtime switch here would
+        # make should_process consult the wrong extension (dead code, removed).
 
         if output_icc and not MAGICK_AVAILABLE:
             # Fail loudly: silently keeping the embedded ICC would deliver
@@ -1986,13 +2009,15 @@ def cmd_convert(args, from_jxl: bool = True):
     # Build pairs
     pairs = []
     for f in files:
-        # Mode 2: output_root must be the EXPLICIT output (or None) so the
-        # suffix-folder branch in resolve_output_convert can fire — passing
-        # args.input here makes --output-suffix dead code.
-        resolve_root = args.output if args.mode == 2 else output_root
+        # Mode 2: explicit output dir -> flat into it. Otherwise: opt-in
+        # --output-suffix -> <folder><suffix>/ sibling folders; default ->
+        # flat into the input root (same layout as the transcode path).
+        _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
+        resolve_root = (args.output or (None if _suffix else args.input)) if args.mode == 2 else output_root
+        _eff_suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or "")
         if direction == "to_jxl":
             out = resolve_output_convert(f, args.mode, args.output_name,
-                                         args.output_suffix, "jxl",
+                                         _eff_suffix, "jxl",
                                          args.rename_from, args.rename_to,
                                          resolve_root, decode=False)
         else:
@@ -2000,7 +2025,7 @@ def cmd_convert(args, from_jxl: bool = True):
             fmt = args.format if args.format else "jpeg"
             ext = "jpg" if fmt == "jpeg" else "png"
             out = resolve_output_convert(f, args.mode, args.output_name,
-                                         args.output_suffix, ext,
+                                         _eff_suffix, ext,
                                          args.rename_from, args.rename_to,
                                          resolve_root, decode=True)
         if out is None:
@@ -2220,6 +2245,11 @@ def cmd_auto(args):
         _process_file_group(files, args, collect_only=lst, **kw)
         planned[key] = lst
         all_pairs.extend(lst)
+        # Groups where the mode filter rejected everything never reach the
+        # discount in _process_file_group — discount them here so the
+        # progress denominator matches reality.
+        if not lst and files:
+            _counter["total"] = max(0, _counter.get("total", 0) - len(files))
     _abort_on_duplicate_outputs(all_pairs)
 
     # Output-vs-input collision: e.g. photo.jpg (encode) + photo.jxl (decode) in
@@ -2315,7 +2345,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     # (possibly None) so the suffix-folder branch in resolve_output_convert
     # can fire (see cmd_convert).
     output_root = args.output if args.output is not None else args.input
-    resolve_root = args.output if args.mode == 2 else output_root
+    _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
+    resolve_root = (args.output or (None if _suffix else args.input)) if args.mode == 2 else output_root
 
     # Build output pairs
     pairs = []
@@ -2524,8 +2555,10 @@ Examples:
                         help="Output folder name override for convert modes 1 and 3")
     parser.add_argument("output", nargs="?", type=Path, default=None,
                         help="Output directory (mode 0 single file)")
-    parser.add_argument("--output-suffix", type=str, default=CONVERT_OUTPUT_SUFFIX,
-                        help="Suffix for mode 2")
+    parser.add_argument("--output-suffix", type=str, default=None,
+                        help="[Convert mode 2] Opt-in: put outputs in <folder><suffix>/ "
+                             "sibling folders instead of flat into the input root "
+                             "(default: flat, matching the transcode path)")
     parser.add_argument("--rename-from", type=str, default="", help="Rename pattern")
     parser.add_argument("--rename-to", type=str, default="", help="Rename replacement")
 

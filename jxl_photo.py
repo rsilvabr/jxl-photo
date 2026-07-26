@@ -829,12 +829,13 @@ class FolderAnalyzer:
                 if count > 0 and folder != '.':
                     src = str(self.root / folder)
                     if mode == 4:
-                        # Replace origin in folder name with dest — same rule as
-                        # the scripts: first complete token only, uppercase
-                        # suffix; if the origin is absent, APPEND the suffix.
-                        new_name = _replace_suffix_token(folder, self.origin, self.dest.upper())
+                        # Replace origin in folder name with the script's actual
+                        # destination suffix — JXL/TIFF by direction, and
+                        # JPEG_recovered for the transcoder's decode direction.
+                        _dest_suffix = 'JPEG_recovered' if self.dest in ('jpeg', 'png') else self.dest.upper()
+                        new_name = _replace_suffix_token(folder, self.origin, _dest_suffix)
                         if new_name == folder:
-                            new_name = folder + "_" + self.dest.upper()
+                            new_name = folder + "_" + _dest_suffix
                         dest = str(self.root / new_name)
                     else:
                         dest = str(Path(src).parent / sibling_name)
@@ -1111,7 +1112,6 @@ class InteractiveMenu:
             'quality': self.config.config.last_quality or self.config.config.default_quality,
             'effort': self.config.config.last_effort or self.config.config.default_effort,
             'staging': last_staging,
-            'selected_files': [],
             'icc_profile': None,
             'use_ram': True,
             'compression': 'zip',
@@ -1315,7 +1315,6 @@ class InteractiveMenu:
             return False
 
         workflow['input_dir'] = str(path)
-        workflow['selected_files'] = []
 
         return True
 
@@ -3826,7 +3825,6 @@ def main():
 
             workflow['origin_format'] = origin
             workflow['dest_format'] = last_dest
-            workflow['selected_files'] = []
             workflow['use_ram'] = config.config.last_use_ram if config.config.last_use_ram is not None else True
             workflow['icc_profile'] = config.config.last_icc_profile
             workflow['compression'] = config.config.last_compression or 'zip'
