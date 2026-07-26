@@ -26,24 +26,23 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New in v1.8
 
-> **v1.8.1 — the audit release.** Months of incremental code audits (independent reviews + full test batteries on real Capture One exports and film scans), consolidated into one release: **~120 bugs fixed and 130+ regression tests added** (`tests/`, 137 passing). Highlights:
->
-> - **Data-safety first** — failed or invalid outputs (including `cjxl`/`djxl` returning 0 with an empty/truncated file) are now always deleted and marked as errors, so smart sync can't skip corrupt files forever; every successful output passes an integrity check (box-chain for JXL, EOI for JPEG, IEND for PNG, forced pixel read for TIFF); source deletion requires a *real* verification (MD5-verified recovery or `djxl --reconstruct_jpeg`).
-> - **Multi-page reconstruction hardened** — grouping is keyed by (folder, marker id), page index/thumbnail role come from authoritative `jxlphoto-page:`/`jxlphoto-thumb` XMP markers (filenames like `scan_page3.tif` or `holiday_thumbnail.tif` can't corrupt order/roles anymore), gray+alpha pages round-trip correctly.
-> - **Wrapper honesty** — JXL→JPEG Auto only touches `.jxl` files (`--from-jxl`), JPEG→JXL lossy only touches JPEGs (`--from-jpeg`), mode 8 delete asks HHMM once (no double/hidden prompts, new `--delete-confirm-off` for automation), mode 7 gets a real `--export-subfolder`, manifests gain a `Direction` guard column and a file picker, exit codes are meaningful (`0` ok / `1` errors / `2` abort / `3` cancelled), and the auto-mode preview matches what actually runs.
-> - **Everything exiftool goes through UTF-8 argfiles** — unicode paths, `[ ]` in folder names, and non-ASCII metadata all round-trip correctly on Windows.
-> - **The original third-pass audit** — mode 6 aborts on duplicate output destinations, `--delete-source` propagates through all wizard paths, multipage marker batch uses an argfile, decoder deletes partial outputs, `--decode` works on directories.
->
-> Full notes: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md)
+### New in v1.8
 
-### libjxl v0.12 Support (auto-detected)
-The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them — on older libjxl, behavior is exactly the same as before.
+- **libjxl v0.12 support (auto-detected)** — the scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them; older libjxl behaves exactly as before.
+  - **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
+  - **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)).
+  - **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
+- **Output integrity verification everywhere** — every converted file is validated before being reported OK: full ISOBMFF box-chain check for JXL, EOI marker for JPEG, IEND for PNG, and a forced pixel read for TIFF. Anything that fails is cleaned up and reported as a per-file error — the batch continues.
+- **Safer delete gates (mode 8)** — source files are only deleted after the output passes integrity, and JPEG recovery additionally requires `djxl --reconstruct_jpeg` or a verified MD5 match.
+- **Direction-restriction flags** — `--from-jxl` (auto mode processes only JXLs) and `--from-jpeg` (convert processes only JPEGs), so mixed folders always convert the files you actually chose.
+- **`--export-subfolder`** — mode 7 can target a specific subfolder of the export marker directly from the CLI (and the wizard asks for it).
+- **`--delete-confirm-off`** — skip the interactive delete confirmation for wrappers/automation that already asked the user.
+- **Multi-page reconstruction v2** — split pages now carry authoritative `jxlphoto-page:` / `jxlphoto-thumb` XMP markers, so reconstruction no longer depends on filenames (safe even for files named `scan_page3.tif` or `holiday_thumbnail.tif`). Gray+alpha (LA) pages round-trip correctly.
+- **Manifest `Direction` column + picker** — manifests are bound to the workflow that generated them (a mismatch is refused with a clear error), and several manifests get a file picker.
+- **Meaningful exit codes** — `0` ok / `1` errors / `2` safety abort / `3` cancelled, consistently across all three scripts and the wrapper.
+- **UTF-8 metadata everywhere** — all exiftool calls use UTF-8 argfiles, so unicode paths, `[ ]` in folder names, and non-ASCII metadata round-trip correctly on Windows.
 
-- **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
-- **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)).
-- **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
-
-### Audit fixes (second pass)
+### v1.8.0
 
 > **⚠️ Breaking change:** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder**. If you have saved commands/manifests using transcoder modes 4 or 5, swap them.
 
@@ -55,6 +54,12 @@ The scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 featu
 - Wizard: decode mode no longer asked twice; target ICC only for matrix mode; repeat workflow preserves lossy `distance`; lossless transcode decode asks only the simple "yes" confirmation
 
 Full release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
+
+### v1.8.1
+
+Bug-fix release driven by an extended code-audit cycle — **100+ fixes** across the four scripts, with a large new regression suite (160+ tests). Highlights include stricter output validation, hardened multi-page reconstruction, more accurate Auto Mode behavior (both in the scripts and the wizard), and many small correctness and performance improvements. Full list: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md).
+
+**Recommended version** — if you're on v1.8.0, upgrade: v1.8.1 is the most stable and most tested release of this toolkit.
 
 ---
 
