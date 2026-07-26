@@ -494,3 +494,39 @@ def test_wizard_summary_flags_page_loss():
         label, warn = _summary(multipage_mode=mp)
         assert not warn, f"{mp} keeps every page and must not be flagged"
         assert "one JXL per page" in label
+
+
+def test_split_warns_when_excluding_thumbnails(tmp_path, monkeypatch, caplog):
+    """`split` means "keep my pages" — dropping the thumbnail ones must be as
+    visible as the `ignore` path, not silent."""
+    tif = tmp_path / "twopage.tif"
+    create_multipage_tiff(tif)          # 2 real pages + 1 thumbnail
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "split")
+    monkeypatch.setattr(enc, "THUMBNAIL_MODE", "exclude")
+
+    with caplog.at_level("WARNING"):
+        items = enc.convert_multipage(tif, tmp_path / "out", mode=0)
+
+    assert len(items) == 2, "the two real pages are still encoded"
+    assert enc._multipage_ignored["pages"] == 1
+    assert any("thumbnail page(s)" in r.message for r in caplog.records)
+
+
+def test_split_include_is_quiet_and_matches_split_all(tmp_path, monkeypatch, caplog):
+    """Control: including thumbnails drops nothing, so nothing is reported —
+    and it must plan exactly what split_all plans (they are the same policy)."""
+    tif = tmp_path / "twopage.tif"
+    create_multipage_tiff(tif)
+
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "split")
+    monkeypatch.setattr(enc, "THUMBNAIL_MODE", "include")
+    with caplog.at_level("WARNING"):
+        split_incl = enc.convert_multipage(tif, tmp_path / "out", mode=0)
+    assert enc._multipage_ignored["pages"] == 0
+    assert not any("DISCARDING" in r.message for r in caplog.records)
+
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "split_all")
+    split_all = enc.convert_multipage(tif, tmp_path / "out", mode=0)
+    assert split_incl == split_all, "split+include and split_all must agree"

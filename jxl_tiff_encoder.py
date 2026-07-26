@@ -2166,6 +2166,16 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             for idx in thumb_pages:
                 info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
                 pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
+        elif thumb_pages:
+            # Same rule as the "ignore" path: asking to split means "keep my
+            # pages", so dropping the thumbnail ones must not be silent.
+            with _multipage_ignored_lock:
+                _multipage_ignored["files"] += 1
+                _multipage_ignored["pages"] += len(thumb_pages)
+            logger.warning(
+                f"DISCARDING {len(thumb_pages)} thumbnail page(s) | {tiff_path.name} | "
+                f"--thumbnail-mode exclude (use include, or --multipage-mode split_all, "
+                f"to keep them)")
         if not pages_to_encode:
             logger.warning(f"SKIP TIFF with no encodable pages | {tiff_path.name}")
             return []
