@@ -636,7 +636,12 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 
 Multi-page TIFFs are handled explicitly instead of silently discarding extra pages:
 
-- `--multipage-mode ignore` — encode only page 0 (original behavior, default)
+- `--multipage-mode ignore` — encode only page 0 (original behavior, **default**).
+  Since v1.8.1 this is no longer silent: every file whose extra pages are dropped
+  is logged as a warning, and the run summary repeats the total
+  (`Multi-page: DISCARDED N page(s) from M TIFF(s)`). Many TIFFs are multi-page
+  without looking like it — Capture One and most scanners append an embedded
+  preview page, and film scanners add an IR/mask page.
 - `--multipage-mode skip` — skip files that have more than one "real" page
 - `--multipage-mode split` — encode each real page to a separate JXL (`photo.jxl`, `photo_page2.jxl`, ...)
 - `--multipage-mode split_all` — encode every page, including thumbnails

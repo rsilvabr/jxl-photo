@@ -427,3 +427,70 @@ def test_misc():
 if __name__ == "__main__":
     main()
     test_misc()
+
+
+# ---------------------------------------------------------------------------
+# --multipage-mode ignore must SAY it is dropping pages (21st audit round)
+# ---------------------------------------------------------------------------
+
+import jxl_tiff_encoder as enc
+import jxl_photo as wrapper
+
+
+def _reset_ignored_counter():
+    enc._multipage_ignored["files"] = 0
+    enc._multipage_ignored["pages"] = 0
+
+
+def test_ignore_mode_warns_and_counts_dropped_pages(tmp_path, monkeypatch, caplog):
+    """`ignore` encodes page 0 and discards the rest. That used to happen with
+    no output at all: the wizard's default never asked, and the encoder never
+    counted the pages, so a 2-page TIFF silently became a 1-page JXL."""
+    tif = tmp_path / "twopage.tif"
+    create_multipage_tiff(tif)          # 2 real pages + 1 thumbnail
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "ignore")
+
+    with caplog.at_level("WARNING"):
+        items = enc.convert_multipage(tif, tmp_path / "out", mode=0)
+
+    assert len(items) == 1, "ignore must plan exactly one output"
+    assert enc._multipage_ignored["files"] == 1
+    assert enc._multipage_ignored["pages"] == 2, "3-page TIFF drops 2 pages"
+    assert any("DISCARDING" in r.message for r in caplog.records), \
+        "dropping pages must be visible in the log"
+
+
+def test_single_page_tiff_does_not_warn(tmp_path, monkeypatch, caplog):
+    """Control: the common case must stay quiet."""
+    tif = tmp_path / "single.tif"
+    tifffile.imwrite(str(tif), np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "ignore")
+
+    with caplog.at_level("WARNING"):
+        enc.convert_multipage(tif, tmp_path / "out", mode=0)
+
+    assert enc._multipage_ignored["files"] == 0
+    assert not any("DISCARDING" in r.message for r in caplog.records)
+
+
+def _summary(**adv):
+    cm = wrapper.ConfigManager()
+    menu = wrapper.InteractiveMenu(cm, wrapper.DependencyChecker(cm))
+    return menu._multipage_summary({"advanced_options": adv})
+
+
+def test_wizard_summary_flags_page_loss():
+    """The Step 7 summary is the last gate before YES — page-dropping policies
+    must be flagged there, including the default (no advanced options set)."""
+    label, warn = _summary()
+    assert warn and "DISCARDED" in label, "the wizard default must be flagged"
+
+    label, warn = _summary(multipage_mode="skip")
+    assert warn and "NOT converted" in label
+
+    for mp in ("split", "split_all"):
+        label, warn = _summary(multipage_mode=mp)
+        assert not warn, f"{mp} keeps every page and must not be flagged"
+        assert "one JXL per page" in label

@@ -555,6 +555,10 @@ _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_n
 # above increment per page in multipage splits; this set deduplicates profiles.
 _d50_patched_hashes = set()
 _d50_patch_lock = threading.Lock()
+# Pages silently dropped by --multipage-mode ignore. Counted so the run summary
+# can say it out loud: per-file warnings scroll away in a large batch.
+_multipage_ignored = {"files": 0, "pages": 0}
+_multipage_ignored_lock = threading.Lock()
 
 def _abort_on_duplicate_outputs(pairs):
     """Abort the run if two outputs map to the same destination file.
@@ -2113,13 +2117,27 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     # single-channel TIFFs are encoded as grayscale rather than RGB.
     if mp_mode == "ignore":
         final_jxl = output_dir / _page_output_name(stem, 0, False)
+        extra_pages = 0
         try:
             with tifffile.TiffFile(str(tiff_path)) as tif:
                 samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
+                # Counting the IFD chain only follows offsets (no pixel decode),
+                # and this is the ONLY place that can tell the user pages are
+                # being dropped: "ignore" encodes page 0 and discards the rest,
+                # which used to happen without a single line of output.
+                extra_pages = max(0, len(tif.pages) - 1)
         except Exception:
             # If we cannot read the page, let convert_one report the error later
             # and fall back to RGB to avoid a planning-time crash.
             samples = 3
+        if extra_pages:
+            with _multipage_ignored_lock:
+                _multipage_ignored["files"] += 1
+                _multipage_ignored["pages"] += extra_pages
+            logger.warning(
+                f"DISCARDING {extra_pages} extra page(s) | {tiff_path.name} | "
+                f"--multipage-mode ignore encodes page 0 only "
+                f"(use split / split_all to keep them)")
         return [(tiff_path, final_jxl, 0, False, 0, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
@@ -2751,6 +2769,15 @@ def main():
         logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    # Multi-page pages dropped by the "ignore" policy — surfaced in the summary
+    # because the per-file warnings scroll away in a large batch, and losing
+    # pages without noticing is exactly the failure this line prevents.
+    if _multipage_ignored["files"]:
+        logger.warning(
+            f"Multi-page: DISCARDED {_multipage_ignored['pages']} page(s) from "
+            f"{_multipage_ignored['files']} TIFF(s) (--multipage-mode ignore). "
+            f"Re-run with --multipage-mode split to keep them.")
 
     # D50 patch summary
     applied = _d50_patch_count["applied"]

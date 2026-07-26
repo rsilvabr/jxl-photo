@@ -2764,6 +2764,24 @@ class InteractiveMenu:
 
         return True
 
+    def _multipage_summary(self, workflow: Dict):
+        """Return (label, is_warning) describing what happens to multi-page TIFFs.
+
+        The wizard's default is `ignore`, which encodes page 0 and DISCARDS every
+        other page. That question is only asked inside Advanced Options (which
+        defaults to No), so a straight-through run used to drop pages without
+        ever mentioning it — here or in the child's output. Surfacing it in the
+        final summary is the last chance to say so before the user types YES.
+        """
+        adv = workflow.get('advanced_options', {})
+        mp = adv.get('multipage_mode') or 'ignore'
+        if mp == 'ignore':
+            return "ignore — extra pages are DISCARDED (choose split to keep them)", True
+        if mp == 'skip':
+            return "skip — multi-page TIFFs are NOT converted at all", True
+        tm = adv.get('thumbnail_mode') or 'exclude'
+        return f"{mp} — one JXL per page (thumbnails: {tm})", False
+
     def _wizard_confirm(self, workflow: Dict) -> bool:
         """Step 7: Final Confirmation"""
         mode_names = {
@@ -2863,6 +2881,9 @@ class InteractiveMenu:
                 table.add_row("Distance:", str(workflow['distance']))
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
+                _mp_label, _mp_warn = self._multipage_summary(workflow)
+                table.add_row("Multi-page TIFF:",
+                              f"[yellow]{_mp_label}[/yellow]" if _mp_warn else _mp_label)
             elif 'lossy' in workflow['conversion_type']:
                 # convert_lossy is JPEG->JXL lossy, which is distance-driven
                 table.add_row("Distance:", str(workflow.get('distance', 1.0)))
@@ -2915,6 +2936,8 @@ class InteractiveMenu:
                 print(f"Distance: {workflow['distance']}")
                 if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
                     print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
+                _mp_label, _mp_warn = self._multipage_summary(workflow)
+                print(f"Multi-page TIFF: {_mp_label}")
             elif 'lossy' in workflow['conversion_type']:
                 # convert_lossy is JPEG->JXL lossy, which is distance-driven
                 print(f"Distance: {workflow.get('distance', 1.0)}")

@@ -551,6 +551,22 @@ exiftool -Make -Model roundtrip.tif
 
 ## Known Limitations & Behaviors
 
+### Multi-page TIFFs: only page 0 is converted by default
+
+`--multipage-mode` defaults to **`ignore`**, which encodes page 0 and discards every other page. This catches people out, because plenty of TIFFs are multi-page without looking like it — Capture One and many scanners append an embedded preview, and film scanners add an IR/mask page.
+
+To keep every page (one JXL per page, rejoined into a multi-page TIFF on decode):
+
+```powershell
+py jxl_tiff_encoder.py "F:\Photos" --multipage-mode split --thumbnail-mode include
+```
+
+In the wizard the setting lives under **Advanced Options** (Step 6A — answer `y` when asked "Configure advanced options?"). Since v1.8.1 the encoder warns for each file whose pages are dropped and repeats the total in the run summary, and the wizard's Step 7 summary spells out the policy before you type YES.
+
+### Lossy is the default: `--distance 0.1`
+
+The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to roughly a tenth of the TIFF size, and a difference blend in Photoshop *will* show small deviations — that is the compression working as configured, not a bug. For a bit-exact archive use `--distance 0` (still ~40% smaller than an uncompressed TIFF). Note that `--mode` (0–8) only decides *where* output files go; quality is `--distance` alone.
+
 ### Film scanners: IR channel / Digital ICE
 
 If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back **may break that feature**. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. **Test with one file before batch-processing important film scans.**
