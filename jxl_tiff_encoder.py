@@ -266,6 +266,11 @@ TEMP_DIR = None
 # None -> use system temp (usually C:\Users\...\AppData\Local\Temp on Windows)
 # Ex:  -> r"E:\\temp_jxl"
 
+CJXL_TIMEOUT = 900
+# Timeout (seconds) for each cjxl invocation. 600s can be tight for very large
+# lossless TIFFs (45-100MP) with many workers competing for CPU/disk; a timeout
+# becomes a per-file error (output cleaned up), never a hung batch.
+
 TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
 # None -> disabled: JXLs are written directly to their final destination.
@@ -1456,12 +1461,14 @@ def make_png_bytes(img, icc_bytes=None):
     h, w, c = img.shape
     if c == 1:
         color_type = 0
+    elif c == 2:
+        color_type = 4  # gray + alpha (LA)
     elif c == 3:
         color_type = 2
     elif c == 4:
         color_type = 6
     else:
-        raise ValueError(f"Unsupported channel count: {c}. Expected 1, 3, or 4.")
+        raise ValueError(f"Unsupported channel count: {c}. Expected 1, 2 (LA), 3, or 4.")
 
     def chunk(name, data):
         p = name + data
@@ -1729,9 +1736,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _log_rejected_file(str(tiff_path), "planar-separate not supported")
                     raise ValueError("Planar-separate TIFFs (PLANARCONFIG=2) are not supported. Convert to chunky/contig first.")
                 spp = int(page.samplesperpixel) if page.samplesperpixel else 1
-                if spp not in (1, 3, 4):
+                if spp not in (1, 2, 3, 4):
                     _log_rejected_file(str(tiff_path), f"unsupported samples-per-pixel: {spp}")
-                    raise ValueError(f"Unsupported channel count: {spp}. Expected 1 (gray), 3 (RGB) or 4 (RGBA).")
+                    raise ValueError(f"Unsupported channel count: {spp}. Expected 1 (gray), 2 (gray+alpha), 3 (RGB) or 4 (RGBA).")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)  # With D50 patch for cjxl
                 img = page.asarray()
@@ -1750,11 +1757,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 else:
                     img = img.astype(np.uint16)
             # Grayscale detection is driven ONLY by the ACTUAL array: a 2D
-            # array or a single-channel 3D array is grayscale. The
-            # planning-time samples-per-pixel is deliberately NOT consulted —
-            # if metadata said 1 channel but the pixels are RGB, flagging the
-            # JXL as grayscale would make the decoder discard G and B.
-            is_grayscale = (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
+            # array or a single-channel 3D array is grayscale; a 2-channel
+            # array is gray+alpha (LA). The planning-time samples-per-pixel is
+            # deliberately NOT consulted — if metadata said 1 channel but the
+            # pixels are RGB, flagging the JXL as grayscale would make the
+            # decoder discard G and B.
+            is_grayscale = (img.ndim == 2) or (img.ndim == 3 and img.shape[2] in (1, 2))
             if img.ndim == 2:
                 img = img[:, :, np.newaxis]
 
@@ -1799,7 +1807,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
-                r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=600)
+                r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=CJXL_TIMEOUT)
                 del png_input
             else:
                 png_path = tmp_dir / f"{tiff_path.stem}.png"
@@ -1809,7 +1817,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del png_bytes
                 cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
-                r = subprocess.run(cjxl_cmd, capture_output=True, timeout=600)
+                r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
 
             if r.returncode != 0:
                 err = (r.stderr or b"").decode(errors='replace')[:200]
@@ -2307,10 +2315,20 @@ def find_tiffs_recursive(input_path: Path):
 _DECODER_OUTPUT_FOLDERS = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
 
 
+def _skip_decoder_output(parts_below_marker) -> bool:
+    """True if any part below the export marker is a decoder output folder —
+    EXCEPT the one explicitly requested via EXPORT_TIFF_SUBFOLDER: an
+    explicit user request always wins over this heuristic."""
+    requested = EXPORT_TIFF_SUBFOLDER.lower()
+    return any(b in _DECODER_OUTPUT_FOLDERS and b != requested
+               for b in parts_below_marker)
+
+
 def find_tiffs_mode6(input_path: Path):
     """Mode 6: only TIFFs inside folders containing EXPORT_MARKER in their path (any subfolder)."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
+    skipped_decoder_out = 0
     marker_lower = EXPORT_MARKER.lower()
     for t in all_tiffs:
         # Match only directory parts; the filename itself is not an anchor
@@ -2321,15 +2339,20 @@ def find_tiffs_mode6(input_path: Path):
         if export_idx is not None:
             # Skip decoder output folders (16B_TIFF etc.) below the marker
             below = [p.lower() for p in parts_str[export_idx + 1:]]
-            if any(b in _DECODER_OUTPUT_FOLDERS for b in below):
+            if _skip_decoder_output(below):
+                skipped_decoder_out += 1
                 continue
             filtered.append(t)
+    if skipped_decoder_out:
+        logger.info(f"Ignored {skipped_decoder_out} TIFF(s) in decoder output folders "
+                    f"({', '.join(sorted(_DECODER_OUTPUT_FOLDERS))}) — use a different mode to re-encode them")
     return sorted(filtered)
 
 def find_tiffs_mode7(input_path: Path):
     """Mode 7: only TIFFs inside EXPORT_MARKER/EXPORT_TIFF_SUBFOLDER specific subfolder."""
     all_tiffs = find_tiffs_recursive(input_path)
     filtered = []
+    skipped_decoder_out = 0
     marker_lower = EXPORT_MARKER.lower()
     subfolder_lower = EXPORT_TIFF_SUBFOLDER.lower()
     for t in all_tiffs:
@@ -2341,13 +2364,17 @@ def find_tiffs_mode7(input_path: Path):
             continue
         # Skip decoder output folders (16B_TIFF etc.) below the marker
         below = [p.lower() for p in parts_str[export_idx + 1:]]
-        if any(b in _DECODER_OUTPUT_FOLDERS for b in below):
+        if _skip_decoder_output(below):
+            skipped_decoder_out += 1
             continue
         if EXPORT_TIFF_SUBFOLDER:
             if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
                 filtered.append(t)
         else:
             filtered.append(t)
+    if skipped_decoder_out:
+        logger.info(f"Ignored {skipped_decoder_out} TIFF(s) in decoder output folders "
+                    f"({', '.join(sorted(_DECODER_OUTPUT_FOLDERS))}) — use a different mode to re-encode them")
     return sorted(filtered)
 
 def main():

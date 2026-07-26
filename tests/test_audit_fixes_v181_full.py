@@ -1827,3 +1827,111 @@ def test_ppm_comment_on_magic_line(tmp_path):
     ppm.write_bytes(b"P6 # created by foo\n2 1 255\n" + b"\x00" * 6)
     img = dec.read_ppm_to_numpy(ppm)
     assert img.shape == (1, 2, 3)
+
+
+# ---------------------------------------------------------------------------
+# fifteenth-pass
+# ---------------------------------------------------------------------------
+
+def test_subfolder_request_wins_over_decoder_filter(monkeypatch, tmp_path):
+    """--export-subfolder 16B_TIFF is an explicit request: the anti-ping-pong
+    filter must NOT skip it. (Test name deliberately avoids the 'export'
+    token: pytest's tmp dir is derived from it and would anchor the marker.)"""
+    session = tmp_path / "_EXPORT"
+    (session / "16B_TIFF").mkdir(parents=True)
+    (session / "16B_TIFF" / "a.tif").write_bytes(b"x")
+    monkeypatch.setattr(enc, "EXPORT_TIFF_SUBFOLDER", "16B_TIFF")
+    try:
+        found = enc.find_tiffs_mode7(tmp_path)
+        assert [f.name for f in found] == ["a.tif"], \
+            "explicit --export-subfolder 16B_TIFF was silently overruled"
+    finally:
+        monkeypatch.setattr(enc, "EXPORT_TIFF_SUBFOLDER", "")
+
+
+def test_decoder_output_still_skipped_when_not_requested(tmp_path):
+    session = tmp_path / "_EXPORT"
+    (session / "16B_TIFF").mkdir(parents=True)
+    (session / "16bit").mkdir(parents=True)
+    (session / "16B_TIFF" / "a.tif").write_bytes(b"x")
+    (session / "16bit" / "b.tif").write_bytes(b"x")
+    found = enc.find_tiffs_mode6(tmp_path)
+    assert [f.name for f in found] == ["b.tif"]
+
+
+def test_convert_mode2_single_file_uses_parent(tmp_path):
+    src = tmp_path / "sess" / "a.jxl"
+    src.parent.mkdir()
+    src.write_bytes(b"\x00" * 16)
+    out = tr.resolve_output_convert(src, 2, "converted", "", "jpg", "", "",
+                                    src.parent, decode=True)
+    assert out == src.parent / "a.jpg"
+
+
+def test_png_lossless_convert_produces_container():
+    """PNG d=0 through encode_to_jxl must succeed (container forced), not be
+    rejected by the toolkit's own integrity gate."""
+    import shutil
+    if shutil.which("cjxl") is None:
+        pytest.skip("cjxl not installed")
+    import tempfile
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        src = td / "a.png"
+        Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8)).save(src)
+        out = td / "a.jxl"
+        tr.setup_logger()
+        (s, status, msg, _) = tr.encode_to_jxl(src, out, out, 1, 0.0, True, False)
+        assert status == "ok", f"PNG d=0 convert failed: {msg}"
+        assert tr._verify_file_integrity(out)
+
+
+def test_jbrd_gate_independent_of_md5_setting(tmp_path):
+    """--no-md5 must NOT disable the jbrd check on the encode delete gate."""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8fake")
+    final = tmp_path / "a.jxl"
+    final.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + (8).to_bytes(4, "big") + b"jxlc")
+    tr.setup_logger()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tr, "DELETE_SOURCE", True)
+    monkeypatch.setattr(tr, "STORE_MD5", False)  # --no-md5
+    monkeypatch.setattr(tr, "TEMP2_DIR", None)
+    results = [(str(src), "ok", str(final), None)]
+    monkeypatch.setattr(tr, "encode_one_transcode", lambda *a, **k: results[0])
+    tr.process_group_transcode([(src, final)], 1, False, False, 8, False, False)
+    assert src.exists(), "jbrd-less JXL authorized delete under --no-md5"
+    monkeypatch.undo()
+
+
+def test_dry_run_does_not_ask_hhmm(tmp_path):
+    """With the HHMM gate at execution time, a dry-run never charges the token."""
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    called = {"n": 0}
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(menu, "_confirm_archive_mode", lambda: called.__setitem__("n", 1) or True)
+    workflow = {
+        'mode': 8, 'advanced_options': {'delete_source': True}, 'dry_run': True,
+        'origin_format': 'tiff', 'dest_format': 'jxl',
+        'input_dir': str(tmp_path), 'workers': 2, 'compression': 'zip',
+        'bit_depth': 16, 'mode_config': {}, 'expert_flags': '',
+        'distance': 0.1, 'effort': 7, 'use_ram': True,
+    }
+    monkeypatch.setattr(menu, "_run_subprocess", lambda cmd: 0)
+    menu.execute_workflow(workflow, {})
+    assert called["n"] == 0, "HHMM was asked for a dry-run"
+    monkeypatch.undo()
+
+
+def test_la_tiff_roundtrip_png_channels():
+    """make_png_bytes must accept 2-channel (gray+alpha) arrays (color type 4)."""
+    img = np.zeros((8, 8, 2), dtype=np.uint16)
+    img[:, :, 0] = 300
+    img[:, :, 1] = 60000
+    png = enc.make_png_bytes(img)
+    # parse color type from IHDR
+    ihdr_off = 8 + 4 + 4  # signature + length + 'IHDR'
+    color_type = png[ihdr_off + 4 + 4 + 1]
+    assert color_type == 4, f"expected PNG color type 4 (LA), got {color_type}"

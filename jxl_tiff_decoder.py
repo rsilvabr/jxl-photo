@@ -284,6 +284,11 @@ TEMP_DIR = None
 # None → use system temp
 # Ex: → r"E:\\temp_jxl"
 
+DJXL_TIMEOUT = 900
+# Timeout (seconds) for each djxl invocation. 600s can be tight for very large
+# JXLs (45-100MP) with many workers competing for CPU/disk; a timeout becomes
+# a per-file error (output cleaned up), never a hung batch.
+
 TEMP2_DIR = None
 # Staging directory for output TIFFs during conversion.
 # None → disabled: TIFFs written directly to final destination
@@ -655,7 +660,7 @@ def decode_auto_png(jxl_path, output_png):
     Raises RuntimeError on failure.
     """
     cmd = ["djxl", str(jxl_path), str(output_png)]
-    r = subprocess.run(cmd, capture_output=True, timeout=600)
+    r = subprocess.run(cmd, capture_output=True, timeout=DJXL_TIMEOUT)
     if r.returncode != 0:
         err = (r.stderr or b"").decode(errors='replace')[:200]
         raise RuntimeError(f"djxl auto failed: {err}")
@@ -803,7 +808,7 @@ def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
         "--color_space=RGB_D65_202_Per_Lin",   # libjxl token for Rec.2020/BT.2100 primaries is "202"
         f"--icc_out={icc_out_path}",
     ]
-    r = subprocess.run(cmd, capture_output=True, timeout=600)
+    r = subprocess.run(cmd, capture_output=True, timeout=DJXL_TIMEOUT)
     if r.returncode != 0:
         err = (r.stderr or b"").decode(errors='replace')[:200]
         raise RuntimeError(f"djxl Rec.2020 failed: {err}")

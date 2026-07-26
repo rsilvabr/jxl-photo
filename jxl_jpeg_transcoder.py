@@ -259,6 +259,11 @@ DELETE_CONFIRM = True
 TEMP_DIR = None
 # None = system temp. Set to custom path if needed.
 
+CODEC_TIMEOUT = 900
+# Timeout (seconds) for each cjxl/djxl/magick invocation. 600s can be tight
+# for very large images (45-100MP) with many workers competing for CPU/disk;
+# a timeout becomes a per-file error (output cleaned up), never a hung batch.
+
 TEMP2_DIR = None
 # Staging directory for output files during conversion
 # Example: r"E:\staging_jxl"
@@ -1038,13 +1043,13 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             r = subprocess.run(
                 ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
                  "--effort", str(effort)],
-                capture_output=True, timeout=600
+                capture_output=True, timeout=CODEC_TIMEOUT
             )
         else:
             output_dirty = True
             r = subprocess.run(
                 ["djxl", str(src_path), str(write_path)],
-                capture_output=True, timeout=600
+                capture_output=True, timeout=CODEC_TIMEOUT
             )
         if r.returncode != 0:
             raise RuntimeError(f"{'cjxl' if is_jpeg_encode else 'djxl'}: {r.stderr.decode(errors='replace')[:200]}")
@@ -1123,7 +1128,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         if is_jxl_decode and _tool_at_least("djxl", 0, 12):
             djxl_cmd.insert(1, "--reconstruct_jpeg")
         output_dirty = True
-        r = subprocess.run(djxl_cmd, capture_output=True, timeout=600)
+        r = subprocess.run(djxl_cmd, capture_output=True, timeout=CODEC_TIMEOUT)
         if r.returncode != 0:
             raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1313,9 +1318,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 if src_md5 is None or read_md5_db(final_file) is None:
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
                     continue
+            if not decode:
                 # Encode direction: structural validity is not enough — the
                 # JXL must also carry jbrd, otherwise the original JPEG can
-                # never be recovered bit-exactly (README's promise).
+                # never be recovered bit-exactly (README's promise). This
+                # check is INDEPENDENT of MD5 storage (--no-md5 must not
+                # weaken it).
                 if final_file.suffix.lower() == '.jxl' and not has_jbrd_box(final_file):
                     logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
                     continue
@@ -1607,21 +1615,32 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
 
         # Build cjxl command
         cmd = ["cjxl", str(src_path), str(write_path), "--effort", str(effort), "-d", str(distance)]
-        # cjxl 0.11.2 default --lossless_jpeg=1 is incompatible with distance>0
+        is_jpeg_input = src_path.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
+        # --lossless_jpeg=0 only for d>0 (convert = pixel re-encode). At d=0
+        # the cjxl default (lossless_jpeg=1) yields a CONTAINER with jbrd —
+        # which the integrity gate requires, and which makes a d=0 "convert"
+        # behave as a lossless transcode (noted in the log).
         if distance > 0:
             cmd.append("--lossless_jpeg=0")
+        elif is_jpeg_input:
+            logger.debug("d=0 on the convert path behaves as lossless transcode (jbrd kept)")
 
         # Add container flag for metadata support (needed for EXIF in IrfanView).
-        # Lossy only (d>0): on lossless it changes how the ICC is stored and
-        # breaks color display in IrfanView (same rule as the TIFF encoder).
-        if FORCE_CONTAINER_FOR_LOSSY and distance > 0:
+        # Lossy only (d>0) for JPEG inputs: on lossless it changes how the ICC
+        # is stored and breaks color display in IrfanView (same rule as the
+        # TIFF encoder), and cjxl --lossless_jpeg=1 already yields a container.
+        # NON-JPEG inputs (PNG...) ALWAYS need it: at d=0 cjxl writes a bare
+        # codestream that exiftool cannot inject metadata into — and the
+        # integrity gate (container required) would reject our own output.
+        is_jpeg_input = src_path.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
+        if not is_jpeg_input or (FORCE_CONTAINER_FOR_LOSSY and distance > 0):
             cmd.append("--container=1")
 
         # [libjxl >= 0.12] optional --buffering (off by default; see CJXL_BUFFERING)
         cmd += _cjxl_buffering_flag()
 
         output_dirty = True
-        r = subprocess.run(cmd, capture_output=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, timeout=CODEC_TIMEOUT)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -1755,14 +1774,14 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=600)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=600)
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
                         raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
                 # Direct djxl to PNG
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=600)
+                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
         else:
@@ -1777,15 +1796,15 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=600)
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=600)
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
                         raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
                 # Direct djxl to JPG (preserves embedded ICC)
                 quality_flag = f"--jpeg_quality={quality}"
-                r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=600)
+                r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -2012,8 +2031,10 @@ def cmd_convert(args, from_jxl: bool = True):
         # Mode 2: explicit output dir -> flat into it. Otherwise: opt-in
         # --output-suffix -> <folder><suffix>/ sibling folders; default ->
         # flat into the input root (same layout as the transcode path).
+        # For a FILE input the "root" is its parent folder.
         _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
-        resolve_root = (args.output or (None if _suffix else args.input)) if args.mode == 2 else output_root
+        _input_root = args.input.parent if args.input.is_file() else args.input
+        resolve_root = (args.output or (None if _suffix else _input_root)) if args.mode == 2 else output_root
         _eff_suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or "")
         if direction == "to_jxl":
             out = resolve_output_convert(f, args.mode, args.output_name,
@@ -2343,10 +2364,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     # Use explicit output directory if provided, otherwise fall back to input
     # root. Mode 2 convert is the exception: it needs the RAW args.output
     # (possibly None) so the suffix-folder branch in resolve_output_convert
-    # can fire (see cmd_convert).
+    # can fire (see cmd_convert). For a FILE input the "root" is its parent.
     output_root = args.output if args.output is not None else args.input
     _suffix = args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or None)
-    resolve_root = (args.output or (None if _suffix else args.input)) if args.mode == 2 else output_root
+    _input_root = args.input.parent if args.input.is_file() else args.input
+    resolve_root = (args.output or (None if _suffix else _input_root)) if args.mode == 2 else output_root
 
     # Build output pairs
     pairs = []
@@ -2377,7 +2399,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input)
         else:
             out = resolve_output_convert(
-                f, args.mode, args.output_name, args.output_suffix,
+                f, args.mode, args.output_name,
+                args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or ""),
                 out_ext, args.rename_from, args.rename_to,
                 resolve_root, decode=(direction == "from_jxl")
             )

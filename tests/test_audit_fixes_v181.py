@@ -148,9 +148,31 @@ def test_container_only_for_lossy(monkeypatch, tmp_path):
     assert "--container=1" in cmd
 
 
-def test_container_not_for_lossless(monkeypatch, tmp_path):
+def test_container_for_lossless_png_input(monkeypatch, tmp_path):
+    """Non-JPEG inputs (PNG) ALWAYS get --container=1, even at d=0: at d=0
+    cjxl writes a bare codestream for them, exiftool cannot inject metadata
+    into it, and our integrity gate (container required) would reject the
+    toolkit's own output."""
     cmd = _run_encode(monkeypatch, tmp_path, 0.0)
-    assert "--container=1" not in cmd
+    assert "--container=1" in cmd
+
+
+def test_container_not_for_lossless_jpeg_input(monkeypatch, tmp_path):
+    """JPEG inputs keep the old rule: no --container=1 at d=0 (cjxl
+    --lossless_jpeg=1 already yields a container via jbrd)."""
+    tr.setup_logger()
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8fake")
+    write = tmp_path / "out" / "a.jxl"
+    calls = []
+    monkeypatch.setattr(tr.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _FakeRun())
+    monkeypatch.setattr(tr, "reorder_jxl_boxes", lambda p: None)
+    monkeypatch.setattr(tr, "_copy_metadata", lambda s, d: None)
+    monkeypatch.setattr(tr, "FORCE_CONTAINER_FOR_LOSSY", True)
+    monkeypatch.setattr(tr, "CJXL_BUFFERING", None)
+    tr.encode_to_jxl(src, write, write, effort=7, distance=0.0,
+                     reconvert_val=True, smart=False)
+    assert "--container=1" not in calls[0]
 
 
 # ---------------------------------------------------------------------------

@@ -829,14 +829,14 @@ class FolderAnalyzer:
                 if count > 0 and folder != '.':
                     src = str(self.root / folder)
                     if mode == 4:
-                        # Replace origin in folder name with the script's actual
-                        # destination suffix — JXL/TIFF by direction, and
-                        # JPEG_recovered for the transcoder's decode direction.
+                        # Replace origin in the FOLDER NAME (not the relative
+                        # path — the scripts operate on parent.name) with the
+                        # script's actual destination suffix.
                         _dest_suffix = 'JPEG_recovered' if self.dest in ('jpeg', 'png') else self.dest.upper()
-                        new_name = _replace_suffix_token(folder, self.origin, _dest_suffix)
-                        if new_name == folder:
-                            new_name = folder + "_" + _dest_suffix
-                        dest = str(self.root / new_name)
+                        new_name = _replace_suffix_token(Path(folder).name, self.origin, _dest_suffix)
+                        if new_name == Path(folder).name:
+                            new_name = Path(folder).name + "_" + _dest_suffix
+                        dest = str(self.root / str(Path(folder).parent / new_name))
                     else:
                         dest = str(Path(src).parent / sibling_name)
                     mappings.append((src, dest, count))
@@ -1874,10 +1874,10 @@ class InteractiveMenu:
         if choice == "M":
             return self._wizard_run_from_manifest(workflow)
 
-        # Handle mode 8 with confirmation
+        # Handle mode 8: only MARK delete_source here. The HHMM confirmation
+        # happens at execution time (execute_workflow), AFTER the user had the
+        # chance to pick dry-run — a simulation never charges the token.
         if choice == "8":
-            if not self._confirm_archive_mode():
-                return False
             workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
@@ -1953,8 +1953,7 @@ class InteractiveMenu:
                 choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
 
         if choice == "8":
-            if not self._confirm_archive_mode():
-                return False
+            # Only mark; HHMM confirmation happens at execution time.
             workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
@@ -2058,8 +2057,7 @@ class InteractiveMenu:
             return self._wizard_run_from_manifest(workflow)
 
         if choice == "8":
-            if not self._confirm_archive_mode():
-                return self._show_mode_details_and_select(workflow)
+            # Only mark; HHMM confirmation happens at execution time.
             workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
@@ -2285,6 +2283,8 @@ class InteractiveMenu:
                         choices=["roundtrip", "basic", "matrix", "none"],
                         default="roundtrip"
                     )
+                    # Mark it: Step 6A must not ask the same thing again.
+                    workflow['decode_mode_asked'] = decode_mode
                     advanced_options = workflow.setdefault('advanced_options', {})
                     if decode_mode == "matrix":
                         advanced_options['matrix'] = True
@@ -2386,6 +2386,10 @@ class InteractiveMenu:
                 # Matrix/Basic mode and target ICC for JXL→TIFF
                 if origin == 'jxl' and dest == 'tiff':
                     decode_mode = input("Decode mode (roundtrip/basic/matrix/none) [roundtrip]: ").strip().lower() or "roundtrip"
+                    if decode_mode not in ("roundtrip", "basic", "matrix", "none"):
+                        decode_mode = "roundtrip"
+                    # Mark it: Step 6A must not ask the same thing again.
+                    workflow['decode_mode_asked'] = decode_mode
                     advanced_options = workflow.setdefault('advanced_options', {})
                     if decode_mode == "matrix":
                         advanced_options['matrix'] = True
@@ -2532,27 +2536,36 @@ class InteractiveMenu:
 
         elif origin == 'jxl' and dest == 'tiff':
             _prev = workflow.get('advanced_options', {})
+            _already_asked = workflow.get('decode_mode_asked') is not None
             if RICH_AVAILABLE and console:
-                use_matrix = Confirm.ask("Use ICC matrix conversion?", default=bool(_prev.get('matrix')))
-                use_none = False
-                use_basic = False
-                if not use_matrix:
-                    _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
-                    icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default=_icc_default)
-                    use_basic = (icc_mode == "basic")
-                    use_none = (icc_mode == "none")
-                # Target ICC only applies to matrix mode (decoder ignores it otherwise)
-                if use_matrix:
-                    _ticc_prev = _prev.get('target_icc') or ""
-                    _ticc_default = "sRGB" if _ticc_prev.lower() == "srgb" else ("custom" if _ticc_prev else "")
-                    target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default=_ticc_default)
-                    if target_icc == "custom":
-                        if _ticc_prev and _ticc_prev.lower() != "srgb":
-                            target_icc = Prompt.ask("Enter ICC profile path", default=_ticc_prev)
-                        else:
-                            target_icc = Prompt.ask("Enter ICC profile path")
+                if _already_asked:
+                    # Decode mode was already chosen in Step 6 — reuse it
+                    # instead of asking the same thing twice.
+                    use_matrix = bool(_prev.get('matrix'))
+                    use_basic = bool(_prev.get('basic'))
+                    use_none = bool(_prev.get('none'))
+                    target_icc = _prev.get('target_icc') or ""
                 else:
-                    target_icc = ""
+                    use_matrix = Confirm.ask("Use ICC matrix conversion?", default=bool(_prev.get('matrix')))
+                    use_none = False
+                    use_basic = False
+                    if not use_matrix:
+                        _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
+                        icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default=_icc_default)
+                        use_basic = (icc_mode == "basic")
+                        use_none = (icc_mode == "none")
+                    # Target ICC only applies to matrix mode (decoder ignores it otherwise)
+                    if use_matrix:
+                        _ticc_prev = _prev.get('target_icc') or ""
+                        _ticc_default = "sRGB" if _ticc_prev.lower() == "srgb" else ("custom" if _ticc_prev else "")
+                        target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default=_ticc_default)
+                        if target_icc == "custom":
+                            if _ticc_prev and _ticc_prev.lower() != "srgb":
+                                target_icc = Prompt.ask("Enter ICC profile path", default=_ticc_prev)
+                            else:
+                                target_icc = Prompt.ask("Enter ICC profile path")
+                    else:
+                        target_icc = ""
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 # Thumbnail reconstruction handling
                 th_default = self.config.config.last_thumbnail_handling if hasattr(self.config.config, 'last_thumbnail_handling') else "include"
@@ -2581,33 +2594,41 @@ class InteractiveMenu:
                     delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
                 _prev = workflow.get('advanced_options', {})
-                _m_default = "y" if _prev.get('matrix') else "n"
-                matrix_input = input(f"Use ICC matrix conversion? [{_m_default}/n]: ").strip().lower() or _m_default
-                use_matrix = matrix_input.startswith('y')
-                use_none = False
-                use_basic = False
-                if not use_matrix:
-                    print("ICC mode: auto = use ICC from XMP or djxl (default)")
-                    print("          basic = force Basic mode (djxl ICC)")
-                    print("          none  = no ICC handling")
-                    _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
-                    icc_mode = input(f"ICC mode [auto/basic/none] [{_icc_default}]: ").strip().lower() or _icc_default
-                    use_basic = (icc_mode == "basic")
-                    use_none = (icc_mode == "none")
-                # Target ICC only applies to matrix mode (decoder ignores it otherwise)
-                if use_matrix:
-                    _ticc_prev = _prev.get('target_icc') or ""
-                    target_icc = input(f"Target ICC (sRGB/custom/empty to clear) [{_ticc_prev}]: ").strip()
-                    if not target_icc:
-                        target_icc = _ticc_prev  # empty input keeps previous
-                    elif target_icc.lower() == "empty":
-                        target_icc = ""  # explicit clear
-                    elif target_icc.lower() == "custom":
-                        target_icc = input("Enter ICC profile path: ").strip()
-                    else:
-                        target_icc = _strip_surrounding_quotes(target_icc)
+                _already_asked = workflow.get('decode_mode_asked') is not None
+                if _already_asked:
+                    # Decode mode was already chosen in Step 6 — reuse it.
+                    use_matrix = bool(_prev.get('matrix'))
+                    use_basic = bool(_prev.get('basic'))
+                    use_none = bool(_prev.get('none'))
+                    target_icc = _prev.get('target_icc') or ""
                 else:
-                    target_icc = ""
+                    _m_default = "y" if _prev.get('matrix') else "n"
+                    matrix_input = input(f"Use ICC matrix conversion? [{_m_default}/n]: ").strip().lower() or _m_default
+                    use_matrix = matrix_input.startswith('y')
+                    use_none = False
+                    use_basic = False
+                    if not use_matrix:
+                        print("ICC mode: auto = use ICC from XMP or djxl (default)")
+                        print("          basic = force Basic mode (djxl ICC)")
+                        print("          none  = no ICC handling")
+                        _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
+                        icc_mode = input(f"ICC mode [auto/basic/none] [{_icc_default}]: ").strip().lower() or _icc_default
+                        use_basic = (icc_mode == "basic")
+                        use_none = (icc_mode == "none")
+                    # Target ICC only applies to matrix mode (decoder ignores it otherwise)
+                    if use_matrix:
+                        _ticc_prev = _prev.get('target_icc') or ""
+                        target_icc = input(f"Target ICC (sRGB/custom/empty to clear) [{_ticc_prev}]: ").strip()
+                        if not target_icc:
+                            target_icc = _ticc_prev  # empty input keeps previous
+                        elif target_icc.lower() == "empty":
+                            target_icc = ""  # explicit clear
+                        elif target_icc.lower() == "custom":
+                            target_icc = input("Enter ICC profile path: ").strip()
+                        else:
+                            target_icc = _strip_surrounding_quotes(target_icc)
+                    else:
+                        target_icc = ""
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
                 # Thumbnail reconstruction handling
@@ -3292,6 +3313,15 @@ class InteractiveMenu:
         # Handle manifest mode (mode 99)
         if workflow.get('mode') == 99:
             return self._execute_manifest_workflow(workflow, status)
+
+        # Mode 8 delete gate, at EXECUTION time (was Step 4): the user has
+        # already had the chance to pick dry-run, and a simulation never
+        # charges the HHMM token.
+        if (workflow['mode'] == 8
+                and workflow.get('advanced_options', {}).get('delete_source')
+                and not workflow.get('dry_run')):
+            if not self._confirm_archive_mode():
+                return False
 
         origin = workflow['origin_format']
         dest = workflow['dest_format']
