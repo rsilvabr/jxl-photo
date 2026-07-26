@@ -26,7 +26,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New in v1.8
 
-### New in v1.8
+> **Breaking change (v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder**. If you have saved commands or manifests using transcoder modes 4 or 5, swap them.
 
 - **libjxl v0.12 support (auto-detected)** — the scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them; older libjxl behaves exactly as before.
   - **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
@@ -42,160 +42,37 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - **Meaningful exit codes** — `0` ok / `1` errors / `2` safety abort / `3` cancelled, consistently across all three scripts and the wrapper.
 - **UTF-8 metadata everywhere** — all exiftool calls use UTF-8 argfiles, so unicode paths, `[ ]` in folder names, and non-ASCII metadata round-trip correctly on Windows.
 
-### v1.8.0
+### v1.8.1 — stability release (recommended)
 
-> **⚠️ Breaking change:** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder**. If you have saved commands/manifests using transcoder modes 4 or 5, swap them.
+Bug-fix release driven by an extended audit cycle: **twenty review rounds**, 130+ fixes across the four scripts, and a regression suite that grew to **188 tests**. Highlights:
 
-- **`--dry-run` now simulates on all transcoder paths** (transcode/auto converted for real before)
-- **Wizard mode 8 `--delete-source` now propagates** through every path (it was silently dropped)
-- **Auto mode + staging + 16-bit** no longer strands outputs in the staging folder
-- **Transcoder mode 1 is flat again** (matching its README and the TIFF decoder)
-- **Auto mode processes PNG-only folders** (convert encode to JXL)
-- Wizard: decode mode no longer asked twice; target ICC only for matrix mode; repeat workflow preserves lossy `distance`; lossless transcode decode asks only the simple "yes" confirmation
+- **No silent data loss** — 16-bit decoding fails loudly instead of quietly delivering 8-bit data; a corrupt JXL can no longer be "repaired" into passing the integrity gate; source deletion requires real verification.
+- **Multi-page reconstruction survives bad input** — one unreadable file in a batch no longer strips the page/grayscale/depth markers from the other 399.
+- **Manifest runs no longer skip files silently** — cross-entry output collisions are refused, and the mode-3 manifest covers files sitting in the input root.
+- **Accurate exit codes and Auto Mode behavior**, in both the scripts and the wizard.
 
-Full release notes: [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
-
-### v1.8.1
-
-Bug-fix release driven by an extended code-audit cycle — **100+ fixes** across the four scripts, with a large new regression suite (170+ tests). Highlights include stricter output validation, hardened multi-page reconstruction, more accurate Auto Mode behavior (both in the scripts and the wizard), and many small correctness and performance improvements. Full list: [v1.8.1 release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [Bug tracking](docs/bug_tracking_since_v1.0.md).
-
-**Recommended version** — if you're on v1.8.0, upgrade: v1.8.1 is the most stable and most tested release of this toolkit.
+Full notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
 
 ---
 
-## What's New in v1.7
+## Release history
 
-### Multi-Page TIFF Support
-TIFFs with more than one page are now handled explicitly instead of silently discarding extra pages.
+| Version | Date | Highlights |
+|---------|------|------------|
+| **v1.8.1** | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
+| v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
+| v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |
+| v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
+| v1.7.0 | 2026-07-12 | Multi-page TIFF support: split/skip/ignore, thumbnail handling, per-page ICC, marker-based reconstruction |
+| v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection |
+| v1.5.x | 2026-04 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix |
+| v1.4 | 2026-04-11 | JXL → JPEG workflow: lossy/lossless conversion modes |
+| v1.3 | 2026-04-11 | Auto Mode (beta), manifest system, embedded JPEG thumbnail |
+| v1.2 | 2026-04-05 | Basic/None decode modes, ICC mode selector |
+| v1.1 | 2026-04-05 | D50 patch modes, metadata strip, race-condition fixes |
+| v1.0 | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
 
-**TIFF → JXL encoder:**
-- `--multipage-mode ignore` — encode only page 0 (original behavior, default)
-- `--multipage-mode skip` — skip files that have more than one "real" page
-- `--multipage-mode split` — encode each real page to a separate JXL (`photo.jxl`, `photo_page2.jxl`, ...)
-- `--multipage-mode split_all` — encode every page, including thumbnails
-
-Thumbnails are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`_thumbnail` by default).
-
-**JXL → TIFF decoder:**
-- Reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder.
-- Preserves per-page ICC profiles: each page is restored with its own ICC tag; pages that inherited ICC from IFD0 are reconstructed without an ICC tag, matching the original TIFF structure.
-- Preserves grayscale pages and `SubfileType` role: single-channel pages are reconstructed as 2D grayscale, and inherited RGB ICC is not forced onto them. Non-standard `SubfileType` values (e.g. scanner IR/mask pages) are restored as `PAGE` semantics.
-- Per-page bit depth policy: main pages stay 16-bit while 8-bit thumbnails are restored as 8-bit by default (`--depth-policy preserve_thumbnails`). Use `force16` for all 16-bit output or `preserve_original` to keep every page at its original bit depth.
-- `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files
-- `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
-- `--thumbnail-handling generate` — not yet implemented; falls back to `include`
-- `--no-reconstruct-multipage` — disable multi-page reconstruction entirely
-
-```bash
-# Photos with main image + thumbnail → split JXLs
-python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode include --distance 0
-
-# Reconstruct the original multi-page TIFF
-python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --thumbnail-handling include
-
-# Film scanner workflow with IR/mask page (grayscale)
-python jxl_tiff_encoder.py "E:\film_scans" "E:\film_scans_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include
-python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include
-```
-
-> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
-
-JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
-
-> **Scanner color profile note:** Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF. The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat JXL as the backup container and the reconstructed TIFF as the final image.
-
-### v1.7.1 / v1.7.2
-
-- **Cautious ICC strategy (v1.7.1)** — the default `--icc-png-strategy cautious` round-trip-tests each unseen ICC profile through cjxl+djxl and caches the verdict, so scanner profiles that darken lossy encodes are skipped automatically.
-- **Audit fixes (v1.7.1)** — a batch crash on JXLs without `jbrd` became a per-file error, lossy convert preserves EXIF/XMP/IPTC via exiftool, `.jfif`/`.jpe` support, `--multipage-mode skip` uses the detected real page.
-- **v1.7.2** — the wrapper's `--delete-source` confirmation no longer gets stuck on the main wizard path, and lossy convert keeps Exif/XMP before the codestream after the metadata copy (IrfanView-compatible).
-
-Full release notes: [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2)
-
----
-
-## What's New in v1.6
-
-### Audit-Driven Fixes
-This release fixes issues found during an independent audit of v1.5.3:
-
-- **Encoder staging concurrency fixed** — failed outputs no longer get promoted when using multiple workers
-- **Auto mode routing fixed** — JPEG folders are now encoded, not decoded; `--format jpeg` actually produces JPEGs
-- **Manifest modes preserved** — generated manifests now include a `Mode` column, so modes 6 and 7 survive execution
-- **Basic mode 16-bit fidelity** — PNG decode now preserves full 16-bit data
-- **Matrix mode for libjxl v0.11.x** — uses the correct `--color_space` token
-- **CMYK TIFFs rejected early** — no more silent RGBA mis-encoding
-- **Wizard cleanup** — removed non-functional "skip" option; custom Target ICC asks for the real file path
-
-### ICC Alias Cleanup
-Only `sRGB` remains as a built-in ICC alias. `Adobe RGB` and `ProPhoto RGB` aliases were removed because Pillow cannot generate them on the fly; use actual `.icc` profile files instead.
-
----
-
-## What's New in v1.5
-
-### JXL → JPEG Auto-Detect Mode
-**Smart per-file detection** for mixed JXL archives:
-- Files **with jbrd box** → lossless transcoding (original JPEG recovered)
-- Files **without jbrd** → lossy conversion with configurable quality
-- Processes entire folders automatically, routing each file to the optimal method
-
-### Optional JPEG Preview in TIFF Output
-JXL → TIFF conversion now supports **disabling the embedded JPEG preview**:
-```bash
-python jxl_tiff_decoder.py folder/ --no-preview  # Smaller files, no preview
-```
-Default behavior unchanged (preview enabled for compatibility).
-
-### Refined JXL → JPEG Options
-Step 2 now offers three clear choices:
-1. **JPEG Auto-Detect** — Recommended (auto-routes based on jbrd presence)
-2. **JPEG Lossless** — Force lossless transcoding (requires jbrd)
-3. **JPEG Lossy** — Force lossy conversion with quality/ICC control
-
----
-
-## What's New in v1.3
-
-### Auto Mode + Manifest System
-
-> **Beta:** Auto Mode is functional but still being tested. If you encounter issues, use manual mode selection (options 0-8) which is fully stable.
-
-**[A] Auto Mode** analyzes your folder structure and recommends the best organization mode automatically:
-- Detects `_EXPORT`, `Export_Lightroom`, etc. (case-insensitive)
-- Shows folder mapping preview before running
-- Recommends mode with confidence level (high/medium/low)
-
-**[P] Manifest CSV** — Generate, edit in Excel, then run:
-```
-[A] Auto Mode → [P] Generate manifest → Edit in Excel → [M] Run from manifest
-```
-
-- Edit paths, delete rows, reorder before running
-- Comment out lines with `#` to skip temporarily
-- Manifests saved in `manifests/` folder — rerun anytime
-- Use with `--sync` to re-process only changed files
-
-### Embedded JPEG Thumbnail in JXL (Optional)
-Optional embedded 256px sRGB thumbnail in JXL files for fast preview in IrfanView, XnView, digiKam.
-```bash
-python jxl_tiff_encoder.py folder/ --embed-thumbnail
-```
-Adds ~20KB per file.
-
-**Windows Explorer Note:** The current JXL WIC codec from Microsoft Store generates its own thumbnail and **ignores the embedded EXIF thumbnail**. Worse, it does so **without color management** — so if your image uses ProPhoto RGB or Adobe RGB, the thumbnail will show wrong/washed-out colors. This is a **Windows codec limitation, not a bug in this software**. Use IrfanView, XnView MP, or digiKam for accurate thumbnails.
-
-**IrfanView Note:** EXIF display in JXL has limitations with this software:
-
-| Source | JXL Type | EXIF in IrfanView | Why |
-|--------|----------|-------------------|-----|
-| **TIFF → JXL** | Lossless | ✅ Shows | Boxes reordered (Exif before codestream) |
-| **JPEG → JXL** | Lossless | ❌ Hidden | Brotli compression (`brob` box) - IrfanView can't read |
-| **JPEG → JXL** | Lossy | ❌ Hidden | Brotli compression (`brob` box) - IrfanView can't read |
-
-For reliable EXIF viewing regardless of source, use **XnView MP** or **digiKam**.
-
-**Wide-gamut Note:** On an Adobe RGB calibrated monitor, IrfanView and XnView MP may display wide-gamut JXL files (e.g. ProPhoto RGB) with a slightly muted appearance — comparable to the difference between an original Adobe RGB file and the same file properly converted to sRGB. The most vibrant colors that extend beyond sRGB may appear dulled. This is a **subtle viewer rendering limitation**, not data loss — the JXL file still holds the full gamut intact. If the image looks *heavily* desaturated, that is a real bug. You can verify preservation by decoding the JXL back to TIFF: the round-trip TIFF will show the original vibrant colors again in any color-managed editor. See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for details.
+Older "What's New" sections in full: [docs/version_history.md](docs/version_history.md)
 
 ---
 
@@ -415,6 +292,7 @@ Depending on your needs, three common approaches:
 | [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | Full documentation for JXL → TIFF decoding |
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+| [docs/version_history.md](docs/version_history.md) | "What's New" notes for releases before v1.8 |
 | [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
 
 ---
@@ -671,7 +549,26 @@ exiftool -Make -Model roundtrip.tif
 
 ---
 
-## Known Limitations
+## Known Limitations & Behaviors
+
+### Film scanners: IR channel / Digital ICE
+
+If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back **may break that feature**. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. **Test with one file before batch-processing important film scans.**
+
+### Scanner ICC profiles and lossy encoding
+
+Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF (see `--icc-png-strategy`). The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat **JXL as the backup container and the reconstructed TIFF as the final image**.
+
+### Viewer quirks (not data loss)
+
+| Viewer | Behavior | Why |
+|--------|----------|-----|
+| **Windows Explorer** | Thumbnails ignore the embedded EXIF thumbnail and are **not color-managed** — ProPhoto/Adobe RGB images look washed out | Limitation of Microsoft's JXL WIC codec |
+| **IrfanView** | EXIF visible for TIFF → JXL, **hidden** for JPEG → JXL (lossless or lossy) | JPEG → JXL uses Brotli (`brob` box), which IrfanView cannot read |
+| **IrfanView / XnView MP** | Wide-gamut JXL may look slightly muted on a calibrated monitor | Viewer rendering limitation — the file keeps the full gamut; decode back to TIFF to confirm |
+| **XnView MP** | Shows `Color Profile: sRGB` for lossy JXL regardless of the real space | Lossy JXL stores compact numeric primaries, not an ICC blob; XnView falls back to an "sRGB" label |
+
+For reliable EXIF and color, use **XnView MP** or **digiKam**. If an image looks *heavily* desaturated, that **is** a real bug — please report it.
 
 ### Default re-run behavior differs per script
 
@@ -701,6 +598,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 ## Changelog
 
 - Release notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
+- [Version history](docs/version_history.md) — "What's New" notes for releases before v1.8
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
 - [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code
