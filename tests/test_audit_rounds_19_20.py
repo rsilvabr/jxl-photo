@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-Tests for the 19th audit round fixes:
+Tests for the 19th and 20th audit round fixes.
+
+20th round (wrapper manifest path):
+
+- manifest entries that would write different files to the same output are
+  refused (each entry is a separate child process, so no child can see it)
+- the mode-3 manifest covers files sitting in the input ROOT
+
+19th round (scripts):
 
 - read_png_to_numpy hard-fails on 16-bit RGB/RGBA when imagecodecs DECODE
   fails, not only when the import fails (no silent 16->8 bit degradation)
@@ -208,3 +216,87 @@ def test_cmd_auto_from_jpeg_ignores_pngs(monkeypatch, tmp_path):
     seen = _auto_seen_suffixes(monkeypatch, tmp_path, from_jpeg=True)
     assert ".jpg" in seen, "JPEGs must still be processed"
     assert ".png" not in seen, "--from-jpeg must leave PNGs untouched in auto mode"
+
+
+# ---------------------------------------------------------------------------
+# 20th round — wrapper manifest path
+# ---------------------------------------------------------------------------
+
+import numpy as _np
+import tifffile as _tifffile
+
+import jxl_photo as wrapper
+
+
+def _make_tiff(path, value=1000):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _tifffile.imwrite(str(path), _np.full((8, 8, 3), value, dtype=_np.uint16),
+                      photometric='rgb')
+
+
+def _menu():
+    cm = wrapper.ConfigManager()
+    return wrapper.InteractiveMenu(cm, wrapper.DependencyChecker(cm))
+
+
+def test_mode3_manifest_covers_root_files(tmp_path):
+    """The child converts TIFFs sitting in the input root (to <root>/JXL_16bits/),
+    so the mode-3 manifest must list the root too — modes 0 and 1 already do."""
+    _make_tiff(tmp_path / "root_a.tif")
+    _make_tiff(tmp_path / "root_b.tif")
+    _make_tiff(tmp_path / "sub1" / "s1.tif")
+
+    fa = wrapper.FolderAnalyzer(tmp_path, "tiff", "jxl")
+    analysis = fa.analyze()
+    covered = sum(c for _s, _d, c, _m in fa.generate_manifest(analysis, 3))
+    assert covered == 3, f"mode-3 manifest covers {covered}/3 files"
+
+    # Consistency with the modes that always included the root
+    for mode in (0, 1):
+        n = sum(c for _s, _d, c, _m in fa.generate_manifest(analysis, mode))
+        assert n == 3, f"mode {mode} covers {n}/3"
+
+
+def test_manifest_cross_entry_collision_detected(tmp_path):
+    """Mode 5 collapses every source folder into one sibling folder, so
+    sub1/foto.tif and sub2/foto.tif both target <root>/JXL_16bits/foto.jxl.
+    Each entry runs as its own process, so only the wrapper can catch this."""
+    _make_tiff(tmp_path / "sub1" / "foto.tif", 1000)
+    _make_tiff(tmp_path / "sub2" / "foto.tif", 60000)
+
+    fa = wrapper.FolderAnalyzer(tmp_path, "tiff", "jxl")
+    analysis = fa.analyze()
+    entries = [(s, d, m) for s, d, _c, m in fa.generate_manifest(analysis, 5)]
+    assert len(entries) == 2, "expected one entry per source folder"
+
+    collisions = _menu()._manifest_output_collisions(entries, fa._get_extensions("tiff"))
+    assert len(collisions) == 1, f"expected 1 collision, got {collisions}"
+    a, b, _dest = collisions[0]
+    assert {a.parent.name, b.parent.name} == {"sub1", "sub2"}
+
+
+def test_manifest_no_false_positive_on_distinct_names(tmp_path):
+    """Distinct filenames in the same collapsed destination must NOT abort."""
+    _make_tiff(tmp_path / "sub1" / "alpha.tif")
+    _make_tiff(tmp_path / "sub2" / "beta.tif")
+
+    fa = wrapper.FolderAnalyzer(tmp_path, "tiff", "jxl")
+    analysis = fa.analyze()
+    menu = _menu()
+    for mode in (0, 1, 3, 5):
+        entries = [(s, d, m) for s, d, _c, m in fa.generate_manifest(analysis, mode)]
+        assert not menu._manifest_output_collisions(entries, fa._get_extensions("tiff")), \
+            f"false positive in mode {mode}"
+
+
+def test_manifest_nested_files_not_flagged(tmp_path):
+    """Only files DIRECTLY in a source folder land in that entry's declared
+    destination; same-named files one level deeper resolve elsewhere and must
+    not be reported (they are covered by the child's own guard)."""
+    _make_tiff(tmp_path / "sub1" / "deep" / "foto.tif")
+    _make_tiff(tmp_path / "sub2" / "deep" / "foto.tif")
+
+    fa = wrapper.FolderAnalyzer(tmp_path, "tiff", "jxl")
+    analysis = fa.analyze()
+    entries = [(s, d, m) for s, d, _c, m in fa.generate_manifest(analysis, 5)]
+    assert not _menu()._manifest_output_collisions(entries, fa._get_extensions("tiff"))

@@ -824,10 +824,16 @@ class FolderAnalyzer:
                 mappings.append((str(self.root), out_dir, total))
 
         elif mode == 3:
-            # Recursive: each folder gets its own real subfolder name
+            # Recursive: each folder gets its own real subfolder name.
+            # The ROOT ('.') is included, like modes 0 and 1: the child DOES
+            # convert files sitting directly in the input root (output goes to
+            # <root>/JXL_16bits/), so excluding it here silently dropped them
+            # from manifest runs while a direct run converted them.
+            # Modes 4/5 below still exclude the root on purpose — there the
+            # output would land OUTSIDE the selected input tree.
             for folder, count in analysis['file_distribution'].items():
-                if count > 0 and folder != '.':
-                    src = str(self.root / folder)
+                if count > 0:
+                    src = str(self.root / folder) if folder != '.' else str(self.root)
                     dest = str(Path(src) / _dest_folder_names(self.origin, self.dest)[1])
                     mappings.append((src, dest, count))
 
@@ -2978,6 +2984,36 @@ class InteractiveMenu:
             return False
         script = str(script_path)
 
+        # Create the analyzer once — prefer the workflow's mode_config marker (a
+        # manifest run with a custom marker must detect modes with the same
+        # marker the children will use).
+        _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
+        analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
+
+        # Cross-entry duplicate outputs: each entry is a separate child process,
+        # so no child can see a collision that spans two entries. Refuse loudly
+        # instead of silently archiving only one of the two sources.
+        collisions = self._manifest_output_collisions(
+            manifest_entries, analyzer._get_extensions(origin)
+        )
+        if collisions:
+            self._print_error(
+                "Aborting: manifest entries would write different files to the same output."
+            )
+            for a, b, d in collisions[:10]:
+                msg = f"  {a} + {b}  ->  same name in {d}"
+                if RICH_AVAILABLE and console:
+                    console.print(f"[red]{msg}[/red]")
+                else:
+                    print(msg)
+            if len(collisions) > 10:
+                print(f"  ... and {len(collisions) - 10} more")
+            self._print_error(
+                "Rename the inputs, pick another mode, or run the folder directly "
+                "(a non-manifest run detects this itself)."
+            )
+            return False
+
         # Manifest entries with mode 8 + delete_source get --delete-confirm-off
         # from the cmd builder — so the wrapper MUST gate them with the same
         # HHMM confirmation the wizard/repeat paths enforce. Ask once, before
@@ -3004,12 +3040,6 @@ class InteractiveMenu:
                 print("DRY RUN MODE")
             print()
 
-        # Create analyzer once outside the loop for efficiency — prefer the
-        # workflow's mode_config marker (a manifest run with a custom marker
-        # must detect modes with the same marker the children will use).
-        _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-        analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
-        
         for i, (source, dest_path, entry_mode) in enumerate(manifest_entries, 1):
             # Preserve the mode the manifest was generated with (important for modes 6/7)
             detected_mode = analyzer.detect_mode_for_entry(source, dest_path, original_mode=entry_mode)
@@ -3060,6 +3090,55 @@ class InteractiveMenu:
             print(f"\nManifest complete: {ok_count} OK | {skip_count} skipped | {error_count} errors")
 
         return error_count == 0
+
+    def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set) -> List:
+        """Find files from DIFFERENT manifest entries that would be written to
+        the same output file.
+
+        Each manifest entry runs as a SEPARATE child process, so the children's
+        own duplicate-output guard (_abort_on_duplicate_outputs) can never see a
+        conflict that spans two entries. Mode 5 is the case that bites: every
+        source folder collapses into the same sibling folder, so
+        sub1/foto.tif and sub2/foto.tif both target <root>/JXL_16bits/foto.jxl.
+        A direct run aborts on this; a manifest run silently converts one and
+        skips (or overwrites) the other while reporting 0 errors.
+
+        Only files DIRECTLY inside each source folder are considered: those are
+        exactly the ones that land in the entry's declared Destination. Files in
+        deeper folders resolve to a different destination and are already
+        covered by the child's own guard within its entry.
+
+        Returns a list of (file_a, file_b, dest_folder) tuples.
+        """
+        by_dest: Dict[str, Dict[str, Path]] = {}
+        collisions = []
+        for source, dest_path, _mode in manifest_entries:
+            if not dest_path:
+                continue
+            src_root = Path(source)
+            try:
+                if not src_root.is_dir():
+                    continue
+                entries = sorted(src_root.iterdir())
+            except OSError:
+                continue
+            key = os.path.normcase(str(Path(dest_path)))
+            seen = by_dest.setdefault(key, {})
+            for f in entries:
+                try:
+                    if not f.is_file() or f.suffix.lower() not in origin_exts:
+                        continue
+                except OSError:
+                    continue
+                # Outputs are named from the stem, so a stem clash is a clash
+                # whatever the target extension is.
+                stem = f.stem.lower()
+                prev = seen.get(stem)
+                if prev is None:
+                    seen[stem] = f
+                elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
+                    collisions.append((prev, f, dest_path))
+        return collisions
 
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
                                    origin: str, dest: str, workers: int,
