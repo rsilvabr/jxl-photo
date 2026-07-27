@@ -206,22 +206,23 @@ everything:
 Manifest complete: 3 entries - 2 ok, 1 with failures, 0 cancelled
 ---------------------------------------------------------------------------
   #  mode folder                           OK    ovw   skip corrupt    err
-  1  6    D:\2025\...\1_Fuji             2003      0      0       0      2
-  2  6    E:\2026\260101_Osaka\2_Z8      3001      2      4       0      0
-  3  6    G:\2026\...\2_Z8                758      0      0       1      0
+  1  6    D:\2026\260318_Rio             2003      0      0       0      2
+  2  6    E:\2026\260425_Nara            3001      2      4       0      0
+  3  6    G:\2026\260512_Recife           758      0      0       1      0
 ---------------------------------------------------------------------------
   TOTAL files                            5762      2      4       1      2
 ---------------------------------------------------------------------------
   D50 patched: 12  |  Thumbnails excluded: 5762
 ---------------------------------------------------------------------------
   FAILURES (2):
-    [1] D:\2025\250913_Fuji_Yokohama\1_Fuji\dia3\IMG_0412.tif
+    [1] D:\2026\260318_Rio\_EXPORT\IMG_0412.tif
         -> cjxl exit 1
-    ...
+    [1] D:\2026\260318_Rio\_EXPORT\IMG_0587.tif
+        -> ICC profile rejected
 ---------------------------------------------------------------------------
   CORRUPT / UNREADABLE (1):
   These were NOT converted. The source files are damaged.
-    [3] G:\2026\260620-23_Kyoto_Tokuyasu\2_Z8\_EXPORT\scan_099.tif
+    [3] G:\2026\260512_Recife\_EXPORT\scan_099.tif
         -> no readable pages (corrupt or truncated TIFF)
 ===========================================================================
 ```

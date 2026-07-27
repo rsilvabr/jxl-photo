@@ -465,7 +465,7 @@ it to be dropped:
 ```
 Done: 41 OK | 0 overwrites | 0 skipped | 0 errors
 WARNING | Corrupt: 1 file(s) had no readable pages and were NOT converted:
-WARNING |   -> G:\2026\260620_Kyoto\_EXPORT\TRUNCADO.tif
+WARNING |   -> G:\2026\260512_Recife\_EXPORT\scan_099.tif
 ```
 
 The test is that the page analyzer found neither a real page nor a thumbnail — a
