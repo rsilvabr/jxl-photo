@@ -24,34 +24,21 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) and [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) to check. 
 
-## What's New in v1.8
+## What's New
 
-> **Breaking change (v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** to match the TIFF encoder/decoder: **4 = folder rename (suffix swap)**, **5 = sibling folder**. If you have saved commands or manifests using transcoder modes 4 or 5, swap them.
+**Current release: v1.8.2** (2026-07-27) — recommended for everyone. Three rounds of hardening on top of v1.8.0's libjxl v0.12 support: an internal audit, an independent second-opinion audit, and a pass of usability fixes found by running a real ~4700-file photo library through the tools.
 
-- **libjxl v0.12 support (auto-detected)** — the scripts detect the `cjxl`/`djxl` version at runtime and only use v0.12 features when the binary supports them; older libjxl behaves exactly as before.
-  - **Lossless JPEG recovery is now authoritative** — on `djxl` ≥ 0.12, the transcode decode path runs `djxl --reconstruct_jpeg`: it fails cleanly if the original JPEG cannot be reconstructed bit-exactly, instead of silently re-encoding. Together with the existing `jbrd` check, lossless recovery now has two independent guards (a failure is a per-file error; the batch continues).
-  - **Optional `--buffering` flag** (encoder CLI) and `CJXL_BUFFERING` setting (encoder + transcoder) — opt into `--buffering 0` on libjxl ≥ 0.12 for maximum compression. Off by default: only ~1.2% smaller but ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)).
-  - **Safe fallback** — unknown/unreadable versions are treated as old; no v0.12-only flag is ever passed to an older binary.
-- **Output integrity verification everywhere** — every converted file is validated before being reported OK: full ISOBMFF box-chain check for JXL, EOI marker for JPEG, IEND for PNG, and a forced pixel read for TIFF. Anything that fails is cleaned up and reported as a per-file error — the batch continues.
-- **Safer delete gates (mode 8)** — source files are only deleted after the output passes integrity, and JPEG recovery additionally requires `djxl --reconstruct_jpeg` or a verified MD5 match.
-- **Direction-restriction flags** — `--from-jxl` (auto mode processes only JXLs) and `--from-jpeg` (convert processes only JPEGs), so mixed folders always convert the files you actually chose.
-- **`--export-subfolder`** — mode 7 can target a specific subfolder of the export marker directly from the CLI (and the wizard asks for it).
-- **`--delete-confirm-off`** — skip the interactive delete confirmation for wrappers/automation that already asked the user.
-- **Multi-page reconstruction v2** — split pages now carry authoritative `jxlphoto-page:` / `jxlphoto-thumb` XMP markers, so reconstruction no longer depends on filenames (safe even for files named `scan_page3.tif` or `holiday_thumbnail.tif`). Gray+alpha (LA) pages round-trip correctly.
-- **Manifest `Direction` column + picker** — manifests are bound to the workflow that generated them (a mismatch is refused with a clear error), and several manifests get a file picker.
-- **Meaningful exit codes** — `0` ok / `1` errors / `2` safety abort / `3` cancelled, consistently across all three scripts and the wrapper.
-- **UTF-8 metadata everywhere** — all exiftool calls use UTF-8 argfiles, so unicode paths, `[ ]` in folder names, and non-ASCII metadata round-trip correctly on Windows.
+> **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
-### v1.8.1 — stability release (recommended)
+Highlights:
 
-Bug-fix release driven by an extended audit cycle: **twenty review rounds**, 130+ fixes across the four scripts, and a regression suite that grew to **188 tests**. Highlights:
+- **No silent data loss** — 16-bit decode failures, a "repaired" corrupt JXL, and weak delete verification now all fail loudly instead of quietly proceeding.
+- **Multi-page TIFFs are safe by default** — every page is kept (`--multipage-mode split`) instead of just page 0, and mode 8 refuses to delete a source whose pages were dropped.
+- **Every output is verified before being trusted** — a corrupt or partial JXL/JPEG/PNG/TIFF is caught and cleaned up instead of reported OK.
+- **Manifests are Excel-safe and collision-checked** — UTF-8 BOM for non-ASCII paths, cross-entry output collisions refused up front.
+- **Better throughput on large libraries** — the thread pool no longer stalls at folder boundaries.
 
-- **No silent data loss** — 16-bit decoding fails loudly instead of quietly delivering 8-bit data; a corrupt JXL can no longer be "repaired" into passing the integrity gate; source deletion requires real verification.
-- **Multi-page reconstruction survives bad input** — one unreadable file in a batch no longer strips the page/grayscale/depth markers from the other 399.
-- **Manifest runs no longer skip files silently** — cross-entry output collisions are refused, and the mode-3 manifest covers files sitting in the input root.
-- **Accurate exit codes and Auto Mode behavior**, in both the scripts and the wizard.
-
-Full notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
+Full release notes: [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
 
 ---
 
@@ -59,7 +46,8 @@ Full notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.8.1** | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
+| **v1.8.2** | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
+| v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
 | v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
 | v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |
 | v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
@@ -617,7 +605,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-- Release notes: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
+- Release notes: [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
 - [Version history](docs/version_history.md) — "What's New" notes for releases before v1.8
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
