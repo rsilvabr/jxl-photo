@@ -440,6 +440,12 @@ import jxl_photo as wrapper
 def _reset_ignored_counter():
     enc._multipage_ignored["files"] = 0
     enc._multipage_ignored["pages"] = 0
+    enc._thumbnails_dropped["files"] = 0
+    enc._thumbnails_dropped["pages"] = 0
+    enc._discard_warned["count"] = 0
+    enc._discard_warned["suppressed"] = 0
+    enc._discarded_real_page_sources.clear()
+    enc._discarded_thumb_sources.clear()
 
 
 def test_ignore_mode_warns_and_counts_dropped_pages(tmp_path, monkeypatch, caplog):
@@ -483,9 +489,14 @@ def _summary(**adv):
 
 def test_wizard_summary_flags_page_loss():
     """The Step 7 summary is the last gate before YES — page-dropping policies
-    must be flagged there, including the default (no advanced options set)."""
+    must be flagged there. The default is now `split`, which drops nothing, so
+    the default must NOT be flagged; `ignore` and `skip` still must be."""
     label, warn = _summary()
-    assert warn and "DISCARDED" in label, "the wizard default must be flagged"
+    assert not warn, "the default no longer drops pages"
+    assert "split" in label, "the wizard default must be reported as split"
+
+    label, warn = _summary(multipage_mode="ignore")
+    assert warn and "DISCARDED" in label, "an explicit ignore must still be flagged"
 
     label, warn = _summary(multipage_mode="skip")
     assert warn and "NOT converted" in label
@@ -496,21 +507,103 @@ def test_wizard_summary_flags_page_loss():
         assert "one JXL per page" in label
 
 
-def test_split_warns_when_excluding_thumbnails(tmp_path, monkeypatch, caplog):
-    """`split` means "keep my pages" — dropping the thumbnail ones must be as
-    visible as the `ignore` path, not silent."""
+def test_split_counts_excluded_thumbnails_without_per_file_warning(tmp_path, monkeypatch, caplog):
+    """Excluding thumbnails is what the user ASKED for, so it must not produce a
+    WARNING per file (a 5000-photo library buried every real error). It is still
+    counted, and the count is reported once in the run summary."""
     tif = tmp_path / "twopage.tif"
     create_multipage_tiff(tif)          # 2 real pages + 1 thumbnail
     _reset_ignored_counter()
     monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "split")
     monkeypatch.setattr(enc, "THUMBNAIL_MODE", "exclude")
+    monkeypatch.setattr(enc, "WARN_DISCARDED_THUMBNAILS", False)
 
     with caplog.at_level("WARNING"):
         items = enc.convert_multipage(tif, tmp_path / "out", mode=0)
 
     assert len(items) == 2, "the two real pages are still encoded"
-    assert enc._multipage_ignored["pages"] == 1
+    assert enc._thumbnails_dropped["pages"] == 1
+    assert enc._thumbnails_dropped["files"] == 1
+    assert not any("DISCARDING" in r.message for r in caplog.records)
+    # Must NOT be attributed to --multipage-mode ignore: the summary reads that
+    # counter and used to blame the wrong setting.
+    assert enc._multipage_ignored["pages"] == 0
+
+
+def test_warn_thumbnail_discard_restores_per_file_warning(tmp_path, monkeypatch, caplog):
+    """--warn-thumbnail-discard is the opt-in for the file names."""
+    tif = tmp_path / "twopage.tif"
+    create_multipage_tiff(tif)
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "split")
+    monkeypatch.setattr(enc, "THUMBNAIL_MODE", "exclude")
+    monkeypatch.setattr(enc, "WARN_DISCARDED_THUMBNAILS", True)
+
+    with caplog.at_level("WARNING"):
+        enc.convert_multipage(tif, tmp_path / "out", mode=0)
+
     assert any("thumbnail page(s)" in r.message for r in caplog.records)
+    assert enc._thumbnails_dropped["pages"] == 1
+
+
+def test_per_file_discard_warnings_are_capped(tmp_path, monkeypatch, caplog):
+    """The `ignore` path keeps its per-file warning (real page loss), but a huge
+    batch must not print one line per file — the cap keeps errors readable."""
+    _reset_ignored_counter()
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "ignore")
+    monkeypatch.setattr(enc, "DISCARD_WARN_LIMIT", 3)
+
+    tifs = []
+    for i in range(6):
+        t = tmp_path / f"multi{i}.tif"
+        create_multipage_tiff(t)
+        tifs.append(t)
+
+    with caplog.at_level("WARNING"):
+        for t in tifs:
+            enc.convert_multipage(t, tmp_path / "out", mode=0)
+
+    discarding = [r for r in caplog.records if r.message.startswith("DISCARDING")]
+    assert len(discarding) == 3, "warnings stop at the cap"
+    assert enc._discard_warned["suppressed"] == 3
+    # Every dropped page is still accounted for.
+    assert enc._multipage_ignored["files"] == 6
+
+
+def test_mode8_refuses_to_delete_a_source_whose_pages_were_dropped(tmp_path, monkeypatch):
+    """The reason `split` is now the default. Under `ignore`, mode 8 encoded page
+    0 and then unlinked a multi-page TIFF — every downstream check passed (the
+    single JXL written IS valid and complete), so this gate is the only thing
+    that can notice the other pages existed only in the source."""
+    import subprocess
+    src = tmp_path / "scan.tif"
+    # 3 REAL pages, no thumbnail flags
+    imgs = [np.random.randint(0, 65535, (60, 60, 3), dtype=np.uint16) for _ in range(3)]
+    with tifffile.TiffWriter(str(src)) as tw:
+        for im in imgs:
+            tw.write(im)
+
+    script = Path(__file__).resolve().parent.parent / "jxl_tiff_encoder.py"
+    r = subprocess.run(
+        [sys.executable, str(script), str(tmp_path), "--mode", "8",
+         "--multipage-mode", "ignore", "--delete-source", "--delete-confirm-off"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+
+    assert src.exists(), (
+        "mode 8 deleted a TIFF whose pages 1-2 were discarded — permanent data loss\n"
+        + r.stdout + r.stderr)
+    assert "KEEP source (pages were discarded" in (r.stdout + r.stderr)
+
+
+def test_default_multipage_mode_is_split(tmp_path):
+    """The default must not drop pages. A single-real-page TIFF still yields
+    exactly one output, so the change is a no-op for ordinary photos."""
+    assert enc.MULTIPAGE_TIFF_MODE == "split"
+
+    flat = tmp_path / "plain.tif"
+    tifffile.imwrite(str(flat), np.random.randint(0, 65535, (40, 40, 3), dtype=np.uint16))
+    items = enc.convert_multipage(flat, tmp_path / "out", mode=0)
+    assert [i[1].name for i in items] == ["plain.jxl"], "single-page output is unchanged"
 
 
 def test_split_include_is_quiet_and_matches_split_all(tmp_path, monkeypatch, caplog):

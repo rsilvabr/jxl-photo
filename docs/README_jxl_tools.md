@@ -154,6 +154,53 @@ Choose the output format based on the source:
 ### Step 3 — Source Directory
 Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).
 
+The wizard takes **one** folder here. To run a **list of folders** in a single
+session — `G:\2024`, `G:\2025`, `G:\2026` — use a manifest (see below).
+
+* * *
+
+## Running a list of folders (manifest)
+
+A manifest is a CSV where each row is one folder, processed as its own run. Auto
+Mode can generate one for you (`[P] Generate manifest CSV`), but you can also
+write it by hand and drop it in `manifests/` next to `jxl_photo.py`:
+
+```csv
+Source,Destination,Mode,Direction
+G:\2024,,3,tiff2jxl
+G:\2025,,3,tiff2jxl
+G:\2026,,3,tiff2jxl
+```
+
+| Column | Meaning |
+|--------|---------|
+| `Source` | Input folder. Rows starting with `#` are comments. |
+| `Destination` | Only used by modes 0 and 2. Leave **empty** for every other mode — they compute their own output location, and a value there is ignored (the wrapper warns). |
+| `Mode` | 0–8, per row. Different folders can use different modes. |
+| `Direction` | `tiff2jxl`, `jpeg2jxl`, `jxl2tiff`, ... Must match the workflow you start, so a TIFF→JXL manifest can never be replayed by a JXL→TIFF session. |
+
+Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
+**`[M] Run from manifest`**. The encoding settings you pick in Step 6/6A
+(distance, effort, multi-page policy, ...) apply to every entry.
+
+**Editing a manifest in Excel:** generated manifests are UTF-8 **with BOM**, so
+Excel opens non-ASCII folder names (Japanese, accents) correctly instead of as
+mojibake. When you save, keep **`CSV UTF-8 (comma delimited)`** — plain `CSV`
+writes the system ANSI codepage, and the wrapper then refuses the file rather
+than guess an encoding and run against a wrongly-decoded path.
+
+Each row runs as a **separate child process**, so a failure in one folder does not
+kill the rest, and the summary reports `N OK | N skipped | N errors`. Before
+anything runs, the wrapper checks for files from *different* rows that would land
+on the same output file and refuses the whole manifest if it finds any — a child
+process can only see its own entry, so that check has to live here.
+
+If you just want a shell loop instead, the encoder takes one folder per call:
+
+```powershell
+foreach ($y in "G:\2024","G:\2025","G:\2026") { py jxl_tiff_encoder.py $y --mode 3 }
+```
+
 ### Step 4 — Organization Mode
 How output files are organized. Press `?` for detailed explanations with visual examples.
 

@@ -6,6 +6,7 @@ Based on jxl_photo.py - all original features preserved.
 """
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -1581,7 +1582,11 @@ class InteractiveMenu:
         manifest_dir.mkdir(exist_ok=True)
         manifest_path = manifest_dir / f"manifest_{timestamp}.csv"
 
-        with open(manifest_path, 'w', newline='', encoding='utf-8') as f:
+        # utf-8-SIG, not plain utf-8: without the BOM, Excel opens a .csv using
+        # the system ANSI codepage, so a path like "240419_山羊公園" comes out as
+        # mojibake — and saving from there would write those broken bytes back.
+        # The BOM costs 3 bytes and makes Excel detect UTF-8 correctly.
+        with open(manifest_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             # The Direction column binds the manifest to the workflow that
             # generated it, so a TIFF->JXL manifest is never accidentally
@@ -1592,6 +1597,28 @@ class InteractiveMenu:
                 writer.writerow([src, dst, entry_mode, direction])
 
         return str(manifest_path)
+
+    @staticmethod
+    def _open_manifest_for_read(manifest_path: str):
+        """Open a manifest CSV. Returns a text stream, or None if undecodable.
+
+        'utf-8-sig' reads both what we write (UTF-8 **with BOM**, see
+        _generate_manifest) and a plain UTF-8 file, and strips the BOM — left in
+        place it lands in the first cell and breaks the "is this row the header?"
+        check, silently turning the header into a data row.
+
+        If the file is not valid UTF-8 at all, Excel re-saved it in the system
+        ANSI codepage. We deliberately do NOT guess an encoding here: guessing
+        wrong yields a path that looks plausible and points somewhere else, and
+        these paths drive a converter that can delete sources in mode 8. Refuse
+        and tell the user how to fix it. (Pure-ASCII manifests are valid UTF-8,
+        so this only ever triggers when there really are non-ASCII paths.)
+        """
+        try:
+            with open(manifest_path, 'r', encoding='utf-8-sig') as f:
+                return io.StringIO(f.read())
+        except UnicodeDecodeError:
+            return None
 
     def _get_latest_manifest(self) -> Optional[str]:
         """Get the most recent manifest file."""
@@ -1643,7 +1670,14 @@ class InteractiveMenu:
             return
 
         entries = []
-        with open(manifest_path, 'r', encoding='utf-8') as f:
+        stream = self._open_manifest_for_read(manifest_path)
+        if stream is None:
+            self._print_error(
+                f"Manifest is not UTF-8: {manifest_path}\n"
+                f"Excel re-saved it in the system ANSI codepage. Re-open it and use "
+                f"'Save As' -> 'CSV UTF-8 (comma delimited)', or re-generate it.")
+            return
+        with stream as f:
             reader = csv.reader(f)
             first_row = next(reader, None)
             rows = []
@@ -1702,7 +1736,16 @@ class InteractiveMenu:
         # Load manifest
         entries = []
         directions = set()
-        with open(manifest_path, 'r', encoding='utf-8') as f:
+        stream = self._open_manifest_for_read(manifest_path)
+        if stream is None:
+            self._print_error(
+                f"Manifest is not UTF-8: {manifest_path}\n"
+                f"Excel re-saved it in the system ANSI codepage, so the paths cannot be "
+                f"decoded reliably — and a wrongly-decoded path is worse than no run at all. "
+                f"Re-open it in Excel and use 'Save As' -> 'CSV UTF-8 (comma delimited)', "
+                f"or re-generate the manifest.")
+            return False
+        with stream as f:
             import csv
             reader = csv.reader(f)
             first_row = next(reader, None)
@@ -2478,7 +2521,7 @@ class InteractiveMenu:
             if origin == 'tiff' and dest == 'jxl':
                 advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
                 advanced_options['encode_tag'] = workflow.get('encode_tag', 'xmp')
-                advanced_options['multipage_mode'] = self.config.config.last_multipage_mode or 'ignore'
+                advanced_options['multipage_mode'] = self.config.config.last_multipage_mode or 'split'
                 advanced_options['thumbnail_mode'] = self.config.config.last_thumbnail_mode or 'exclude'
                 advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
             elif origin == 'jxl' and dest == 'tiff':
@@ -2505,7 +2548,12 @@ class InteractiveMenu:
                 thumb_default = self.config.config.last_jpeg_thumbnail if self.config.config.last_jpeg_thumbnail is not None else False
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
                 # Multi-page TIFF options
-                mp_default = self.config.config.last_multipage_mode or "ignore"
+                mp_default = self.config.config.last_multipage_mode or "split"
+                console.print(
+                    "  [dim]ignore   = encode page 0 only, drop the rest (default)\n"
+                    "  skip      = leave multi-page TIFFs untouched\n"
+                    "  split     = one JXL per real page; thumbnails per the next question\n"
+                    "  split_all = one JXL per page, thumbnails always included[/dim]")
                 multipage_mode = Prompt.ask(
                     "Multi-page TIFF handling",
                     choices=["ignore", "skip", "split", "split_all"],
@@ -2513,13 +2561,17 @@ class InteractiveMenu:
                 )
                 thumbnail_mode = "exclude"
                 thumbnail_suffix = "_thumbnail"
-                if multipage_mode in ("split", "split_all"):
+                # Only "split" consults the thumbnail question — split_all always
+                # includes thumbnails, so asking there implied a choice that the
+                # encoder ignores.
+                if multipage_mode == "split":
                     tm_default = self.config.config.last_thumbnail_mode or "exclude"
                     thumbnail_mode = Prompt.ask(
-                        "Thumbnail handling when splitting",
+                        "Embedded thumbnail/preview pages",
                         choices=["exclude", "include"],
                         default=tm_default
                     )
+                if multipage_mode == "split_all" or thumbnail_mode == "include":
                     ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
@@ -2536,15 +2588,21 @@ class InteractiveMenu:
                 thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
                 embed_thumb = thumb_input.startswith('y')
                 # Multi-page TIFF options
-                mp_default = self.config.config.last_multipage_mode or "ignore"
+                mp_default = self.config.config.last_multipage_mode or "split"
+                print("  ignore    = encode page 0 only, drop the rest (default)")
+                print("  skip      = leave multi-page TIFFs untouched")
+                print("  split     = one JXL per real page; thumbnails per the next question")
+                print("  split_all = one JXL per page, thumbnails always included")
                 mp_input = input(f"Multi-page TIFF handling (ignore/skip/split/split_all) [{mp_default}]: ").strip().lower() or mp_default
                 multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else "ignore"
                 thumbnail_mode = "exclude"
                 thumbnail_suffix = "_thumbnail"
-                if multipage_mode in ("split", "split_all"):
+                # split_all always includes thumbnails; only "split" has a choice.
+                if multipage_mode == "split":
                     tm_default = self.config.config.last_thumbnail_mode or "exclude"
-                    tm_input = input(f"Thumbnail handling when splitting (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
+                    tm_input = input(f"Embedded thumbnail/preview pages (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
                     thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else "exclude"
+                if multipage_mode == "split_all" or thumbnail_mode == "include":
                     ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                     thumbnail_suffix = ts_input if ts_input else ts_default
@@ -2775,20 +2833,25 @@ class InteractiveMenu:
     def _multipage_summary(self, workflow: Dict):
         """Return (label, is_warning) describing what happens to multi-page TIFFs.
 
-        The wizard's default is `ignore`, which encodes page 0 and DISCARDS every
-        other page. That question is only asked inside Advanced Options (which
-        defaults to No), so a straight-through run used to drop pages without
-        ever mentioning it — here or in the child's output. Surfacing it in the
-        final summary is the last chance to say so before the user types YES.
+        The question lives inside Advanced Options (which defaults to No), so a
+        straight-through run never sees it — this line is the last chance to say
+        what happens to extra pages before the user types YES. The default is
+        `split` (was `ignore`, which silently dropped them), so only the
+        page-dropping choices are flagged as warnings.
         """
         adv = workflow.get('advanced_options', {})
-        mp = adv.get('multipage_mode') or 'ignore'
+        mp = adv.get('multipage_mode') or 'split'
         if mp == 'ignore':
             return "ignore — extra pages are DISCARDED (choose split to keep them)", True
         if mp == 'skip':
             return "skip — multi-page TIFFs are NOT converted at all", True
+        if mp == 'split_all':
+            # split_all never consults thumbnail_mode; saying otherwise implied
+            # a choice the encoder ignores.
+            return "split_all — one JXL per page, thumbnail pages included", False
         tm = adv.get('thumbnail_mode') or 'exclude'
-        return f"{mp} — one JXL per page (thumbnails: {tm})", False
+        tm_note = "thumbnail pages included" if tm == 'include' else "thumbnail pages excluded"
+        return f"split — one JXL per page ({tm_note})", False
 
     def _wizard_confirm(self, workflow: Dict) -> bool:
         """Step 7: Final Confirmation"""
@@ -4026,7 +4089,7 @@ def main():
                 'd50_patch': last_d50_patch if origin == 'tiff' else None,
                 'encode_tag': last_encode_tag if origin == 'tiff' else None,
                 'embed_thumbnail': config.config.last_jpeg_thumbnail if origin == 'tiff' else None,
-                'multipage_mode': config.config.last_multipage_mode or 'ignore',
+                'multipage_mode': config.config.last_multipage_mode or 'split',
                 'thumbnail_mode': config.config.last_thumbnail_mode or 'exclude',
                 'thumbnail_suffix': config.config.last_thumbnail_suffix or '_thumbnail',
                 'thumbnail_handling': config.config.last_thumbnail_handling or 'include',

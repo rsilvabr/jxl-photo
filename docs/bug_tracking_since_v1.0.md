@@ -14,6 +14,42 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ---
 
+## Post-v1.8.1 — Real-batch usability fixes (2026-07-27)
+
+Found by running a 4762-file Capture One library through mode 6 — the kind of
+scale the synthetic test suite never reproduces.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 195 | Planning phase opened every TIFF serially with no output at all: on an external drive a large library sat silent for minutes and looked hung | encoder | ✅ FIXED (scan runs on a thread pool capped at 16, logs `Analyzing TIFF pages (N workers)`, progress every ~5%, and the elapsed time; plan order still follows input order) |
+| 196 | `--thumbnail-mode exclude` logged one WARNING per file — an export library where every TIFF has a preview page produced thousands of lines and buried the real errors, for a drop the user had explicitly requested | encoder | ✅ FIXED (counted and reported once in the run summary; `--warn-thumbnail-discard` restores the per-file lines) |
+| 197 | Thumbnails dropped in `split` mode were counted in `_multipage_ignored`, so the run summary blamed `--multipage-mode ignore` and told the user to "re-run with --multipage-mode split" — which is what they had already done | encoder | ✅ FIXED (separate `_thumbnails_dropped` counter and its own summary line) |
+| 198 | Per-file discard warnings were uncapped in `ignore` mode too | encoder | ✅ FIXED (`DISCARD_WARN_LIMIT = 20`, then a suppression notice; totals always in the summary) |
+| 199 | `--dry-run` returned before the discard summary, so a dry run never reported dropped pages once the per-file warnings were quieted | encoder | ✅ FIXED (`_log_discard_summary()` called from both exits) |
+| 200 | Wizard asked "Thumbnail handling when splitting" after `split_all`, where the encoder ignores the answer | wrapper | ✅ FIXED (question asked only for `split`; both prompts now list what each mode does, and the Step 7 summary states `split_all` always includes thumbnails) |
+| 201 | Duplicate-output abort did not explain the cause; nested marker folders (`Untitled Export/Untitled Export/`) collapse onto one destination in modes 6/7 | all 3 | ✅ FIXED (abort prints a hint naming the one-level collapse rule) |
+| 202 | **Data loss:** mode 8 + `--delete-source` deleted a multi-page TIFF after encoding page 0 only. Every existing gate passed — the single JXL written *is* valid and complete — so nothing downstream could notice the other pages existed only in the source. Reproduced: 3-real-page TIFF in, 1 JXL out, source unlinked | encoder | ✅ FIXED (planning records which sources lost real pages; the delete gate refuses them: `KEEP source (pages were discarded...)`) |
+| 203 | `--multipage-mode` defaulted to `ignore`, i.e. the default silently dropped pages | encoder + wrapper | ✅ CHANGED (default is now `split`; a single-real-page TIFF still yields exactly `photo.jxl`, so ordinary photos are unaffected) |
+
+| 204 | **Throughput:** the thread pool was fed one OUTPUT FOLDER at a time. A folder with fewer files than `--workers` could never fill the pool, and the pool drained at every folder boundary — modes 3/5/6/7 create one output folder per shoot, so a photo library ran at roughly one worker (CPU ~4% with `--workers 12`) | encoder | ✅ FIXED (one pool for the whole run; staging still flushes per folder, fired when that folder's last file lands). Measured on 8 real 45 MP TIFFs, 8 workers: **33s → 10s** when spread over 8 folders (10s in a single folder, 47s fully serial) |
+| 205 | Manifest CSV written as UTF-8 **without BOM**: Excel opens it with the system ANSI codepage, so `240419_山羊公園_長瀞岩畳` displayed as 文字化け — and saving from there wrote the broken bytes back | wrapper | ✅ FIXED (written as `utf-8-sig`; readers use `utf-8-sig`, which also strips a BOM that would otherwise land in the first header cell and turn the header into a data row) |
+| 206 | A manifest re-saved by Excel in the ANSI codepage crashed the reader with `UnicodeDecodeError` | wrapper | ✅ FIXED (refused with an actionable message). **Deliberately not** decoded with a guessed codepage: a wrong guess yields a plausible path pointing elsewhere, and these paths drive a converter that deletes sources in mode 8. Pure-ASCII manifests are valid UTF-8, so hand-written files are unaffected |
+
+**Thumbnail pages are deliberately NOT covered by fix 202.** A thumbnail is a
+reduced-resolution copy of a page that *is* in the output (TIFF `is_reduced` /
+`is_subifd`), so `--thumbnail-mode exclude` does not block deletion — it would
+block it for every Capture One export, since they all carry a preview. The delete
+line says `(embedded thumbnail page not encoded)` instead. Use
+`--thumbnail-mode include` when the decoded TIFF must reproduce the original page
+structure exactly.
+
+**Not a bug:** the duplicate-output abort itself. Modes 6/7 drop one folder level
+under the marker by design, so `X/photo.tif` and `X/X/photo.tif` legitimately map
+to the same `X/16B_JXL/photo.jxl`. The guard stopping the run is what prevents a
+silent overwrite.
+
+---
+
 ## v1.8.1 — The Audit Release (2026-07)
 
 Twelve full audit rounds on the 4 scripts, each verified with reproductions and real-data batteries (Capture One 16-bit exports, 700 MB RGB+IR film scans). All fixes ship with regression tests (174 passing in `tests/`). Only the highest-impact bugs are detailed individually here; the full list is in `docs/RELEASE_v1.8.1.md`.

@@ -411,14 +411,25 @@ DELETE_SOURCE = False
 # WARNING: irreversible. Only enable after testing on a small batch first.
 # Has no effect on modes 0–7.
 
-MULTIPAGE_TIFF_MODE = "ignore"
+MULTIPAGE_TIFF_MODE = "split"
 # How to handle TIFFs with more than one page.
-# "ignore"    -> Always encode page 0 (series[0]) and silently ignore extra pages.
-#                This is the original behavior and the default.
+#
+# DEFAULT CHANGED (was "ignore"): a single-page TIFF produces exactly the same
+# output under "split", so the only files affected are the ones that were losing
+# pages. Many TIFFs are multi-page without looking like it — Capture One and most
+# scanners append an embedded preview, film scanners add an IR/mask page — and
+# under "ignore" + mode 8 the source was deleted after encoding page 0 only,
+# destroying the rest for good.
+#
+# "ignore"    -> Always encode page 0 (series[0]) and ignore extra pages.
+#                This is the original behavior; dropped pages are reported, and
+#                mode 8 refuses to delete a source whose pages were dropped.
 # "skip"      -> If the TIFF has more than one "real" page (non-thumbnail),
 #                skip the entire file and log a warning.
-# "split"     -> Encode each real page to a separate JXL:
+# "split"     -> [DEFAULT] Encode each real page to a separate JXL:
 #                page 0 -> photo.jxl, page N -> photo_pageN.jxl.
+#                A TIFF with a single real page yields exactly photo.jxl, i.e.
+#                identical to "ignore" for the overwhelming majority of files.
 #                Thumbnails are handled according to THUMBNAIL_MODE below.
 # "split_all" -> Encode every page, including thumbnails, to separate JXLs.
 #
@@ -427,12 +438,27 @@ MULTIPAGE_TIFF_MODE = "ignore"
 
 THUMBNAIL_MODE = "exclude"
 # Only used when MULTIPAGE_TIFF_MODE is "split".
-# "exclude" -> Do not encode thumbnail pages.
+# "exclude" -> Do not encode thumbnail pages (default).
 # "include" -> Encode thumbnail pages too, with a _thumbnail suffix.
+#
+# A thumbnail is a REDUCED-resolution copy of another page (TIFF SubfileType
+# is_reduced / is_subifd), i.e. derived data — which is why excluding it does not
+# block source deletion in mode 8, while dropping a real page does. Use "include"
+# if you want the decoded TIFF to reproduce the original page structure exactly.
 
 THUMBNAIL_SUFFIX = "_thumbnail"
 # Suffix appended to the output name when THUMBNAIL_MODE="include".
 # Example: photo_page1_thumbnail.jxl
+
+WARN_DISCARDED_THUMBNAILS = False
+# Only used when MULTIPAGE_TIFF_MODE="split" and THUMBNAIL_MODE="exclude".
+# False (default) -> excluding thumbnails is what the user explicitly asked for,
+#   so it is reported ONCE in the run summary instead of once per file. A library
+#   where every TIFF carries an embedded preview would otherwise produce one
+#   WARNING line per file and bury the real errors.
+# True  -> also log a per-file warning for each TIFF whose thumbnail is dropped.
+#   Enable with --warn-thumbnail-discard when you want the file names.
+# The summary line is printed either way: the drop is never silent.
 
 MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
 # Prefix for the group id appended to the dc:Relation XMP bag on split pages.
@@ -575,6 +601,67 @@ _d50_patch_lock = threading.Lock()
 # can say it out loud: per-file warnings scroll away in a large batch.
 _multipage_ignored = {"files": 0, "pages": 0}
 _multipage_ignored_lock = threading.Lock()
+# Thumbnail pages dropped by --multipage-mode split + --thumbnail-mode exclude.
+# Tracked SEPARATELY from _multipage_ignored: mixing them made the summary blame
+# "--multipage-mode ignore" for a drop that happened in split mode.
+_thumbnails_dropped = {"files": 0, "pages": 0}
+# Source TIFFs that lost REAL image pages at planning time (--multipage-mode
+# ignore). Mode 8 consults this before deleting: encoding page 0 and then
+# unlinking a 3-page scan destroys the other two pages permanently, and no
+# integrity check downstream can notice — the one JXL that was written is
+# perfectly valid. Keyed by os.path.normcase(str(tiff_path)).
+_discarded_real_page_sources = set()
+# Same, for thumbnail pages only. These do NOT block deletion — a thumbnail is a
+# reduced-resolution copy of a page that IS in the output — but the delete line
+# says so, because the decoded TIFF will not have that preview page back.
+_discarded_thumb_sources = set()
+# Per-file discard warnings are capped: a 5000-file library must not push every
+# real error off the screen. The full totals always land in the run summary.
+DISCARD_WARN_LIMIT = 20
+_discard_warned = {"count": 0, "suppressed": 0}
+
+def _capped_discard_warning(msg: str):
+    """Log a per-file discard warning, but only up to DISCARD_WARN_LIMIT of them.
+
+    Callers must already hold _multipage_ignored_lock (the counters and the cap
+    have to move together, or a parallel scan prints N+workers lines).
+    """
+    if _discard_warned["count"] < DISCARD_WARN_LIMIT:
+        _discard_warned["count"] += 1
+        logger.warning(msg)
+        if _discard_warned["count"] == DISCARD_WARN_LIMIT:
+            logger.warning(f"... further per-file discard warnings suppressed "
+                           f"(limit {DISCARD_WARN_LIMIT}) — totals in the run summary")
+    else:
+        _discard_warned["suppressed"] += 1
+
+
+def _log_discard_summary():
+    """Report every page the run chose not to encode.
+
+    Called from BOTH the dry-run exit and the end of a real run: a dry run is
+    where the user checks for page loss, and it never reaches the real summary.
+    """
+    # Pages dropped by the "ignore" policy — a WARNING, because the user did not
+    # ask for it (ignore is the default) and it is real image data.
+    if _multipage_ignored["files"]:
+        logger.warning(
+            f"Multi-page: DISCARDED {_multipage_ignored['pages']} page(s) from "
+            f"{_multipage_ignored['files']} TIFF(s) (--multipage-mode ignore). "
+            f"Re-run with --multipage-mode split to keep them.")
+
+    # Thumbnails excluded on purpose: informational, not a warning — the user
+    # asked for it. Still printed so the count is never a surprise.
+    if _thumbnails_dropped["files"]:
+        logger.info(
+            f"Thumbnails: excluded {_thumbnails_dropped['pages']} thumbnail page(s) from "
+            f"{_thumbnails_dropped['files']} TIFF(s) (--thumbnail-mode exclude, as requested). "
+            f"Use --thumbnail-mode include to encode them too.")
+
+    if _discard_warned["suppressed"]:
+        logger.info(f"({_discard_warned['suppressed']} per-file discard warning(s) suppressed; "
+                    f"see the totals above)")
+
 
 def _abort_on_duplicate_outputs(pairs):
     """Abort the run if two outputs map to the same destination file.
@@ -606,6 +693,9 @@ def _abort_on_duplicate_outputs(pairs):
             logger.error(f"... and {len(dupes) - 10} more")
         logger.error("Aborting: multiple inputs map to the same output file. "
                      "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
+        logger.error("  Hint: marker-anchored modes (6/7) drop ONE folder level under the marker, "
+                     "so nested marker folders (X/X/photo.tif and X/photo.tif) and same-named files "
+                     "in sibling recipe folders both collapse onto the same .jxl name.")
         sys.exit(2)
 
 def setup_logger():
@@ -2150,10 +2240,14 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             with _multipage_ignored_lock:
                 _multipage_ignored["files"] += 1
                 _multipage_ignored["pages"] += extra_pages
-            logger.warning(
-                f"DISCARDING {extra_pages} extra page(s) | {tiff_path.name} | "
-                f"--multipage-mode ignore encodes page 0 only "
-                f"(use split / split_all to keep them)")
+                # NOTE: in "ignore" mode we never opened the pages to classify
+                # them, so an extra page may well be just a thumbnail. Deletion
+                # is irreversible: treat every unclassified dropped page as real.
+                _discarded_real_page_sources.add(os.path.normcase(str(tiff_path)))
+                _capped_discard_warning(
+                    f"DISCARDING {extra_pages} extra page(s) | {tiff_path.name} | "
+                    f"--multipage-mode ignore encodes page 0 only "
+                    f"(use split / split_all to keep them)")
         return [(tiff_path, final_jxl, 0, False, 0, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
@@ -2183,15 +2277,19 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                 info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
                 pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
         elif thumb_pages:
-            # Same rule as the "ignore" path: asking to split means "keep my
-            # pages", so dropping the thumbnail ones must not be silent.
+            # Dropping thumbnails here is what --thumbnail-mode exclude ASKED
+            # for, so it is reported once in the summary rather than once per
+            # file (--warn-thumbnail-discard brings the per-file lines back).
+            # Counted apart from _multipage_ignored so the summary can name the
+            # right setting.
             with _multipage_ignored_lock:
-                _multipage_ignored["files"] += 1
-                _multipage_ignored["pages"] += len(thumb_pages)
-            logger.warning(
-                f"DISCARDING {len(thumb_pages)} thumbnail page(s) | {tiff_path.name} | "
-                f"--thumbnail-mode exclude (use include, or --multipage-mode split_all, "
-                f"to keep them)")
+                _thumbnails_dropped["files"] += 1
+                _thumbnails_dropped["pages"] += len(thumb_pages)
+                _discarded_thumb_sources.add(os.path.normcase(str(tiff_path)))
+                if WARN_DISCARDED_THUMBNAILS:
+                    _capped_discard_warning(
+                        f"DISCARDING {len(thumb_pages)} thumbnail page(s) | {tiff_path.name} | "
+                        f"--thumbnail-mode exclude (use include to keep them)")
         if not pages_to_encode:
             logger.warning(f"SKIP TIFF with no encodable pages | {tiff_path.name}")
             return []
@@ -2211,6 +2309,11 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         # Unknown mode, fall back to ignore
         info = page_info.get(0, {'subfiletype': 0, 'samples': 3})
         pages_to_encode.append((0, 0 in thumb_pages, info['subfiletype'], info['samples']))
+        if len(real_pages) > 1:
+            # Same rule as the real "ignore" path: pages are being dropped, so
+            # mode 8 must not delete this source.
+            with _multipage_ignored_lock:
+                _discarded_real_page_sources.add(os.path.normcase(str(tiff_path)))
 
     # Resolve final output path for each page
     results = []
@@ -2230,8 +2333,20 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
 
 def process_group(group_items: list, workers: int, mode: int = 0):
     """
-    Converts a group of (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples)
-    items in parallel. If TEMP2_DIR is set, writes to staging first then moves in bulk.
+    Converts (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples) items
+    in parallel. If TEMP2_DIR is set, writes to staging first then moves in bulk.
+
+    Called ONCE with every planned item. It used to be called once per output
+    FOLDER, which quietly throttled the whole run: a folder holding fewer files
+    than `workers` could never fill the pool, and the pool had to drain at every
+    folder boundary. On a photo library — modes 3/5/6/7 create one output folder
+    per shoot — that turned 12 workers into roughly one. Measured on 8 real
+    45 MP TIFFs with 8 workers: 10s in a single folder vs 33s spread over eight
+    folders (47s fully serial).
+
+    The staging move stays per-folder and still runs in bulk: each folder's files
+    are moved as soon as that folder's last item finishes, so staging holds only
+    the folders still in flight rather than the entire batch.
     """
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
@@ -2263,27 +2378,10 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         group_id = _make_group_id(tiff) if outputs_per_tiff.get(tiff_key, 0) > 1 else None
         tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype, samples, group_id))
 
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g): (t, w, f, p, th, sft, spl, g)
-                   for t, w, f, p, th, sft, spl, g in tasks}
-        for fut in as_completed(futures):
-            task = futures[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                # An exception escaped convert_one entirely (e.g. temp-dir
-                # failure, source vanished before the sync check). One bad
-                # file must not kill the whole batch.
-                n, total = next_count()
-                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
-                results.append(((str(task[0]), task[3]), "error", str(e), None))
-
-    # Move from staging to final destination in bulk
-    if use_staging:
+    def _move_dest_from_staging(dest_tasks: list, status_map: Dict):
+        """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
-        status_map = {r[0]: r[1] for r in results}
-        for tiff, write_jxl, final_jxl, page_idx, _, _, _, _ in tasks:
+        for tiff, write_jxl, final_jxl, page_idx, _, _, _, _ in dest_tasks:
             status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
                 if status != "skipped":
@@ -2305,7 +2403,43 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 # keep the file in staging and log it for manual recovery.
                 logger.error(f"  MOVE FAILED, kept in staging | {write_jxl.name} -> {final_jxl} | {e}")
         if moved:
-            logger.info(f"  -> Moved {moved} file(s) from staging to final destination")
+            logger.info(f"  -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
+
+    # Per-destination bookkeeping so a folder can be flushed the moment its last
+    # item lands, instead of stalling the pool at every folder boundary.
+    tasks_by_dest: Dict[Path, list] = {}
+    pending_by_dest: Dict[Path, int] = {}
+    for task in tasks:
+        dest = task[2].parent
+        tasks_by_dest.setdefault(dest, []).append(task)
+        pending_by_dest[dest] = pending_by_dest.get(dest, 0) + 1
+
+    results = []
+    status_map: Dict = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g): (t, w, f, p, th, sft, spl, g)
+                   for t, w, f, p, th, sft, spl, g in tasks}
+        for fut in as_completed(futures):
+            task = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                # An exception escaped convert_one entirely (e.g. temp-dir
+                # failure, source vanished before the sync check). One bad
+                # file must not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                result = ((str(task[0]), task[3]), "error", str(e), None)
+            results.append(result)
+            status_map[result[0]] = result[1]
+
+            # Flush this destination folder once every one of its items is done.
+            # Runs on the main thread (inside the as_completed loop), so no two
+            # moves ever race for the same file.
+            dest = task[2].parent
+            pending_by_dest[dest] -= 1
+            if use_staging and pending_by_dest[dest] == 0:
+                _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
     # Delete source TIFFs after confirmed encode — only for mode 8, only after staging.
     # A source TIFF is deleted only if ALL of its encoded pages succeeded and every
@@ -2334,6 +2468,17 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 logger.warning(f"  KEEP source (not all pages succeeded) | {Path(tiff_key).name}")
                 continue
 
+            # Pages this run chose NOT to encode. Every downstream check passes
+            # in this case — the JXL that was written is valid and complete —
+            # so this is the only place that can stop the deletion. Fail closed:
+            # a page that exists only in the source must keep the source alive.
+            if os.path.normcase(tiff_key) in _discarded_real_page_sources:
+                logger.warning(
+                    f"  KEEP source (pages were discarded, deleting would lose them) | "
+                    f"{Path(tiff_key).name} | re-run with --multipage-mode split to encode "
+                    f"every page, then delete")
+                continue
+
             # All final JXLs must exist and pass integrity check
             can_delete = True
             for expected in {r[2] for r in tiff_results}:
@@ -2359,7 +2504,12 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             try:
                 src_tiff.unlink()
                 deleted += 1
-                logger.info(f"  DELETED source | {src_tiff.name}")
+                # A dropped thumbnail does not block the delete (it is a reduced
+                # copy of a page that IS in the output), but the decoded TIFF
+                # will not have that preview page back — say so at delete time.
+                thumb_note = (" (embedded thumbnail page not encoded)"
+                              if os.path.normcase(tiff_key) in _discarded_thumb_sources else "")
+                logger.info(f"  DELETED source | {src_tiff.name}{thumb_note}")
             except OSError as e:
                 logger.warning(f"  KEEP (could not delete source) | {src_tiff.name}: {e}")
         if deleted:
@@ -2502,12 +2652,15 @@ def main():
                              "empty = all subfolders). Overrides EXPORT_TIFF_SUBFOLDER.")
     parser.add_argument("--multipage-mode",  type=str, default=None,
                         choices=["ignore", "skip", "split", "split_all"],
-                        help="How to handle multi-page TIFFs: ignore (default), skip, split, split_all")
+                        help="How to handle multi-page TIFFs: split (default), ignore, skip, split_all")
     parser.add_argument("--thumbnail-mode",  type=str, default=None,
                         choices=["exclude", "include"],
                         help="When splitting: exclude thumbnails (default) or include them")
     parser.add_argument("--thumbnail-suffix", type=str, default=None,
                         help="Suffix for thumbnail outputs when --thumbnail-mode=include (default: _thumbnail)")
+    parser.add_argument("--warn-thumbnail-discard", action="store_true",
+                        help="Log one warning per file whose thumbnail page is dropped by "
+                             "--thumbnail-mode exclude (default: only a single summary line)")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Show what would be converted without converting")
     parser.add_argument("--staging",         type=str, default=None,
@@ -2536,7 +2689,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -2625,6 +2778,8 @@ def main():
         if not args.thumbnail_suffix.strip():
             parser.error("--thumbnail-suffix must not be empty (thumbnail names would collide with page 0)")
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
+    if args.warn_thumbnail_discard:
+        WARN_DISCARDED_THUMBNAILS = True
 
     # Handle --strip flag - store in global for use in convert_one
     global STRIP_METADATA
@@ -2706,11 +2861,23 @@ def main():
 
     # Build (tiff, final_jxl, page_idx, is_thumbnail) items.
     # Each TIFF may produce one or more JXLs depending on MULTIPAGE_TIFF_MODE.
+    #
+    # Every mode opens each TIFF here to read its IFD chain (page count, samples
+    # per pixel, thumbnail flags). That is header-only — no pixel decode — but at
+    # one open per file it is dominated by seek latency, so a library on an
+    # external/network drive can sit here for minutes. The scan CANNOT simply be
+    # folded into the conversion loop: the duplicate-destination guard below has
+    # to see every planned output BEFORE the first byte is written, or two inputs
+    # silently overwrite each other. So it runs in parallel and reports progress
+    # instead, which is where the "it just hangs reading" impression came from.
     all_items = []
     skipped_files = 0
     analyze_errors = 0
     multipage_skipped = 0
-    for t in tiffs:
+
+    def _plan_one(t: Path):
+        """Resolve the output path and page list for one TIFF. Thread-safe:
+        touches only locals plus the lock-protected discard counters."""
         # Resolve the main JXL path just to know the output directory
         if args.mode == 0:
             if output_root != args.input:
@@ -2730,8 +2897,7 @@ def main():
             main_jxl = resolve_output(t, args.mode, args.input)
 
         if main_jxl is None:
-            skipped_files += 1
-            continue  # Skip files that don't match mode criteria (e.g., outside _EXPORT)
+            return ("skipped_by_mode", None)  # e.g. outside _EXPORT
 
         try:
             items = convert_multipage(t, main_jxl.parent, args.mode)
@@ -2739,16 +2905,52 @@ def main():
             # A corrupt/unreadable TIFF must not abort the whole batch at
             # planning time — log one error and move on, matching pre-multipage
             # behavior where such files failed individually during conversion.
-            logger.error(f"SKIP (cannot analyze TIFF) | {t.name} | {e}")
-            analyze_errors += 1
-            continue
+            return ("error", str(e))
         if not items:
             # Multipage "skip" mode (or no encodable pages): the file was seen
             # and intentionally skipped — count it so the summary accounts for
             # every input file.
+            return ("multipage_skipped", None)
+        return ("items", items)
+
+    # Threads, not processes: the work is blocking file I/O inside tifffile, so
+    # the GIL is released where it matters. Capped because more concurrent reads
+    # than the drive can serve just thrashes the heads on spinning media.
+    scan_workers = max(1, min(args.workers, 16, len(tiffs) or 1))
+    scan_started = datetime.now()
+    if len(tiffs) > 1:
+        logger.info(f"Analyzing TIFF pages ({scan_workers} workers)...")
+    progress_step = max(250, len(tiffs) // 20) if tiffs else 0
+    results_by_index: Dict[int, Any] = {}
+    with ThreadPoolExecutor(max_workers=scan_workers) as pool:
+        futures = {pool.submit(_plan_one, t): i for i, t in enumerate(tiffs)}
+        done_count = 0
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results_by_index[idx] = fut.result()
+            except Exception as e:  # defensive: _plan_one already catches its own
+                results_by_index[idx] = ("error", str(e))
+            done_count += 1
+            if progress_step and done_count % progress_step == 0:
+                logger.info(f"  Analyzed {done_count}/{len(tiffs)} TIFF(s)...")
+
+    # Consume in INPUT order so the conversion order (and the log) stays
+    # deterministic regardless of how the threads finished.
+    for i, t in enumerate(tiffs):
+        kind, payload = results_by_index[i]
+        if kind == "skipped_by_mode":
+            skipped_files += 1
+        elif kind == "error":
+            logger.error(f"SKIP (cannot analyze TIFF) | {t.name} | {payload}")
+            analyze_errors += 1
+        elif kind == "multipage_skipped":
             multipage_skipped += 1
-            continue
-        all_items.extend(items)
+        else:
+            all_items.extend(payload)
+
+    if len(tiffs) > 1:
+        logger.info(f"Page analysis done in {(datetime.now() - scan_started).total_seconds():.1f}s")
 
     planned_msg = f"JXL outputs planned: {len(all_items)} (from {len(tiffs)} TIFFs, {skipped_files} skipped by mode"
     if multipage_skipped:
@@ -2768,6 +2970,10 @@ def main():
             gray_label = " [grayscale]" if samples == 1 else ""
             logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
+        # A dry run is exactly where the user checks whether pages get dropped,
+        # so the discard totals must print here too — the real-run summary below
+        # is never reached.
+        _log_discard_summary()
         return
 
     # Create the mode-2 output dir only for real runs (dry-run must not write)
@@ -2794,22 +3000,24 @@ def main():
     ok = skipped = overwritten = synced = 0
     err = analyze_errors  # count TIFFs that couldn't be analyzed at planning time
 
-    for dest_folder, group_items in groups.items():
-        if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_items)} output(s))")
+    # ONE pool for the whole run. Feeding it folder by folder meant a folder with
+    # fewer files than --workers could never fill the pool, and every folder
+    # boundary drained it — modes 3/5/6/7 create one output folder per shoot, so
+    # a big library ran at a fraction of the requested concurrency. The staging
+    # move is still per-folder and still in bulk; it now fires when that folder's
+    # last file lands (see process_group).
+    results = process_group(all_items, args.workers, args.mode)
 
-        results = process_group(group_items, args.workers, args.mode)
-
-        for result in results:
-            status = result[1]
-            if   status == "ok":
-                ok += 1
-                if args.sync:
-                    synced += 1
-            elif status == "overwrite":
-                ok += 1; overwritten += 1; synced += 1
-            elif status == "skipped":   skipped += 1
-            elif status == "error":     err += 1
+    for result in results:
+        status = result[1]
+        if   status == "ok":
+            ok += 1
+            if args.sync:
+                synced += 1
+        elif status == "overwrite":
+            ok += 1; overwritten += 1; synced += 1
+        elif status == "skipped":   skipped += 1
+        elif status == "error":     err += 1
 
     # Account for files intentionally skipped by the multipage policy
     skipped += multipage_skipped
@@ -2822,14 +3030,7 @@ def main():
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
 
-    # Multi-page pages dropped by the "ignore" policy — surfaced in the summary
-    # because the per-file warnings scroll away in a large batch, and losing
-    # pages without noticing is exactly the failure this line prevents.
-    if _multipage_ignored["files"]:
-        logger.warning(
-            f"Multi-page: DISCARDED {_multipage_ignored['pages']} page(s) from "
-            f"{_multipage_ignored['files']} TIFF(s) (--multipage-mode ignore). "
-            f"Re-run with --multipage-mode split to keep them.")
+    _log_discard_summary()
 
     # D50 patch summary
     applied = _d50_patch_count["applied"]

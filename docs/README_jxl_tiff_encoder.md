@@ -636,17 +636,28 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 
 Multi-page TIFFs are handled explicitly instead of silently discarding extra pages:
 
-- `--multipage-mode ignore` — encode only page 0 (original behavior, **default**).
-  Since v1.8.1 this is no longer silent: every file whose extra pages are dropped
-  is logged as a warning, and the run summary repeats the total
+- `--multipage-mode split` — **default**. Encode each real page to a separate JXL
+  (`photo.jxl`, `photo_page1.jxl`, ...). A TIFF with one real page yields exactly
+  `photo.jxl`, identical to the old `ignore` default. Thumbnail pages follow
+  `--thumbnail-mode` (`exclude` default, or `include`).
+- `--multipage-mode ignore` — encode only page 0, drop the rest (the pre-v1.8.2
+  default). Not silent: files whose extra pages are dropped are logged as warnings
+  (capped at 20 lines per run) and the run summary repeats the total
   (`Multi-page: DISCARDED N page(s) from M TIFF(s)`). Many TIFFs are multi-page
   without looking like it — Capture One and most scanners append an embedded
   preview page, and film scanners add an IR/mask page.
 - `--multipage-mode skip` — skip files that have more than one "real" page
-- `--multipage-mode split` — encode each real page to a separate JXL (`photo.jxl`, `photo_page2.jxl`, ...)
-- `--multipage-mode split_all` — encode every page, including thumbnails
+- `--multipage-mode split_all` — encode every page, **always including thumbnails**.
+  Equivalent to `--multipage-mode split --thumbnail-mode include`; `--thumbnail-mode`
+  is ignored in this mode.
 
 Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`).
+
+**Thumbnail exclusion is not warned per file.** `--thumbnail-mode exclude` is an
+explicit request, so it produces a single summary line
+(`Thumbnails: excluded N thumbnail page(s) from M TIFF(s)`) instead of one WARNING
+per file — a library where every export carries a preview page would otherwise
+bury the real errors. Pass `--warn-thumbnail-discard` when you want the file names.
 
 Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so `jxl_tiff_decoder.py` can reconstruct the original multi-page TIFF only from genuinely split files. Independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged.
 
@@ -665,7 +676,8 @@ Single-channel pages are encoded as grayscale and flagged with `jxlphoto-graysca
 ### Examples
 
 ```bash
-# Default: encode only page 0, ignore extra pages
+# Old behavior: encode only page 0, ignore extra pages
+# (mode 8 will then REFUSE to delete any source whose pages were dropped)
 python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode ignore
 
 # Skip any TIFF that has more than one real page
@@ -675,7 +687,11 @@ python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode
 python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode exclude
 
 # Split every page, including thumbnails, with a custom suffix
-python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include --thumbnail-suffix "_thumb"
+# (split_all already includes thumbnails; --thumbnail-mode has no effect here)
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split_all --thumbnail-suffix "_thumb"
+
+# Split, drop thumbnails, but list every file whose thumbnail was dropped
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode exclude --warn-thumbnail-discard
 
 # Film scanner workflow: encode main + preview + IR/mask pages
 python jxl_tiff_encoder.py "E:\film_scans" "E:\film_scans_jxl" --mode 2 --multipage-mode split_all --thumbnail-mode include

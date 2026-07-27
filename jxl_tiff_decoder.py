@@ -503,6 +503,9 @@ def _abort_on_duplicate_outputs(pairs):
             logger.error(f"... and {len(dupes) - 10} more")
         logger.error("Aborting: multiple inputs map to the same output file. "
                      "Rename inputs, pick another mode/folder, or split the run to avoid silent overwrites.")
+        logger.error("  Hint: marker-anchored modes (6/7) drop ONE folder level under the marker, "
+                     "so nested marker folders (X/X/photo.tif and X/photo.tif) and same-named files "
+                     "in sibling recipe folders both collapse onto the same .jxl name.")
         sys.exit(2)
 
 def confirm_deletion_jxl():

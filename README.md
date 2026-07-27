@@ -551,17 +551,21 @@ exiftool -Make -Model roundtrip.tif
 
 ## Known Limitations & Behaviors
 
-### Multi-page TIFFs: only page 0 is converted by default
+### Multi-page TIFFs: every page is converted by default
 
-`--multipage-mode` defaults to **`ignore`**, which encodes page 0 and discards every other page. This catches people out, because plenty of TIFFs are multi-page without looking like it — Capture One and many scanners append an embedded preview, and film scanners add an IR/mask page.
+`--multipage-mode` defaults to **`split`** — one JXL per page (`photo.jxl`, `photo_page1.jxl`, ...), rejoined into a multi-page TIFF on decode. A TIFF with a single real page produces exactly `photo.jxl`, so for ordinary photos this is indistinguishable from the old default.
 
-To keep every page (one JXL per page, rejoined into a multi-page TIFF on decode):
+**This default changed.** It used to be `ignore` (page 0 only, everything else discarded), which caught people out: plenty of TIFFs are multi-page without looking like it — Capture One and many scanners append an embedded preview, and film scanners add an IR/mask page. Worse, mode 8 then deleted the source after encoding page 0, destroying the other pages permanently.
+
+Embedded **thumbnail/preview** pages are still dropped by default (`--thumbnail-mode exclude`); they are reduced-resolution copies of a page that is already in the output. Add `--thumbnail-mode include` if you want the decoded TIFF to reproduce the original page structure exactly.
 
 ```powershell
-py jxl_tiff_encoder.py "F:\Photos" --multipage-mode split --thumbnail-mode include
+py jxl_tiff_encoder.py "F:\Photos"                             # split, thumbnails dropped
+py jxl_tiff_encoder.py "F:\Photos" --thumbnail-mode include    # keep the previews too
+py jxl_tiff_encoder.py "F:\Photos" --multipage-mode ignore     # old behavior: page 0 only
 ```
 
-In the wizard the setting lives under **Advanced Options** (Step 6A — answer `y` when asked "Configure advanced options?"). Since v1.8.1 the encoder warns for each file whose pages are dropped and repeats the total in the run summary, and the wizard's Step 7 summary spells out the policy before you type YES.
+In the wizard the setting lives under **Advanced Options** (Step 6A — answer `y` when asked "Configure advanced options?"), and the Step 7 summary spells out the policy before you type YES. If you do choose a page-dropping policy, the encoder reports the totals in the run summary — and **mode 8 refuses to delete any source whose pages were dropped**, so you cannot lose them by accident.
 
 ### Lossy is the default: `--distance 0.1`
 
