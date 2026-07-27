@@ -143,6 +143,33 @@ under its own name:
   asked, never inherited.
 - Presets live in the same `~/.jxl_tools_config.json` as the rest of the settings.
 
+#### Running a preset unattended (Task Scheduler / cron)
+
+```powershell
+py jxl_photo.py --list-presets                    # names + what each one does
+py jxl_photo.py --run-preset nightly-sync         # runs it, no menu, no prompts
+py jxl_photo.py --run-preset nightly-sync --dry-run
+py jxl_photo.py --run-preset nightly-sync --overwrite
+```
+
+`--run-preset` runs once and exits — safe to point a scheduled task at, since it
+never waits on stdin.
+
+| | |
+|---|---|
+| **Default** | sync (reconvert only what is newer). `--overwrite` redoes everything |
+| **Dry-run** | off unless you pass `--dry-run`. It is **never** inherited from the stored run — a saved simulation does not silently make the scheduled job a simulation, nor the other way round |
+| **Exit code** | `0` ran, `1` failed or refused, `2` no such preset (available names are printed) |
+
+`--overwrite` and `--dry-run` are rejected without `--run-preset`, rather than
+silently ignored — a stray `--dry-run` that did nothing would mean a real
+conversion for someone who asked for a simulation.
+
+> **Mode 8 presets cannot run unattended.** A preset that deletes sources is
+> refused with an explanation: that confirmation is a typed token, and honouring
+> it automatically would let a scheduled task delete originals on its own. Run it
+> from the menu, or add `--dry-run` to simulate it.
+
 * * *
 
 ## Workflow wizard steps

@@ -545,3 +545,135 @@ def test_config_without_presets_key_still_loads(tmp_path, monkeypatch):
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: path)
     loaded = wp.ConfigManager()
     assert loaded.config.presets == {}
+
+
+# ─────────────────────────────────────────────
+# --run-preset (unattended: Task Scheduler / cron)
+# ─────────────────────────────────────────────
+
+def _config_with_preset(tmp_path, name="nightly", **preset):
+    import json
+    data = {
+        "last_input_dir": str(tmp_path),
+        "dependencies_checked": True,
+        "presets": {name: {
+            "last_input_dir": str(tmp_path),
+            "last_output_mode": "6",
+            "last_origin_format": "tiff",
+            "last_dest_format": "jxl",
+            "last_conversion_type": "jxl_tiff_encoder",
+            "last_workers": 12,
+            "last_distance": 0.05,
+            **preset,
+        }},
+    }
+    path = tmp_path / ".jxl_tools_config.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _run_cli(monkeypatch, config_path, argv):
+    """Run main() as the CLI would. Returns (exit_code, workflow-or-None)."""
+    captured = []
+    monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: config_path)
+    monkeypatch.setattr(wp.DependencyChecker, "check_dependencies",
+                        lambda self, force=False: {"cjxl": True, "djxl": True})
+    monkeypatch.setattr(wp.InteractiveMenu, "execute_workflow",
+                        lambda self, wf, st: (captured.append(wf), True)[1])
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(sys, "argv", ["jxl_photo.py"] + argv)
+    # Any prompt at all would hang a scheduled task — make one an instant failure.
+    monkeypatch.setattr("builtins.input",
+                        lambda *a, **k: pytest.fail("--run-preset must not prompt"))
+    with pytest.raises(SystemExit) as exit_info:
+        wp.main()
+    return exit_info.value.code, (captured[0] if captured else None)
+
+
+def test_run_preset_executes_without_any_prompt(tmp_path, monkeypatch):
+    code, workflow = _run_cli(monkeypatch, _config_with_preset(tmp_path), ["--run-preset", "nightly"])
+    assert code == 0
+    assert workflow['workers'] == 12
+    assert workflow['distance'] == 0.05
+    assert workflow['mode'] == 6
+
+
+def test_run_preset_defaults_to_sync_not_overwrite(tmp_path, monkeypatch):
+    """A scheduled job that re-encoded the whole archive every night because it
+    silently defaulted to overwrite would be a disaster."""
+    _, workflow = _run_cli(monkeypatch, _config_with_preset(tmp_path), ["--run-preset", "nightly"])
+    assert workflow['advanced_options']['sync'] is True
+    assert workflow['advanced_options']['overwrite'] is False
+    assert workflow['dry_run'] is False
+
+
+def test_run_preset_honors_the_flags(tmp_path, monkeypatch):
+    _, workflow = _run_cli(monkeypatch, _config_with_preset(tmp_path),
+                           ["--run-preset", "nightly", "--overwrite", "--dry-run"])
+    assert workflow['advanced_options']['overwrite'] is True
+    assert workflow['advanced_options']['sync'] is False
+    assert workflow['dry_run'] is True
+
+
+def test_run_preset_never_inherits_the_stored_dry_run(tmp_path, monkeypatch):
+    """The saved session may have been a simulation; without the flag the run is
+    real, and vice versa — the decision is always the caller's."""
+    cfg_path = _config_with_preset(tmp_path, last_advanced_options={"sync": True, "dry_run": True})
+    _, workflow = _run_cli(monkeypatch, cfg_path, ["--run-preset", "nightly"])
+    assert workflow['dry_run'] is False
+
+
+def test_run_preset_of_a_manifest(tmp_path, monkeypatch):
+    src = tmp_path / "shoot"
+    src.mkdir()
+    manifest = _write_manifest(tmp_path / "manifest_nightly.csv", [(str(src), str(src), 6)])
+    cfg_path = _config_with_preset(tmp_path, last_output_mode="99", last_manifest_path=manifest)
+    code, workflow = _run_cli(monkeypatch, cfg_path, ["--run-preset", "nightly"])
+    assert code == 0
+    assert workflow['mode'] == 99
+    assert workflow['manifest_entries'] == [(str(src), str(src), 6)]
+
+
+def test_unknown_preset_exits_with_an_error(tmp_path, monkeypatch, capsys):
+    code, workflow = _run_cli(monkeypatch, _config_with_preset(tmp_path), ["--run-preset", "typo"])
+    assert code == 2 and workflow is None
+    out = capsys.readouterr().out
+    assert "typo" in out and "nightly" in out, "the available names must be listed"
+
+
+def test_deleting_presets_refuse_to_run_unattended(tmp_path, monkeypatch, capsys):
+    """Mode 8 + delete_source is gated behind an HHMM token nobody can type in a
+    scheduled task; skipping that gate would let cron delete originals."""
+    cfg_path = _config_with_preset(tmp_path, last_output_mode="8",
+                                   last_advanced_options={"sync": True, "delete_source": True})
+    code, workflow = _run_cli(monkeypatch, cfg_path, ["--run-preset", "nightly"])
+    assert code == 1 and workflow is None
+    assert "deletes source files" in capsys.readouterr().out
+
+
+def test_deleting_preset_may_still_be_simulated(tmp_path, monkeypatch):
+    cfg_path = _config_with_preset(tmp_path, last_output_mode="8",
+                                   last_advanced_options={"sync": True, "delete_source": True})
+    code, workflow = _run_cli(monkeypatch, cfg_path, ["--run-preset", "nightly", "--dry-run"])
+    assert code == 0 and workflow['dry_run'] is True
+
+
+def test_run_preset_fails_when_the_folder_is_gone(tmp_path, monkeypatch):
+    cfg_path = _config_with_preset(tmp_path, last_input_dir=str(tmp_path / "deleted"))
+    code, workflow = _run_cli(monkeypatch, cfg_path, ["--run-preset", "nightly"])
+    assert code == 1 and workflow is None
+
+
+def test_list_presets_prints_and_exits(tmp_path, monkeypatch, capsys):
+    code, _ = _run_cli(monkeypatch, _config_with_preset(tmp_path), ["--list-presets"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "nightly" in out and "workers 12" in out
+
+
+@pytest.mark.parametrize("argv", [["--dry-run"], ["--overwrite"]])
+def test_flags_without_run_preset_are_rejected(tmp_path, monkeypatch, argv):
+    """A stray --dry-run that silently did nothing would run a REAL conversion
+    for someone who believed they asked for a simulation."""
+    code, _ = _run_cli(monkeypatch, _config_with_preset(tmp_path), argv)
+    assert code == 2, "argparse must reject it instead of ignoring it"

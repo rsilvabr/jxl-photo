@@ -4343,7 +4343,8 @@ class InteractiveMenu:
 
             self._print_error("Not a valid option.")
 
-    def _run_saved_session(self, session: Dict, status: Dict[str, bool]) -> None:
+    def _run_saved_session(self, session: Dict, status: Dict[str, bool],
+                           answers: Optional[Dict] = None) -> bool:
         """Re-run a stored workflow: "Repeat last workflow" (a snapshot of the
         last_* config fields) and named presets (a snapshot saved under a name)
         both come through here, so the two can never drift apart.
@@ -4351,7 +4352,13 @@ class InteractiveMenu:
         `session` is a plain dict keyed exactly like the last_* config fields.
         Overwrite/sync and dry-run are always re-asked: the stored run may have
         been a simulation, and inheriting that silently would turn a repeat into
-        a real conversion (or vice versa) without a word."""
+        a real conversion (or vice versa) without a word.
+
+        `answers` supplies those two decisions up front for `--run-preset`, the
+        unattended path (Task Scheduler/cron), where there is nobody to ask.
+        They are still explicit choices — passed as CLI flags, never inherited
+        from the stored run. Returns True only when a run actually executed."""
+        unattended = answers is not None
         last_dir = session.get('last_input_dir') or ""
         last_mode = session.get('last_output_mode') or "0"
         last_workers = session.get('last_workers') or 4
@@ -4376,11 +4383,11 @@ class InteractiveMenu:
                 self._print_error(
                     f"The manifest for the last run is gone: {manifest_path or '(not saved)'}\n"
                     f"Use 'New workflow' to generate or pick another one.")
-                return
+                return False
             manifest_entries = self._load_manifest_entries(manifest_path, last_origin, last_dest)
             if manifest_entries is None:
                 # _load_manifest_entries already explained why.
-                return
+                return False
 
         if RICH_AVAILABLE and console:
             settings = [
@@ -4449,6 +4456,13 @@ class InteractiveMenu:
             # answer would be ignored).
             new_folder = last_dir
             input_path = Path(new_folder) if new_folder else Path.cwd()
+        elif unattended:
+            # Nobody to ask: the stored folder is the whole point of the preset.
+            new_folder = last_dir
+            input_path = Path(new_folder) if new_folder else Path.cwd()
+            if not new_folder or not input_path.exists():
+                self._print_error(f"The preset's input folder is gone: {new_folder or '(not saved)'}")
+                return False
         else:
             if RICH_AVAILABLE and console:
                 new_folder = Prompt.ask(f"\n[bold cyan]Input folder[/bold cyan]", default=last_dir).strip()
@@ -4465,11 +4479,13 @@ class InteractiveMenu:
                     console.print(f"[red]Folder not found: {new_folder}[/red]")
                 else:
                     print(f"Folder not found: {new_folder}")
-                return
+                return False
 
         origin = last_origin
 
-        if RICH_AVAILABLE and console:
+        if unattended:
+            ow_choice = "1" if answers.get('overwrite') else "2"
+        elif RICH_AVAILABLE and console:
             console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
             ow_choice = Prompt.ask("If exists", choices=["1", "2"], default="2")
         else:
@@ -4483,19 +4499,35 @@ class InteractiveMenu:
         # Ask dry-run explicitly — the original run may have been a
         # simulation, and hardcoding False would turn a repeat into a REAL
         # conversion without any notice.
-        if RICH_AVAILABLE and console:
+        if unattended:
+            dry_choice = bool(answers.get('dry_run'))
+        elif RICH_AVAILABLE and console:
             dry_choice = Confirm.ask("Dry run? (simulate without converting)", default=False)
         else:
             dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
 
-        if RICH_AVAILABLE and console:
+        if unattended:
+            # A destructive preset cannot run unattended: execute_workflow gates
+            # mode 8 + delete_source behind an HHMM token nobody can type here,
+            # and skipping that gate would let a scheduled task delete originals
+            # on its own. Fail closed and say what to do instead.
+            if (int(last_mode or 0) == 8
+                    and (session.get('last_advanced_options') or {}).get('delete_source')
+                    and not dry_choice):
+                self._print_error(
+                    "This preset deletes source files (mode 8 + delete_source). "
+                    "That confirmation cannot be given unattended - run it from "
+                    "the menu, or add --dry-run to simulate it here.")
+                return False
+            proceed = True
+        elif RICH_AVAILABLE and console:
             proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)
         else:
             resp = input(f"\nProceed with this workflow? [Y/n]: ").strip().lower()
             proceed = not resp.startswith('n')
 
         if not proceed:
-            return
+            return False
 
         # Separate distance (TIFF) and quality (JPEG) - don't mix!
         if origin == 'tiff':
@@ -4600,7 +4632,7 @@ class InteractiveMenu:
         # would ask for the token TWICE in a row (and the second prompt
         # could roll into the next minute and fail spuriously).
 
-        self.execute_workflow(workflow, status)
+        return bool(self.execute_workflow(workflow, status))
 
     def _print_success(self, message: str) -> None:
         if RICH_AVAILABLE and console:
@@ -4618,7 +4650,23 @@ class InteractiveMenu:
 def main():
     parser = argparse.ArgumentParser(description="JXL Tools v2 - JPEG XL Processing with Auto Mode")
     parser.add_argument("--recheck", action="store_true", help="Force dependency recheck")
+    parser.add_argument("--run-preset", metavar="NAME",
+                        help="Run a saved preset without the menu (Task Scheduler / cron) and exit")
+    parser.add_argument("--list-presets", action="store_true",
+                        help="List saved presets and exit")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="With --run-preset: overwrite existing outputs (default: sync, "
+                             "reconvert only what is newer)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --run-preset: simulate without converting")
     args = parser.parse_args()
+
+    # These two are decisions, not preferences carried over from the stored run,
+    # so they only mean something next to --run-preset. Silently ignoring a
+    # stray --dry-run would be the worst outcome: a REAL conversion for someone
+    # who believed they asked for a simulation.
+    if (args.overwrite or args.dry_run) and not args.run_preset:
+        parser.error("--overwrite and --dry-run only apply together with --run-preset")
 
     config = ConfigManager()
     checker = DependencyChecker(config)
@@ -4632,6 +4680,25 @@ def main():
     if not status.get('cjxl') and not status.get('djxl'):
         print("\nERROR: cjxl/djxl not found!")
         sys.exit(1)
+
+    if args.list_presets:
+        presets = config.config.presets or {}
+        if not presets:
+            print("No presets saved. Run a workflow, then save it from menu option 7.")
+        for name in sorted(presets):
+            print(f"{name}\n    {menu._describe_session(presets[name])}")
+        sys.exit(0)
+
+    if args.run_preset:
+        presets = config.config.presets or {}
+        if args.run_preset not in presets:
+            available = ", ".join(sorted(presets)) or "(none saved)"
+            print(f"ERROR: no preset named {args.run_preset!r}. Available: {available}")
+            sys.exit(2)
+        ok = menu._run_saved_session(
+            presets[args.run_preset], status,
+            answers={'overwrite': args.overwrite, 'dry_run': args.dry_run})
+        sys.exit(0 if ok else 1)
 
     # Main loop
     while True:

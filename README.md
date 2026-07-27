@@ -26,6 +26,8 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
+**Unreleased (in `main`)** — `--run-preset NAME` runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved.
+
 **Current release: v1.8.3** (2026-07-28) — recommended for everyone. Cuts the repetitive parts of the menu (your own distance, repeatable manifests, named presets) and adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.

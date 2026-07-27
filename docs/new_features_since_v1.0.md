@@ -1,5 +1,36 @@
 # New Features Since v1.0
 
+## Unreleased (in `main`)
+
+### `--run-preset`: presets without the menu
+
+The companion to presets (v1.8.3): the same saved workflow, runnable from a
+scheduled task.
+
+```powershell
+py jxl_photo.py --list-presets
+py jxl_photo.py --run-preset nightly-sync
+py jxl_photo.py --run-preset nightly-sync --dry-run
+py jxl_photo.py --run-preset nightly-sync --overwrite
+```
+
+It runs once and exits, never touching stdin, so Task Scheduler (or cron) can
+drive it. Exit codes: `0` ran, `1` failed or refused, `2` no such preset — with
+the available names printed.
+
+The two decisions that the interactive path always asks about are **flags, not
+inheritance**: sync is the default (`--overwrite` to redo everything), and
+dry-run is off unless requested. A stored simulation never makes the scheduled
+job a simulation, and a stored real run never forces one. Passing either flag
+without `--run-preset` is an error rather than a silent no-op, because a
+`--dry-run` that quietly did nothing would mean a real conversion for someone
+who believed they asked for a simulation.
+
+A preset that deletes sources (mode 8 + `delete_source`) is **refused**
+unattended: that confirmation is a typed token, and honouring it automatically
+would let a scheduled task delete originals on its own. `--dry-run` still
+simulates it.
+
 ## v1.8.3
 
 Date: 2026-07-28
