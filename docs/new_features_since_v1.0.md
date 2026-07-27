@@ -1,5 +1,79 @@
 # New Features Since v1.0
 
+## v1.8.3
+
+Date: 2026-07-27
+
+### End-of-manifest summary
+A manifest run now closes with a block covering the **whole** run instead of the
+last entry's numbers:
+
+```
+===========================================================================
+Manifest complete: 3 entries - 2 ok, 1 with failures, 0 cancelled
+---------------------------------------------------------------------------
+  #  mode folder                           OK    ovw   skip corrupt    err
+  1  6    D:\2025\...\1_Fuji             2003      0      0       0      2
+  2  6    E:\2026\260101_Osaka\2_Z8      3001      2      4       0      0
+  3  6    G:\2026\...\2_Z8                758      0      0       1      0
+---------------------------------------------------------------------------
+  TOTAL files                            5762      2      4       1      2
+---------------------------------------------------------------------------
+  D50 patched: 12  |  Thumbnails excluded: 5762
+---------------------------------------------------------------------------
+  FAILURES (2):
+    [1] D:\2025\250913_Fuji_Yokohama\1_Fuji\dia3\IMG_0412.tif
+        -> cjxl exit 1
+---------------------------------------------------------------------------
+  CORRUPT / UNREADABLE (1):
+  These were NOT converted. The source files are damaged.
+    [3] G:\2026\260620-23_Kyoto_Tokuyasu\2_Z8\_EXPORT\scan_099.tif
+        -> no readable pages (corrupt or truncated TIFF)
+===========================================================================
+```
+
+The header counts **entries**; the table counts **files**. Failed files are listed
+with their paths — a count alone still leaves you hunting through per-entry logs
+for which photo broke.
+
+Entries that produced no summary (child crashed, killed, or cancelled) are shown
+as `(no summary - failed)` rather than as zeros, so a dead child never reads as a
+clean run.
+
+### Combined wrapper log — `Logs/jxl_photo/<timestamp>.log`
+Each manifest entry is a separate child process with its own log file, so nothing
+on disk held the totals. The wrapper now writes its own: the block above, the
+untruncated source paths (the on-screen table shortens them to fit 80 columns),
+and the complete failure lists (the screen caps them at 15). This is what you open
+hours later, once the scrollback is gone.
+
+### `--summary-json` (all 3 scripts, internal)
+Hidden from `--help`; the wrapper passes it to every manifest child. The child
+prints one `##JXLSUM## {...}` line at the end — counts, per-script extras
+(thumbnails excluded, D50 patched, MD5 failures), failed file paths, and its own
+log path. The wrapper consumes the line and never displays it, so a direct human
+run sees nothing new. Emitted *before* the non-zero exit, since a run with
+failures is exactly the one the summary matters for.
+
+Parsing the human-readable `Done:` line was the alternative and was rejected:
+there are already three different final-line formats across the scripts (normal,
+`SYNC done:`, and the transcoder's `reconverted`/`up to date` variants), so a
+regex would have started with three cases and broken silently on the next wording
+change.
+
+### Corrupt files are counted apart from skipped files
+`skipped` now means only what you asked to skip. A TIFF with no readable pages
+gets its own `corrupt` count, its own summary section, and — on a direct run — its
+own warning:
+
+```
+Done: 1 OK | 0 overwrites | 0 skipped | 0 errors
+WARNING | Corrupt: 1 file(s) had no readable pages and were NOT converted:
+WARNING |   -> G:\...\_EXPORT\TRUNCADO.tif
+```
+
+Exit codes are unchanged: a damaged input is not a failed run.
+
 ## v1.8.1
 
 Date: 2026-07 (the audit release)

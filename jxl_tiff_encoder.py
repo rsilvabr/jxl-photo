@@ -733,6 +733,61 @@ def setup_logger():
     return log_file
 
 
+# Machine-readable run summary for the jxl_photo.py wrapper.
+#
+# A manifest run spawns one child PER ENTRY, each writing its own log file, so
+# the wrapper had no way to total a multi-entry run: the user saw only the last
+# entry's "Done:" line and had to open N logs to find out whether anything
+# failed. The wrapper consumes this line and does NOT print it.
+#
+# Gated behind --summary-json so a direct human run never sees the JSON. Keep
+# the key names stable: jxl_photo.py parses them.
+SUMMARY_PREFIX = "##JXLSUM## "
+
+# A pathological run (unreadable drive) could fail every file; the line still
+# has to fit in a pipe buffer, so the list is capped and the wrapper is told.
+SUMMARY_MAX_FAILURES = 200
+
+
+def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
+                      errors: int, log_file, extras: Optional[Dict[str, int]] = None,
+                      failures: Optional[list] = None, dry_run: bool = False,
+                      unreadable: Optional[list] = None) -> None:
+    """Print one JSON line the wrapper can aggregate. No-op without the flag.
+
+    `extras` is a plain label -> count map (e.g. {"Thumbnails excluded": 758}),
+    so the wrapper can sum and render script-specific stats without knowing
+    what they mean. `failures` is a list of (file, reason) pairs. `dry_run`
+    marks counts as "would have" so the wrapper can label the block instead of
+    reporting a simulation as finished work.
+    """
+    if not enabled:
+        return
+    failures = failures or []
+    unreadable = unreadable or []
+    payload = {
+        "script": Path(__file__).stem,
+        "ok": ok,
+        "overwritten": overwritten,
+        "skipped": skipped,
+        "errors": errors,
+        "unreadable": len(unreadable),
+        "dry_run": dry_run,
+        "extras": {k: v for k, v in (extras or {}).items() if v},
+        "failures": [{"file": f, "reason": r} for f, r in failures[:SUMMARY_MAX_FAILURES]],
+        "failures_truncated": len(failures) > SUMMARY_MAX_FAILURES,
+        "unreadable_files": [{"file": f, "reason": r} for f, r in unreadable[:SUMMARY_MAX_FAILURES]],
+        "log": str(log_file),
+    }
+    try:
+        # Straight to stdout, not through the logger: the timestamp prefix and
+        # the log file copy would both be noise, and the wrapper matches on the
+        # line starting with the prefix.
+        print(SUMMARY_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+    except Exception:
+        pass  # a summary line must never take down a finished run
+
+
 _rejected_log_lock = threading.Lock()
 
 
@@ -2199,6 +2254,18 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             logger.error(f"[{n}/{total}] ERROR{page_label} | {tiff_path.name} | {e}")
             return ((str(tiff_path), page_idx), "error", str(e), None)
 
+class UnreadableTiff(Exception):
+    """The TIFF yielded no pages at all — corrupt or truncated.
+
+    Distinct from an empty return, which means "policy asked me to drop this"
+    (--multipage-mode skip on a multi-page file, --thumbnail-mode exclude on a
+    thumbnail-only file). Both used to be counted as "skipped", so a corrupt
+    file was reported as "skipped by multipage policy" — a policy that never
+    asked for it. Kept out of the error count so exit codes (and the automation
+    reading them) keep their current meaning.
+    """
+
+
 def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     """
     Decide which pages of a TIFF to encode based on MULTIPAGE_TIFF_MODE and
@@ -2291,6 +2358,8 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                         f"DISCARDING {len(thumb_pages)} thumbnail page(s) | {tiff_path.name} | "
                         f"--thumbnail-mode exclude (use include to keep them)")
         if not pages_to_encode:
+            if not real_pages and not thumb_pages:
+                raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
             logger.warning(f"SKIP TIFF with no encodable pages | {tiff_path.name}")
             return []
 
@@ -2302,8 +2371,9 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
             pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
         if not pages_to_encode:
-            logger.warning(f"SKIP TIFF with no pages | {tiff_path.name}")
-            return []
+            # split_all encodes every page there is, so an empty result can only
+            # mean the file has none — always a broken file, never a policy skip.
+            raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
 
     else:
         # Unknown mode, fall back to ignore
@@ -2663,6 +2733,8 @@ def main():
                              "--thumbnail-mode exclude (default: only a single summary line)")
     parser.add_argument("--dry-run",         action="store_true",
                         help="Show what would be converted without converting")
+    parser.add_argument("--summary-json",    action="store_true",
+                        help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py
     parser.add_argument("--staging",         type=str, default=None,
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
     parser.add_argument("--export-marker",  type=str, default=None,
@@ -2901,6 +2973,10 @@ def main():
 
         try:
             items = convert_multipage(t, main_jxl.parent, args.mode)
+        except UnreadableTiff as e:
+            # Caught before the generic handler below: a file with no readable
+            # pages is a broken file, not a policy skip and not a crash.
+            return ("unreadable", str(e))
         except Exception as e:
             # A corrupt/unreadable TIFF must not abort the whole batch at
             # planning time — log one error and move on, matching pre-multipage
@@ -2935,6 +3011,15 @@ def main():
             if progress_step and done_count % progress_step == 0:
                 logger.info(f"  Analyzed {done_count}/{len(tiffs)} TIFF(s)...")
 
+    # Which files actually failed, for the wrapper's end-of-run FAILURES list.
+    # Counts alone don't answer "did something break in the middle?" — the user
+    # walks away from a multi-hour manifest and needs the paths on return.
+    failed_files = []
+    # Files that are simply broken. Tracked apart from both buckets: they are
+    # not policy skips (nothing asked for them to be dropped) and not errors
+    # (the run did not fail), but the user still has to know about them.
+    unreadable_files = []
+
     # Consume in INPUT order so the conversion order (and the log) stays
     # deterministic regardless of how the threads finished.
     for i, t in enumerate(tiffs):
@@ -2944,6 +3029,10 @@ def main():
         elif kind == "error":
             logger.error(f"SKIP (cannot analyze TIFF) | {t.name} | {payload}")
             analyze_errors += 1
+            failed_files.append((str(t), f"cannot analyze TIFF: {payload}"))
+        elif kind == "unreadable":
+            logger.warning(f"UNREADABLE (not converted) | {t.name} | {payload}")
+            unreadable_files.append((str(t), payload))
         elif kind == "multipage_skipped":
             multipage_skipped += 1
         else:
@@ -2955,8 +3044,12 @@ def main():
     planned_msg = f"JXL outputs planned: {len(all_items)} (from {len(tiffs)} TIFFs, {skipped_files} skipped by mode"
     if multipage_skipped:
         planned_msg += f", {multipage_skipped} skipped by multipage policy"
+    if unreadable_files:
+        planned_msg += f", {len(unreadable_files)} corrupt"
     if analyze_errors:
-        planned_msg += f", {analyze_errors} unreadable"
+        # Distinct from "corrupt" above: analysis raised rather than returning
+        # an empty page list. Both are broken files; only this one is an error.
+        planned_msg += f", {analyze_errors} failed to analyze"
     planned_msg += ")"
     logger.info(planned_msg)
 
@@ -2974,6 +3067,20 @@ def main():
         # so the discard totals must print here too — the real-run summary below
         # is never reached.
         _log_discard_summary()
+        emit_summary_json(
+            args.summary_json,
+            ok=len(all_items), overwritten=0,
+            skipped=skipped_files + multipage_skipped,
+            errors=analyze_errors,
+            log_file=log_file,
+            extras={
+                "Thumbnails excluded": _thumbnails_dropped["pages"],
+                "Multipage pages ignored": _multipage_ignored["pages"],
+            },
+            failures=failed_files,
+            unreadable=unreadable_files,
+            dry_run=True,
+        )
         return
 
     # Create the mode-2 output dir only for real runs (dry-run must not write)
@@ -3017,7 +3124,10 @@ def main():
         elif status == "overwrite":
             ok += 1; overwritten += 1; synced += 1
         elif status == "skipped":   skipped += 1
-        elif status == "error":     err += 1
+        elif status == "error":
+            err += 1
+            # result[0] is (path, page_idx); result[2] is the exception text.
+            failed_files.append((str(result[0][0]), str(result[2])))
 
     # Account for files intentionally skipped by the multipage policy
     skipped += multipage_skipped
@@ -3029,6 +3139,15 @@ def main():
         logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    # Named separately from "skipped": these files were not dropped by any
+    # setting the user chose, they simply could not be read.
+    if unreadable_files:
+        logger.warning(f"Corrupt: {len(unreadable_files)} file(s) had no readable pages and were NOT converted:")
+        for path, _reason in unreadable_files[:10]:
+            logger.warning(f"  -> {path}")
+        if len(unreadable_files) > 10:
+            logger.warning(f"  -> ... and {len(unreadable_files) - 10} more (see the list above in this log)")
 
     _log_discard_summary()
 
@@ -3059,6 +3178,24 @@ def main():
             logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
     logger.info(f"Log: {log_file}")
+
+    # Emitted BEFORE the exit below: a run with failures is exactly the run the
+    # wrapper most needs the summary from.
+    emit_summary_json(
+        args.summary_json,
+        ok=synced if args.sync else ok,
+        overwritten=overwritten,
+        skipped=skipped,
+        errors=err,
+        log_file=log_file,
+        extras={
+            "Thumbnails excluded": _thumbnails_dropped["pages"],
+            "Multipage pages ignored": _multipage_ignored["pages"],
+            "D50 patched": (applied - applied_already_correct) if D50_PATCH_MODE != "off" else 0,
+        },
+        failures=failed_files,
+        unreadable=unreadable_files,
+    )
 
     # Non-zero exit when any file failed so wrappers/automation can detect it.
     if err > 0:

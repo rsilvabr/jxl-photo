@@ -30,6 +30,7 @@ import threading
 import hashlib
 import argparse
 import functools
+import json
 import re
 import uuid
 from pathlib import Path
@@ -492,6 +493,53 @@ logger = logging.getLogger("jxl_jpeg_transcoder")
 counter_lock = threading.Lock()
 _md5_db_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
+
+# Machine-readable run summary for the jxl_photo.py wrapper.
+#
+# A manifest run spawns one child PER ENTRY, each writing its own log file, so
+# the wrapper had no way to total a multi-entry run: the user saw only the last
+# entry's "Done:" line and had to open N logs to find out whether anything
+# failed. The wrapper consumes this line and does NOT print it.
+#
+# Unlike the encoder/decoder, this script's counters live inside the cmd_*
+# functions, which only return (errors, cancelled). Rather than change three
+# return signatures, each cmd_* records its totals here and main() emits once.
+SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_MAX_FAILURES = 200
+
+_run_summary = {"ok": 0, "overwritten": 0, "skipped": 0, "errors": 0,
+                "dry_run": False, "extras": {}, "failures": [], "log": ""}
+
+
+def record_summary(*, ok=0, overwritten=0, skipped=0, errors=0, log_file="",
+                   extras=None, failures=None, dry_run=False):
+    """Store this command's totals for main() to emit. Overwrites, not adds:
+    exactly one cmd_* runs per invocation."""
+    _run_summary.update({
+        "ok": ok, "overwritten": overwritten, "skipped": skipped,
+        "errors": errors, "dry_run": dry_run,
+        "extras": {k: v for k, v in (extras or {}).items() if v},
+        "failures": list(failures or []),
+        "log": str(log_file),
+    })
+
+
+def emit_summary_json(enabled):
+    """Print one JSON line the wrapper can aggregate. No-op without the flag."""
+    if not enabled:
+        return
+    failures = _run_summary["failures"]
+    payload = dict(_run_summary)
+    payload["script"] = Path(__file__).stem
+    payload["failures"] = [{"file": f, "reason": r} for f, r in failures[:SUMMARY_MAX_FAILURES]]
+    payload["failures_truncated"] = len(failures) > SUMMARY_MAX_FAILURES
+    try:
+        # Straight to stdout, not through the logger: the timestamp prefix and
+        # the log file copy would both be noise.
+        print(SUMMARY_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+    except Exception:
+        pass  # a summary line must never take down a finished run
+
 
 def setup_logger():
     global logger
@@ -1465,6 +1513,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     logger.info(f"Output groups: {len(groups)}")
 
     ok = err = skipped = overwritten = md5_fail = 0
+    # Which files actually failed, for the wrapper's end-of-run FAILURES list.
+    failed_files = []
     for dest_folder, group_pairs in groups.items():
         if len(groups) > 1:
             logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
@@ -1484,8 +1534,10 @@ def cmd_transcode(args, auto_decode: bool = False):
             elif status == "md5_fail":
                 err += 1
                 md5_fail += 1
+                failed_files.append((str(result[0]), "MD5 verification failed"))
             elif status == "error":
                 err += 1
+                failed_files.append((str(result[0]), str(result[2])))
 
     logger.info(f"\n{'-'*50}")
     if decode and md5_fail:
@@ -1493,6 +1545,9 @@ def cmd_transcode(args, auto_decode: bool = False):
     else:
         logger.info(f"Done: {ok} OK | {overwritten} reconverted | {skipped} up to date | {err} errors")
     logger.info(f"Log: {log_file}")
+    record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
+                   log_file=log_file, failures=failed_files,
+                   extras={"MD5 failures": md5_fail})
     return (err, False)
 
 # --------------------------------------------─
@@ -2109,6 +2164,8 @@ def cmd_convert(args, from_jxl: bool = True):
                     return (0, True)
 
     ok = err = skipped = overwritten = 0
+    # Which files actually failed, for the wrapper's end-of-run FAILURES list.
+    failed_files = []
     for dest_folder, group_pairs in groups.items():
         if len(groups) > 1:
             logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
@@ -2143,7 +2200,7 @@ def cmd_convert(args, from_jxl: bool = True):
             if deleted:
                 logger.info(f" -> Deleted {deleted} source file(s)")
 
-        for _, status, _, _ in results:
+        for src, status, detail, _ in results:
             if status == "ok":
                 ok += 1
             elif status == "reconvert":
@@ -2153,10 +2210,13 @@ def cmd_convert(args, from_jxl: bool = True):
                 skipped += 1
             elif status == "error":
                 err += 1
+                failed_files.append((str(src), str(detail)))
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"Done: {ok} OK | {overwritten} reconverts | {skipped} skipped | {err} errors")
     logger.info(f"Log: {log_file}")
+    record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
+                   log_file=log_file, failures=failed_files)
     return (err, False)
 
 # --------------------------------------------─
@@ -2341,10 +2401,14 @@ def cmd_auto(args):
     # have its JXL source overwritten before decoding (extra belt on top of
     # the collision guard above).
     totals = {"ok": 0, "err": 0, "skipped": 0}
+    # Failure paths ride alongside the counts (kept out of `totals` so the
+    # numeric merge below stays a plain sum).
+    all_failures = []
 
     def _merge(tally):
         for k in totals:
             totals[k] += tally.get(k, 0)
+        all_failures.extend(tally.get("failures", []))
 
     # Process JXL transcode files (lossless decode to JPEG) — only when the
     # mode filter left something to do (otherwise the header lies).
@@ -2371,6 +2435,9 @@ def cmd_auto(args):
     logger.info(f"AUTO MODE complete | Total: {total_files} files | "
                 f"{totals['ok']} OK | {totals['skipped']} skipped | {totals['err']} errors")
     logger.info(f"Log: {log_file}")
+    record_summary(ok=totals["ok"], overwritten=0, skipped=totals["skipped"],
+                   errors=totals["err"], log_file=log_file,
+                   failures=all_failures, dry_run=args.dry_run)
     return (totals["err"], False)
 
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
@@ -2445,7 +2512,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if not pairs:
         return {"ok": 0, "err": 0, "skipped": 0}
 
-    tally = {"ok": 0, "err": 0, "skipped": 0}
+    tally = {"ok": 0, "err": 0, "skipped": 0, "failures": []}
 
     def _accumulate(results):
         for r in results:
@@ -2456,6 +2523,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 tally["skipped"] += 1
             else:
                 tally["err"] += 1
+                # r[0] is the source path; r[2] is the reason (or the output
+                # path for md5_fail, which has no message of its own).
+                reason = "MD5 verification failed" if st == "md5_fail" else str(r[2])
+                tally["failures"].append((str(r[0]), reason))
 
     # Group by output folder
     groups = {}
@@ -2594,6 +2665,8 @@ Examples:
     parser.add_argument("--ram", action="store_true", default=True, help="Accepted for CLI compatibility; decode currently always uses temporary files (no in-RAM pipeline yet)")
     parser.add_argument("--no-ram", dest="ram", action="store_false", help="Use disk")
     parser.add_argument("--dry-run", action="store_true", help="Show what would happen")
+    parser.add_argument("--summary-json", action="store_true",
+                        help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py
     parser.add_argument("--output-name", type=str, default=CONVERT_OUTPUT_FOLDER,
                         help="Output folder name override for convert modes 1 and 3")
     parser.add_argument("output", nargs="?", type=Path, default=None,
@@ -2717,6 +2790,12 @@ Examples:
         # Fallback - should not reach here
         print(f"ERROR: Unknown command state: {cmd}")
         sys.exit(1)
+
+    # Emitted BEFORE the exits below: a run with failures is exactly the run the
+    # wrapper most needs the summary from. A cancelled run recorded nothing, so
+    # the wrapper sees no summary for that entry and labels it accordingly.
+    if not cancelled:
+        emit_summary_json(args.summary_json)
 
     if cancelled:
         sys.exit(3)

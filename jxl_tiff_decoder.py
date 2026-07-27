@@ -18,7 +18,7 @@ Requirements:
  exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io, json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -467,6 +467,51 @@ def setup_logger():
     logger.addHandler(ch)
     logger.info(f"Log saved to: {log_file}")
     return log_file
+
+
+# Machine-readable run summary for the jxl_photo.py wrapper.
+#
+# A manifest run spawns one child PER ENTRY, each writing its own log file, so
+# the wrapper had no way to total a multi-entry run: the user saw only the last
+# entry's "Done:" line and had to open N logs to find out whether anything
+# failed. The wrapper consumes this line and does NOT print it.
+#
+# Gated behind --summary-json so a direct human run never sees the JSON. Keep
+# the key names stable: jxl_photo.py parses them.
+SUMMARY_PREFIX = "##JXLSUM## "
+SUMMARY_MAX_FAILURES = 200
+
+
+def emit_summary_json(enabled, *, ok, overwritten, skipped, errors, log_file,
+                      extras=None, failures=None, dry_run=False):
+    """Print one JSON line the wrapper can aggregate. No-op without the flag.
+
+    `extras` is a plain label -> count map so the wrapper can render
+    script-specific stats without knowing what they mean. `failures` is a list
+    of (file, reason) pairs. `dry_run` marks counts as "would have".
+    """
+    if not enabled:
+        return
+    failures = failures or []
+    payload = {
+        "script": Path(__file__).stem,
+        "ok": ok,
+        "overwritten": overwritten,
+        "skipped": skipped,
+        "errors": errors,
+        "dry_run": dry_run,
+        "extras": {k: v for k, v in (extras or {}).items() if v},
+        "failures": [{"file": f, "reason": r} for f, r in failures[:SUMMARY_MAX_FAILURES]],
+        "failures_truncated": len(failures) > SUMMARY_MAX_FAILURES,
+        "log": str(log_file),
+    }
+    try:
+        # Straight to stdout, not through the logger: the timestamp prefix and
+        # the log file copy would both be noise.
+        print(SUMMARY_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+    except Exception:
+        pass  # a summary line must never take down a finished run
+
 
 def next_count():
     with counter_lock:
@@ -2524,6 +2569,8 @@ Examples:
                              "empty = all subfolders). Overrides EXPORT_JXL_SUBFOLDER.")
     parser.add_argument("--dry-run", action="store_true",
                       help="Preview operations without converting")
+    parser.add_argument("--summary-json", action="store_true",
+                        help=argparse.SUPPRESS)  # internal: machine-readable summary for jxl_photo.py
     parser.add_argument("--no-preview", action="store_true",
                       help="Skip JPEG preview generation (smaller TIFF files)")
     parser.add_argument("--thumbnail-handling", type=str, default=None,
@@ -2716,6 +2763,11 @@ Examples:
             detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
+        emit_summary_json(
+            args.summary_json,
+            ok=len(tasks), overwritten=0, skipped=0, errors=0,
+            log_file=log_file, dry_run=True,
+        )
         return
 
     # Mode 8 confirmation (after dry-run so simulations never prompt)
@@ -2738,6 +2790,10 @@ Examples:
 
     # Process
     ok = err = skipped = overwritten = 0
+    # Which files actually failed, for the wrapper's end-of-run FAILURES list.
+    # Counts alone don't answer "did something break in the middle?" — the user
+    # walks away from a multi-hour manifest and needs the paths on return.
+    failed_files = []
 
     for dest_folder, group_tasks in groups.items():
         if len(groups) > 1:
@@ -2757,6 +2813,9 @@ Examples:
                 skipped += 1
             elif status == "error":
                 err += 1
+                # result[0] is the source JXL path; result[2] is the reason.
+                failed_files.append((str(result[0]),
+                                     str(result[2]) if len(result) > 2 else "unknown error"))
 
     logger.info("\n" + "-"*50)
     if args.sync:
@@ -2764,6 +2823,14 @@ Examples:
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
     logger.info(f"Log: {log_file}")
+
+    # Emitted BEFORE the exit below: a run with failures is exactly the run the
+    # wrapper most needs the summary from.
+    emit_summary_json(
+        args.summary_json,
+        ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
+        log_file=log_file, failures=failed_files,
+    )
 
     # Non-zero exit when any file failed so wrappers/automation can detect it.
     if err > 0:

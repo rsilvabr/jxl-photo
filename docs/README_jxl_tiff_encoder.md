@@ -453,6 +453,30 @@ D50 patch: 15 applied | 27 skipped (mode: auto)
 
 This helps you verify that the auto-detection is working correctly for your files.
 
+#### `skipped` vs `corrupt`
+
+`skipped` counts **only** files you asked to skip — `--multipage-mode skip` on a
+multi-page TIFF, a thumbnail-only file under `--thumbnail-mode exclude`, or a file
+outside the export marker in modes 6/7.
+
+A file that simply cannot be read is reported apart, because no setting asked for
+it to be dropped:
+
+```
+Done: 41 OK | 0 overwrites | 0 skipped | 0 errors
+WARNING | Corrupt: 1 file(s) had no readable pages and were NOT converted:
+WARNING |   -> G:\2026\260620_Kyoto\_EXPORT\TRUNCADO.tif
+```
+
+The test is that the page analyzer found neither a real page nor a thumbnail — a
+healthy TIFF always has at least one page, so there is no guessing involved.
+
+**Corrupt files do not change the exit code.** A damaged input is not a failed
+run: exit `1` still means the conversion failed on a file, so automation reading
+exit codes does not start firing on broken photos. Run a manifest and the same
+files appear under `CORRUPT / UNREADABLE` in the end-of-run block (see
+[README_jxl_tools.md](README_jxl_tools.md)).
+
 ---
 
 ## Scanner ICC / Lossy Encoding Workaround

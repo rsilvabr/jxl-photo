@@ -190,10 +190,62 @@ writes the system ANSI codepage, and the wrapper then refuses the file rather
 than guess an encoding and run against a wrongly-decoded path.
 
 Each row runs as a **separate child process**, so a failure in one folder does not
-kill the rest, and the summary reports `N OK | N skipped | N errors`. Before
-anything runs, the wrapper checks for files from *different* rows that would land
-on the same output file and refuses the whole manifest if it finds any — a child
-process can only see its own entry, so that check has to live here.
+kill the rest. Before anything runs, the wrapper checks for files from *different*
+rows that would land on the same output file and refuses the whole manifest if it
+finds any — a child process can only see its own entry, so that check has to live
+here.
+
+### Reading the result
+
+A manifest over a few folders can run for hours, and the per-folder totals scroll
+away long before it ends. The run therefore closes with a block covering
+everything:
+
+```
+===========================================================================
+Manifest complete: 3 entries - 2 ok, 1 with failures, 0 cancelled
+---------------------------------------------------------------------------
+  #  mode folder                           OK    ovw   skip corrupt    err
+  1  6    D:\2025\...\1_Fuji             2003      0      0       0      2
+  2  6    E:\2026\260101_Osaka\2_Z8      3001      2      4       0      0
+  3  6    G:\2026\...\2_Z8                758      0      0       1      0
+---------------------------------------------------------------------------
+  TOTAL files                            5762      2      4       1      2
+---------------------------------------------------------------------------
+  D50 patched: 12  |  Thumbnails excluded: 5762
+---------------------------------------------------------------------------
+  FAILURES (2):
+    [1] D:\2025\250913_Fuji_Yokohama\1_Fuji\dia3\IMG_0412.tif
+        -> cjxl exit 1
+    ...
+---------------------------------------------------------------------------
+  CORRUPT / UNREADABLE (1):
+  These were NOT converted. The source files are damaged.
+    [3] G:\2026\260620-23_Kyoto_Tokuyasu\2_Z8\_EXPORT\scan_099.tif
+        -> no readable pages (corrupt or truncated TIFF)
+===========================================================================
+```
+
+The first line counts **entries**; the table counts **files**. The two failure
+sections are deliberately separate:
+
+| Section | Meaning |
+|---------|---------|
+| `FAILURES` | The conversion failed on that file — this is what makes the run exit non-zero. |
+| `CORRUPT / UNREADABLE` | The source file is damaged and was not converted. The run itself is fine, so exit codes are unaffected. |
+
+Both list the file **paths**, not just a count: a number still leaves you opening
+per-entry logs to find out which photo broke.
+
+An entry whose child crashed, was killed, or was cancelled shows
+`(no summary - failed)` instead of zeros, so a dead child is never mistaken for a
+clean folder.
+
+**`Logs/jxl_photo/<timestamp>.log`** holds the same block plus the untruncated
+folder paths (the table shortens them to fit the terminal) and the complete
+failure lists (the screen shows the first 15). Each entry still writes its own
+detailed log under `Logs/jxl_tiff_encoder/` etc., and the block lists those paths
+too.
 
 If you just want a shell loop instead, the encoder takes one folder per call:
 

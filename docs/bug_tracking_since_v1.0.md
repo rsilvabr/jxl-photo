@@ -50,6 +50,29 @@ silent overwrite.
 
 ---
 
+## v1.8.3 — Manifest run reporting (2026-07-27)
+
+Found by running a 3-entry manifest over folders holding thousands of files each:
+the user starts it, leaves, and comes back hours later to find out whether
+anything broke.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 207 | A manifest run reported only `3 OK \| 0 skipped \| 0 errors` — **entries**, not files. Each entry is a separate child with its own log file, so the per-folder totals scrolled away and the only surviving number counted folders. Answering "did any file fail?" meant opening N logs by hand | wrapper | ✅ FIXED (children emit a machine-readable summary under `--summary-json`; the wrapper aggregates it into a per-entry table, a file-level TOTAL, and the list of failed files with their paths) |
+| 208 | **Miscounted:** a corrupt or truncated TIFF was reported as `skipped by multipage policy`. `convert_multipage()` returns an empty list both when a policy asked for the file to be dropped (`--multipage-mode skip`, `--thumbnail-mode exclude`) and when the file has no readable pages at all — the caller could not tell them apart, so a damaged file was filed under a policy that never asked for it, and vanished into the `skipped` count | encoder | ✅ FIXED (new `UnreadableTiff`, raised when the analyzer found neither a real page nor a thumbnail; counted, logged and reported in its own bucket) |
+
+**Why "corrupt" is not an error.** A damaged input is not a failed run: exit codes
+keep their current meaning (`1` = the process failed on a file), so automation
+reading them does not start firing on broken photos. The count gets its own
+column and its own section in the summary instead.
+
+**How the split is decided.** No heuristic: a healthy TIFF always has at least one
+page, so "the analyzer returned neither a real page nor a thumbnail" is a reliable
+signal. In `split_all` it is stronger still — that mode encodes every page there
+is, so an empty result can only mean the file has none.
+
+---
+
 ## v1.8.1 — The Audit Release (2026-07)
 
 Twelve full audit rounds on the 4 scripts, each verified with reproductions and real-data batteries (Capture One 16-bit exports, 700 MB RGB+IR film scans). All fixes ship with regression tests (174 passing in `tests/`). Only the highest-impact bugs are detailed individually here; the full list is in `docs/RELEASE_v1.8.1.md`.

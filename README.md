@@ -26,19 +26,21 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
-**Current release: v1.8.2** (2026-07-27) — recommended for everyone. Three rounds of hardening on top of v1.8.0's libjxl v0.12 support: an internal audit, an independent second-opinion audit, and a pass of usability fixes found by running a real ~4700-file photo library through the tools.
+**Current release: v1.8.3** (2026-07-27) — recommended for everyone. Adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
 Highlights:
 
+- **Manifest runs end with a real summary** — a per-folder table, a file-level TOTAL across every entry, and the **paths** of the files that failed. A multi-hour run over three folders used to end with `3 OK` (counting folders), the per-folder numbers already scrolled away into three separate logs. Also saved to `Logs/jxl_photo/<timestamp>.log`.
+- **Corrupt files no longer hide in the `skipped` count** — a TIFF with no readable pages was reported as "skipped by multipage policy", a policy that never asked for it. It now has its own count and its own section. Exit codes are unchanged: a damaged input is not a failed run.
 - **No silent data loss** — 16-bit decode failures, a "repaired" corrupt JXL, and weak delete verification now all fail loudly instead of quietly proceeding.
 - **Multi-page TIFFs are safe by default** — every page is kept (`--multipage-mode split`) instead of just page 0, and mode 8 refuses to delete a source whose pages were dropped.
 - **Every output is verified before being trusted** — a corrupt or partial JXL/JPEG/PNG/TIFF is caught and cleaned up instead of reported OK.
 - **Manifests are Excel-safe and collision-checked** — UTF-8 BOM for non-ASCII paths, cross-entry output collisions refused up front.
 - **Better throughput on large libraries** — the thread pool no longer stalls at folder boundaries.
 
-Full release notes: [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)
+Full release notes: [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) · [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1)
 
 ---
 
@@ -46,7 +48,8 @@ Full release notes: [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.8.2** | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
+| **v1.8.3** | 2026-07-27 | Manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
+| v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
 | v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
 | v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
 | v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |

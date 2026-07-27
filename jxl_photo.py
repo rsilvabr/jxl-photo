@@ -158,6 +158,17 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
+# Child scripts emit one machine-readable summary line per run when given
+# --summary-json. The wrapper consumes it to build the end-of-manifest block
+# and never prints it. Must match SUMMARY_PREFIX in the child scripts.
+CHILD_SUMMARY_PREFIX = "##JXLSUM## "
+
+# Where the wrapper writes its own combined log for a manifest run. Each entry
+# is a separate child with its own log file, so before this there was no single
+# place holding the totals or the full failure list.
+WRAPPER_LOG_DIR = SCRIPT_DIR / "Logs" / "jxl_photo"
+
+
 @dataclass
 class ToolConfig:
     """Configuration dataclass for JXL tools"""
@@ -998,6 +1009,9 @@ class InteractiveMenu:
                  dependency_checker: DependencyChecker):
         self.config = config_manager
         self.checker = dependency_checker
+        # Summary parsed from the last child's ##JXLSUM## line, or None when it
+        # produced none (crash, cancellation, older script).
+        self._last_child_summary: Optional[Dict] = None
 
     def display_status(self, status: Dict[str, bool]) -> None:
         """Display status in single line at top (v3 style)"""
@@ -3120,6 +3134,8 @@ class InteractiveMenu:
         ok_count = 0
         skip_count = 0
         error_count = 0
+        # One record per entry, feeding the end-of-run recap.
+        entry_reports: List[Dict] = []
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing manifest: {total_entries} entry(ies)[/bold cyan]")
@@ -3160,30 +3176,221 @@ class InteractiveMenu:
 
             if cmd is None:
                 error_count += 1
+                entry_reports.append({
+                    "index": i, "mode": detected_mode, "source": source,
+                    "state": "not started", "summary": None,
+                })
                 continue
 
             # Execute
             rc = self._run_subprocess(cmd)
             if rc == 0:
                 ok_count += 1
+                state = "ok"
             elif rc == 3:
                 # User declined the child's confirmation prompt
                 skip_count += 1
+                state = "cancelled"
                 if RICH_AVAILABLE and console:
                     console.print("  [yellow]Cancelled by user[/yellow]")
                 else:
                     print("  Cancelled by user")
             else:
                 error_count += 1
+                state = "failed"
 
-        # Summary
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print(f"[bold]Manifest complete:[/bold] {ok_count} OK | {skip_count} skipped | {error_count} errors")
-        else:
-            print(f"\nManifest complete: {ok_count} OK | {skip_count} skipped | {error_count} errors")
+            entry_reports.append({
+                "index": i, "mode": detected_mode, "source": source,
+                "state": state, "summary": self._last_child_summary,
+            })
+
+        # Summary: per-entry recap + grand total + every failed file. A manifest
+        # runs for hours and the user walks away — coming back to a single
+        # "3 OK" line meant opening N child logs to learn whether anything
+        # broke in the middle.
+        self._render_manifest_summary(entry_reports, ok_count, skip_count, error_count)
 
         return error_count == 0
+
+    def _render_manifest_summary(self, entry_reports: List[Dict], ok_count: int,
+                                 skip_count: int, error_count: int) -> None:
+        """Print the end-of-manifest block and write the combined wrapper log."""
+        totals = {"ok": 0, "overwritten": 0, "skipped": 0, "unreadable": 0, "errors": 0}
+        extras_total: Dict[str, int] = {}
+        failures: List = []      # (entry_index, file, reason)
+        unreadable: List = []    # same shape; kept apart — broken input, not a run failure
+        child_logs: List[str] = []
+        truncated = False
+        any_dry_run = False
+
+        for rep in entry_reports:
+            s = rep["summary"]
+            if not s:
+                continue
+            for k in totals:
+                totals[k] += s[k]
+            for label, value in s["extras"].items():
+                extras_total[label] = extras_total.get(label, 0) + value
+            for f, reason in s["failures"]:
+                failures.append((rep["index"], f, reason))
+            for f, reason in s["unreadable_files"]:
+                unreadable.append((rep["index"], f, reason))
+            truncated = truncated or s["failures_truncated"]
+            any_dry_run = any_dry_run or s["dry_run"]
+            if s["log"]:
+                child_logs.append(s["log"])
+
+        lines = self._build_manifest_summary_lines(
+            entry_reports, totals, extras_total, failures, unreadable, child_logs,
+            ok_count, skip_count, error_count, truncated, any_dry_run,
+        )
+
+        if RICH_AVAILABLE and console:
+            from rich.markup import escape as _escape
+            console.print()
+            for text, style in lines:
+                console.print(f"[{style}]{_escape(text)}[/{style}]" if style else _escape(text))
+        else:
+            print()
+            for text, _style in lines:
+                print(text)
+
+        # Written after the block is built (it contains the block) and printed
+        # on its own line: a full Windows path plus a label wraps mid-path.
+        log_path = self._write_manifest_log(lines, entry_reports, failures,
+                                            unreadable, child_logs)
+        if log_path:
+            if RICH_AVAILABLE and console:
+                from rich.markup import escape as _escape
+                console.print("[dim]Combined log:[/dim]")
+                console.print(f"[dim]  {_escape(str(log_path))}[/dim]", soft_wrap=True)
+            else:
+                print("Combined log:")
+                print(f"  {log_path}")
+
+    # How many failed files to show on screen. The rest stay in the combined
+    # log — the point of the screen list is "something broke, here's where",
+    # not a full incident report.
+    SUMMARY_SCREEN_FAILURES = 15
+
+    def _build_manifest_summary_lines(self, entry_reports: List[Dict], totals: Dict,
+                                      extras_total: Dict[str, int], failures: List,
+                                      unreadable: List, child_logs: List[str],
+                                      ok_count: int, skip_count: int, error_count: int,
+                                      truncated: bool, any_dry_run: bool) -> List:
+        """Build the block as (text, rich_style) pairs — shared by screen and log.
+
+        Laid out to fit an 80-column terminal: a wrapped table is harder to
+        read at a glance than the scrolled-away lines this replaces.
+        """
+        width = 75
+        rule = "-" * width
+        lines: List = [("=" * width, "dim")]
+
+        # Counts entries, not files — the table below counts files, and mixing
+        # the two in one line read as a contradiction ("3 OK" over "5762 OK").
+        head = (f"Manifest complete: {len(entry_reports)} entries - "
+                f"{ok_count} ok, {error_count} with failures, {skip_count} cancelled")
+        if any_dry_run:
+            head = "[DRY RUN] " + head
+        lines.append((head, "bold red" if error_count else "bold"))
+        lines.append((rule, "dim"))
+        lines.append((f"  {'#':<3}{'mode':<5}{'folder':<28}{'OK':>7}{'ovw':>7}"
+                      f"{'skip':>7}{'corrupt':>8}{'err':>7}", "dim"))
+
+        # Per-entry recap. Manifest entries are folders the user chose by hand,
+        # so there are few of them even when each holds thousands of files —
+        # no need to collapse this list.
+        for rep in entry_reports:
+            label = (f"  {rep['index']:<3}{rep['mode']:<5}"
+                     f"{self._truncate_path(rep['source'], 28):<28}")
+            s = rep["summary"]
+            if s:
+                text = (f"{label}{s['ok']:>7}{s['overwritten']:>7}"
+                        f"{s['skipped']:>7}{s['unreadable']:>8}{s['errors']:>7}")
+                style = "red" if s["errors"] else ("yellow" if s["unreadable"] else "")
+            else:
+                # No summary line: the child crashed, was killed, or never
+                # launched. Saying so beats showing zeros as if nothing failed.
+                text = f"{label}   (no summary - {rep['state']})"
+                style = "yellow" if rep["state"] == "cancelled" else "red"
+            lines.append((text, style))
+
+        lines.append((rule, "dim"))
+        lines.append((f"  {'TOTAL files':<36}{totals['ok']:>7}{totals['overwritten']:>7}"
+                      f"{totals['skipped']:>7}{totals['unreadable']:>8}{totals['errors']:>7}",
+                      "bold red" if totals["errors"] else "bold"))
+
+        if extras_total:
+            lines.append((rule, "dim"))
+            lines.append(("  " + "  |  ".join(f"{k}: {v}" for k, v in sorted(extras_total.items())), "dim"))
+
+        def _file_section(title: str, items: List, style: str, note: str = "") -> None:
+            if not items:
+                return
+            lines.append((rule, "dim"))
+            lines.append((f"  {title} ({len(items)}):", f"bold {style}"))
+            if note:
+                lines.append((f"  {note}", style))
+            for entry_idx, path, reason in items[:self.SUMMARY_SCREEN_FAILURES]:
+                lines.append((f"    [{entry_idx}] {path}", style))
+                if reason:
+                    lines.append((f"        -> {reason}", style))
+            hidden = len(items) - self.SUMMARY_SCREEN_FAILURES
+            if hidden > 0:
+                lines.append((f"    ... and {hidden} more (full list in the combined log)", style))
+
+        _file_section("FAILURES", failures, "red")
+        if truncated:
+            lines.append(("    Note: a child capped its failure list; see its own log for the rest.", "yellow"))
+        # Kept out of FAILURES on purpose: these files were never converted, but
+        # the run did not fail — the input is broken, not the process.
+        _file_section("CORRUPT / UNREADABLE", unreadable, "yellow",
+                      note="These were NOT converted. The source files are damaged.")
+
+        if child_logs:
+            lines.append((rule, "dim"))
+            lines.append((f"  Child logs ({len(child_logs)}):", "dim"))
+            for p in child_logs:
+                lines.append((f"    {p}", "dim"))
+
+        lines.append(("=" * width, "dim"))
+        return lines
+
+    def _write_manifest_log(self, lines: List, entry_reports: List[Dict],
+                            failures: List, unreadable: List,
+                            child_logs: List[str]) -> Optional[Path]:
+        """Write the combined run log. Returns its path, or None if it failed.
+
+        The screen block truncates the failure list; this file never does — it
+        is what the user opens hours later, after the scrollback is gone.
+        """
+        from datetime import datetime
+        try:
+            WRAPPER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            path = WRAPPER_LOG_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(f"jxl_photo manifest run — {datetime.now():%Y-%m-%d %H:%M:%S}\n\n")
+                for text, _style in lines:
+                    fh.write(text + "\n")
+                # The table truncates folders to fit the terminal; the log is
+                # the durable copy, so it also carries the untruncated paths.
+                fh.write("\nENTRIES (full paths)\n")
+                for rep in entry_reports:
+                    fh.write(f"  [{rep['index']}] mode {rep['mode']} | {rep['state']} | {rep['source']}\n")
+                # The screen list is capped; this file is the uncapped copy.
+                for title, items in (("FULL FAILURE LIST", failures),
+                                     ("FULL CORRUPT / UNREADABLE LIST", unreadable)):
+                    if len(items) > self.SUMMARY_SCREEN_FAILURES:
+                        fh.write(f"\n{title}\n")
+                        for entry_idx, p, reason in items:
+                            fh.write(f"  [{entry_idx}] {p}\n      -> {reason}\n")
+            return path
+        except OSError as e:
+            # A log we could not write must not fail a run whose real work is
+            # already done — the block was printed to screen either way.
+            self._print_error(f"Could not write combined log: {e}")
+            return None
 
     def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
@@ -3244,6 +3451,9 @@ class InteractiveMenu:
         if dest_path:
             cmd.append(dest_path)
         cmd.extend(['--mode', str(mode), '--workers', str(workers)])
+        # Every manifest child reports machine-readable totals so the run can be
+        # summed at the end (all three scripts accept this flag).
+        cmd.append('--summary-json')
 
         # Pass configured export marker so scripts match the wrapper's detection.
         export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
@@ -3419,6 +3629,46 @@ class InteractiveMenu:
         else:
             print(f"  {line}")
 
+    def _parse_child_summary(self, line: str) -> Optional[Dict]:
+        """Decode a ##JXLSUM## line into the dict the final block aggregates.
+
+        Defensive on purpose: a malformed or half-flushed line must degrade to
+        "this entry reported no summary" (the block says so) rather than blow
+        up a run that already finished its real work.
+        """
+        try:
+            payload = json.loads(line.lstrip()[len(CHILD_SUMMARY_PREFIX):])
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        clean = {
+            "ok": int(payload.get("ok") or 0),
+            "overwritten": int(payload.get("overwritten") or 0),
+            "skipped": int(payload.get("skipped") or 0),
+            "errors": int(payload.get("errors") or 0),
+            # Only the encoder reports this today; the others default to 0.
+            "unreadable": int(payload.get("unreadable") or 0),
+            "dry_run": bool(payload.get("dry_run")),
+            "log": str(payload.get("log") or ""),
+            "extras": {},
+            "failures": [],
+            "unreadable_files": [],
+            "failures_truncated": bool(payload.get("failures_truncated")),
+        }
+        extras = payload.get("extras")
+        if isinstance(extras, dict):
+            clean["extras"] = {str(k): int(v) for k, v in extras.items()
+                               if isinstance(v, (int, float))}
+        for key in ("failures", "unreadable_files"):
+            raw = payload.get(key)
+            if isinstance(raw, list):
+                clean[key] = [
+                    (str(f.get("file", "?")), str(f.get("reason", "")))
+                    for f in raw if isinstance(f, dict)
+                ]
+        return clean
+
     def _stream_child(self, cmd: List, idle_timeout: int = 1800) -> int:
         """Run a child script, streaming stdout live, with an IDLE deadline.
 
@@ -3484,6 +3734,11 @@ class InteractiveMenu:
                     break
                 # Progress resets the idle deadline
                 deadline = time.time() + idle_timeout
+                # The machine-readable summary is data for the end-of-run
+                # block, not output: swallow it so the user never sees JSON.
+                if line.lstrip().startswith(CHILD_SUMMARY_PREFIX):
+                    self._last_child_summary = self._parse_child_summary(line)
+                    continue
                 self._print_child_line(line)
         except KeyboardInterrupt:
             # Ctrl+C must also take the child down, not leave it running.
@@ -3506,6 +3761,9 @@ class InteractiveMenu:
         Exit code contract with the child scripts: 0 = success, 1 = some
         files failed, 2 = aborted, 3 = user declined a confirmation.
         """
+        # Cleared per run so a child that dies before emitting its summary
+        # cannot inherit the previous entry's numbers.
+        self._last_child_summary = None
         return self._stream_child(cmd)
 
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
