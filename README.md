@@ -26,12 +26,16 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
-**Current release: v1.8.3** (2026-07-27) — recommended for everyone. Adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
+**Current release: v1.8.3** (2026-07-28) — recommended for everyone. Cuts the repetitive parts of the menu (your own distance, repeatable manifests, named presets) and adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
 Highlights:
 
+- **Your own distance in the menu** — entry `[2]` of Step 2 now shows the distance you set in option 4 (e.g. `d=0.05 — Your default`), instead of forcing a trip through `[4] Custom` on every single run. Ships as `0.1`, so nothing changes until you set it. `[4] Custom` comes pre-filled with the last value you used.
+- **Manifest runs are repeatable** — `Repeat last workflow` now handles them: it re-reads the CSV (so edits you made in Excel count), skips the pointless input-folder question and goes straight to overwrite/sync and dry-run. Keeping a library in sync is two keystrokes; it used to mean walking through the whole wizard again.
+- **Presets (option 7)** — save the last workflow under a name and run it later. Several recurring jobs (a nightly manifest sync, a per-shoot conversion) can coexist instead of overwriting one another in the single "last workflow" slot.
+- **Settings that actually apply** — changing workers/quality/effort/distance in option 4 now also drives the next run, repeats included. They used to write a separate value that no run ever read, so editing them appeared to do nothing.
 - **Manifest runs end with a real summary** — a per-folder table, a file-level TOTAL across every entry, and the **paths** of the files that failed. A multi-hour run over three folders used to end with `3 OK` (counting folders), the per-folder numbers already scrolled away into three separate logs. Also saved to `Logs/jxl_photo/<timestamp>.log`.
 - **Corrupt files no longer hide in the `skipped` count** — a TIFF with no readable pages was reported as "skipped by multipage policy", a policy that never asked for it. It now has its own count and its own section. Exit codes are unchanged: a damaged input is not a failed run.
 - **No silent data loss** — 16-bit decode failures, a "repaired" corrupt JXL, and weak delete verification now all fail loudly instead of quietly proceeding.
@@ -48,7 +52,7 @@ Full release notes: [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.8.3** | 2026-07-27 | Manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
+| **v1.8.3** | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
 | v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
 | v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
 | v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
@@ -120,6 +124,7 @@ The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided
 │  4  Edit default settings                                                                                          │
 │  5  Reset all settings                                                                                             │
 │  6  Move settings file                                                                                             │
+│  7  Presets (2 saved)                                                                                              │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```

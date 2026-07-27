@@ -2,7 +2,83 @@
 
 ## v1.8.3
 
-Date: 2026-07-27
+Date: 2026-07-28
+
+### Your own distance as a menu entry
+
+Step 2 (TIFF → JXL) offered `d=0` / `d=0.1` / `d=1.0` / Custom. Anyone working at
+another distance — 0.05 is a common choice for 45 MP masters — had to open
+`[4] Custom` and retype the number on every run.
+
+Option 4 (Edit default settings) now carries a **Distance (TIFF→JXL)** setting,
+and entry `[2]` is built from it:
+
+```
+[1] d=0    - Lossless (exact replica)
+[2] d=0.05 - Your default (change in Settings)
+[3] d=1.0  - Visually lossless
+[4] Custom - Enter any value 0-15
+```
+
+It ships as `0.1` and reads exactly as before until you change it. Two details
+worth knowing:
+
+- Setting it to **0** makes entry `[2]` run the *lossless* encoder — the same
+  code path as entry `[1]`, not a `d=0` lossy run.
+- `[4] Custom` now starts from the last distance you actually used, so repeating
+  an experiment is two keystrokes.
+
+### Repeatable manifest runs
+
+A manifest run (mode 99) was never saved, so `Repeat last workflow` showed it
+greyed out and a recurring "keep the library in sync" pass meant walking through
+the whole wizard again.
+
+The menu entry now reads `Repeat last workflow (manifest: manifest_2026.csv)`
+and:
+
+- **re-reads the CSV** instead of replaying a stored copy of its rows, so folders
+  you added or removed in Excel between runs are honoured;
+- skips the input-folder question (a manifest carries its own source and
+  destination per row);
+- still asks overwrite/sync (default: sync) and dry-run every time;
+- applies the same `Direction` and path-traversal guards the wizard applies — a
+  `tiff2jxl` manifest can never be replayed by a `jxl2tiff` session;
+- is disabled only while the CSV itself is missing, and says so.
+
+### Presets (main menu option 7)
+
+`Repeat last workflow` remembers exactly one run. Presets are named snapshots of
+the same thing, so several recurring jobs can coexist:
+
+```
+--- Presets ---
+  1. nightly-sync
+     TIFF->JXL | manifest: manifest_2026.csv | workers 12 | d=0.05
+  2. shoot-inplace
+     TIFF->JXL | mode 6 | G:\2026 | workers 8 | d=0.05
+[number] run | [S] save last workflow as preset | [D] delete | [B] back
+```
+
+`[S]` snapshots whatever ran last — including a manifest run — under a name you
+choose, and later runs no longer disturb it. Running a preset goes through the
+*same* code as `Repeat last workflow`, so the two cannot drift apart: overwrite/
+sync and dry-run are always asked, never inherited.
+
+### Settings that reach the next run
+
+Option 4 wrote `default_workers`/`default_quality`/`default_effort` while every
+run read the `last_*` values saved by the previous session. Once you had run
+anything, editing those settings had no visible effect — which read as "the
+repeat resets my workers".
+
+Now changing a value in option 4 also adopts it for the next run, repeats
+included. Values you leave untouched still keep whatever the last run used, and
+the screen tells you when that is happening:
+
+```
+Workers: 4  (last run used 12 — editing this adopts the new value)
+```
 
 ### End-of-manifest summary
 A manifest run now closes with a block covering the **whole** run instead of the

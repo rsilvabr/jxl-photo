@@ -103,6 +103,22 @@ def _strip_surrounding_quotes(value: str) -> str:
     return value
 
 
+def _sane_distance(value: Any, fallback: float = 0.1) -> float:
+    """Clamp any stored/typed distance into cjxl's valid 0.0-15.0 range.
+
+    The config file is plain JSON the user can hand-edit, and _load_config does
+    no type checking — a distance that came back as "0,05" or None would other-
+    wise reach an f-string format spec or the cjxl command line. Anything
+    uninterpretable falls back instead of aborting the menu."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if result != result:  # NaN: float('nan') fails every comparison below
+        return fallback
+    return max(0.0, min(result, 15.0))
+
+
 def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     """Replace the FIRST occurrence of suffix_from in a folder name, but only
     when it is a complete token (bounded by _, -, space, or string edges) —
@@ -181,6 +197,11 @@ class ToolConfig:
     default_workers: int = 4
     default_quality: int = 95
     default_effort: int = 7
+    # Preferred cjxl distance for TIFF -> JXL. Drives the label AND the value of
+    # menu entry [2] in Step 2, so a photographer who always shoots at d=0.05
+    # gets it with one keystroke instead of going through [4] Custom every time.
+    # 0.1 keeps the historical "near-lossless (recommended)" entry unchanged.
+    default_distance: float = 0.1
     confirm_delete: bool = True
     export_marker: str = "_EXPORT"
 
@@ -211,6 +232,15 @@ class ToolConfig:
     last_mode_config: Optional[Dict] = None
     last_icc_profile: Optional[str] = None
     last_expert_flags: Optional[str] = None
+    # CSV of the last manifest run (mode 99). Only the PATH is kept, never the
+    # entries: the repeat re-reads the file, so edits made in Excel between runs
+    # are picked up instead of silently replaying a stale copy.
+    last_manifest_path: Optional[str] = None
+
+    # Named snapshots of the last_* fields above ({name: {last_*: value}}), so
+    # several recurring jobs can coexist instead of fighting over the single
+    # "last workflow" slot. See ConfigManager.session_snapshot().
+    presets: Dict[str, Dict] = field(default_factory=dict)
 
     dependencies_checked: bool = False
     available_features: Dict[str, bool] = field(default_factory=dict)
@@ -278,7 +308,8 @@ class ConfigManager:
                           compression: Optional[str] = None,
                           bit_depth: Optional[int] = None,
                           add_preview: Optional[bool] = None,
-                          mode_config: Optional[Dict] = None) -> None:
+                          mode_config: Optional[Dict] = None,
+                          manifest_path=_STAGING_UNSET) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -340,7 +371,37 @@ class ConfigManager:
             self.config.last_add_preview = add_preview
         if mode_config is not None:
             self.config.last_mode_config = dict(mode_config)
+        if manifest_path is not self._STAGING_UNSET:
+            # Sentinel-based (same as staging/icc): a NON-manifest run passes
+            # None explicitly and CLEARS the path, so the main menu can never
+            # offer to repeat a manifest that has nothing to do with the last
+            # saved session.
+            self.config.last_manifest_path = manifest_path
         self.save_config()
+
+    def session_snapshot(self) -> Dict:
+        """Every last_* field as a plain dict — the unit both 'Repeat last
+        workflow' and presets are built from. Derived from the dataclass fields
+        so a future last_* setting is picked up without touching this code."""
+        return {name: getattr(self.config, name)
+                for name in ToolConfig.__dataclass_fields__ if name.startswith('last_')}
+
+    def save_preset(self, name: str, session: Dict) -> None:
+        from datetime import datetime
+        presets = dict(self.config.presets or {})
+        presets[name] = dict(session)
+        presets[name]['saved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.config.presets = presets
+        self.save_config()
+
+    def delete_preset(self, name: str) -> bool:
+        presets = dict(self.config.presets or {})
+        if name not in presets:
+            return False
+        del presets[name]
+        self.config.presets = presets
+        self.save_config()
+        return True
 
     def update_tool_paths(self, tools: Dict[str, Optional[str]]) -> None:
         self.config.cjxl_path = tools.get('cjxl')
@@ -1038,21 +1099,31 @@ class InteractiveMenu:
         if has_last_session:
             last_info = f"({self.config.config.last_output_mode or 'unknown'})"
             options.append(("1", "New workflow", True))
-            # Manifest workflows (mode 99) cannot be repeated because the manifest
-            # file path and entries are not persisted.
+            # A manifest workflow is repeatable as long as its CSV is still
+            # there — the repeat re-reads the file. Offering an entry whose CSV
+            # was deleted or moved would only dead-end at the confirmation, so
+            # it is disabled with the reason spelled out instead.
             if self.config.config.last_output_mode == "99":
-                options.append(("2", f"Repeat last workflow {last_info} [manifest]", False))
+                saved_manifest = self.config.config.last_manifest_path
+                if saved_manifest and Path(saved_manifest).exists():
+                    options.append(("2", f"Repeat last workflow (manifest: {Path(saved_manifest).name})", True))
+                else:
+                    options.append(("2", "Repeat last workflow [manifest CSV no longer available]", False))
             else:
                 options.append(("2", f"Repeat last workflow {last_info}", True))
         else:
             options.append(("1", "New workflow", True))
             options.append(("2", "Repeat last workflow (none saved)", False))
 
+        preset_count = len(self.config.config.presets or {})
+        preset_label = (f"Presets ({preset_count} saved)" if preset_count
+                        else "Presets (save the last workflow under a name)")
         options.extend([
             ("3", "Check dependencies again", True),
             ("4", "Edit default settings", True),
             ("5", "Reset all settings", True),
             ("6", "Move settings file", True),
+            ("7", preset_label, True),
             ("0", "Exit", True),
         ])
 
@@ -1087,13 +1158,31 @@ class InteractiveMenu:
 
     def edit_settings(self) -> None:
         current = self.config.config
+        # Snapshot BEFORE any prompt: `current` IS self.config.config, so a
+        # comparison made after the write-back would always compare equal.
+        # Used below to propagate only the values the user actually changed.
+        was_workers, was_quality = current.default_workers, current.default_quality
+        was_effort = current.default_effort
+        was_distance = _sane_distance(current.default_distance)
+
+        def _effective(default_value, last_value) -> str:
+            """Flag a default that the saved session is currently overriding —
+            otherwise editing it here looks like it did nothing, because the
+            wizard and 'Repeat last workflow' both read the last_* value."""
+            if last_value is None or last_value == default_value:
+                return f"{default_value:g}" if isinstance(default_value, float) else f"{default_value}"
+            shown = f"{default_value:g}" if isinstance(default_value, float) else f"{default_value}"
+            was = f"{last_value:g}" if isinstance(last_value, float) else f"{last_value}"
+            return f"{shown}  (last run used {was} — editing this adopts the new value)"
 
         if RICH_AVAILABLE and console:
             console.print("[bold]Current Settings:[/bold]")
             console.print(f"Staging: {current.staging_dir or 'system default'}")
-            console.print(f"Workers: {current.default_workers}")
-            console.print(f"Quality: {current.default_quality}")
-            console.print(f"Effort: {current.default_effort}")
+            console.print(f"Workers: {_effective(current.default_workers, current.last_workers)}")
+            console.print(f"Quality: {_effective(current.default_quality, current.last_quality)}")
+            console.print(f"Effort: {_effective(current.default_effort, current.last_effort)}")
+            console.print("Distance (TIFF->JXL): "
+                          f"{_effective(_sane_distance(current.default_distance), current.last_distance)}")
             console.print(f"Confirm deletes: {current.confirm_delete}")
             console.print(f"Export marker: {current.export_marker}")
 
@@ -1101,6 +1190,9 @@ class InteractiveMenu:
             new_workers = IntPrompt.ask("Workers", default=current.default_workers)
             new_quality = IntPrompt.ask("Quality (1-100)", default=current.default_quality)
             new_effort = IntPrompt.ask("Effort (1-10)", default=current.default_effort)
+            new_distance = Prompt.ask(
+                "Distance for TIFF->JXL (0=lossless, 0.1=near-lossless)",
+                default=f"{_sane_distance(current.default_distance):g}")
             new_confirm = Confirm.ask("Confirm before delete?", default=current.confirm_delete)
             new_marker = Prompt.ask("Export marker", default=current.export_marker)
         else:
@@ -1108,17 +1200,21 @@ class InteractiveMenu:
             print(f"Current staging: {current.staging_dir or 'system default'}")
             new_staging = input("New staging (empty=keep, 'none'=system default): ").strip()
 
-            print(f"Current workers: {current.default_workers}")
+            print(f"Current workers: {_effective(current.default_workers, current.last_workers)}")
             workers_input = input("New workers: ").strip()
             new_workers = int(workers_input) if workers_input.isdigit() else current.default_workers
 
-            print(f"Current quality: {current.default_quality}")
+            print(f"Current quality: {_effective(current.default_quality, current.last_quality)}")
             quality_input = input("New quality (1-100): ").strip()
             new_quality = int(quality_input) if quality_input.isdigit() else current.default_quality
 
-            print(f"Current effort: {current.default_effort}")
+            print(f"Current effort: {_effective(current.default_effort, current.last_effort)}")
             effort_input = input("New effort (1-10): ").strip()
             new_effort = int(effort_input) if effort_input.isdigit() else current.default_effort
+
+            print("Current distance (TIFF->JXL): "
+                  f"{_effective(_sane_distance(current.default_distance), current.last_distance)}")
+            new_distance = input("New distance (0=lossless, 0.1=near-lossless): ").strip()
 
             confirm_input = input("Confirm before delete? (y/n): ").strip().lower()
             new_confirm = confirm_input.startswith('y') if confirm_input else current.confirm_delete
@@ -1135,7 +1231,37 @@ class InteractiveMenu:
         self.config.config.default_workers = max(1, min(new_workers, 32))
         self.config.config.default_quality = max(1, min(new_quality, 100))
         self.config.config.default_effort = max(1, min(new_effort, 10))
+        # Empty = keep current (the non-rich branch offers no default). A typed
+        # value that does not parse is reported instead of silently ignored:
+        # the whole point of this setting is that the number shown in Step 2 is
+        # the number the user asked for.
+        typed_distance = (new_distance or "").strip()
+        if typed_distance:
+            current_distance = _sane_distance(current.default_distance)
+            try:
+                self.config.config.default_distance = _sane_distance(
+                    float(typed_distance), fallback=current_distance)
+            except ValueError:
+                self._print_error(f"Invalid distance {typed_distance!r} — keeping {current_distance:g}")
+                self.config.config.default_distance = current_distance
         self.config.config.confirm_delete = new_confirm
+
+        # Changing a default here is a statement about the NEXT run, so it also
+        # adopts the saved session's value. Without this the wizard and 'Repeat
+        # last workflow' keep reading last_* from an older session and the whole
+        # settings screen appears to do nothing (the "repeat resets my workers"
+        # complaint). Only values the user actually changed are propagated —
+        # merely opening the screen and pressing Enter must not overwrite what
+        # the last run used.
+        cfg = self.config.config
+        if cfg.default_workers != was_workers:
+            cfg.last_workers = cfg.default_workers
+        if cfg.default_quality != was_quality:
+            cfg.last_quality = cfg.default_quality
+        if cfg.default_effort != was_effort:
+            cfg.last_effort = cfg.default_effort
+        if _sane_distance(cfg.default_distance) != was_distance:
+            cfg.last_distance = _sane_distance(cfg.default_distance)
 
         self.config.save_config()
         self._print_success("Settings saved!")
@@ -1246,13 +1372,24 @@ class InteractiveMenu:
         """Step 2: Destination"""
         origin = workflow['origin_format']
         options = []
+        # TIFF -> JXL entry [2] is driven by the configured default_distance
+        # (Settings), so the value the user actually shoots at is one keystroke
+        # away. Out of the box it is 0.1 and reads exactly as it always did.
+        # Computed here (not inside the TIFF branch) because the code that
+        # applies the choice further down needs the same value.
+        preferred = _sane_distance(self.config.config.default_distance)
 
         if origin == "jpeg" and status.get('cjxl'):
             options.append(("1", "JXL Lossless  ", "Lossless JPEG ⇌ JXL transcoding (recommended)", "transcode_lossless"))
             options.append(("2", "JXL Lossy     ", "Lossy — JPEG→JXL encode loses quality", "convert_lossy"))
         elif origin == "tiff" and status.get('cjxl'):
+            preferred_desc = ("Near-lossless (recommended)" if preferred == 0.1
+                              else "Your default (change in Settings)")
+            # d=0 is a DIFFERENT code path (the lossless encoder), so a user who
+            # sets 0 as their default must get that path, not a d=0 lossy run.
+            preferred_type = "jxl_tiff_encoder_lossless" if preferred == 0.0 else "jxl_tiff_encoder"
             options.append(("1", "d=0   ", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
-            options.append(("2", "d=0.1 ", "Near-lossless (recommended)", "jxl_tiff_encoder"))
+            options.append(("2", f"d={preferred:<5g}", preferred_desc, preferred_type))
             options.append(("3", "d=1.0 ", "Visually lossless", "jxl_tiff_encoder"))
             options.append(("4", "Custom", "Enter any value 0-15", "jxl_tiff_encoder"))
         elif origin == "jxl" and status.get('djxl'):
@@ -1297,9 +1434,9 @@ class InteractiveMenu:
                 workflow['dest_format'] = 'jxl'
                 workflow['distance'] = 0.0
             elif choice == "2":
-                workflow['distance_choice'] = "0.1"
+                workflow['distance_choice'] = f"{preferred:g}"
                 workflow['dest_format'] = 'jxl'
-                workflow['distance'] = 0.1
+                workflow['distance'] = preferred
             elif choice == "3":
                 workflow['distance_choice'] = "1.0"
                 workflow['dest_format'] = 'jxl'
@@ -1308,10 +1445,16 @@ class InteractiveMenu:
                 workflow['distance_choice'] = "custom"
                 workflow['dest_format'] = 'jxl'
 
+            # Custom starts from the last distance actually used, falling back to
+            # the configured default. Tested with `is not None`, never `or`:
+            # a legitimate 0.0 is falsy and would silently become 0.1.
+            last_used = self.config.config.last_distance
+            custom_default = _sane_distance(last_used, fallback=preferred) if last_used is not None else preferred
+
             if RICH_AVAILABLE and console:
                 if choice == "4":
-                    dist_default = workflow.get('distance', 0.1)
-                    dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=str(dist_default))
+                    dist_default = custom_default
+                    dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=f"{dist_default:g}")
                     try:
                         workflow['distance'] = max(0.0, min(float(dist_str), 15.0))
                     except ValueError:
@@ -1320,8 +1463,8 @@ class InteractiveMenu:
                 workflow['effort'] = max(1, min(custom_effort, 10))
             else:
                 if choice == "4":
-                    dist_default = workflow.get('distance', 0.1)
-                    dist_str = input(f"Distance (0.0-15.0) [{dist_default}]: ").strip()
+                    dist_default = custom_default
+                    dist_str = input(f"Distance (0.0-15.0) [{dist_default:g}]: ").strip()
                     try:
                         workflow['distance'] = max(0.0, min(float(dist_str), 15.0)) if dist_str else dist_default
                     except ValueError:
@@ -1737,17 +1880,15 @@ class InteractiveMenu:
                 print(f"     -> {dst} (mode {mode})")
                 print()
 
-    def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
-        """Run workflow from manifest file."""
-        manifest_path = self._pick_manifest()
-        if not manifest_path or not Path(manifest_path).exists():
-            if RICH_AVAILABLE and console:
-                console.print("[red]No manifest found![/red]")
-            else:
-                print("No manifest found!")
-            return False
+    def _load_manifest_entries(self, manifest_path: str,
+                               origin_format: str, dest_format: str) -> Optional[List[Tuple]]:
+        """Parse and validate a manifest CSV. Returns the entries, or None (with
+        an explanation already printed) when the file cannot be trusted.
 
-        # Load manifest
+        Shared by the wizard and by "Repeat last workflow" so both get the same
+        Mode/traversal/direction guards — these decide which script runs on which
+        folders, and mode 8 deletes sources, so a repeat must never take a laxer
+        path than the wizard did."""
         entries = []
         directions = set()
         stream = self._open_manifest_for_read(manifest_path)
@@ -1758,7 +1899,7 @@ class InteractiveMenu:
                 f"decoded reliably — and a wrongly-decoded path is worse than no run at all. "
                 f"Re-open it in Excel and use 'Save As' -> 'CSV UTF-8 (comma delimited)', "
                 f"or re-generate the manifest.")
-            return False
+            return None
         with stream as f:
             import csv
             reader = csv.reader(f)
@@ -1788,10 +1929,10 @@ class InteractiveMenu:
                             entry_mode = int(float(row[2].strip()))
                         except ValueError:
                             self._print_error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
-                            return False
+                            return None
                         if not 0 <= entry_mode <= 8:
                             self._print_error(f"Mode out of range (0-8) in manifest: {entry_mode} (row: {source})")
-                            return False
+                            return None
                     if len(row) > 3 and row[3].strip():
                         directions.add(row[3].strip())
                     if source and not source.startswith('#'):
@@ -1808,19 +1949,21 @@ class InteractiveMenu:
                 console.print("[yellow]Manifest is empty or only has comments.[/yellow]")
             else:
                 print("Manifest is empty or only has comments.")
-            return False
+            return None
 
         # Direction guard: a manifest is bound to the workflow that generated
         # it (e.g. tiff2jxl). Running it from a different session would invoke
         # the wrong script on the wrong files.
-        current_direction = f"{workflow['origin_format']}2{workflow['dest_format']}"
+        # NOT `dest`: that name belongs to the row loop above (a Destination
+        # path), and reusing it here silently produced "tiff2G:\2025".
+        current_direction = f"{origin_format}2{dest_format}"
         if directions:
             if directions != {current_direction}:
                 self._print_error(
                     f"Manifest direction {sorted(directions)} does not match the current "
                     f"workflow ({current_direction}). Generate/select a matching manifest."
                 )
-                return False
+                return None
         else:
             # Legacy manifest without a Direction column: allow, but warn.
             warn = (f"Manifest has no Direction column (pre-v1.8.1 format). "
@@ -1830,7 +1973,11 @@ class InteractiveMenu:
             else:
                 print(f"WARNING: {warn}")
 
-        # Show preview
+        return entries
+
+    def _confirm_manifest_entries(self, manifest_path: str, entries: List[Tuple]) -> bool:
+        """Preview the entries and ask for a go-ahead. Shared by the wizard and
+        the repeat so a repeat never runs a CSV the user has not seen."""
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Manifest:[/bold cyan] {manifest_path}")
             console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
@@ -1859,10 +2006,26 @@ class InteractiveMenu:
             proceed_input = input("Proceed with manifest? [Y/n]: ").strip().lower()
             proceed = not proceed_input.startswith('n')
 
-        if not proceed:
+        return proceed
+
+    def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
+        """Step 4 alternative: run the workflow from a manifest CSV."""
+        manifest_path = self._pick_manifest()
+        if not manifest_path or not Path(manifest_path).exists():
+            if RICH_AVAILABLE and console:
+                console.print("[red]No manifest found![/red]")
+            else:
+                print("No manifest found!")
             return False
 
-        # Execute each entry
+        entries = self._load_manifest_entries(
+            manifest_path, workflow['origin_format'], workflow['dest_format'])
+        if entries is None:
+            return False
+
+        if not self._confirm_manifest_entries(manifest_path, entries):
+            return False
+
         # For manifest mode, we set mode to special value 99 (manifest mode)
         workflow['mode'] = 99  # Special mode for manifest execution
         workflow['manifest_entries'] = entries
@@ -4051,6 +4214,394 @@ class InteractiveMenu:
             self._print_error(f"\n✗ Conversion failed (code {returncode})")
             return False
 
+    @staticmethod
+    def _describe_session(session: Dict) -> str:
+        """One-line summary of a stored workflow, for the preset list."""
+        origin = (session.get('last_origin_format') or '?').upper()
+        dest = (session.get('last_dest_format') or '?').upper()
+        mode = session.get('last_output_mode') or '?'
+        bits = [f"{origin}->{dest}"]
+        if mode == "99":
+            manifest = session.get('last_manifest_path')
+            bits.append(f"manifest: {Path(manifest).name}" if manifest else "manifest: (missing)")
+        else:
+            bits.append(f"mode {mode}")
+            if session.get('last_input_dir'):
+                bits.append(str(session['last_input_dir']))
+        bits.append(f"workers {session.get('last_workers') or 4}")
+        distance = session.get('last_distance')
+        if distance is not None:
+            bits.append(f"d={_sane_distance(distance):g}")
+        elif session.get('last_quality') is not None:
+            bits.append(f"q={session['last_quality']}")
+        return " | ".join(bits)
+
+    @staticmethod
+    def _clean_preset_name(raw: str) -> Optional[str]:
+        """Reject names that would be unusable or would corrupt the config: the
+        key ends up in JSON and in a menu row, so control characters and
+        runaway lengths are cut here rather than at display time."""
+        name = (raw or "").strip().strip('"\'')
+        if not name or len(name) > 40:
+            return None
+        if any(ord(ch) < 32 for ch in name):
+            return None
+        return name
+
+    def presets_menu(self, status: Dict[str, bool]) -> None:
+        """Named snapshots of a workflow, so several recurring jobs (a nightly
+        manifest sync, a one-off shoot) can coexist instead of overwriting each
+        other in the single 'last workflow' slot."""
+        while True:
+            presets = dict(self.config.config.presets or {})
+            names = sorted(presets)
+
+            if RICH_AVAILABLE and console:
+                if names:
+                    table = Table(show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
+                    table.add_column("#", justify="right", style="dim")
+                    table.add_column("Name", style="bold")
+                    table.add_column("Workflow")
+                    table.add_column("Saved", style="dim")
+                    for i, name in enumerate(names, 1):
+                        table.add_row(str(i), name, self._describe_session(presets[name]),
+                                      presets[name].get('saved_at', ''))
+                    console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
+                else:
+                    console.print("\n[dim]No presets saved yet.[/dim]")
+                console.print("[bold]\\[number][/bold] run  "
+                              "[bold]\\[S][/bold] save last workflow as preset  "
+                              "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
+                choice = Prompt.ask("Presets").strip()
+            else:
+                print("\n--- Presets ---")
+                if names:
+                    for i, name in enumerate(names, 1):
+                        print(f"  {i}. {name}")
+                        print(f"     {self._describe_session(presets[name])}")
+                else:
+                    print("  (none saved yet)")
+                print("[number] run | [S] save last workflow as preset | [D] delete | [B] back")
+                choice = input("Presets: ").strip()
+
+            upper = choice.upper()
+            if not choice or upper == "B":
+                return
+
+            if upper == "S":
+                snapshot = self.config.session_snapshot()
+                if not snapshot.get('last_input_dir'):
+                    self._print_error("No workflow has been run yet — run one first, then save it here.")
+                    continue
+                if RICH_AVAILABLE and console:
+                    console.print(f"[dim]{self._describe_session(snapshot)}[/dim]")
+                    raw_name = Prompt.ask("Preset name")
+                else:
+                    print(f"  {self._describe_session(snapshot)}")
+                    raw_name = input("Preset name: ")
+                name = self._clean_preset_name(raw_name)
+                if not name:
+                    self._print_error("Invalid name (empty, too long, or contains control characters).")
+                    continue
+                if name in presets:
+                    if RICH_AVAILABLE and console:
+                        overwrite = Confirm.ask(f"Preset '{name}' already exists. Overwrite?", default=False)
+                    else:
+                        overwrite = input(f"Preset '{name}' exists. Overwrite? [y/N]: ").strip().lower().startswith('y')
+                    if not overwrite:
+                        continue
+                self.config.save_preset(name, snapshot)
+                self._print_success(f"Preset '{name}' saved.")
+                continue
+
+            if upper == "D":
+                if not names:
+                    continue
+                if RICH_AVAILABLE and console:
+                    target = Prompt.ask("Delete which number?").strip()
+                else:
+                    target = input("Delete which number?: ").strip()
+                if not target.isdigit() or not 1 <= int(target) <= len(names):
+                    self._print_error("No preset with that number.")
+                    continue
+                name = names[int(target) - 1]
+                if RICH_AVAILABLE and console:
+                    sure = Confirm.ask(f"Delete preset '{name}'?", default=False)
+                else:
+                    sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith('y')
+                if sure and self.config.delete_preset(name):
+                    self._print_success(f"Preset '{name}' deleted.")
+                continue
+
+            if choice.isdigit() and 1 <= int(choice) <= len(names):
+                name = names[int(choice) - 1]
+                # Straight to the shared runner: a preset is exactly a stored
+                # session, and it gets the same overwrite/sync and dry-run
+                # questions as 'Repeat last workflow'.
+                self._run_saved_session(presets[name], status)
+                return
+
+            self._print_error("Not a valid option.")
+
+    def _run_saved_session(self, session: Dict, status: Dict[str, bool]) -> None:
+        """Re-run a stored workflow: "Repeat last workflow" (a snapshot of the
+        last_* config fields) and named presets (a snapshot saved under a name)
+        both come through here, so the two can never drift apart.
+
+        `session` is a plain dict keyed exactly like the last_* config fields.
+        Overwrite/sync and dry-run are always re-asked: the stored run may have
+        been a simulation, and inheriting that silently would turn a repeat into
+        a real conversion (or vice versa) without a word."""
+        last_dir = session.get('last_input_dir') or ""
+        last_mode = session.get('last_output_mode') or "0"
+        last_workers = session.get('last_workers') or 4
+        last_staging = session.get('last_staging') or ""
+        last_effort = session.get('last_effort') or 7
+        last_quality = session.get('last_quality') or 95
+        last_distance = session.get('last_distance')
+        last_origin = session.get('last_origin_format') or "tiff"
+        last_dest = session.get('last_dest_format') or ("jxl" if last_origin != "jxl" else "jpeg")
+        last_conv_type = session.get('last_conversion_type') or ""
+        last_d50_patch = session.get('last_d50_patch') or "auto"
+        last_encode_tag = session.get('last_encode_tag') or "xmp"
+
+        # A manifest repeat re-reads the CSV instead of replaying a stored
+        # copy of its rows, so edits made in Excel between runs take effect
+        # — that is the whole point of repeating a manifest on a schedule.
+        is_manifest_repeat = last_mode == "99"
+        manifest_path = session.get('last_manifest_path')
+        manifest_entries = None
+        if is_manifest_repeat:
+            if not manifest_path or not Path(manifest_path).exists():
+                self._print_error(
+                    f"The manifest for the last run is gone: {manifest_path or '(not saved)'}\n"
+                    f"Use 'New workflow' to generate or pick another one.")
+                return
+            manifest_entries = self._load_manifest_entries(manifest_path, last_origin, last_dest)
+            if manifest_entries is None:
+                # _load_manifest_entries already explained why.
+                return
+
+        if RICH_AVAILABLE and console:
+            settings = [
+                ["Manifest", f"{Path(manifest_path).name} ({len(manifest_entries)} entries)"]
+                if is_manifest_repeat else ["Input folder", last_dir],
+                ["Source", last_origin.upper()],
+                ["Destination", last_dest.upper()],
+                ["Mode", last_mode],
+                ["Workers", str(last_workers)],
+                ["Effort", str(last_effort)],
+            ]
+            # Show relevant field based on origin format
+            # TIFF→JXL & JPEG→JXL-lossy: distance-driven | JXL→JPEG: quality
+            if last_origin == 'tiff' and last_distance is not None:
+                settings.append(["Distance", f"{last_distance}"])
+            elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
+                settings.append(["Distance", f"{last_distance}"])
+            elif last_origin == 'jpeg':
+                settings.append(["Quality", str(last_quality)])
+            elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
+                settings.append(["Quality", str(last_quality)])
+            settings.append(["Staging", last_staging or "(none)"])
+            # Surface silently-reapplied dangerous settings (they are NOT
+            # re-asked on this path, so the user must see them here).
+            _last_adv = session.get('last_advanced_options') or {}
+            if _last_adv.get('delete_source'):
+                settings.append(["Delete source", "ON"])
+            if session.get('last_expert_flags'):
+                settings.append(["Expert flags", session.get('last_expert_flags')])
+            
+            t = Table(box=BOX_SIMPLE, show_header=False, pad_edge=False)
+            t.add_column("", style="cyan")
+            t.add_column("")
+            for row in settings:
+                t.add_row(*row)
+            console.print(Panel(t, title="[bold]Last Workflow Settings[/bold]", border_style="green"))
+        else:
+            print("\n=== Last Workflow Settings ===")
+            if is_manifest_repeat:
+                print(f"  Manifest:     {Path(manifest_path).name} ({len(manifest_entries)} entries)")
+            else:
+                print(f"  Input folder: {last_dir}")
+            print(f"  Source:       {last_origin.upper()}")
+            print(f"  Destination:  {last_dest.upper()}")
+            print(f"  Mode:         {last_mode}")
+            print(f"  Workers:      {last_workers}")
+            print(f"  Effort:       {last_effort}")
+            # Show relevant field based on origin format
+            if last_origin == 'tiff' and last_distance is not None:
+                print(f"  Distance:     {last_distance}")
+            elif last_origin == 'jpeg':
+                print(f"  Quality:      {last_quality}")
+            elif last_origin == 'jxl' and last_quality is not None:
+                print(f"  Quality:      {last_quality}")
+            print(f"  Staging:      {last_staging or '(none)'}")
+            _last_adv = session.get('last_advanced_options') or {}
+            if _last_adv.get('delete_source'):
+                print(f"  Delete source: ON")
+            if session.get('last_expert_flags'):
+                print(f"  Expert flags: {session.get('last_expert_flags')}")
+            print()
+
+        if is_manifest_repeat:
+            # The manifest carries its own source/destination per entry, so
+            # asking for an input folder here would be meaningless (and any
+            # answer would be ignored).
+            new_folder = last_dir
+            input_path = Path(new_folder) if new_folder else Path.cwd()
+        else:
+            if RICH_AVAILABLE and console:
+                new_folder = Prompt.ask(f"\n[bold cyan]Input folder[/bold cyan]", default=last_dir).strip()
+            else:
+                new_folder = input(f"\nInput folder [{last_dir}]: ").strip()
+
+            if not new_folder:
+                new_folder = last_dir
+
+            new_folder = _strip_surrounding_quotes(new_folder)
+            input_path = Path(new_folder)
+            if not input_path.exists():
+                if RICH_AVAILABLE and console:
+                    console.print(f"[red]Folder not found: {new_folder}[/red]")
+                else:
+                    print(f"Folder not found: {new_folder}")
+                return
+
+        origin = last_origin
+
+        if RICH_AVAILABLE and console:
+            console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
+            ow_choice = Prompt.ask("If exists", choices=["1", "2"], default="2")
+        else:
+            ow_choice = input("If exists (1=overwrite, 2=sync) [2]: ").strip() or "2"
+
+        if ow_choice == "1":
+            overwrite, sync = True, False
+        else:
+            overwrite, sync = False, True
+
+        # Ask dry-run explicitly — the original run may have been a
+        # simulation, and hardcoding False would turn a repeat into a REAL
+        # conversion without any notice.
+        if RICH_AVAILABLE and console:
+            dry_choice = Confirm.ask("Dry run? (simulate without converting)", default=False)
+        else:
+            dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
+
+        if RICH_AVAILABLE and console:
+            proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)
+        else:
+            resp = input(f"\nProceed with this workflow? [Y/n]: ").strip().lower()
+            proceed = not resp.startswith('n')
+
+        if not proceed:
+            return
+
+        # Separate distance (TIFF) and quality (JPEG) - don't mix!
+        if origin == 'tiff':
+            workflow = {
+                'input_dir': new_folder,
+                'mode': int(last_mode or 0),
+                'workers': last_workers or 4,
+                'staging': last_staging,
+                'effort': last_effort or 7,
+                'distance': last_distance if last_distance is not None else 0.1,
+                'overwrite_mode': ow_choice,
+            }
+        else:
+            workflow = {
+                'input_dir': new_folder,
+                'mode': int(last_mode or 0),
+                'workers': last_workers or 4,
+                'staging': last_staging,
+                'effort': last_effort or 7,
+                'quality': last_quality or 95,
+                'overwrite_mode': ow_choice,
+            }
+            if last_distance is not None:
+                workflow['distance'] = last_distance
+
+        if is_manifest_repeat:
+            workflow['manifest_entries'] = manifest_entries
+            workflow['manifest_path'] = manifest_path
+
+        if workflow['mode'] == 2:
+            saved_out = (session.get('last_mode_config') or {}).get('output_dir')
+            # Only reuse the saved output folder when the input folder is
+            # the same as the saved session's; with a NEW input folder the
+            # old destination would silently swallow the new outputs.
+            if saved_out and new_folder == last_dir:
+                workflow['mode_config'] = {'output_dir': saved_out}
+            else:
+                workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
+        else:
+            # mode_config is mode-SPECIFIC: a stale export_subfolder from a
+            # previous mode-7 run must not leak into mode 0/3/6 repeats
+            # (it changes child behavior, e.g. the decoder-output filter).
+            _keep = {6: ('export_marker',), 7: ('export_marker', 'export_subfolder')}
+            _src = session.get('last_mode_config') or {}
+            workflow['mode_config'] = {k: _src[k] for k in _keep.get(workflow['mode'], ()) if k in _src}
+
+        workflow['origin_format'] = origin
+        workflow['dest_format'] = last_dest
+        workflow['use_ram'] = session.get('last_use_ram') if session.get('last_use_ram') is not None else True
+        workflow['icc_profile'] = session.get('last_icc_profile')
+        workflow['compression'] = session.get('last_compression') or 'zip'
+        workflow['bit_depth'] = session.get('last_bit_depth') or 16
+        workflow['dry_run'] = dry_choice
+        workflow['add_preview'] = session.get('last_add_preview') if session.get('last_add_preview') is not None else True
+        fallback_advanced = {
+            'overwrite': overwrite,
+            'sync': sync,
+            'd50_patch': last_d50_patch if origin == 'tiff' else None,
+            'encode_tag': last_encode_tag if origin == 'tiff' else None,
+            'embed_thumbnail': session.get('last_jpeg_thumbnail') if origin == 'tiff' else None,
+            'multipage_mode': session.get('last_multipage_mode') or 'split',
+            'thumbnail_mode': session.get('last_thumbnail_mode') or 'exclude',
+            'thumbnail_suffix': session.get('last_thumbnail_suffix') or '_thumbnail',
+            'thumbnail_handling': session.get('last_thumbnail_handling') or 'include',
+            'no_reconstruct_multipage': bool(session.get('last_no_reconstruct_multipage')),
+            'depth_policy': session.get('last_depth_policy') or 'preserve_thumbnails',
+            'matrix': False,
+            'basic': False,
+            'none': False,
+            'target_icc': None,
+            'no_icc_cleanup': False,
+        }
+        workflow['advanced_options'] = dict(session.get('last_advanced_options') or fallback_advanced)
+        # Ensure overwrite/sync reflect the choice just made in this dialog,
+        # not a stale value from a previous session's last_advanced_options.
+        workflow['advanced_options']['overwrite'] = overwrite
+        workflow['advanced_options']['sync'] = sync
+        workflow['expert_flags'] = session.get('last_expert_flags') or ''
+        workflow['auto_mode_used'] = False
+        
+        # Use saved conversion type or fallback to defaults
+        if last_conv_type:
+            workflow['conversion_type'] = last_conv_type
+        elif origin == 'jpeg':
+            workflow['conversion_type'] = 'transcode_lossless'
+        elif origin == 'tiff':
+            workflow['conversion_type'] = 'jxl_tiff_encoder'
+        elif origin == 'jxl' and last_dest == 'tiff':
+            workflow['conversion_type'] = 'jxl_tiff_decoder'
+        elif origin == 'jxl' and last_dest == 'jpeg':
+            # No conversion type saved (old config): default to auto, which
+            # recovers losslessly via jbrd when possible, instead of force
+            # lossy, which would recompress everything.
+            workflow['conversion_type'] = 'jxl_to_jpeg_auto'
+        elif origin == 'jxl' and last_dest == 'png':
+            workflow['conversion_type'] = 'jxl_to_png'
+        else:
+            workflow['conversion_type'] = 'jxl_to_jpeg_force'
+
+        # NOTE: no HHMM gate here — execute_workflow() has the single
+        # execution-time gate (which also honors dry_run). A gate here
+        # would ask for the token TWICE in a row (and the second prompt
+        # could roll into the next minute and fail spuriously).
+
+        self.execute_workflow(workflow, status)
+
     def _print_success(self, message: str) -> None:
         if RICH_AVAILABLE and console:
             console.print(f"[green]✓[/green] {message}")
@@ -4108,39 +4659,42 @@ def main():
                     saved_quality = config.config.default_quality
                     saved_distance = None
 
-                # Manifest runs (mode 99) are not repeatable and must not
-                # clobber the saved repeat-workflow state.
-                if workflow['mode'] != 99:
-                    config.save_last_session(
-                        input_dir=workflow['input_dir'],
-                        output_mode=str(workflow['mode']),
-                        workers=workflow['workers'],
-                        staging=workflow['staging'],
-                        effort=workflow['effort'],
-                        quality=saved_quality,
-                        distance=saved_distance,
-                        origin_format=workflow['origin_format'],
-                        dest_format=workflow['dest_format'],
-                        conversion_type=workflow['conversion_type'],
-                        icc_profile=workflow.get('icc_profile'),
-                        expert_flags=workflow.get('expert_flags'),
-                        d50_patch=workflow.get('advanced_options', {}).get('d50_patch'),
-                        encode_tag=workflow.get('advanced_options', {}).get('encode_tag'),
-                        # The advanced-options dict stores it as 'embed_thumbnail'
-                        jpeg_thumbnail=workflow.get('advanced_options', {}).get('embed_thumbnail'),
-                        multipage_mode=workflow.get('advanced_options', {}).get('multipage_mode'),
-                        thumbnail_mode=workflow.get('advanced_options', {}).get('thumbnail_mode'),
-                        thumbnail_suffix=workflow.get('advanced_options', {}).get('thumbnail_suffix'),
-                        thumbnail_handling=workflow.get('advanced_options', {}).get('thumbnail_handling'),
-                        no_reconstruct_multipage=workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
-                        depth_policy=workflow.get('advanced_options', {}).get('depth_policy'),
-                        advanced_options=workflow.get('advanced_options'),
-                        use_ram=workflow.get('use_ram') if origin == 'tiff' else None,
-                        compression=workflow.get('compression') if dest == 'tiff' else None,
-                        bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
-                        add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
-                        mode_config=workflow.get('mode_config')
-                    )
+                # Manifest runs (mode 99) are saved like any other: the repeat
+                # re-reads the CSV, which is what makes a recurring "sync the
+                # whole library" run a two-keystroke operation. Saving one DOES
+                # overwrite the previous repeat slot — that is the intent.
+                config.save_last_session(
+                    input_dir=workflow['input_dir'],
+                    output_mode=str(workflow['mode']),
+                    workers=workflow['workers'],
+                    staging=workflow['staging'],
+                    effort=workflow['effort'],
+                    quality=saved_quality,
+                    distance=saved_distance,
+                    origin_format=workflow['origin_format'],
+                    dest_format=workflow['dest_format'],
+                    conversion_type=workflow['conversion_type'],
+                    icc_profile=workflow.get('icc_profile'),
+                    expert_flags=workflow.get('expert_flags'),
+                    d50_patch=workflow.get('advanced_options', {}).get('d50_patch'),
+                    encode_tag=workflow.get('advanced_options', {}).get('encode_tag'),
+                    # The advanced-options dict stores it as 'embed_thumbnail'
+                    jpeg_thumbnail=workflow.get('advanced_options', {}).get('embed_thumbnail'),
+                    multipage_mode=workflow.get('advanced_options', {}).get('multipage_mode'),
+                    thumbnail_mode=workflow.get('advanced_options', {}).get('thumbnail_mode'),
+                    thumbnail_suffix=workflow.get('advanced_options', {}).get('thumbnail_suffix'),
+                    thumbnail_handling=workflow.get('advanced_options', {}).get('thumbnail_handling'),
+                    no_reconstruct_multipage=workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
+                    depth_policy=workflow.get('advanced_options', {}).get('depth_policy'),
+                    advanced_options=workflow.get('advanced_options'),
+                    use_ram=workflow.get('use_ram') if origin == 'tiff' else None,
+                    compression=workflow.get('compression') if dest == 'tiff' else None,
+                    bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
+                    add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
+                    mode_config=workflow.get('mode_config'),
+                    # None on a normal run: clears any previously stored CSV.
+                    manifest_path=workflow.get('manifest_path'),
+                )
 
                 if RICH_AVAILABLE and console:
                     execute_now = Confirm.ask("\nConfiguration saved! Execute now?", default=True)
@@ -4174,224 +4728,10 @@ def main():
                 continue
 
         elif choice == "2" and has_last:
-            last = config.config
-            last_dir = last.last_input_dir or ""
-            last_mode = last.last_output_mode or "0"
-            last_workers = last.last_workers or 4
-            last_staging = last.last_staging or ""
-            last_effort = last.last_effort or 7
-            last_quality = last.last_quality or 95
-            last_distance = last.last_distance
-            last_origin = last.last_origin_format or "tiff"
-            last_dest = last.last_dest_format or ("jxl" if last_origin != "jxl" else "jpeg")
-            last_conv_type = last.last_conversion_type or ""
-            last_d50_patch = last.last_d50_patch or "auto"
-            last_encode_tag = last.last_encode_tag or "xmp"
+            menu._run_saved_session(config.session_snapshot(), status)
 
-            if RICH_AVAILABLE and console:
-                settings = [
-                    ["Input folder", last_dir],
-                    ["Source", last_origin.upper()],
-                    ["Destination", last_dest.upper()],
-                    ["Mode", last_mode],
-                    ["Workers", str(last_workers)],
-                    ["Effort", str(last_effort)],
-                ]
-                # Show relevant field based on origin format
-                # TIFF→JXL & JPEG→JXL-lossy: distance-driven | JXL→JPEG: quality
-                if last_origin == 'tiff' and last_distance is not None:
-                    settings.append(["Distance", f"{last_distance}"])
-                elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
-                    settings.append(["Distance", f"{last_distance}"])
-                elif last_origin == 'jpeg':
-                    settings.append(["Quality", str(last_quality)])
-                elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                    settings.append(["Quality", str(last_quality)])
-                settings.append(["Staging", last_staging or "(none)"])
-                # Surface silently-reapplied dangerous settings (they are NOT
-                # re-asked on this path, so the user must see them here).
-                _last_adv = last.last_advanced_options or {}
-                if _last_adv.get('delete_source'):
-                    settings.append(["Delete source", "ON"])
-                if last.last_expert_flags:
-                    settings.append(["Expert flags", last.last_expert_flags])
-                
-                t = Table(box=BOX_SIMPLE, show_header=False, pad_edge=False)
-                t.add_column("", style="cyan")
-                t.add_column("")
-                for row in settings:
-                    t.add_row(*row)
-                console.print(Panel(t, title="[bold]Last Workflow Settings[/bold]", border_style="green"))
-            else:
-                print("\n=== Last Workflow Settings ===")
-                print(f"  Input folder: {last_dir}")
-                print(f"  Source:       {last_origin.upper()}")
-                print(f"  Destination:  {last_dest.upper()}")
-                print(f"  Mode:         {last_mode}")
-                print(f"  Workers:      {last_workers}")
-                print(f"  Effort:       {last_effort}")
-                # Show relevant field based on origin format
-                if last_origin == 'tiff' and last_distance is not None:
-                    print(f"  Distance:     {last_distance}")
-                elif last_origin == 'jpeg':
-                    print(f"  Quality:      {last_quality}")
-                elif last_origin == 'jxl' and last_quality is not None:
-                    print(f"  Quality:      {last_quality}")
-                print(f"  Staging:      {last_staging or '(none)'}")
-                _last_adv = last.last_advanced_options or {}
-                if _last_adv.get('delete_source'):
-                    print(f"  Delete source: ON")
-                if last.last_expert_flags:
-                    print(f"  Expert flags: {last.last_expert_flags}")
-                print()
-
-            if RICH_AVAILABLE and console:
-                new_folder = Prompt.ask(f"\n[bold cyan]Input folder[/bold cyan]", default=last_dir).strip()
-            else:
-                new_folder = input(f"\nInput folder [{last_dir}]: ").strip()
-
-            if not new_folder:
-                new_folder = last_dir
-
-            new_folder = _strip_surrounding_quotes(new_folder)
-            input_path = Path(new_folder)
-            if not input_path.exists():
-                if RICH_AVAILABLE and console:
-                    console.print(f"[red]Folder not found: {new_folder}[/red]")
-                else:
-                    print(f"Folder not found: {new_folder}")
-                continue
-
-            origin = last_origin
-
-            if RICH_AVAILABLE and console:
-                console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
-                ow_choice = Prompt.ask("If exists", choices=["1", "2"], default="2")
-            else:
-                ow_choice = input("If exists (1=overwrite, 2=sync) [2]: ").strip() or "2"
-
-            if ow_choice == "1":
-                overwrite, sync = True, False
-            else:
-                overwrite, sync = False, True
-
-            # Ask dry-run explicitly — the original run may have been a
-            # simulation, and hardcoding False would turn a repeat into a REAL
-            # conversion without any notice.
-            if RICH_AVAILABLE and console:
-                dry_choice = Confirm.ask("Dry run? (simulate without converting)", default=False)
-            else:
-                dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
-
-            if RICH_AVAILABLE and console:
-                proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)
-            else:
-                resp = input(f"\nProceed with this workflow? [Y/n]: ").strip().lower()
-                proceed = not resp.startswith('n')
-
-            if not proceed:
-                continue
-
-            # Separate distance (TIFF) and quality (JPEG) - don't mix!
-            if origin == 'tiff':
-                workflow = {
-                    'input_dir': new_folder,
-                    'mode': int(last_mode or 0),
-                    'workers': last_workers or 4,
-                    'staging': last_staging,
-                    'effort': last_effort or 7,
-                    'distance': last_distance if last_distance is not None else 0.1,
-                    'overwrite_mode': ow_choice,
-                }
-            else:
-                workflow = {
-                    'input_dir': new_folder,
-                    'mode': int(last_mode or 0),
-                    'workers': last_workers or 4,
-                    'staging': last_staging,
-                    'effort': last_effort or 7,
-                    'quality': last_quality or 95,
-                    'overwrite_mode': ow_choice,
-                }
-                if last_distance is not None:
-                    workflow['distance'] = last_distance
-
-            if workflow['mode'] == 2:
-                saved_out = (config.config.last_mode_config or {}).get('output_dir')
-                # Only reuse the saved output folder when the input folder is
-                # the same as the saved session's; with a NEW input folder the
-                # old destination would silently swallow the new outputs.
-                if saved_out and new_folder == last_dir:
-                    workflow['mode_config'] = {'output_dir': saved_out}
-                else:
-                    workflow['mode_config'] = {'output_dir': str(input_path.parent / "output")}
-            else:
-                # mode_config is mode-SPECIFIC: a stale export_subfolder from a
-                # previous mode-7 run must not leak into mode 0/3/6 repeats
-                # (it changes child behavior, e.g. the decoder-output filter).
-                _keep = {6: ('export_marker',), 7: ('export_marker', 'export_subfolder')}
-                _src = config.config.last_mode_config or {}
-                workflow['mode_config'] = {k: _src[k] for k in _keep.get(workflow['mode'], ()) if k in _src}
-
-            workflow['origin_format'] = origin
-            workflow['dest_format'] = last_dest
-            workflow['use_ram'] = config.config.last_use_ram if config.config.last_use_ram is not None else True
-            workflow['icc_profile'] = config.config.last_icc_profile
-            workflow['compression'] = config.config.last_compression or 'zip'
-            workflow['bit_depth'] = config.config.last_bit_depth or 16
-            workflow['dry_run'] = dry_choice
-            workflow['add_preview'] = config.config.last_add_preview if config.config.last_add_preview is not None else True
-            fallback_advanced = {
-                'overwrite': overwrite,
-                'sync': sync,
-                'd50_patch': last_d50_patch if origin == 'tiff' else None,
-                'encode_tag': last_encode_tag if origin == 'tiff' else None,
-                'embed_thumbnail': config.config.last_jpeg_thumbnail if origin == 'tiff' else None,
-                'multipage_mode': config.config.last_multipage_mode or 'split',
-                'thumbnail_mode': config.config.last_thumbnail_mode or 'exclude',
-                'thumbnail_suffix': config.config.last_thumbnail_suffix or '_thumbnail',
-                'thumbnail_handling': config.config.last_thumbnail_handling or 'include',
-                'no_reconstruct_multipage': bool(config.config.last_no_reconstruct_multipage),
-                'depth_policy': config.config.last_depth_policy or 'preserve_thumbnails',
-                'matrix': False,
-                'basic': False,
-                'none': False,
-                'target_icc': None,
-                'no_icc_cleanup': False,
-            }
-            workflow['advanced_options'] = dict(config.config.last_advanced_options or fallback_advanced)
-            # Ensure overwrite/sync reflect the choice just made in this dialog,
-            # not a stale value from a previous session's last_advanced_options.
-            workflow['advanced_options']['overwrite'] = overwrite
-            workflow['advanced_options']['sync'] = sync
-            workflow['expert_flags'] = config.config.last_expert_flags or ''
-            workflow['auto_mode_used'] = False
-            
-            # Use saved conversion type or fallback to defaults
-            if last_conv_type:
-                workflow['conversion_type'] = last_conv_type
-            elif origin == 'jpeg':
-                workflow['conversion_type'] = 'transcode_lossless'
-            elif origin == 'tiff':
-                workflow['conversion_type'] = 'jxl_tiff_encoder'
-            elif origin == 'jxl' and last_dest == 'tiff':
-                workflow['conversion_type'] = 'jxl_tiff_decoder'
-            elif origin == 'jxl' and last_dest == 'jpeg':
-                # No conversion type saved (old config): default to auto, which
-                # recovers losslessly via jbrd when possible, instead of force
-                # lossy, which would recompress everything.
-                workflow['conversion_type'] = 'jxl_to_jpeg_auto'
-            elif origin == 'jxl' and last_dest == 'png':
-                workflow['conversion_type'] = 'jxl_to_png'
-            else:
-                workflow['conversion_type'] = 'jxl_to_jpeg_force'
-
-            # NOTE: no HHMM gate here — execute_workflow() has the single
-            # execution-time gate (which also honors dry_run). A gate here
-            # would ask for the token TWICE in a row (and the second prompt
-            # could roll into the next minute and fail spuriously).
-
-            menu.execute_workflow(workflow, status)
+        elif choice == "7":
+            menu.presets_menu(status)
 
         elif choice == "3":
             status = checker.check_dependencies(force=True)

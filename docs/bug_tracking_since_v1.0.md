@@ -122,6 +122,8 @@ Twelve full audit rounds on the 4 scripts, each verified with reproductions and 
 | 205 | Auto Mode → [P] manifest → [Y] on mode 7 lost the auto-detected export subfolder (ran as mode 6; C1 trees aborted on duplicate destination) | wrapper | ✅ FIXED (same propagation as the direct [Y] path) |
 | 206 | "Repeat last workflow" silently reapplied `delete_source` and expert flags without showing them | wrapper | ✅ FIXED (Last Workflow Settings table now shows DELETE SOURCE: ON and expert flags) |
 | 207 | `.jfif`/`.jpe` outputs refused by the integrity gate (unknown extension) | transcoder | ✅ FIXED (added to the JPEG branch) |
+| 208 | Editing workers/quality/effort in "Edit default settings" had no effect on any run: the screen wrote `default_*` while the wizard and "Repeat last workflow" both read `last_*` from the previous session. Read as "the repeat resets my workers" | wrapper | ✅ FIXED (a value changed in settings is also adopted as the `last_*` for the next run; untouched values still keep what the last run used, and the screen flags a default the saved session is overriding) |
+| 209 | Manifest runs (mode 99) were never saved, so they could not be repeated and a recurring sync meant redoing the whole wizard | wrapper | ✅ FIXED (the CSV path is persisted and the repeat re-reads the file, picking up Excel edits; the `Direction` and path-traversal guards were extracted so the repeat validates exactly like the wizard) |
 
 ### Medium (selection)
 

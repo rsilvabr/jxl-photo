@@ -79,6 +79,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 │  4  Edit default settings                                                                                          │
 │  5  Reset all settings                                                                                             │
 │  6  Move settings file                                                                                             │
+│  7  Presets (2 saved)                                                                                              │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -112,12 +113,35 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | # | Option | Description |
 |---|--------|-------------|
 | `1` | New workflow | Start the conversion wizard |
-| `2` | Repeat last workflow | Re-run the previous conversion with same settings |
+| `2` | Repeat last workflow | Re-run the previous conversion with same settings. **Manifest runs are repeatable too**: the entry reads `Repeat last workflow (manifest: <file>.csv)`, skips the input-folder question and re-reads the CSV, so edits you made in Excel between runs are picked up. It is disabled only while that CSV is missing. You are still asked overwrite/sync (default: sync) and dry-run every time |
 | `3` | Check dependencies again | Re-scan all tools and libraries |
 | `4` | Edit default settings | Change workers, quality, effort, export marker |
 | `5` | Reset all settings | Delete config and start fresh |
 | `6` | Move settings file | Toggle between script folder and User Profile |
+| `7` | Presets | Save the last workflow under a name and re-run it later. See below |
 | `0` | Exit | Quit |
+
+### Presets (option 7)
+
+`Repeat last workflow` only ever remembers **one** run. Presets let several
+recurring jobs coexist — a nightly manifest sync, a per-shoot conversion — each
+under its own name:
+
+```
+--- Presets ---
+  1. nightly-sync
+     TIFF->JXL | manifest: manifest_2026.csv | workers 12 | d=0.05
+  2. shoot-inplace
+     TIFF->JXL | mode 6 | G:\2026 | workers 8 | d=0.05
+[number] run | [S] save last workflow as preset | [D] delete | [B] back
+```
+
+- **`[S]`** snapshots whatever ran last (including a manifest run) under a name
+  you choose, so it stops being affected by later runs.
+- **`[number]`** runs a preset. It goes through exactly the same questions as
+  `Repeat last workflow`: overwrite/sync (default sync) and dry-run are always
+  asked, never inherited.
+- Presets live in the same `~/.jxl_tools_config.json` as the rest of the settings.
 
 * * *
 
@@ -140,9 +164,10 @@ Choose the output format based on the source:
 
 **TIFF source:**
 - JXL d=0 — Lossless (exact replica)
-- JXL d=0.1 — Near-lossless (recommended, much smaller)
+- JXL d=0.1 — Near-lossless (recommended, much smaller). This entry shows **your**
+  distance when you change it in option 4 (e.g. `d=0.05 — Your default`)
 - JXL d=1.0 — Visually lossless (smallest)
-- Custom distance — Any value 0-15
+- Custom distance — Any value 0-15 (pre-filled with the last distance you used)
 
 **JXL source:**
 - **JPEG Auto-Detect** — Recommended: lossless if jbrd present, else lossy
@@ -335,11 +360,22 @@ Full review of all settings before execution. Type `YES` to confirm.
 
 ## Edit default settings (option 4)
 
-Persistent defaults saved to `~/.jxl_tools_config.json`:
+Persistent defaults saved to `~/.jxl_tools_config.json`.
+
+> Changing **workers**, **quality**, **effort** or **distance** here also updates
+> what the next run uses, including *Repeat last workflow*. Values you leave
+> untouched keep whatever the last run used, and the screen tells you when a
+> saved session is currently overriding a default.
+
 - **Staging directory** — output SSD path
 - **Workers** — default thread count
 - **Quality** — JPEG quality for lossy workflows
 - **Effort** — cjxl effort level (1-10)
+- **Distance (TIFF→JXL)** — your preferred cjxl distance (default: `0.1`). This is
+  the value offered as entry `[2]` in Step 2, so if you always work at `0.05`,
+  set it once here and pick it with a single keystroke instead of going through
+  `[4] Custom` on every run. Setting it to `0` makes entry `[2]` run the
+  **lossless** encoder, exactly like entry `[1]`.
 - **Confirm deletes** — safety confirmation before destructive operations
 - **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`)
 
@@ -392,6 +428,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Default workers | Persisted |
 | Default quality | Persisted |
 | Default effort | Persisted |
+| Default distance (TIFF→JXL) | Drives entry `[2]` of Step 2. Default: `0.1` |
 | Confirm deletes | Safety toggle |
 | Export marker | Default: `_EXPORT` |
 
