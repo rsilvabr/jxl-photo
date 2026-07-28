@@ -26,9 +26,9 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
-**Unreleased (in `main`)** — `--run-preset NAME` runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved.
+**Current release: v1.8.4** (2026-07-28) — recommended for everyone. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
 
-**Current release: v1.8.3** (2026-07-28) — recommended for everyone. Cuts the repetitive parts of the menu (your own distance, repeatable manifests, named presets) and adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
+**v1.8.3** (2026-07-28) — recommended for everyone. Cuts the repetitive parts of the menu (your own distance, repeatable manifests, named presets) and adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
@@ -46,7 +46,7 @@ Highlights:
 - **Manifests are Excel-safe and collision-checked** — UTF-8 BOM for non-ASCII paths, cross-entry output collisions refused up front.
 - **Better throughput on large libraries** — the thread pool no longer stalls at folder boundaries.
 
-Full release notes: [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) · [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1)
+Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4) · [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) · [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2)
 
 ---
 
@@ -54,7 +54,8 @@ Full release notes: [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.8.3** | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
+| **v1.8.4** | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
+| v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
 | v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
 | v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
 | v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |

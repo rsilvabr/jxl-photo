@@ -1,6 +1,8 @@
 # New Features Since v1.0
 
-## Unreleased (in `main`)
+## v1.8.4
+
+Date: 2026-07-28
 
 ### `--run-preset`: presets without the menu
 
