@@ -608,6 +608,31 @@ worker**.
 it gives the same 65.4 % at effort 7 and effort 9, so pairing it with effort 9
 buys nothing at all. This is why it is off by default.
 
+### Lossy (`--distance 0.05`): same RAM, a fraction of the time
+
+Same photos, same measurement method, at the near-lossless distance most
+delivery workflows use:
+
+| Source | Effort | Buffering | RAM per worker | Time | JXL size |
+|---|---|---|---|---|---|
+| 24 MP | 7 | default | 0.86 GB | 8.1 s | 19.4 % |
+| 24 MP | 9 | default | 0.92 GB | 9.4 s | 19.4 % |
+| 24 MP | 9 | `0` | 6.53 GB | 42.3 s | 20.6 % |
+| 45 MP | 7 | default | 1.56 GB | 13.1 s | 17.4 % |
+| 45 MP | 9 | default | 1.56 GB | 15.4 s | 17.4 % |
+| 45 MP | 9 | `0` | 12.09 GB | 74.5 s | 18.7 % |
+
+**RAM is the same as lossless**, so size `--workers` from either table. What
+collapses is time: effort 9 goes from 79.9 s to 9.4 s at 24 MP and from 168.7 s
+to 15.4 s at 45 MP (8–11× faster). Effort is nearly free here — 7 → 9 costs
+about a second and changes nothing in the output.
+
+> **Never combine `--buffering 0` with lossy.** At effort 9 it costs 7–8× the
+> RAM and ~4.7× the time **and produces a larger file** (20.6 % vs 19.4 % at
+> 24 MP; 18.7 % vs 17.4 % at 45 MP). It loses on all three axes. At 12 GB per
+> worker, five workers would already need 60 GB. At effort 7 it is merely
+> pointless: double the RAM for the same time and the same size.
+
 ### 8-bit sources: much faster, barely lighter
 
 The table above is all **16-bit** input. Running the same photos converted to
