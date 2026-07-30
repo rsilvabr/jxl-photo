@@ -36,6 +36,17 @@ docs/RELEASE_v*.md
 # Guias pessoais — locais, nunca publicados
 docs/GUIA_*.md
 
+# Manifests gerados pela ferramenta (SCRIPT_DIR/manifests) — dados locais
+manifests/
+
+# Snapshot antigo dos scripts (era v1.7.0), mantido local — ver AGENTS.md
+claude/
+
+# Dumps de --help e checksums de teste, regeneraveis
+cjxl_help*.txt
+djxl_help*.txt
+checksums.md5
+
 # Abandoned HDR side project — kept locally, never committed (see AGENTS.md)
 jxl_jpeg_transcoder_HDR.py
 hdr/

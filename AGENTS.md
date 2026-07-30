@@ -6,6 +6,10 @@
   commit these files.
 - `deprecated/` — superseded scripts, tracked only for history. Out of scope
   for audits, refactors and edits.
+- `claude/` — stale copies of the active scripts from the v1.7.0 era, kept
+  untracked at the repo root (gitignored). They still match on a repo-wide
+  grep, so treat any hit there as noise: the duplicated-helper rule below means
+  a fix applied to `claude/jxl_*.py` by mistake would look right and do nothing.
 
 ## Active scripts
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)
