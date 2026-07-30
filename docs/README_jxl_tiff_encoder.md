@@ -651,10 +651,8 @@ falls only 4–21 %, because `cjxl` works in an internal representation that doe
 not shrink with input depth. Only the PNG intermediate halves. Size the worker
 count from the 16-bit figures either way.
 
-> Pre-0.12 libjxl is believed to behave roughly like 0.12 with `--buffering 0`
-> — that is, several times the memory of the current default path. This is
-> based on recollection of earlier runs, **not measured or confirmed here**;
-> every number in the tables above is first-hand measurement on v0.12.0.
+Every figure on this page is measured on **libjxl v0.12.0**. Older libjxl is
+not characterised here — if you are on one, upgrading is the answer.
 
 ---
 
