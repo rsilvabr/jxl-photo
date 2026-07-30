@@ -179,7 +179,8 @@ CLEANUP_XMP_ICC_MARKER = False
 # False → keeps existing ICC markers (default)
 
 USE_RAM_FOR_PNG = True
-# True  → PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
+# True  → PNG intermediate stays entirely in RAM (faster; RAM scales with
+#         megapixels, not with a fixed per-worker figure — see Performance)
 # False → PNG is written to disk in TEMP_DIR (useful if RAM is limited)
 
 PIL_MAX_IMAGE_PIXELS = None
@@ -279,13 +280,15 @@ Arguments:
 
 Options:
   --mode 0-8      Output folder mode (default: 0)
-  --workers N     Parallel threads (tested up to 32 on a Ryzen 9 5950X)
+  --workers N     Parallel threads (tested up to 32 on a Ryzen 9 5950X).
+                  RAM is the real ceiling — see "RAM per worker" in Performance
   --overwrite     Always overwrite existing JXLs
   --sync          Reconvert only TIFFs newer than their JXL
   --distance N    JXL distance (0=lossless, 0.1=near-lossless, default: from script)
   --effort 1-10  Compression effort (default: from script setting)
   --buffering 0-3 [libjxl >= 0.12] cjxl buffering level (default: off = use cjxl default;
-                  0 = best compression, much slower on large lossless images)
+                  0 = best compression, much slower on large lossless images,
+                  and ~2.4x the RAM per worker)
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after successful encode (mode 8 only)
@@ -557,11 +560,76 @@ This version uses **targeted XMP updates**:
 
 ## Performance
 
-With `USE_RAM_FOR_PNG = True` (default), the PNG intermediate (~200MB) lives entirely 
+With `USE_RAM_FOR_PNG = True` (default), the PNG intermediate lives entirely
 in RAM. Disk I/O per file = read TIFF + write JXL.
 
 With `--staging` (or `TEMP2_DIR`) set to a separate SSD, JXLs are written to fast storage during conversion
 and moved in bulk at the end — eliminates random write contention on HDD collections.
+
+### RAM per worker
+
+Measured with libjxl **v0.12.0**: peak RSS of the whole process tree (Python +
+`cjxl`) with `--workers 1`, lossless (`--distance 0`), `USE_RAM_FOR_PNG = True`,
+on real 16-bit ProPhoto exports. Divide your RAM budget by these to pick
+`--workers`.
+
+| Source | Effort | Buffering | RAM per worker | Time | JXL size |
+|---|---|---|---|---|---|
+| 24 MP (6048×4032) | 7 | default | 0.87 GB | 19.7 s | 68.8 % |
+| 24 MP | 9 | default | 0.99 GB | 79.9 s | 68.6 % |
+| 24 MP | 7 | `0` | 2.31 GB | 141.5 s | 67.8 % |
+| 24 MP | 9 | `0` | 3.14 GB | 351.0 s | 67.0 % |
+| 45 MP (8256×5504) | 7 | default | 1.73 GB | 36.8 s | 66.3 % |
+| 45 MP | 9 | default | 1.55 GB | 168.7 s | 66.8 % |
+| 45 MP | 7 | `0` | 4.24 GB | 278.6 s | 65.4 % |
+| 45 MP | 9 | `0` | 5.05 GB | 632.9 s | 65.4 % |
+| 93 MP scan (11170×8355) | 7 | default | 3.19 GB | 75.4 s | — |
+| 93 MP scan | 9 | default | 3.32 GB | 415.8 s | — |
+
+JXL size is a percentage of the source TIFF. Peak-RSS sampling has a few
+percent of noise: the 45 MP effort-9 figure landing just under effort 7 is
+noise, not a real inversion.
+
+**Megapixels drive RAM, not effort.** Effort 7 → 9 barely moves memory but
+costs 2–5× the time. Budget roughly **35–40 MB of RAM per megapixel, per
+worker**.
+
+**The safe worker count depends on image size, not just on the machine.** On
+64 GB, at effort 9 with default buffering:
+
+| Source | 30 workers | Comfortable ceiling |
+|---|---|---|
+| 24 MP | ≈ 30 GB | 30+ |
+| 45 MP | ≈ 47 GB — tight | ~25 |
+| 93 MP scan | ≈ 100 GB — pages badly | ~15 |
+
+**`--buffering 0` does not pay for itself.** It costs 2.5–3.3× the RAM and
+3.8–7.6× the time to return **1–1.6 percentage points** of file size. At 45 MP
+it gives the same 65.4 % at effort 7 and effort 9, so pairing it with effort 9
+buys nothing at all. This is why it is off by default.
+
+### 8-bit sources: much faster, barely lighter
+
+The table above is all **16-bit** input. Running the same photos converted to
+8 bits (identical dimensions and ICC, pixels shifted down by 8):
+
+| Source | Effort | RAM per worker | vs 16-bit | Time | vs 16-bit |
+|---|---|---|---|---|---|
+| 24 MP 8-bit | 7 | 0.69 GB | −21 % | 6.4 s | 3.1× faster |
+| 24 MP 8-bit | 9 | 0.95 GB | −4 % | 13.2 s | 6.1× faster |
+| 45 MP 8-bit | 7 | 1.40 GB | −19 % | 11.8 s | 3.1× faster |
+| 45 MP 8-bit | 9 | 1.36 GB | −12 % | 24.7 s | 6.8× faster |
+
+**Do not raise `--workers` for 8-bit work expecting the memory to halve.** Bit
+depth is a speed lever, not a memory one: encoding is 3–7× faster, but RAM
+falls only 4–21 %, because `cjxl` works in an internal representation that does
+not shrink with input depth. Only the PNG intermediate halves. Size the worker
+count from the 16-bit figures either way.
+
+> Pre-0.12 libjxl is believed to behave roughly like 0.12 with `--buffering 0`
+> — that is, several times the memory of the current default path. This is
+> based on recollection of earlier runs, **not measured or confirmed here**;
+> every number in the tables above is first-hand measurement on v0.12.0.
 
 ---
 
