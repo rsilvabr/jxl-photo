@@ -49,6 +49,12 @@ SHARED_HELPERS = [
     "_scan_state",
     "_scan_tick",
     "_scan_done",
+    # Staging sweep. These DELETE files, so a copy drifting is the worst kind:
+    # one backend could start sweeping what another still needs.
+    "_fmt_size",
+    "_staging_leftovers",
+    "_report_staging_leftovers",
+    "_clean_staging",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally

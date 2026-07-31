@@ -315,6 +315,106 @@ def _scan_done(st, found):
                     f"entries in {time.monotonic() - st['t0']:.0f}s")
 
 
+# --- Staging leftovers ------------------------------------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
+# standalone. Fix bugs in ALL copies.
+#
+# A file whose conversion failed is deliberately KEPT in staging for manual
+# recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
+# scheduled runs that is a slow leak on precisely the small scratch SSD the
+# disk-full abort exists to protect -- the leftovers eventually cause the
+# condition they were evidence of.
+#
+# Every staging name this tool writes starts with a uuid4 hex prefix, and that
+# is what makes a sweep safe: a staging directory is frequently a shared scratch
+# folder, so nothing that did not come from here may be touched. The scan is
+# non-recursive for the same reason.
+_STAGING_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
+# A file still being written belongs to a run in flight, possibly a CONCURRENT
+# one sharing this directory. Only sweep what has been sitting still a while.
+_STAGING_MIN_AGE_SECONDS = 3600
+
+
+def _fmt_size(n):
+    """Human size that stays informative below a gigabyte.
+
+    A fixed GB format printed "0.0 GB" for everything under ~50 MB, which is
+    exactly the reading someone with a nearly-full staging drive needs to see.
+    """
+    for unit, step in (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2)):
+        if n >= step:
+            return f"{n / step:.1f} {unit}"
+    return f"{n / 1024:.0f} KB"
+
+
+def _staging_leftovers(staging_dir):
+    """(paths, total_bytes) for files this tool left behind in staging."""
+    found, total = [], 0
+    try:
+        entries = list(Path(staging_dir).iterdir())
+    except OSError:
+        return [], 0
+    for f in entries:
+        if not _STAGING_PREFIX_RE.match(f.name):
+            continue
+        try:
+            if not f.is_file():
+                continue
+            total += f.stat().st_size
+        except OSError:
+            continue
+        found.append(f)
+    return found, total
+
+
+def _report_staging_leftovers(staging_dir):
+    """Say what is still sitting in staging, so the leak cannot stay invisible."""
+    if not staging_dir:
+        return
+    found, total = _staging_leftovers(staging_dir)
+    if not found:
+        return
+    logger.warning(f"Staging holds {len(found)} leftover file(s) ({_fmt_size(total)}) "
+                   f"in {staging_dir}")
+    for f in sorted(found)[:5]:
+        logger.warning(f"    {f.name}")
+    if len(found) > 5:
+        logger.warning(f"    ... and {len(found) - 5} more")
+    logger.warning("  These are outputs whose conversion failed, kept for inspection. "
+                   "Pass --clean-staging on a later run to sweep the older ones.")
+
+
+def _clean_staging(staging_dir):
+    """Delete leftovers that have been idle long enough to be nobody's.
+
+    Deliberately runs BEFORE the batch, not after: sweeping at the end would
+    delete this run's own failures, which are the evidence the KEEP path exists
+    to preserve. Sweeping first clears the previous runs' orphans instead.
+    """
+    if not staging_dir:
+        return 0, 0
+    found, _ = _staging_leftovers(staging_dir)
+    if not found:
+        return 0, 0
+    cutoff = time.time() - _STAGING_MIN_AGE_SECONDS
+    removed, freed = 0, 0
+    for f in found:
+        try:
+            st = f.stat()
+            if st.st_mtime > cutoff:
+                continue        # young enough that a live run may own it
+            size = st.st_size
+            f.unlink()
+        except OSError as e:
+            logger.warning(f"  Could not remove staging leftover {f.name}: {e}")
+            continue
+        removed += 1
+        freed += size
+    if removed:
+        logger.info(f"Staging: removed {removed} leftover file(s), freed {_fmt_size(freed)}")
+    return removed, freed
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -2854,6 +2954,10 @@ Examples:
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
     parser.add_argument("--sync", action="store_true",
                         help="Smart mode: only process if source is newer than destination")
+    parser.add_argument("--clean-staging", action="store_true",
+                        help="Before converting, delete staging leftovers from EARLIER "
+                             "runs (failed outputs kept for inspection). Files touched in "
+                             "the last hour are left alone: a concurrent run may own them")
     parser.add_argument("--staging", type=str, default=None, help="Staging directory")
 
     # Format options (for convert/from_jxl)
@@ -2998,6 +3102,9 @@ Examples:
             print(f"WARNING: cjxl {'.'.join(map(str, _v))} is older than the supported "
                   f"minimum (0.11.2); conversions may fail in confusing ways.")
 
+    if args.clean_staging and args.staging:
+        _clean_staging(args.staging)
+
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.
     if cmd == "transcode":
@@ -3029,6 +3136,10 @@ Examples:
 
     if cancelled:
         sys.exit(3)
+
+    # Whatever this run could not move out is still sitting on the staging
+    # drive; saying so is what keeps the leak from being invisible.
+    _report_staging_leftovers(args.staging)
 
     # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
     # the same event as a run that finished with some bad files, and automation
