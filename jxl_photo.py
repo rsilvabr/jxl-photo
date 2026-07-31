@@ -94,6 +94,24 @@ def _split_expert_flags(flags: str) -> List[str]:
     return stripped
 
 
+def _flags_request_delete(flags: Optional[str]) -> bool:
+    """True when the free-form expert-flags string asks the child to delete sources.
+
+    Expert flags are appended to the child's argv verbatim, so `--delete-source`
+    typed here NEVER sets advanced_options['delete_source'] — the wrapper's whole
+    delete-gate logic keys off that dict and so never fires. Paired with
+    `--delete-confirm-off` (which suppresses the child's OWN confirmation) a saved
+    preset could delete originals from Task Scheduler with nobody confirming
+    anything, the exact scenario the unattended gate exists to prevent.
+
+    argparse also lets a later `--mode 8` in these flags override the mode the
+    wrapper passed, so the callers deliberately do NOT combine this with a mode
+    check: expert-flag deletion is gated on its own, whatever the stored mode says.
+    """
+    return any(t.split('=', 1)[0] in ('--delete-source', '--delete_source')
+               for t in _split_expert_flags(flags or ''))
+
+
 def _strip_surrounding_quotes(value: str) -> str:
     """Strip balanced surrounding quotes from pasted paths
     (e.g. Explorer's 'Copy as path' wraps the path in double quotes)."""
@@ -1940,8 +1958,16 @@ class InteractiveMenu:
                         # path PARTS (not a substring match, which false-
                         # positives on legitimate names like "2024..final").
                         if '..' in Path(source).parts or '..' in Path(dest).parts:
-                            logger.warning(f"Skipping manifest entry with path traversal: {source} -> {dest}")
-                            continue
+                            # Refuse the whole manifest, do not skip the row.
+                            # Skipping shrank the run silently: the summary
+                            # counts only the entries that LOADED, so a
+                            # dropped folder looks exactly like a folder that
+                            # synced cleanly. Same fail-closed rule as the
+                            # Mode checks above.
+                            self._print_error(
+                                f"Path traversal in manifest entry: {source} -> {dest}\n"
+                                f"Use absolute paths (or paths without '..') and run it again.")
+                            return None
                         entries.append((source, dest, entry_mode))
 
         if not entries:
@@ -3288,8 +3314,11 @@ class InteractiveMenu:
         # Manifest entries with mode 8 + delete_source get --delete-confirm-off
         # from the cmd builder — so the wrapper MUST gate them with the same
         # HHMM confirmation the wizard/repeat paths enforce. Ask once, before
-        # anything runs.
-        if not dry_run and advanced.get('delete_source') and any(m == 8 for _, _, m in manifest_entries):
+        # anything runs. Expert-flag deletion is gated on its own here too: it
+        # never reaches `advanced`, and it applies to every entry at once.
+        if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
+                            or (advanced.get('delete_source')
+                                and any(m == 8 for _, _, m in manifest_entries))):
             if not self._confirm_archive_mode():
                 return False
 
@@ -3832,7 +3861,7 @@ class InteractiveMenu:
                 ]
         return clean
 
-    def _stream_child(self, cmd: List, idle_timeout: int = 1800) -> int:
+    def _stream_child(self, cmd: List, idle_timeout: int = 3600) -> int:
         """Run a child script, streaming stdout live, with an IDLE deadline.
 
         The deadline resets every time the child prints a line: a long healthy
@@ -3840,6 +3869,12 @@ class InteractiveMenu:
         stuck on an interactive stdin prompt (no output) is detected and
         killed. (The previous absolute 1-hour wall-clock limit could kill
         healthy long batches mid-run.)
+
+        The children print one line per COMPLETED file, so the idle window has
+        to cover the slowest single file, not the slowest batch — a 750 MB
+        multi-page drum scan at effort 9/10 is minutes of legitimate silence,
+        and on slower hardware the old 30 min left little margin before a
+        healthy encode was killed and blamed on a "hidden prompt".
 
         Exit code contract: 0 = success, 1 = some files failed, 2 = aborted,
         3 = user declined a confirmation. Returns -1 on timeout/launch failure.
@@ -3885,7 +3920,8 @@ class InteractiveMenu:
                     process.kill()
                     self._print_error(
                         f"No output for {idle_timeout // 60} min: process killed "
-                        f"(possible hidden prompt or hang)")
+                        f"(hidden prompt, hang, or a single file slower than that "
+                        f"— the child prints only on completed files)")
                     return -1
                 try:
                     line = q.get(timeout=min(1.0, max(remaining, 0.1)))
@@ -3936,12 +3972,16 @@ class InteractiveMenu:
         if workflow.get('mode') == 99:
             return self._execute_manifest_workflow(workflow, status)
 
-        # Mode 8 delete gate, at EXECUTION time (was Step 4): the user has
-        # already had the chance to pick dry-run, and a simulation never
-        # charges the HHMM token.
-        if (workflow['mode'] == 8
-                and workflow.get('advanced_options', {}).get('delete_source')
-                and not workflow.get('dry_run')):
+        # Delete gate, at EXECUTION time (was Step 4): the user has already had
+        # the chance to pick dry-run, and a simulation never charges the HHMM
+        # token. `--delete-source` typed into expert flags is gated on its own,
+        # without the mode 8 condition: it bypasses advanced_options entirely,
+        # and a later `--mode 8` in those same flags can override the mode this
+        # check would otherwise trust.
+        _flag_delete = _flags_request_delete(workflow.get('expert_flags'))
+        _adv_delete = bool(workflow.get('advanced_options', {}).get('delete_source'))
+        if (not workflow.get('dry_run')
+                and (_flag_delete or (_adv_delete and workflow['mode'] == 8))):
             if not self._confirm_archive_mode():
                 return False
 
@@ -4507,15 +4547,28 @@ class InteractiveMenu:
             dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
 
         if unattended:
-            # A destructive preset cannot run unattended: execute_workflow gates
-            # mode 8 + delete_source behind an HHMM token nobody can type here,
-            # and skipping that gate would let a scheduled task delete originals
-            # on its own. Fail closed and say what to do instead.
-            if (int(last_mode or 0) == 8
-                    and (session.get('last_advanced_options') or {}).get('delete_source')
-                    and not dry_choice):
+            # A destructive preset cannot run unattended: the delete gates ask
+            # for an HHMM token nobody can type here, and skipping them would
+            # let a scheduled task delete originals on its own. Fail closed and
+            # say what to do instead.
+            #
+            # Three ways a stored run can reach a deletion, all of them checked:
+            #   * mode 8 + advanced_options['delete_source'] (the menu's own path);
+            #   * a MANIFEST preset (mode 99) whose entries are mode 8 — the mode
+            #     recorded on the session is 99, so a plain `== 8` test misses it
+            #     and the run fell through to _execute_manifest_workflow, which
+            #     printed an interactive HHMM prompt into the scheduler log before
+            #     failing on EOF. Safe, but unreadable at 3am;
+            #   * --delete-source hidden in expert flags, which never touches
+            #     advanced_options at all (see _flags_request_delete).
+            _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
+            _mode_8 = int(last_mode or 0) == 8 or (
+                is_manifest_repeat and any(m == 8 for _, _, m in (manifest_entries or [])))
+            _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
+            if not dry_choice and (_flag_delete or (_adv_delete and _mode_8)):
                 self._print_error(
-                    "This preset deletes source files (mode 8 + delete_source). "
+                    "This preset deletes source files "
+                    f"({'--delete-source in expert flags' if _flag_delete else 'mode 8 + delete_source'}). "
                     "That confirmation cannot be given unattended - run it from "
                     "the menu, or add --dry-run to simulate it here.")
                 return False
