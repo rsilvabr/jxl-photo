@@ -183,6 +183,70 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     return name[:m.start()] + suffix_to + name[m.end():]
 
 
+# --- Disk-full abort ------------------------------------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
+# standalone. Fix bugs in ALL copies.
+#
+# A staging drive is usually a small, cheap SSD nobody watches, and it holds a
+# whole destination folder's output until that folder's last file lands -- for
+# a flat run (one destination) that is the ENTIRE batch. When it fills, cjxl and
+# djxl still exit 0 while writing truncated files, the integrity check rejects
+# each one, and the run grinds on: one error per remaining file, thousands of
+# identical lines, none of them naming the disk. Latch the first one instead and
+# let the queued work fall straight through.
+_MIN_FREE_BYTES = 64 * 1024 * 1024
+_abort_lock = threading.Lock()
+_abort_reason = None
+
+
+def _reset_abort():
+    """Clear the latch. Called when a run starts (and by the tests)."""
+    global _abort_reason
+    with _abort_lock:
+        _abort_reason = None
+
+
+def _aborted():
+    """The reason the run gave up, or None while it is healthy."""
+    return _abort_reason
+
+
+def _signal_abort(reason):
+    """Latch the FIRST reason and announce it once.
+
+    Racing workers all fail within milliseconds of each other, so the latch has
+    to be first-wins: the earliest failure is the one that explains the run.
+    """
+    global _abort_reason
+    with _abort_lock:
+        if _abort_reason is not None:
+            return
+        _abort_reason = reason
+    logger.error(f"ABORTING RUN: {reason}")
+    logger.error("  Queued files were NOT attempted and nothing was deleted. "
+                 "Free space, then re-run: sync mode resumes where this stopped.")
+
+
+def _abort_if_disk_full(write_dir, needed):
+    """Latch an abort when `write_dir` can no longer take a `needed`-byte file.
+
+    Only ever called from a failure path, so a healthy run never pays for the
+    stat. A volume that cannot be queried returns False: "cannot tell" must
+    never be reported to the user as "disk full".
+    """
+    try:
+        free = shutil.disk_usage(write_dir).free
+    except OSError:
+        return False
+    required = max(int(needed or 0), _MIN_FREE_BYTES)
+    if free >= required:
+        return False
+    _signal_abort(f"no space left on {write_dir} "
+                  f"({free // (1024 * 1024)} MB free, "
+                  f"needs at least {required // (1024 * 1024)} MB)")
+    return True
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -1066,6 +1130,13 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
 
 def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path, 
                          reconvert_val: bool, effort: int, smart: bool) -> tuple:
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors.
+    _why = _aborted()
+    if _why:
+        return (str(src_path), "aborted", _why, None)
+
     # Check if should process - pass both smart and reconvert_val
     if not should_process(src_path, final_path, smart, reconvert_val):
         n, total = next_count()
@@ -1138,10 +1209,25 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
+        # Was the disk the real cause? The codec exits 0 while writing a
+        # truncated file when the volume is full, so this arrives as an
+        # integrity failure with nothing pointing at the drive.
+        try:
+            _need = src_path.stat().st_size
+        except OSError:
+            _need = 0
+        _abort_if_disk_full(write_path.parent, _need)
         return (str(src_path), "error", str(e), None)
 
 def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                          verify: bool, reconvert_val: bool, smart: bool) -> tuple:
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors.
+    _why = _aborted()
+    if _why:
+        return (str(jxl_path), "aborted", _why, None)
+
     # Lossless JXL -> JPEG recovery (djxl, jbrd-gated below). Only .jxl inputs
     # ever reach this function — _process_file_group splits encode (JPEG ->
     # encode_one_transcode) from decode before submitting.
@@ -1232,6 +1318,14 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
             _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
+        # Was the disk the real cause? The codec exits 0 while writing a
+        # truncated file when the volume is full, so this arrives as an
+        # integrity failure with nothing pointing at the drive.
+        try:
+            _need = jxl_path.stat().st_size
+        except OSError:
+            _need = 0
+        _abort_if_disk_full(write_path.parent, _need)
         return (str(jxl_path), "error", str(e), None)
 
 def _capture_output_identity(write_path: Path, final_path: Path):
@@ -1305,7 +1399,10 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         for src, write_out, final_out in tasks:
             status = status_map.get(str(src), "error")
             if status not in ("ok", "reconvert"):
-                if status != "skipped":
+                # "aborted" is as silent as "skipped": nothing was written,
+                # and one line per never-attempted file is the wall of noise
+                # the abort exists to prevent.
+                if status not in ("skipped", "aborted"):
                     logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
                 continue
             if not write_out.exists():
@@ -1512,7 +1609,8 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     logger.info(f"Output groups: {len(groups)}")
 
-    ok = err = skipped = overwritten = md5_fail = 0
+    ok = err = skipped = overwritten = md5_fail = aborted = 0
+    _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = []
     for dest_folder, group_pairs in groups.items():
@@ -1526,6 +1624,11 @@ def cmd_transcode(args, auto_decode: bool = False):
             status = result[1]
             if status == "ok":
                 ok += 1
+            # Counted apart from BOTH skipped and errors: the run gave
+            # up before these were tried, so they are neither a policy
+            # decision nor a failure.
+            elif status == "aborted":
+                aborted += 1
             elif status == "reconvert":
                 ok += 1
                 overwritten += 1
@@ -1545,9 +1648,13 @@ def cmd_transcode(args, auto_decode: bool = False):
     else:
         logger.info(f"Done: {ok} OK | {overwritten} reconverted | {skipped} up to date | {err} errors")
     logger.info(f"Log: {log_file}")
+    if _aborted():
+        logger.error(f"RUN ABORTED: {_aborted()}")
+        logger.error(f"  {aborted} file(s) were never attempted (not failures).")
     record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
                    log_file=log_file, failures=failed_files,
-                   extras={"MD5 failures": md5_fail})
+                   extras={"MD5 failures": md5_fail,
+                           "Not attempted (run aborted)": aborted})
     return (err, False)
 
 # --------------------------------------------─
@@ -1658,6 +1765,13 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
 def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path, 
                   effort: int, distance: float, reconvert_val: bool, smart: bool) -> tuple:
     """Convert any image (JPEG/PNG) to JXL."""
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors.
+    _why = _aborted()
+    if _why:
+        return (str(src_path), "aborted", _why, None)
+
     # Use should_process for consistent logic
     if not should_process(src_path, final_path, smart, reconvert_val):
         n, total = next_count()
@@ -1732,6 +1846,14 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
             _delete_partial_if_written(write_path, final_path, _pre_identity)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {src_path.name} | {e}")
+        # Was the disk the real cause? The codec exits 0 while writing a
+        # truncated file when the volume is full, so this arrives as an
+        # integrity failure with nothing pointing at the drive.
+        try:
+            _need = src_path.stat().st_size
+        except OSError:
+            _need = 0
+        _abort_if_disk_full(write_path.parent, _need)
         return (str(src_path), "error", str(e), None)
 
 _srgb_icc_cache = None
@@ -1788,6 +1910,13 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     quality: int, fmt: str, bit_depth: int,
                     output_icc: str, use_ram: bool, reconvert_val: bool, smart: bool) -> tuple:
     """Convert JXL to JPEG or PNG."""
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors.
+    _why = _aborted()
+    if _why:
+        return (str(jxl_path), "aborted", _why, None)
+
     # Use should_process for consistent logic
     if not should_process(jxl_path, final_path, smart, reconvert_val):
         n, total = next_count()
@@ -1896,6 +2025,14 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     _pre_identity if candidate == actual_out else None)
         n, total = next_count()
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
+        # Was the disk the real cause? The codec exits 0 while writing a
+        # truncated file when the volume is full, so this arrives as an
+        # integrity failure with nothing pointing at the drive.
+        try:
+            _need = jxl_path.stat().st_size
+        except OSError:
+            _need = 0
+        _abort_if_disk_full(write_path.parent, _need)
         return (str(jxl_path), "error", str(e), None)
 
 def process_group_convert(group_pairs: list, workers: int, direction: str,
@@ -2163,7 +2300,8 @@ def cmd_convert(args, from_jxl: bool = True):
                     logger.info("Deletion not confirmed -- exiting.")
                     return (0, True)
 
-    ok = err = skipped = overwritten = 0
+    ok = err = skipped = overwritten = aborted = 0
+    _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = []
     for dest_folder, group_pairs in groups.items():
@@ -2203,6 +2341,11 @@ def cmd_convert(args, from_jxl: bool = True):
         for src, status, detail, _ in results:
             if status == "ok":
                 ok += 1
+            # Counted apart from BOTH skipped and errors: the run gave
+            # up before these were tried, so they are neither a policy
+            # decision nor a failure.
+            elif status == "aborted":
+                aborted += 1
             elif status == "reconvert":
                 ok += 1
                 overwritten += 1
@@ -2214,9 +2357,13 @@ def cmd_convert(args, from_jxl: bool = True):
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"Done: {ok} OK | {overwritten} reconverts | {skipped} skipped | {err} errors")
+    if _aborted():
+        logger.error(f"RUN ABORTED: {_aborted()}")
+        logger.error(f"  {aborted} file(s) were never attempted (not failures).")
     logger.info(f"Log: {log_file}")
     record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
-                   log_file=log_file, failures=failed_files)
+                   log_file=log_file, failures=failed_files,
+                   extras={"Not attempted (run aborted)": aborted})
     return (err, False)
 
 # --------------------------------------------─
@@ -2400,7 +2547,10 @@ def cmd_auto(args):
     # Decode groups run BEFORE encode groups, so a same-stem pair can never
     # have its JXL source overwritten before decoding (extra belt on top of
     # the collision guard above).
-    totals = {"ok": 0, "err": 0, "skipped": 0}
+    totals = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0}
+    _reset_abort()  # once per RUN, not per group: the four _process_file_group
+                    # calls below must share one latch, so an abort in the first
+                    # stops the rest instead of being forgotten between them.
     # Failure paths ride alongside the counts (kept out of `totals` so the
     # numeric merge below stays a plain sum).
     all_failures = []
@@ -2434,10 +2584,14 @@ def cmd_auto(args):
     logger.info(f"\n{'-'*50}")
     logger.info(f"AUTO MODE complete | Total: {total_files} files | "
                 f"{totals['ok']} OK | {totals['skipped']} skipped | {totals['err']} errors")
+    if _aborted():
+        logger.error(f"RUN ABORTED: {_aborted()}")
+        logger.error(f"  {totals['aborted']} file(s) were never attempted (not failures).")
     logger.info(f"Log: {log_file}")
     record_summary(ok=totals["ok"], overwritten=0, skipped=totals["skipped"],
                    errors=totals["err"], log_file=log_file,
-                   failures=all_failures, dry_run=args.dry_run)
+                   failures=all_failures, dry_run=args.dry_run,
+                   extras={"Not attempted (run aborted)": totals["aborted"]})
     return (totals["err"], False)
 
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
@@ -2512,7 +2666,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if not pairs:
         return {"ok": 0, "err": 0, "skipped": 0}
 
-    tally = {"ok": 0, "err": 0, "skipped": 0, "failures": []}
+    tally = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "failures": []}
 
     def _accumulate(results):
         for r in results:
@@ -2521,6 +2675,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 tally["ok"] += 1
             elif st == "skipped":
                 tally["skipped"] += 1
+            elif st == "aborted":
+                # Named explicitly: the catch-all below calls everything else
+                # an error, which would turn every never-attempted file into a
+                # reported failure — the exact wall of noise the abort removes.
+                tally["aborted"] += 1
             else:
                 tally["err"] += 1
                 # r[0] is the source path; r[2] is the reason (or the output
@@ -2799,6 +2958,13 @@ Examples:
 
     if cancelled:
         sys.exit(3)
+
+    # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
+    # the same event as a run that finished with some bad files, and automation
+    # has to be able to tell them apart (the aborted one is worth retrying).
+    if _aborted():
+        sys.exit(2)
+
     if errors:
         sys.exit(1)
 

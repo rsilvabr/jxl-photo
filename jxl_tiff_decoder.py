@@ -77,6 +77,70 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     return name[:m.start()] + suffix_to + name[m.end():]
 
 
+# --- Disk-full abort ------------------------------------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
+# standalone. Fix bugs in ALL copies.
+#
+# A staging drive is usually a small, cheap SSD nobody watches, and it holds a
+# whole destination folder's output until that folder's last file lands -- for
+# a flat run (one destination) that is the ENTIRE batch. When it fills, cjxl and
+# djxl still exit 0 while writing truncated files, the integrity check rejects
+# each one, and the run grinds on: one error per remaining file, thousands of
+# identical lines, none of them naming the disk. Latch the first one instead and
+# let the queued work fall straight through.
+_MIN_FREE_BYTES = 64 * 1024 * 1024
+_abort_lock = threading.Lock()
+_abort_reason = None
+
+
+def _reset_abort():
+    """Clear the latch. Called when a run starts (and by the tests)."""
+    global _abort_reason
+    with _abort_lock:
+        _abort_reason = None
+
+
+def _aborted():
+    """The reason the run gave up, or None while it is healthy."""
+    return _abort_reason
+
+
+def _signal_abort(reason):
+    """Latch the FIRST reason and announce it once.
+
+    Racing workers all fail within milliseconds of each other, so the latch has
+    to be first-wins: the earliest failure is the one that explains the run.
+    """
+    global _abort_reason
+    with _abort_lock:
+        if _abort_reason is not None:
+            return
+        _abort_reason = reason
+    logger.error(f"ABORTING RUN: {reason}")
+    logger.error("  Queued files were NOT attempted and nothing was deleted. "
+                 "Free space, then re-run: sync mode resumes where this stopped.")
+
+
+def _abort_if_disk_full(write_dir, needed):
+    """Latch an abort when `write_dir` can no longer take a `needed`-byte file.
+
+    Only ever called from a failure path, so a healthy run never pays for the
+    stat. A volume that cannot be queried returns False: "cannot tell" must
+    never be reported to the user as "disk full".
+    """
+    try:
+        free = shutil.disk_usage(write_dir).free
+    except OSError:
+        return False
+    required = max(int(needed or 0), _MIN_FREE_BYTES)
+    if free >= required:
+        return False
+    _signal_abort(f"no space left on {write_dir} "
+                  f"({free // (1024 * 1024)} MB free, "
+                  f"needs at least {required // (1024 * 1024)} MB)")
+    return True
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -1793,6 +1857,13 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     page_entries: sorted list of (jxl_path, page_idx, is_thumbnail, icc_inherited,
                                   subfiletype, grayscale, depth) tuples.
     """
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors.
+    _why = _aborted()
+    if _why:
+        return str(main_jxl), "aborted", _why
+
     already_exists = final_path.exists()
 
     if already_exists:
@@ -2026,6 +2097,23 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         write_path.unlink()
                 except OSError:
                     pass
+            # Was the disk the real cause? djxl exits 0 while writing a
+            # truncated file when the volume is full, so this arrives as a
+            # decode/verify failure with nothing pointing at the drive.
+            #
+            # The size passed is the SOURCE group's, which for a decode is a
+            # lower bound on the TIFF about to be written (a TIFF is several
+            # times its JXL). So this reliably catches a volume that is truly
+            # full and may miss one that is merely tight — it never reports a
+            # healthy disk as full, which is the direction that matters.
+            _need = 0
+            for _entry in page_entries:
+                try:
+                    _need += Path(_entry[0]).stat().st_size
+                except (OSError, IndexError):
+                    pass
+            _abort_if_disk_full(write_path.parent, _need)
+
             n, total = next_count()
             logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
             return str(main_jxl), "error", str(e)
@@ -2094,7 +2182,10 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             final_tiff = task["final_tiff"]
             status = status_map.get(str(main_jxl), "error")
             if status not in ("ok", "overwrite"):
-                if status != "skipped":
+                # "aborted" is as silent as "skipped": nothing was
+                # written, and one line per never-attempted file is
+                # the wall of noise the abort exists to prevent.
+                if status not in ("skipped", "aborted"):
                     if write_path.exists():
                         logger.warning(f"  KEEP in staging ({status}) | {write_path.name}")
                     else:
@@ -2789,7 +2880,8 @@ Examples:
     logger.info(f"Output groups: {len(groups)}")
 
     # Process
-    ok = err = skipped = overwritten = 0
+    ok = err = skipped = overwritten = aborted = 0
+    _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     # Counts alone don't answer "did something break in the middle?" — the user
     # walks away from a multi-hour manifest and needs the paths on return.
@@ -2811,6 +2903,11 @@ Examples:
                 overwritten += 1
             elif status == "skipped":
                 skipped += 1
+            # Counted apart from BOTH skipped and errors: the run gave up
+            # before these were tried, so they are neither a policy decision
+            # nor a failure.
+            elif status == "aborted":
+                aborted += 1
             elif status == "error":
                 err += 1
                 # result[0] is the source JXL path; result[2] is the reason.
@@ -2822,6 +2919,12 @@ Examples:
         logger.info(f"SYNC done: {ok} reconverted | {skipped} up to date | {err} errors")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    # Loudest line in the block: on a batch that ran for hours the reason it
+    # stopped must not be buried above the per-file scrollback.
+    if _aborted():
+        logger.error(f"RUN ABORTED: {_aborted()}")
+        logger.error(f"  {aborted} file(s) were never attempted (not failures).")
     logger.info(f"Log: {log_file}")
 
     # Emitted BEFORE the exit below: a run with failures is exactly the run the
@@ -2830,7 +2933,14 @@ Examples:
         args.summary_json,
         ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
         log_file=log_file, failures=failed_files,
+        extras={"Not attempted (run aborted)": aborted},
     )
+
+    # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
+    # the same event as a run that finished with some bad files, and automation
+    # has to be able to tell them apart (the aborted one is worth retrying).
+    if _aborted():
+        sys.exit(2)
 
     # Non-zero exit when any file failed so wrappers/automation can detect it.
     if err > 0:

@@ -144,6 +144,70 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     return name[:m.start()] + suffix_to + name[m.end():]
 
 
+# --- Disk-full abort ------------------------------------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
+# standalone. Fix bugs in ALL copies.
+#
+# A staging drive is usually a small, cheap SSD nobody watches, and it holds a
+# whole destination folder's output until that folder's last file lands -- for
+# a flat run (one destination) that is the ENTIRE batch. When it fills, cjxl and
+# djxl still exit 0 while writing truncated files, the integrity check rejects
+# each one, and the run grinds on: one error per remaining file, thousands of
+# identical lines, none of them naming the disk. Latch the first one instead and
+# let the queued work fall straight through.
+_MIN_FREE_BYTES = 64 * 1024 * 1024
+_abort_lock = threading.Lock()
+_abort_reason = None
+
+
+def _reset_abort():
+    """Clear the latch. Called when a run starts (and by the tests)."""
+    global _abort_reason
+    with _abort_lock:
+        _abort_reason = None
+
+
+def _aborted():
+    """The reason the run gave up, or None while it is healthy."""
+    return _abort_reason
+
+
+def _signal_abort(reason):
+    """Latch the FIRST reason and announce it once.
+
+    Racing workers all fail within milliseconds of each other, so the latch has
+    to be first-wins: the earliest failure is the one that explains the run.
+    """
+    global _abort_reason
+    with _abort_lock:
+        if _abort_reason is not None:
+            return
+        _abort_reason = reason
+    logger.error(f"ABORTING RUN: {reason}")
+    logger.error("  Queued files were NOT attempted and nothing was deleted. "
+                 "Free space, then re-run: sync mode resumes where this stopped.")
+
+
+def _abort_if_disk_full(write_dir, needed):
+    """Latch an abort when `write_dir` can no longer take a `needed`-byte file.
+
+    Only ever called from a failure path, so a healthy run never pays for the
+    stat. A volume that cannot be queried returns False: "cannot tell" must
+    never be reported to the user as "disk full".
+    """
+    try:
+        free = shutil.disk_usage(write_dir).free
+    except OSError:
+        return False
+    required = max(int(needed or 0), _MIN_FREE_BYTES)
+    if free >= required:
+        return False
+    _signal_abort(f"no space left on {write_dir} "
+                  f"({free // (1024 * 1024)} MB free, "
+                  f"needs at least {required // (1024 * 1024)} MB)")
+    return True
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -1837,6 +1901,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                      can reconstruct ONLY genuinely-split files and never merge
                      independently-named files that happen to look like pages.
     """
+    # The pool submits every task up front, so a run that has given up cannot
+    # stop scheduling — it stops HERE instead. Queued files return untouched
+    # and are reported as "not attempted", never as errors: nothing was tried,
+    # so nothing failed.
+    _why = _aborted()
+    if _why:
+        return ((str(tiff_path), page_idx), "aborted", _why, None)
+
     overwritten = final_path.exists()
 
     if overwritten:
@@ -2249,6 +2321,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         write_path.unlink()
                 except OSError:
                     pass
+            # Was the disk the real cause? cjxl exits 0 while writing a
+            # truncated file when the volume is full, so this arrives as an
+            # integrity failure with nothing pointing at the drive. Checked
+            # only here, on a path that has already failed, so a healthy run
+            # never pays for the stat.
+            try:
+                _need = tiff_path.stat().st_size
+            except OSError:
+                _need = 0
+            _abort_if_disk_full(write_path.parent, _need)
+
             n, total = next_count()
             page_label = f" page{page_idx}" if page_idx > 0 else ""
             logger.error(f"[{n}/{total}] ERROR{page_label} | {tiff_path.name} | {e}")
@@ -2454,7 +2537,11 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         for tiff, write_jxl, final_jxl, page_idx, _, _, _, _ in dest_tasks:
             status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
-                if status != "skipped":
+                # "aborted" is as silent as "skipped": nothing was written, so
+                # there is no partial output to report — and one line per
+                # never-attempted file is precisely the wall of noise the
+                # abort exists to prevent. The count is in the summary.
+                if status not in ("skipped", "aborted"):
                     if write_jxl.exists():
                         logger.warning(f"  KEEP in staging ({status}) | {write_jxl.name}")
                     else:
@@ -3104,8 +3191,9 @@ def main():
 
     logger.info(f"Output groups: {len(groups)}")
 
-    ok = skipped = overwritten = synced = 0
+    ok = skipped = overwritten = synced = aborted = 0
     err = analyze_errors  # count TIFFs that couldn't be analyzed at planning time
+    _reset_abort()  # a fresh run must not inherit a previous one's latch
 
     # ONE pool for the whole run. Feeding it folder by folder meant a folder with
     # fewer files than --workers could never fill the pool, and every folder
@@ -3124,6 +3212,11 @@ def main():
         elif status == "overwrite":
             ok += 1; overwritten += 1; synced += 1
         elif status == "skipped":   skipped += 1
+        # Counted apart from BOTH skipped and errors: the run gave up before
+        # these were tried. Calling them "skipped" would hide them behind a
+        # policy nobody chose, and calling them errors would invent thousands
+        # of failures that never happened.
+        elif status == "aborted":   aborted += 1
         elif status == "error":
             err += 1
             # result[0] is (path, page_idx); result[2] is the exception text.
@@ -3139,6 +3232,12 @@ def main():
         logger.info(f"  -> Up to date: JXL is newer than or equal to TIFF")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    # Loudest line in the block, and last: on a batch that ran for hours the
+    # reason it stopped must not be buried above the per-file scrollback.
+    if _aborted():
+        logger.error(f"RUN ABORTED: {_aborted()}")
+        logger.error(f"  {aborted} file(s) were never attempted (not failures).")
 
     # Named separately from "skipped": these files were not dropped by any
     # setting the user chose, they simply could not be read.
@@ -3192,10 +3291,17 @@ def main():
             "Thumbnails excluded": _thumbnails_dropped["pages"],
             "Multipage pages ignored": _multipage_ignored["pages"],
             "D50 patched": (applied - applied_already_correct) if D50_PATCH_MODE != "off" else 0,
+            "Not attempted (run aborted)": aborted,
         },
         failures=failed_files,
         unreadable=unreadable_files,
     )
+
+    # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
+    # the same event as a run that finished with some bad files, and automation
+    # has to be able to tell them apart (the aborted one is worth retrying).
+    if _aborted():
+        sys.exit(2)
 
     # Non-zero exit when any file failed so wrappers/automation can detect it.
     if err > 0:

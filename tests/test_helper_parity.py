@@ -38,6 +38,12 @@ SHARED_HELPERS = [
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_tool_version",
+    # Disk-full abort. These decide whether a run stops or grinds on, so a copy
+    # drifting would make one backend keep failing file after file.
+    "_reset_abort",
+    "_aborted",
+    "_signal_abort",
+    "_abort_if_disk_full",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally
