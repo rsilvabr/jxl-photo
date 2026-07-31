@@ -137,6 +137,64 @@ def _sane_distance(value: Any, fallback: float = 0.1) -> float:
     return max(0.0, min(result, 15.0))
 
 
+# The numbers a saved workflow replays straight into the child's argv, with the
+# range each child's argparse accepts. Distance is deliberately absent: it has
+# _sane_distance, which clamps instead of refusing — the right call for a
+# quality knob with a meaningful fallback, the wrong one for the values below.
+_SESSION_NUMBERS = (
+    ("last_workers", "workers", 1, 32),
+    ("last_effort", "effort", 1, 10),
+    ("last_quality", "quality", 1, 100),
+)
+# Modes 0-8, plus 99 for a manifest run.
+_SESSION_MODES = frozenset(range(0, 9)) | {99}
+
+
+def _as_exact_int(raw: Any) -> int:
+    """int() that also accepts 7.0 and "7", but refuses "7.5", NaN and "sete"."""
+    value = float(raw)                      # ValueError/TypeError on garbage
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(raw)
+    if value != int(value):
+        raise ValueError(raw)
+    return int(value)
+
+
+def _session_number_error(session: Dict) -> Optional[str]:
+    """Describe the first corrupt number in a stored workflow, or None if sane.
+
+    The config is plain JSON the user can hand-edit and _load_config does no
+    type checking, so a saved workflow can come back with a mode of "sete".
+    That reached int() and ended the run in a raw ValueError traceback; the
+    other values reached the CHILD's argparse instead, which then complained
+    about a command line the user never typed.
+
+    Corrupt numbers are REFUSED, not defaulted: a workflow replayed unattended
+    must never quietly run with a mode — or a worker count — that nobody chose.
+    Mode especially, since it decides where the outputs land.
+    """
+    raw_mode = session.get("last_output_mode")
+    if raw_mode not in (None, ""):
+        try:
+            mode = _as_exact_int(raw_mode)
+        except (TypeError, ValueError):
+            return f"mode is not a number: {raw_mode!r}"
+        if mode not in _SESSION_MODES:
+            return f"mode {mode} does not exist (valid: 0-8, or 99 for a manifest)"
+
+    for field, label, low, high in _SESSION_NUMBERS:
+        raw = session.get(field)
+        if raw in (None, ""):
+            continue
+        try:
+            value = _as_exact_int(raw)
+        except (TypeError, ValueError):
+            return f"{label} is not a number: {raw!r}"
+        if not low <= value <= high:
+            return f"{label} is out of range ({low}-{high}): {value}"
+    return None
+
+
 def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     """Replace the FIRST occurrence of suffix_from in a folder name, but only
     when it is a complete token (bounded by _, -, space, or string edges) —
@@ -4399,13 +4457,30 @@ class InteractiveMenu:
         They are still explicit choices — passed as CLI flags, never inherited
         from the stored run. Returns True only when a run actually executed."""
         unattended = answers is not None
+
+        # Everything below comes from hand-editable JSON with no type checking,
+        # and goes on to pick a mode and build a command line. Check it before
+        # printing anything: a corrupt value used to surface either as a raw
+        # ValueError traceback (mode) or as the child's argparse rejecting a
+        # command line the user never typed (workers/effort/quality).
+        _corrupt = _session_number_error(session)
+        if _corrupt:
+            self._print_error(
+                f"This saved workflow is corrupt: {_corrupt}.\n"
+                f"Fix it in the settings file, or re-save the workflow from the menu.")
+            return False
+
         last_dir = session.get('last_input_dir') or ""
         last_mode = session.get('last_output_mode') or "0"
         last_workers = session.get('last_workers') or 4
         last_staging = session.get('last_staging') or ""
         last_effort = session.get('last_effort') or 7
         last_quality = session.get('last_quality') or 95
-        last_distance = session.get('last_distance')
+        # Routed through the project's own clamp, which every other caller
+        # already uses — the preset path was the one that read it raw and put
+        # it straight on the cjxl command line.
+        _raw_distance = session.get('last_distance')
+        last_distance = None if _raw_distance is None else _sane_distance(_raw_distance)
         last_origin = session.get('last_origin_format') or "tiff"
         last_dest = session.get('last_dest_format') or ("jxl" if last_origin != "jxl" else "jpeg")
         last_conv_type = session.get('last_conversion_type') or ""
