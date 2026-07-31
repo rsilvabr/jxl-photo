@@ -1886,6 +1886,194 @@ def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
         base += THUMBNAIL_SUFFIX
     return base + ".jxl"
 
+# --- Space preflight (advisory) -------------------------------------------
+# Measured, not guessed. Encoding a few small crops of the batch's OWN files
+# answers the only unknown in the projection; everything else (the file list,
+# each file's size, which destination folder each output lands in, and the fact
+# that staging drains per folder) is already known before the pool starts.
+#
+# Why crops of real files, and not a synthetic probe or a fixed ratio table:
+# measured across 130 full-size encodes of real 16-bit photos at 13 distances,
+#   * a 2048 crop reproduces its own full file's ratio to within 3% at every
+#     distance from 0 to 1.0 -- so the sample can be cheap;
+#   * a synthetic image matched real photos only by coincidence, inside one
+#     narrow distance band, and was off by 4x outside it;
+#   * fitting one curve on one photo and rescaling it to another broke on 1 of
+#     4 photos (38% error), so there is no universal shape to lean on either.
+# Compression is content-dependent; nothing substitutes for encoding the
+# actual content.
+_SAMPLE_CROP = 2048
+_SAMPLE_COUNT = 3
+# Below this a run cannot plausibly fill a disk, and a ~15s probe would be a
+# visible tax on a job that only takes a couple of minutes.
+_PREFLIGHT_MIN_BYTES = 5 * 1024 ** 3
+# cjxl clamps every distance at or below this to the same value: --distance
+# 0.005 and 0.05 were measured producing BYTE-IDENTICAL output. Projecting from
+# a requested 0.01 would therefore model a file that cjxl will never write.
+_MIN_EFFECTIVE_DISTANCE = 0.05
+# TIFF compression tag -> what tifffile needs to reproduce it. The crop must be
+# stored the way the source is, because the ratio's denominator is a TIFF size:
+# the same pixels as Deflate vs uncompressed shift the ratio measurably.
+_TIFF_COMP_WRITE = {1: None, 5: "lzw", 8: "zlib", 32946: "zlib"}
+
+
+def _sample_one_ratio(tiff_path: Path, distance: float, effort: int):
+    """jxl_bytes / tiff_bytes for a centre crop of one real file, or None."""
+    try:
+        with tifffile.TiffFile(str(tiff_path)) as tf:
+            page = tf.pages[0]
+            comp = page.compression
+            comp = comp.value if hasattr(comp, "value") else int(comp)
+            if comp not in _TIFF_COMP_WRITE:
+                return None  # unknown container; the denominator would not mean anything
+            img = page.asarray()
+    except Exception:
+        return None
+
+    if img.ndim < 2 or img.dtype.kind == 'f' or img.dtype not in (np.uint8, np.uint16):
+        return None
+    h, w = img.shape[:2]
+    n = min(_SAMPLE_CROP, h, w)
+    y, x = (h - n) // 2, (w - n) // 2
+    crop = np.ascontiguousarray(img[y:y + n, x:x + n])
+    del img
+
+    tmp = Path(tempfile.mkdtemp(prefix="jxl_preflight_", dir=TEMP_DIR))
+    try:
+        crop_tif = tmp / "s.tif"
+        kw = {"photometric": "rgb" if (crop.ndim == 3 and crop.shape[2] >= 3) else "minisblack"}
+        if _TIFF_COMP_WRITE[comp]:
+            kw["compression"] = _TIFF_COMP_WRITE[comp]
+        tifffile.imwrite(str(crop_tif), crop, **kw)
+
+        png = tmp / "s.png"
+        png.write_bytes(make_png_bytes(crop if crop.dtype == np.uint16
+                                       else crop.astype(np.uint16) * 257))
+        jxl = tmp / "s.jxl"
+        cmd = [_get_cjxl_cmd() or "cjxl", str(png), str(jxl),
+               "-d", str(distance), "--effort", str(effort), "--container=1"]
+        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        if r.returncode != 0 or not jxl.exists():
+            return None
+        den = crop_tif.stat().st_size
+        return (jxl.stat().st_size / den) if den else None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _measure_batch_ratio(tiffs, distance: float, effort: int):
+    """Worst observed jxl/tiff ratio over a few samples spanning the size range.
+
+    The WORST, never the mean: photos in one batch spread 1.1x-2.1x apart
+    depending on distance, and an estimate that under-promises space is worse
+    than none. Samples are picked across the size distribution so one unusual
+    file cannot define the run.
+    """
+    uniq = sorted({Path(t) for t in tiffs}, key=lambda p: p.stat().st_size)
+    if not uniq:
+        return None, []
+    if len(uniq) <= _SAMPLE_COUNT:
+        picks = uniq
+    else:
+        idx = [int(round(i * (len(uniq) - 1) / (_SAMPLE_COUNT - 1)))
+               for i in range(_SAMPLE_COUNT)]
+        picks = [uniq[i] for i in sorted(set(idx))]
+
+    out = []
+    for p in picks:
+        r = _sample_one_ratio(p, distance, effort)
+        if r is not None:
+            out.append((p.name, r))
+    if not out:
+        return None, []
+    return max(r for _, r in out), out
+
+
+def _fmt_size(n: float) -> str:
+    """Human size that stays informative below a gigabyte.
+
+    A fixed GB format printed "0.0 GB" for everything under ~50 MB, which is
+    exactly the reading someone with a nearly-full staging drive needs to see.
+    """
+    for unit, step in (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2)):
+        if n >= step:
+            return f"{n / step:.1f} {unit}"
+    return f"{n / 1024:.0f} KB"
+
+
+def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
+                     staging_dir) -> None:
+    """Warn -- never block -- when the projected output will not fit.
+
+    Advisory on purpose. The estimate is measured but still an estimate, and a
+    projection that REFUSED a run would eventually refuse one that fits. What
+    stops a run stays evidence-based (see the disk-full abort): a real failure
+    on a volume that is really full.
+    """
+    per_group = {}
+    for dest, items in groups.items():
+        # Unique sources: a split multi-page TIFF appears once per page, but
+        # its bytes only exist once.
+        srcs = {}
+        for t, _j, _pi, _th, _sf, _sp in items:
+            try:
+                srcs[str(t)] = Path(t).stat().st_size
+            except OSError:
+                pass
+        per_group[dest] = sum(srcs.values())
+    total_in = sum(per_group.values())
+    if total_in < _PREFLIGHT_MIN_BYTES:
+        return
+
+    effective = max(distance, _MIN_EFFECTIVE_DISTANCE) if distance > 0 else 0.0
+    logger.info(f"Preflight: measuring compression on {_SAMPLE_COUNT} sample crop(s)...")
+    ratio, samples = _measure_batch_ratio(
+        [t for items in groups.values() for t, *_ in items], effective, effort)
+    if ratio is None:
+        logger.info("Preflight: could not measure a ratio; skipping the space estimate.")
+        return
+    detail = ", ".join(f"{n}: {r*100:.0f}%" for n, r in samples)
+    logger.info(f"Preflight: worst measured ratio {ratio*100:.0f}% of source ({detail})")
+
+    ordered = sorted(per_group.values(), reverse=True)
+    # Staging holds a destination folder's output until that folder's LAST file
+    # lands, and the pool deliberately no longer drains at folder boundaries --
+    # so two folders can be accumulating at once. Not the sum of all of them
+    # (that would refuse runs that fit), not just the largest either.
+    if staging_dir:
+        peak = sum(ordered[:2]) * ratio
+        try:
+            free = shutil.disk_usage(str(staging_dir)).free
+            verdict = "OK" if free > peak else "NOT ENOUGH"
+            line = (f"Preflight: staging {staging_dir} -- {_fmt_size(free)} free, "
+                    f"peak ~{_fmt_size(peak)} ({verdict})")
+            logger.warning(line) if free <= peak else logger.info(line)
+        except OSError:
+            pass
+
+    # Destination volumes accumulate for the whole run, so there the sum IS the
+    # right number. Split by volume: two output folders can live on two drives.
+    by_vol = {}
+    for dest, in_bytes in per_group.items():
+        try:
+            vol = os.path.splitdrive(str(Path(dest).resolve()))[0] or str(Path(dest).anchor)
+        except OSError:
+            continue
+        by_vol.setdefault(vol, [Path(dest), 0])[1] += in_bytes
+    for vol, (probe, in_bytes) in by_vol.items():
+        need = in_bytes * ratio
+        try:
+            free = shutil.disk_usage(str(probe)).free
+        except OSError:
+            continue
+        verdict = "OK" if free > need else "NOT ENOUGH"
+        line = (f"Preflight: destination {vol or probe} -- {_fmt_size(free)} free, "
+                f"needs ~{_fmt_size(need)} ({verdict})")
+        logger.warning(line) if free <= need else logger.info(line)
+
+
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
                 is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3, multipage_group: str = None):
     """
@@ -2807,6 +2995,9 @@ def main():
                         help="[Mode 7] Only process files inside this subfolder of the "
                              "export marker (default: script setting EXPORT_TIFF_SUBFOLDER, "
                              "empty = all subfolders). Overrides EXPORT_TIFF_SUBFOLDER.")
+    parser.add_argument("--no-preflight", action="store_true",
+                        help="Skip the pre-run space estimate (it encodes a few small "
+                             "sample crops to measure this batch's compression)")
     parser.add_argument("--multipage-mode",  type=str, default=None,
                         choices=["ignore", "skip", "split", "split_all"],
                         help="How to handle multi-page TIFFs: split (default), ignore, skip, split_all")
@@ -2905,6 +3096,15 @@ def main():
     if args.distance is not None:
         if not 0 <= args.distance <= 15:
             parser.error("--distance must be between 0 and 15")
+        # cjxl clamps: --distance 0.005 and 0.05 were measured producing
+        # byte-identical output. Someone asking for 0.02 to get "closer to
+        # lossless" gets exactly the 0.05 file and should hear so, rather than
+        # believe they bought quality they did not.
+        if 0 < args.distance < _MIN_EFFECTIVE_DISTANCE:
+            logger.warning(
+                f"--distance {args.distance} behaves exactly like "
+                f"{_MIN_EFFECTIVE_DISTANCE}: cjxl clamps every lossy distance below "
+                f"that to the same output. Use --distance 0 for true lossless.")
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort
@@ -3190,6 +3390,16 @@ def main():
         groups.setdefault(j.parent, []).append((t, j, page_idx, is_thumb, subfiletype, samples))
 
     logger.info(f"Output groups: {len(groups)}")
+
+    # Advisory space estimate, before a single real file is converted. Skipped
+    # for dry runs (nothing gets written) and behind --no-preflight for anyone
+    # who does not want to pay the sample encodes.
+    if not args.dry_run and not args.no_preflight:
+        try:
+            _preflight_space(groups, CJXL_DISTANCE, CJXL_EFFORT, TEMP2_DIR)
+        except Exception as e:
+            # An advisory check must never be the thing that kills a run.
+            logger.debug(f"Preflight skipped: {e}")
 
     ok = skipped = overwritten = synced = aborted = 0
     err = analyze_errors  # count TIFFs that couldn't be analyzed at planning time
