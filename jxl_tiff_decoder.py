@@ -22,6 +22,7 @@ import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, st
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import time
 import argparse
 import numpy as np
 from PIL import Image
@@ -139,6 +140,60 @@ def _abort_if_disk_full(write_dir, needed):
                   f"({free // (1024 * 1024)} MB free, "
                   f"needs at least {required // (1024 * 1024)} MB)")
     return True
+
+
+# --- Directory-scan progress ----------------------------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
+# standalone. Fix bugs in ALL copies.
+#
+# Walking a large tree on a slow or network drive costs real time -- measured
+# at 25s for 3312 files on an external drive with a cold OS cache -- and the
+# run printed NOTHING between "Input: ..." and "Files found: N". Twenty-five
+# silent seconds reads as a freeze, not as work, and the natural reaction is to
+# kill the run. (The page analysis that follows was never the problem: it
+# reports progress as it goes, and a warm cache brings it down from 39s to
+# under 2s.)
+#
+# Silent on a fast scan: nothing is printed until the walk has already taken
+# longer than a person would wait without wondering.
+_SCAN_QUIET_SECONDS = 3.0
+_SCAN_REPORT_EVERY = 3.0
+_SCAN_CHECK_INTERVAL = 512   # entries between clock reads
+
+
+def _scan_state(root):
+    """Bookkeeping for a directory walk. See _scan_tick."""
+    now = time.monotonic()
+    return {"root": str(root) if root is not None else "", "scanned": 0,
+            "t0": now, "next": now + _SCAN_QUIET_SECONDS, "announced": False}
+
+
+def _scan_tick(st, found):
+    """Report that a slow walk is still moving; stay quiet while it is fast.
+
+    The clock is read once every _SCAN_CHECK_INTERVAL entries rather than on
+    every one: this runs for every file on the volume, not just the matches.
+    """
+    st["scanned"] += 1
+    if st["scanned"] % _SCAN_CHECK_INTERVAL:
+        return
+    now = time.monotonic()
+    if now < st["next"]:
+        return
+    if not st["announced"]:
+        logger.info(f"Searching for files under {st['root']} -- a large or "
+                    f"network drive can take a while...")
+        st["announced"] = True
+    logger.info(f"  Scanned {st['scanned']} entries, {found} match(es) so far "
+                f"({now - st['t0']:.0f}s)")
+    st["next"] = now + _SCAN_REPORT_EVERY
+
+
+def _scan_done(st, found):
+    """Close the report, but only if one was ever opened."""
+    if st["announced"]:
+        logger.info(f"  Scan finished: {found} match(es) from {st['scanned']} "
+                    f"entries in {time.monotonic() - st['t0']:.0f}s")
 
 
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
@@ -2253,10 +2308,12 @@ def process_group(group_tasks, workers, mode, target_icc=None):
 JXL_EXTS = frozenset({".jxl"})
 
 
-def _iter_jxls(paths):
+def _iter_jxls(paths, root=None):
     seen = set()
     files = []
+    _scan = _scan_state(root)
     for f in paths:
+        _scan_tick(_scan, len(files))
         if f.suffix.lower() not in JXL_EXTS:
             continue
         try:
@@ -2268,16 +2325,17 @@ def _iter_jxls(paths):
         if key not in seen:
             seen.add(key)
             files.append(f)
+    _scan_done(_scan, len(files))
     return sorted(files)
 
 
 def find_jxls_flat(path):
     """Find JXL files in the top-level directory only (no subfolders) — modes 0 and 1."""
-    return _iter_jxls(path.glob("*"))
+    return _iter_jxls(path.glob("*"), path)
 
 def find_jxls_recursive(path):
     """Find all JXL files recursively"""
-    return _iter_jxls(path.rglob("*"))
+    return _iter_jxls(path.rglob("*"), path)
 
 def find_jxls_mode6(input_path):
     """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""

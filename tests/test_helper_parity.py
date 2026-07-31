@@ -44,6 +44,11 @@ SHARED_HELPERS = [
     "_aborted",
     "_signal_abort",
     "_abort_if_disk_full",
+    # Directory-scan progress. A copy drifting would leave one backend silent
+    # through the exact 25-second pause that looks like a freeze.
+    "_scan_state",
+    "_scan_tick",
+    "_scan_done",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally
