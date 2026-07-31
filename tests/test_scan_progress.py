@@ -92,6 +92,31 @@ def test_done_closes_a_report_it_opened(mod, logged, monkeypatch):
 
 
 @BACKENDS
+def test_reports_back_off_instead_of_growing_without_bound(mod, logged, monkeypatch):
+    """A fixed gap has no ceiling on line count. At 3s flat, a five-minute
+    network scan produced 100 progress lines -- the same wall of noise the
+    reporter exists to avoid, wearing a different hat. Doubling the gap keeps a
+    five-minute scan near 8 lines while still proving the run is alive."""
+    lines = logged(mod)
+    clock = iter([1000.0 + i for i in range(400)])   # 1s per 512-entry block
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(clock))
+
+    st = mod._scan_state("Z:/slow")
+    for i in range(300 * mod._SCAN_CHECK_INTERVAL):
+        mod._scan_tick(st, i // 100)
+
+    progress = [x for x in lines if "Scanned" in x]
+    assert 4 <= len(progress) <= 12, f"{len(progress)} lines over 5 minutes"
+
+
+@BACKENDS
+def test_the_gap_is_capped(mod):
+    """Backing off forever would eventually go quiet for so long that a live
+    run looks dead again."""
+    assert mod._SCAN_REPORT_MAX <= 120.0
+
+
+@BACKENDS
 def test_the_clock_is_not_read_every_entry(mod, monkeypatch):
     """This runs once per entry on the VOLUME, not once per match: a syscall
     per entry would tax the very scan it is reporting on."""

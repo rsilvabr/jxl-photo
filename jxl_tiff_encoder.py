@@ -225,6 +225,12 @@ def _abort_if_disk_full(write_dir, needed):
 # longer than a person would wait without wondering.
 _SCAN_QUIET_SECONDS = 3.0
 _SCAN_REPORT_EVERY = 3.0
+# The gap doubles after each report, up to this cap. A fixed 3s gap has no
+# ceiling on line count: a five-minute network scan produced 100 lines, which
+# is the same "wall of noise" problem in a different costume. Backing off gives
+# ~3 lines for a 25s scan and ~7 for a five-minute one, while still proving
+# often enough that the run is alive.
+_SCAN_REPORT_MAX = 60.0
 _SCAN_CHECK_INTERVAL = 512   # entries between clock reads
 
 
@@ -232,7 +238,8 @@ def _scan_state(root):
     """Bookkeeping for a directory walk. See _scan_tick."""
     now = time.monotonic()
     return {"root": str(root) if root is not None else "", "scanned": 0,
-            "t0": now, "next": now + _SCAN_QUIET_SECONDS, "announced": False}
+            "t0": now, "next": now + _SCAN_QUIET_SECONDS,
+            "gap": _SCAN_REPORT_EVERY, "announced": False}
 
 
 def _scan_tick(st, found):
@@ -253,7 +260,8 @@ def _scan_tick(st, found):
         st["announced"] = True
     logger.info(f"  Scanned {st['scanned']} entries, {found} match(es) so far "
                 f"({now - st['t0']:.0f}s)")
-    st["next"] = now + _SCAN_REPORT_EVERY
+    st["gap"] = min(st["gap"] * 2, _SCAN_REPORT_MAX)
+    st["next"] = now + st["gap"]
 
 
 def _scan_done(st, found):
