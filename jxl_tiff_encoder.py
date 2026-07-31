@@ -225,11 +225,16 @@ def _abort_if_disk_full(write_dir, needed):
 # longer than a person would wait without wondering.
 _SCAN_QUIET_SECONDS = 3.0
 _SCAN_REPORT_EVERY = 3.0
-# The gap doubles after each report, up to this cap. A fixed 3s gap has no
-# ceiling on line count: a five-minute network scan produced 100 lines, which
-# is the same "wall of noise" problem in a different costume. Backing off gives
-# ~3 lines for a 25s scan and ~7 for a five-minute one, while still proving
-# often enough that the run is alive.
+# The gap grows by this factor after each report, up to the cap below. A fixed
+# 3s gap has no ceiling on line count: a five-minute network scan produced 100
+# lines, which is the same "wall of noise" problem in a different costume.
+#
+# 1.618 (the golden ratio) rather than 2: measured over a 25s scan -- the real
+# cold-cache case -- phi and 2 both give 3 lines, while e and pi drop to 2,
+# losing a checkpoint exactly where the pause is long enough to worry about.
+# Past that the cap dominates anyway: over five minutes phi/2/e/pi land on
+# 9/8/7/7 lines, so the factor is nearly free and the gentler one wins.
+_SCAN_REPORT_FACTOR = 1.618
 _SCAN_REPORT_MAX = 60.0
 _SCAN_CHECK_INTERVAL = 512   # entries between clock reads
 
@@ -260,7 +265,7 @@ def _scan_tick(st, found):
         st["announced"] = True
     logger.info(f"  Scanned {st['scanned']} entries, {found} match(es) so far "
                 f"({now - st['t0']:.0f}s)")
-    st["gap"] = min(st["gap"] * 2, _SCAN_REPORT_MAX)
+    st["gap"] = min(st["gap"] * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
     st["next"] = now + st["gap"]
 
 
