@@ -162,7 +162,7 @@ def test_large_batch_warns_when_it_will_not_fit(tmp_path, monkeypatch, small_thr
 
     text = "\n".join(lines)
     assert "NOT ENOUGH" in text
-    assert "staging" in text and "destination" in text
+    assert "Preflight: staging" in text and "Preflight: destination" in text
 
 
 def test_large_batch_stays_quiet_when_it_fits(tmp_path, monkeypatch, small_threshold):
@@ -175,6 +175,67 @@ def test_large_batch_stays_quiet_when_it_fits(tmp_path, monkeypatch, small_thres
     enc._preflight_space(groups, 0.1, 7, str(tmp_path))
 
     assert "NOT ENOUGH" not in "\n".join(lines)
+
+
+def test_destination_is_quiet_when_it_shares_the_staging_volume(tmp_path, monkeypatch,
+                                                                small_threshold):
+    """Two lines quoting the same free space read as a duplicate, and on one
+    volume the staged file is MOVED (same-filesystem rename, no extra space),
+    so the destination total already covers the staging peak."""
+    monkeypatch.setattr(enc, "_measure_batch_ratio", lambda *a, **k: (0.2, []))
+    monkeypatch.setattr(enc.shutil, "disk_usage", lambda p: Usage(900 * MB, 0, 800 * MB))
+    lines = _capture(monkeypatch)
+    dest = tmp_path / "out"
+    groups = {dest: _items(tmp_path / "src", dest, [6 * MB])}
+
+    enc._preflight_space(groups, 0.1, 7, str(tmp_path))
+
+    text = "\n".join(lines)
+    # pytest names tmp_path after the test, so the staging PATH itself contains
+    # the word "destination" -- anchor on the line prefix, not a bare substring.
+    assert "Preflight: staging" in text, "the drive nobody watches must still be reported"
+    assert "Preflight: destination" not in text, text
+
+
+def test_destination_speaks_up_on_a_different_volume(tmp_path, monkeypatch, small_threshold):
+    monkeypatch.setattr(enc, "_measure_batch_ratio", lambda *a, **k: (0.2, []))
+    monkeypatch.setattr(enc.shutil, "disk_usage", lambda p: Usage(900 * MB, 0, 800 * MB))
+    monkeypatch.setattr(enc.os.path, "splitdrive",
+                        lambda p: ("Z:", p) if "out" in str(p) else ("C:", p))
+    lines = _capture(monkeypatch)
+    dest = tmp_path / "out"
+    groups = {dest: _items(tmp_path / "src", dest, [6 * MB])}
+
+    enc._preflight_space(groups, 0.1, 7, str(tmp_path))
+
+    assert "Preflight: destination" in "\n".join(lines)
+
+
+def test_destination_speaks_up_when_it_will_not_fit(tmp_path, monkeypatch, small_threshold):
+    """Sharing a volume silences the OK case, never the bad one."""
+    monkeypatch.setattr(enc, "_measure_batch_ratio", lambda *a, **k: (0.9, []))
+    monkeypatch.setattr(enc.shutil, "disk_usage", lambda p: Usage(100 * MB, 99 * MB, 1 * MB))
+    lines = _capture(monkeypatch)
+    dest = tmp_path / "out"
+    groups = {dest: _items(tmp_path / "src", dest, [6 * MB])}
+
+    enc._preflight_space(groups, 0.1, 7, str(tmp_path))
+
+    text = "\n".join(lines)
+    assert "Preflight: destination" in text and "NOT ENOUGH" in text
+
+
+def test_no_staging_still_reports_the_destination(tmp_path, monkeypatch, small_threshold):
+    """Without staging the destination is the only drive in play."""
+    monkeypatch.setattr(enc, "_measure_batch_ratio", lambda *a, **k: (0.2, []))
+    monkeypatch.setattr(enc.shutil, "disk_usage", lambda p: Usage(900 * MB, 0, 800 * MB))
+    lines = _capture(monkeypatch)
+    dest = tmp_path / "out"
+    groups = {dest: _items(tmp_path / "src", dest, [6 * MB])}
+
+    enc._preflight_space(groups, 0.1, 7, None)
+
+    assert "Preflight: destination" in "\n".join(lines)
 
 
 def test_staging_peak_uses_two_groups_not_the_whole_batch(tmp_path, monkeypatch, small_threshold):
@@ -193,7 +254,7 @@ def test_staging_peak_uses_two_groups_not_the_whole_batch(tmp_path, monkeypatch,
 
     enc._preflight_space(groups, 0.1, 7, str(tmp_path))
 
-    line = next((c for c in lines if "staging" in c), "")
+    line = next((c for c in lines if c.startswith("Preflight: staging")), "")
     # The two largest groups (4 + 3), never all four (10) and never just one.
     assert abs(_peak_bytes(line) - 7 * MB) < MB * 0.1, f"expected 4+3 MB, got: {line}"
 
@@ -215,7 +276,7 @@ def test_multipage_source_is_counted_once(tmp_path, monkeypatch, small_threshold
 
     enc._preflight_space(groups, 0.1, 7, None)
 
-    line = next((c for c in lines if "destination" in c), "")
+    line = next((c for c in lines if c.startswith("Preflight: destination")), "")
     assert abs(_needs_bytes(line) - 6 * MB) < MB * 0.1, \
         f"3 pages inflated a 6 MB source: {line}"
 

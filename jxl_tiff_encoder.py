@@ -2037,11 +2037,22 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
     detail = ", ".join(f"{n}: {r*100:.0f}%" for n, r in samples)
     logger.info(f"Preflight: worst measured ratio {ratio*100:.0f}% of source ({detail})")
 
+    def _volume(p):
+        try:
+            rp = Path(p).resolve()
+        except OSError:
+            rp = Path(p)
+        return (os.path.splitdrive(str(rp))[0] or str(rp.anchor) or str(rp)).upper()
+
     ordered = sorted(per_group.values(), reverse=True)
-    # Staging holds a destination folder's output until that folder's LAST file
-    # lands, and the pool deliberately no longer drains at folder boundaries --
-    # so two folders can be accumulating at once. Not the sum of all of them
-    # (that would refuse runs that fit), not just the largest either.
+    staging_vol = _volume(staging_dir) if staging_dir else None
+
+    # Staging is the headline, and usually the only line printed. It is the
+    # drive nobody watches -- typically a small scratch SSD -- and the one
+    # whose peak is not obvious: it holds a destination folder's output until
+    # that folder's LAST file lands, and the pool deliberately no longer drains
+    # at folder boundaries, so two folders can accumulate at once. Not the sum
+    # of all of them (that would refuse runs that fit), not just the largest.
     if staging_dir:
         peak = sum(ordered[:2]) * ratio
         try:
@@ -2054,24 +2065,31 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
             pass
 
     # Destination volumes accumulate for the whole run, so there the sum IS the
-    # right number. Split by volume: two output folders can live on two drives.
+    # number. Split by volume: two output folders can live on two drives.
+    #
+    # Reported far more quietly than staging, on purpose. It is the drive the
+    # user chose and watches, and when it shares a volume with staging the two
+    # lines showed the same free space twice while meaning different things
+    # (a peak vs a total), which read as a duplicate. On a shared volume the
+    # staged file is MOVED, not copied -- same-filesystem rename, no extra
+    # space -- so the destination total already covers it. Only speak up when
+    # it is a different drive, when there is no staging at all, or when the
+    # answer is bad.
     by_vol = {}
     for dest, in_bytes in per_group.items():
-        try:
-            vol = os.path.splitdrive(str(Path(dest).resolve()))[0] or str(Path(dest).anchor)
-        except OSError:
-            continue
-        by_vol.setdefault(vol, [Path(dest), 0])[1] += in_bytes
+        by_vol.setdefault(_volume(dest), [Path(dest), 0])[1] += in_bytes
     for vol, (probe, in_bytes) in by_vol.items():
         need = in_bytes * ratio
         try:
             free = shutil.disk_usage(str(probe)).free
         except OSError:
             continue
-        verdict = "OK" if free > need else "NOT ENOUGH"
+        tight = free <= need
+        if not tight and staging_vol is not None and vol == staging_vol:
+            continue
         line = (f"Preflight: destination {vol or probe} -- {_fmt_size(free)} free, "
-                f"needs ~{_fmt_size(need)} ({verdict})")
-        logger.warning(line) if free <= need else logger.info(line)
+                f"needs ~{_fmt_size(need)} ({'NOT ENOUGH' if tight else 'OK'})")
+        logger.warning(line) if tight else logger.info(line)
 
 
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
