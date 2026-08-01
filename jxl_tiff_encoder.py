@@ -2893,6 +2893,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         group_id = _make_group_id(tiff) if outputs_per_tiff.get(tiff_key, 0) > 1 else None
         tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype, samples, group_id))
 
+    moved_finals = set()
+
     def _move_dest_from_staging(dest_tasks: list, status_map: Dict):
         """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
@@ -2917,6 +2919,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 final_jxl.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(write_jxl), str(final_jxl))
                 moved += 1
+                moved_finals.add(os.path.normcase(str(final_jxl)))
             except OSError as e:
                 # A locked/readonly destination must not abort the whole batch:
                 # keep the file in staging and log it for manual recovery.
@@ -3009,6 +3012,14 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     can_delete = False
                     break
                 if not Path(final_jxl).exists():
+                    can_delete = False
+                    break
+                # A staged page whose move FAILED leaves a stale pre-existing
+                # JXL at the final path: it passes exists()+integrity below,
+                # but it is not the file this run wrote and verified. The
+                # delete gate must certify THIS run's output, not whatever
+                # was already sitting there.
+                if use_staging and os.path.normcase(str(final_jxl)) not in moved_finals:
                     can_delete = False
                     break
                 if not _verify_jxl_integrity(Path(final_jxl)):

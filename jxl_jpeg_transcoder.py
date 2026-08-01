@@ -1564,6 +1564,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
                 results.append((str(task[0]), "error", str(e), None))
 
+    moved_finals = set()
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
@@ -1583,6 +1584,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 final_out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(write_out), str(final_out))
                 moved += 1
+                moved_finals.add(os.path.normcase(str(final_out)))
             except OSError as e:
                 # A locked/readonly destination must not abort the whole batch:
                 # keep the file in staging and log it for manual recovery.
@@ -1638,6 +1640,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 continue
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None or not final_file.exists():
+                continue
+            # A staged output whose move FAILED leaves a stale pre-existing
+            # file at the final path: it passes exists()+integrity below, but
+            # it is not the file this run wrote and verified. Fail closed.
+            if use_staging and os.path.normcase(str(final_file)) not in moved_finals:
+                logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
             if STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
                 if src_md5 is None or read_md5_db(final_file) is None:
@@ -2244,6 +2252,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
                 results.append((str(task[0]), "error", str(e), None))
 
+    moved_finals = set()
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
@@ -2254,6 +2263,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                     final_out.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(write_out), str(final_out))
                     moved += 1
+                    moved_finals.add(os.path.normcase(str(final_out)))
                 except OSError as e:
                     # A locked/readonly destination must not abort the batch:
                     # keep the file in staging and log it for manual recovery.
@@ -2265,7 +2275,11 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to destination")
 
-    return results
+    # moved_finals lets the mode-8 delete gate distinguish "this run's output
+    # arrived at the final path" from a stale pre-existing file whose
+    # overwrite FAILED (the gate's integrity check would otherwise certify
+    # the old file and delete the source anyway).
+    return results, moved_finals
 
 def cmd_convert(args, from_jxl: bool = True):
     """Returns (errors, cancelled)."""
@@ -2365,7 +2379,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
     # JPEG does not support 16-bit. Switch format to PNG before building output
     # pairs so that staging files and final paths use the correct extension.
-    if direction == "from_jxl" and args.format == "jpeg" and args.bit_depth == 16:
+    if direction == "from_jxl" and (args.format or "jpeg") in ("jpeg", "jpg") and args.bit_depth == 16:
         logger.warning("JPEG output does not support 16-bit; switching to PNG")
         args.format = "png"
 
@@ -2479,7 +2493,7 @@ def cmd_convert(args, from_jxl: bool = True):
         if len(groups) > 1:
             logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
 
-        results = process_group_convert(
+        results, moved_finals = process_group_convert(
             group_pairs, args.workers, direction,
             args.quality, args.distance, args.format, args.bit_depth,
             args.icc_profile, args.ram, args.effort, reconvert_explicit,
@@ -2496,6 +2510,11 @@ def cmd_convert(args, from_jxl: bool = True):
                     continue
                 src_path, final_file = src_map.get(result[0], (None, None))
                 if src_path is None:
+                    continue
+                # Fail closed on a failed staging move: the file at the final
+                # path would be a stale pre-existing one, not this run's output.
+                if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+                    logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
                 if final_file is None or not _verify_file_integrity(final_file):
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
@@ -2641,7 +2660,9 @@ def cmd_auto(args):
 
     # JPEG does not support 16-bit. Switch format to PNG before any group is
     # processed so that staging files and final paths use the correct extension.
-    if args.format == "jpeg" and args.bit_depth == 16:
+    # args.format is None when --format was not passed (default is JPEG), so
+    # the check must evaluate the EFFECTIVE format, and "jpg" too.
+    if (args.format or "jpeg") in ("jpeg", "jpg") and args.bit_depth == 16:
         logger.warning("JPEG output does not support 16-bit; switching to PNG")
         args.format = "png"
 
@@ -2882,7 +2903,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
                 ))
         else:
-            results = process_group_convert(
+            results, moved_finals = process_group_convert(
                 group_pairs, args.workers, direction=direction,
                 quality=args.quality, distance=args.distance,
                 fmt=args.format or "jpeg",
@@ -2902,6 +2923,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                         continue
                     src_path, final_file = src_map.get(result[0], (None, None))
                     if src_path is None:
+                        continue
+                    # Fail closed on a failed staging move: the file at the
+                    # final path would be a stale pre-existing one.
+                    if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+                        logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                         continue
                     if final_file is None or not _verify_file_integrity(final_file):
                         logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")

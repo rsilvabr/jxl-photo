@@ -134,7 +134,7 @@ def test_auto_16bit_output_is_png(monkeypatch, tmp_path):
 
     def fake_pgc(group_pairs, workers, **kw):
         captured["pairs"] = group_pairs
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     tr._process_file_group([jxl], _args(tmp_path, format=None, bit_depth=16),
@@ -155,7 +155,7 @@ def test_auto_processes_png_only_folder(monkeypatch, tmp_path):
     def fake_pgc(group_pairs, workers, direction=None, **kw):
         seen["direction"] = direction
         seen["files"] = [str(s) for s, _ in group_pairs]
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     tr.cmd_auto(_args(tmp_path))

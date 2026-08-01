@@ -2341,6 +2341,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 logger.error(f"[{n}/{total}] ERROR | {task['main_jxl'].name} | {e}")
                 results.append((str(task["main_jxl"]), "error", str(e)))
 
+    moved_finals = set()
     if use_staging:
         moved = 0
         status_map = {r[0]: r[1] for r in results}
@@ -2367,6 +2368,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 final_tiff.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(write_path), str(final_tiff))
                 moved += 1
+                moved_finals.add(os.path.normcase(str(final_tiff)))
             except OSError as e:
                 # A locked/readonly destination must not abort the whole batch:
                 # keep the file in staging and log it for manual recovery.
@@ -2387,6 +2389,14 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 continue
             final_tiff = task["final_tiff"]
             if not final_tiff.exists():
+                continue
+            # A staged output whose move FAILED leaves a stale pre-existing
+            # TIFF at the final path: it passes exists()+integrity below, but
+            # it is not the file this run verified and delivered. Without this
+            # check the gate would certify the old file and delete the JXLs
+            # while the fresh output sits in staging under a UUID name.
+            if use_staging and os.path.normcase(str(final_tiff)) not in moved_finals:
+                logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
                 continue
             if not _verify_tiff_integrity(final_tiff):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")

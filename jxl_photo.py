@@ -108,8 +108,23 @@ def _flags_request_delete(flags: Optional[str]) -> bool:
     wrapper passed, so the callers deliberately do NOT combine this with a mode
     check: expert-flag deletion is gated on its own, whatever the stored mode says.
     """
-    return any(t.split('=', 1)[0] in ('--delete-source', '--delete_source')
-               for t in _split_expert_flags(flags or ''))
+    # The children run argparse with allow_abbrev=True, so any UNAMBIGUOUS
+    # prefix of --delete-source also deletes: `--delete-s` works, and paired
+    # with `--delete-c` (an abbreviation of --delete-confirm-off) a preset
+    # would sail past a gate that only matched the full spelling. Tokens that
+    # are also a prefix of --delete-confirm-off (`--delete`, `--delete-`)
+    # are ambiguous and argparse rejects them, so they are not flagged here.
+    source_spellings = ('--delete-source', '--delete_source')
+    confirm_spellings = ('--delete-confirm-off', '--delete_confirm_off')
+    for t in _split_expert_flags(flags or ''):
+        tok = t.split('=', 1)[0]
+        if not tok.startswith('--'):
+            continue
+        for spelling in source_spellings:
+            if spelling.startswith(tok) and not any(
+                    c.startswith(tok) for c in confirm_spellings):
+                return True
+    return False
 
 
 def _strip_surrounding_quotes(value: str) -> str:

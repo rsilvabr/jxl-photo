@@ -335,7 +335,7 @@ def test_convert_from_jpeg_ignores_pngs(monkeypatch, tmp_path):
 
     def fake_pgc(group_pairs, workers, *a, **kw):
         seen.extend(str(s) for s, _ in group_pairs)
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     tr.cmd_convert(_args(tmp_path, from_jpeg=True), from_jxl=False)
@@ -351,7 +351,7 @@ def test_convert_without_from_jpeg_still_processes_pngs(monkeypatch, tmp_path):
 
     def fake_pgc(group_pairs, workers, *a, **kw):
         seen.extend(str(s) for s, _ in group_pairs)
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     tr.cmd_convert(_args(tmp_path), from_jxl=False)
@@ -369,7 +369,7 @@ def test_png_fallback_on_jxl_folder_keeps_16bit(monkeypatch, tmp_path):
         # bit_depth is the 6th positional after group_pairs/workers:
         # (direction, quality, distance, fmt, bit_depth, ...)
         captured["bit_depth"] = kw.get("bit_depth", a[4] if len(a) > 4 else None)
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     tr.cmd_convert(_args(tmp_path, format="png"), from_jxl=False)
@@ -1381,7 +1381,7 @@ def test_icc_warn_only_on_encode_direction(monkeypatch, tmp_path):
     seen = []
 
     def fake_pgc(group_pairs, workers, *a, **k):
-        return []
+        return [], set()
 
     monkeypatch.setattr(tr, "process_group_convert", fake_pgc)
     monkeypatch.setattr(tr.logger, "warning", lambda m, *a: seen.append(str(m)))
