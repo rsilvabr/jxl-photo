@@ -110,7 +110,7 @@ def _warn_if_libjxl_too_old(exe: str) -> None:
     "Reading image data failed" and nothing points at the version.
     """
     v = _tool_version(exe)
-    if v is not None and v[:2] < (0, 11):
+    if v is not None and v[:3] < (0, 11, 2):
         logger.warning(
             f"{exe} {'.'.join(map(str, v))} is older than the supported minimum "
             f"(0.11.2). The default in-RAM pipeline needs a cjxl that reads PNG "
@@ -136,13 +136,13 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     import re as _re
     pat = _re.compile(
         _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
-    m = pat.search(name)
-    if not m:
-        return name
-    left_ok = m.start() == 0 or name[m.start() - 1] in '_- '
-    if not left_ok:
-        return name
-    return name[:m.start()] + suffix_to + name[m.end():]
+    # A non-token match must NOT stop the search: in 'MyTIFF_TIFF' the
+    # embedded 'TIFF' fails the left-boundary test, but the trailing '_TIFF'
+    # is a valid token and gets replaced.
+    for m in pat.finditer(name):
+        if m.start() == 0 or name[m.start() - 1] in '_- ':
+            return name[:m.start()] + suffix_to + name[m.end():]
+    return name
 
 
 # --- Disk-full abort ------------------------------------------------------
@@ -392,7 +392,12 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
         if not rest or rest[0] in '_- ':
             return True
     if part_lower.endswith(marker_lower):
-        return True
+        s = len(part_lower) - len(marker_lower)
+        # endswith also needs a left anchor: either the marker brings its own
+        # (a leading underscore, as in the default '_EXPORT') or the name
+        # must boundary it — otherwise marker 'EXPORT' would match 'ReExport'.
+        if s == 0 or marker_lower[0] in '_- ' or part_lower[s - 1] in '_- ':
+            return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
         return False
@@ -3308,8 +3313,14 @@ def main():
         USE_RAM_FOR_PNG = args.ram
     if args.staging is not None:
         TEMP2_DIR = args.staging
-        if args.clean_staging:
+    if args.clean_staging:
+        # Clean the EFFECTIVE staging dir — requiring --staging alongside
+        # made the flag silently inert whenever staging came from the
+        # script setting (the documented way).
+        if TEMP2_DIR is not None:
             _clean_staging(TEMP2_DIR)
+        else:
+            logger.warning("--clean-staging: no staging directory configured; nothing to clean")
     if args.export_marker:
         global EXPORT_MARKER
         EXPORT_MARKER = args.export_marker

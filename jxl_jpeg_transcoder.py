@@ -175,13 +175,13 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     import re as _re
     pat = _re.compile(
         _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
-    m = pat.search(name)
-    if not m:
-        return name
-    left_ok = m.start() == 0 or name[m.start() - 1] in '_- '
-    if not left_ok:
-        return name
-    return name[:m.start()] + suffix_to + name[m.end():]
+    # A non-token match must NOT stop the search: in 'MyTIFF_TIFF' the
+    # embedded 'TIFF' fails the left-boundary test, but the trailing '_TIFF'
+    # is a valid token and gets replaced.
+    for m in pat.finditer(name):
+        if m.start() == 0 or name[m.start() - 1] in '_- ':
+            return name[:m.start()] + suffix_to + name[m.end():]
+    return name
 
 
 # --- Disk-full abort ------------------------------------------------------
@@ -431,7 +431,12 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
         if not rest or rest[0] in '_- ':
             return True
     if part_lower.endswith(marker_lower):
-        return True
+        s = len(part_lower) - len(marker_lower)
+        # endswith also needs a left anchor: either the marker brings its own
+        # (a leading underscore, as in the default '_EXPORT') or the name
+        # must boundary it — otherwise marker 'EXPORT' would match 'ReExport'.
+        if s == 0 or marker_lower[0] in '_- ' or part_lower[s - 1] in '_- ':
+            return True
     bare = marker_lower.strip('_')
     if not bare or bare == marker_lower:
         return False

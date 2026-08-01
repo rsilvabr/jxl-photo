@@ -60,9 +60,6 @@ SHARED_HELPERS = [
 # Two helpers are semantically equivalent across their copies but structurally
 # different, so normalisation cannot fold them together:
 #
-#   _replace_suffix_token       jxl_photo.py tests `A and not B`, the backends
-#                               assign `left_ok = not A or B` first. De Morgan —
-#                               same result, different shape.
 #   _abort_on_duplicate_outputs the encoder/decoder reuse one loop name where
 #                               the transcoder uses two.
 #
@@ -71,12 +68,6 @@ SHARED_HELPERS = [
 # hash and fails the test — which is the point: you then re-check by hand that
 # the copies still behave alike and update the baseline in the same commit.
 PINNED_VARIANTS: dict[str, dict[str, str]] = {
-    "_replace_suffix_token": {
-        "jxl_photo.py": "e38c82ab6d42c9ac",
-        "jxl_tiff_encoder.py": "5608038ca7681acb",
-        "jxl_tiff_decoder.py": "5608038ca7681acb",
-        "jxl_jpeg_transcoder.py": "5608038ca7681acb",
-    },
     "_abort_on_duplicate_outputs": {
         "jxl_tiff_encoder.py": "a80bdc7535cacaad",
         "jxl_tiff_decoder.py": "a80bdc7535cacaad",
