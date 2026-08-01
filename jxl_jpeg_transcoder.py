@@ -1580,7 +1580,11 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # and one line per never-attempted file is the wall of noise
                 # the abort exists to prevent.
                 if status not in ("skipped", "aborted"):
-                    logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
+                    if write_out.exists():
+                        logger.warning(f"  KEEP in staging ({status}) | {write_out.name}")
+                    # else: the worker already deleted the bad output itself
+                    # (e.g. md5_fail) — logging KEEP for a file that no longer
+                    # exists sends the user hunting for nothing.
                 continue
             if not write_out.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_out.name}")

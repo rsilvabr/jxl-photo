@@ -550,7 +550,11 @@ Each underlying script writes its own log:
 <script_folder>/Logs/<script_name>/YYYYMMDD_HHMMSS.log
 ```
 
-`jxl_photo.py` itself does not write a log — it streams the selected script's output in real-time.
+`jxl_photo.py` streams the selected script's output in real-time and only writes
+a log of its own for **manifest runs** — a combined summary across all entries:
+```
+Logs/jxl_photo/YYYYMMDD_HHMMSS.log
+```
 
 * * *
 

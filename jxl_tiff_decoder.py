@@ -2532,7 +2532,7 @@ def _parse_jxl_page_suffix(name: str):
 
     return stem, page_idx, is_thumbnail
 
-def _group_naming_path(main_jxl: Path, entries: list) -> Path:
+def _group_naming_path(main_jxl: Path, entries: list, was_marked_group: bool = None) -> Path:
     """Path whose NAME should name the reconstructed TIFF.
 
     The group's anchor is the lowest REAL page, so when page 0 of the original
@@ -2542,8 +2542,14 @@ def _group_naming_path(main_jxl: Path, entries: list) -> Path:
     Only for genuine multi-page groups: a STANDALONE third-party file named
     `photo_page2.jxl` is a whole image in its own right and must keep its name
     (renaming it to `photo.tif` could also collide with a real `photo.jxl`).
+
+    was_marked_group: pass the PRE-filter group size when the caller dropped
+    entries (e.g. --thumbnail-handling ignore) — a marked 2-page group that
+    shrank to one real page must still shed its _page<N> suffix.
     """
-    if len(entries) <= 1:
+    if was_marked_group is None:
+        was_marked_group = len(entries) > 1
+    if not was_marked_group:
         return main_jxl
     stem, _page, _thumb = _parse_jxl_page_suffix(main_jxl.stem)
     if stem and stem != main_jxl.stem:
@@ -2968,6 +2974,19 @@ Examples:
     _check_external_tools(dry_run=args.dry_run)
     _warn_if_libjxl_too_old("djxl")
 
+    if ADD_JPEG_PREVIEW:
+        try:
+            import imagecodecs  # noqa: F401
+        except ImportError:
+            # The preview page is JPEG-compressed, so tifffile needs
+            # imagecodecs to READ it back. Without it every output fails the
+            # post-write integrity check and is deleted as a partial — with
+            # an error that blames the TIFF, not the missing package.
+            logger.warning("ADD_JPEG_PREVIEW is on but imagecodecs is not installed: "
+                           "the integrity check cannot decode the JPEG preview page and "
+                           "every output will fail it. Install imagecodecs "
+                           "(pip install imagecodecs) or pass --no-preview.")
+
     # Warnings that must go to the configured log file
     if args.target_icc and not USE_MATRIX_MODE:
         logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
@@ -2978,7 +2997,7 @@ Examples:
     # simulation never asks for the deletion token (consistent with the
     # encoder and transcoder).
 
-    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else "no"))
+    _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else ("yes" if OVERWRITE else "no")))
     logger.info(f"Mode: {args.mode} | Depth: {DJXL_OUTPUT_DEPTH} | "
                 f"Compression: {TIFF_COMPRESSION} | Workers: {args.workers}")
     logger.info(f"Matrix: {USE_MATRIX_MODE} | Basic: {FORCE_BASIC_MODE} | None: {FORCE_NONE_MODE} | "
@@ -3017,11 +3036,12 @@ Examples:
     # Build tasks: each task represents one output TIFF
     tasks = []
     for main_jxl, entries in mp_groups.items():
-        # Filter thumbnail pages if requested — but KEEP the ignored entries
-        # in the task so mode-8 delete can remove them with the group
-        # (otherwise they become permanent orphans: next run they form a
-        # thumbnails-only group that is skipped forever).
+        # Filter thumbnail pages if requested. The ignored entries travel in
+        # "ignored_thumbs" so the mode-8 delete block can KEEP them explicitly
+        # (their pixels are not in the output TIFF, so deleting them would
+        # destroy data the user never got back) and report them at delete time.
         ignored_thumbs = []
+        group_size = len(entries)
         if THUMBNAIL_HANDLING == "ignore":
             ignored_thumbs = [e for e in entries if e[2]]
             entries = [e for e in entries if not e[2]]
@@ -3029,7 +3049,7 @@ Examples:
                 logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
                 continue
 
-        tiff = resolve_output(_group_naming_path(main_jxl, entries), args.mode, output_root)
+        tiff = resolve_output(_group_naming_path(main_jxl, entries, group_size > 1), args.mode, output_root)
         if tiff is None:
             continue
         tasks.append({

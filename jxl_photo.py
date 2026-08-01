@@ -271,6 +271,36 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     return False
 
 
+def _append_expert_flags(cmd: List[str], flags: str) -> None:
+    """Append free-form expert flags to a child command line.
+
+    When the flags ask to delete sources, the wrapper charges the HHMM token
+    itself (see _flags_request_delete) — so the child's OWN confirmation must
+    be suppressed too, or it re-prompts on the inherited stdin mid-stream and
+    the run appears to hang. Appended AFTER the flags so argparse's
+    last-one-wins cannot be subverted by an earlier --delete-confirm in the
+    flags (there is no such flag today; the position is simply the safe one).
+    """
+    if not flags:
+        return
+    tokens = _split_expert_flags(flags)
+    cmd.extend(tokens)
+    if _flags_request_delete(flags) and not any(
+            t.split('=', 1)[0] in ('--delete-confirm-off', '--delete_confirm_off')
+            for t in tokens):
+        cmd.append('--delete-confirm-off')
+
+
+def _is_manifest_header_row(row) -> bool:
+    """True only when the first row really is the CSV header — not when a
+    data folder happens to be named 'source'. A header names at least one of
+    the other columns."""
+    if not row or row[0].strip().lower() != "source":
+        return False
+    return any(cell.strip().lower() == expected
+               for cell, expected in zip(row[1:4], ("destination", "mode", "direction")))
+
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Child scripts emit one machine-readable summary line per run when given
@@ -1938,7 +1968,7 @@ class InteractiveMenu:
             first_row = next(reader, None)
             rows = []
             if first_row is not None:
-                if first_row and first_row[0].strip().lower() == "source":
+                if _is_manifest_header_row(first_row):
                     rows = list(reader)
                 else:
                     rows = [first_row] + list(reader)
@@ -2007,34 +2037,42 @@ class InteractiveMenu:
             # whose header line was deleted must not silently lose entry #1.
             rows = []
             if first_row is not None:
-                if first_row and first_row[0].strip().lower() == "source":
+                if _is_manifest_header_row(first_row):
                     rows = list(reader)
                 else:
                     rows = [first_row] + list(reader)
             for row in rows:
                 if row and len(row) >= 1:
                     source = row[0].strip()
+                    is_comment = not source or source.startswith('#')
                     # Empty Destination cell must fall back to Source, not to
                     # "" — Path("") becomes "." (the CWD) downstream.
                     dest = (row[1].strip() or source) if len(row) > 1 else source
                     # Mode cell: Excel often formats integers as "7.0" — a
                     # naive isdigit() check would silently turn that into
-                    # mode 0 and scatter outputs next to the sources.
+                    # mode 0 and scatter outputs next to the sources. For the
+                    # same reason a FRACTION ("7.5") is refused outright rather
+                    # than truncated to 7.
                     # None = "no Mode cell" (legacy manifest), which enables
                     # marker-based detection downstream; an explicit 0 is kept.
                     entry_mode = None
                     if len(row) > 2 and row[2].strip():
                         try:
-                            entry_mode = int(float(row[2].strip()))
+                            _mode_f = float(row[2].strip())
+                            if not _mode_f.is_integer():
+                                raise ValueError
+                            entry_mode = int(_mode_f)
                         except ValueError:
                             self._print_error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
                             return None
                         if not 0 <= entry_mode <= 8:
                             self._print_error(f"Mode out of range (0-8) in manifest: {entry_mode} (row: {source})")
                             return None
-                    if len(row) > 3 and row[3].strip():
+                    # Direction cells only count on real entries: a comment row
+                    # carrying one must not poison the single-direction guard.
+                    if not is_comment and len(row) > 3 and row[3].strip():
                         directions.add(row[3].strip())
-                    if source and not source.startswith('#'):
+                    if not is_comment:
                         # Validate paths to prevent directory traversal. Check
                         # path PARTS (not a substring match, which false-
                         # positives on legitimate names like "2024..final").
@@ -2083,8 +2121,9 @@ class InteractiveMenu:
         return entries
 
     def _confirm_manifest_entries(self, manifest_path: str, entries: List[Tuple]) -> bool:
-        """Preview the entries and ask for a go-ahead. Shared by the wizard and
-        the repeat so a repeat never runs a CSV the user has not seen."""
+        """Preview the entries and ask for a go-ahead. Used by the wizard; the
+        attended repeat ("Repeat last workflow") re-reads the CSV with the same
+        loader guards but shows only the manifest name and entry count."""
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Manifest:[/bold cyan] {manifest_path}")
             console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
@@ -2132,6 +2171,28 @@ class InteractiveMenu:
 
         if not self._confirm_manifest_entries(manifest_path, entries):
             return False
+
+        # A manifest with mode-8 rows promises "DELETE originals", but the
+        # children only delete with --delete-source — and nothing on this path
+        # ever asked. Mirror Step 4's mode-8 mark; the HHMM token itself is
+        # charged at execution time, after the user had the chance to dry-run.
+        if any(m == 8 for _, _, m in entries):
+            if RICH_AVAILABLE and console:
+                delete = Confirm.ask(
+                    "[bold red]Manifest contains DELETE-mode (8) entries[/bold red] — "
+                    "delete originals after conversion? (IRREVERSIBLE)", default=False)
+            else:
+                delete = input("Manifest contains DELETE-mode (8) entries — "
+                               "delete originals after conversion? (IRREVERSIBLE) [y/N]: "
+                               ).strip().lower().startswith('y')
+            if delete:
+                workflow['delete_source'] = True
+            else:
+                console_msg = "Mode-8 entries will run WITHOUT deleting originals (TIFF and JXL will coexist)."
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{console_msg}[/yellow]")
+                else:
+                    print(console_msg)
 
         # For manifest mode, we set mode to special value 99 (manifest mode)
         workflow['mode'] = 99  # Special mode for manifest execution
@@ -3820,8 +3881,10 @@ class InteractiveMenu:
                 key = os.path.normcase(str(out_folder))
                 seen = by_dest.setdefault(key, {})
                 # Outputs are named from the stem, so a stem clash is a clash
-                # whatever the target extension is.
-                stem = f.stem.lower()
+                # whatever the target extension is. normcase (not .lower()):
+                # case-sensitive filesystems treat Foto.tif/foto.tif as
+                # distinct files and must NOT collide.
+                stem = os.path.normcase(f.stem)
                 prev = seen.get(stem)
                 if prev is None:
                     seen[stem] = f
@@ -4009,8 +4072,7 @@ class InteractiveMenu:
         if workflow.get('dry_run'):
             cmd.append('--dry-run')
 
-        if workflow.get('expert_flags'):
-            cmd.extend(_split_expert_flags(workflow['expert_flags']))
+        _append_expert_flags(cmd, workflow.get('expert_flags'))
 
         return cmd
 
@@ -4050,13 +4112,23 @@ class InteractiveMenu:
             return None
         if not isinstance(payload, dict):
             return None
+
+        def _as_int(v) -> int:
+            # A wrong-typed field ("ok": "many") must degrade to 0, not raise:
+            # this parser runs after the child's real work is done, and an
+            # exception here kills the whole manifest run at the summary.
+            try:
+                return int(v or 0)
+            except (ValueError, TypeError):
+                return 0
+
         clean = {
-            "ok": int(payload.get("ok") or 0),
-            "overwritten": int(payload.get("overwritten") or 0),
-            "skipped": int(payload.get("skipped") or 0),
-            "errors": int(payload.get("errors") or 0),
+            "ok": _as_int(payload.get("ok")),
+            "overwritten": _as_int(payload.get("overwritten")),
+            "skipped": _as_int(payload.get("skipped")),
+            "errors": _as_int(payload.get("errors")),
             # Only the encoder reports this today; the others default to 0.
-            "unreadable": int(payload.get("unreadable") or 0),
+            "unreadable": _as_int(payload.get("unreadable")),
             "dry_run": bool(payload.get("dry_run")),
             "log": str(payload.get("log") or ""),
             "extras": {},
@@ -4441,8 +4513,7 @@ class InteractiveMenu:
         if workflow.get('dry_run'):
             cmd.append('--dry-run')
 
-        if expert_flags:
-            cmd.extend(_split_expert_flags(expert_flags))
+        _append_expert_flags(cmd, expert_flags)
 
         if not Path(script).exists():
             self._print_error(f"Script not found: {script}")
@@ -4708,12 +4779,15 @@ class InteractiveMenu:
             print(f"  Mode:         {last_mode}")
             print(f"  Workers:      {last_workers}")
             print(f"  Effort:       {last_effort}")
-            # Show relevant field based on origin format
+            # Show relevant field based on origin format (same rule as the
+            # rich panel: JPEG→JXL-lossy is distance-driven, not quality).
             if last_origin == 'tiff' and last_distance is not None:
+                print(f"  Distance:     {last_distance}")
+            elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
                 print(f"  Distance:     {last_distance}")
             elif last_origin == 'jpeg':
                 print(f"  Quality:      {last_quality}")
-            elif last_origin == 'jxl' and last_quality is not None:
+            elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
                 print(f"  Quality:      {last_quality}")
             print(f"  Staging:      {last_staging or '(none)'}")
             _last_adv = session.get('last_advanced_options') or {}

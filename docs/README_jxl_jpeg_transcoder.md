@@ -348,7 +348,7 @@ Options:
   --ram              Use RAM pipeline (faster, default: True)
   --no-ram           Use disk pipeline (slower, less memory)
   --output-name NAME Output folder name for convert mode (default: "converted")
-  --output-suffix SFX Suffix for converted files (default: "_converted")
+  --output-suffix SFX Suffix for converted files (default: none — flat output)
   --rename-from PAT  Literal substring to replace in filenames (not regex)
   --rename-to REP    Replacement string for renamed files
   --dry-run          Preview operations without converting
@@ -520,9 +520,9 @@ py jxl_jpeg_transcoder.py "F:\Masters\JXL" --force-convert --to-srgb --quality 9
 Opening line shows detected operation and active settings:
 
 ```
-[14:23:01] | INFO | TRANSCODE lossless | Mode: 8 | Effort: 7 | Store MD5: True | delete_source=False | overwrite=ON | Staging: disabled | Workers: 16
+[14:23:01] | INFO | TRANSCODE lossless | Mode: 8 | Effort: 7 | Store MD5: True | delete_source=False | reconvert=ON | Staging: disabled | Workers: 16
 [14:23:01] | INFO | TRANSCODE lossless | Mode: 8 | Effort: 7 | Store MD5: True | delete_source=False | smart (source newer → overwrite) | Staging: disabled | Workers: 16
-[14:23:01] | INFO | CONVERT lossy | Mode: 0 | Format: jpeg | ICC: converting to ImageMagick sRGB (built-in) | overwrite=OFF (skip existing)
+[14:23:01] | INFO | CONVERT lossy | Mode: 0 | Format: jpeg | ICC: converting to ImageMagick sRGB (built-in) | reconvert=OFF (skip existing)
 ```
 
 File progress examples:
