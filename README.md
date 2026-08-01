@@ -26,9 +26,26 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
-**Current release: v1.8.4** (2026-07-28) — recommended for everyone. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
+**In beta: v1.9.0** ([beta3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0_beta3)) — the release where the tool stops flying blind. A run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging. **v1.8.4 remains the recommended stable release** until v1.9.0 is promoted.
 
-**v1.8.3** (2026-07-28) — recommended for everyone. Cuts the repetitive parts of the menu (your own distance, repeatable manifests, named presets) and adds honest reporting for multi-folder runs on top of v1.8.2's three rounds of hardening: you can start a manifest, walk away, and find out on return whether any file broke — and which one.
+> **Behaviour change in v1.9.0 — read this if you script the tools.** A run that fills its output volume now **aborts and exits 2** instead of failing every remaining file and exiting 1. Automation that treats "non-zero" as one bucket is unaffected; automation that distinguishes `1` (some files failed) from `2` (aborted) will now see `2` for a full disk — which is the retryable case.
+
+Highlights:
+
+- **Space estimate before the run starts** — encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
+- **A full disk stops the run** — instead of failing every remaining file one by one. Queued files are reported as *not attempted*, and the run exits `2`.
+- **Slow folder scans show progress** — a 25-second walk on an external drive no longer looks frozen. Fast local scans stay silent.
+- **Staging leftovers are reported** — and `--clean-staging` sweeps the old ones.
+- **Distances below 0.05 do nothing** — cjxl clamps them; `0.02` and `0.05` give byte-identical files. Use `--distance 0` for real lossless.
+- **Three delete-gate bypasses closed** — `--delete-source` in the wrapper's expert-flags field could delete originals unattended.
+- **Corrupt saved workflows are refused** — a hand-edited config no longer ends the run in a traceback.
+- **Manifest entries with `..` refuse the whole file** — they used to be skipped while the run carried on.
+
+Full release notes: [v1.9.0_beta3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0_beta3) · [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4) · [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3)
+
+---
+
+**Last stable: v1.8.4** (2026-07-28) — recommended for everyone. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
@@ -54,6 +71,7 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| v1.9.0 *(beta)* | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
 | **v1.8.4** | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
 | v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
 | v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
@@ -571,6 +589,22 @@ In the wizard the setting lives under **Advanced Options** (Step 6A — answer `
 ### Lossy is the default: `--distance 0.1`
 
 The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to roughly a tenth of the TIFF size, and a difference blend in Photoshop *will* show small deviations — that is the compression working as configured, not a bug. For a bit-exact archive use `--distance 0` (still ~40% smaller than an uncompressed TIFF). Note that `--mode` (0–8) only decides *where* output files go; quality is `--distance` alone.
+
+#### There is a floor at 0.05 (measured, v1.9.0)
+
+**cjxl clamps every lossy distance at or below 0.05 to the same value.** On a real 16-bit photo, `--distance 0.005`, `0.01`, `0.02`, `0.03`, `0.04` and `0.05` all produced a **byte-identical** 20,188,082-byte file. The menu and the CLI accept anything from 0 to 15, so setting `0.02` looks like it buys you something — it does not. Either stay at `0.05`, or go to `--distance 0` for true lossless. Since v1.9.0 the encoder warns when you ask for a distance in the dead zone.
+
+Measured ratios on real 16-bit ProPhoto photos already stored as Deflate TIFF (output ÷ source), so you can see where the curve actually bends:
+
+| distance | 0 | 0.05 | 0.1 | 0.2 | 0.5 | 1.0 |
+|---|---|---|---|---|---|---|
+| camera files | 61–70% | 14–18% | 10–14% | 7–10% | 4–7% | 2–4% |
+
+The spread across photos at one distance is 1.1×–2.1×, so treat any single number as an order of magnitude, not a promise.
+
+#### 8-bit sources: lossless can be *smaller* than lossy
+
+Counter-intuitive but reproducible across four real photos: at 8 bits, `--distance 0` produced a **smaller** file than `--distance 0.05` (38.6% vs 46.4% of source on one, 42.6% vs 47.8% on another). JXL's lossless mode is very efficient at 8 bits, while VarDCT at a very low distance carries overhead it cannot amortise. If your source is 8-bit and you want small files, measure before assuming lossy wins.
 
 ### Film scanners: IR channel / Digital ICE
 

@@ -308,6 +308,15 @@ Options:
                     faithful multipage/grayscale reconstruction is not possible)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
+  --no-preflight  Skip the pre-run space estimate. The estimate encodes three
+                  small crops of your own files to measure this batch's real
+                  compression, then projects it against the free space on the
+                  staging and destination drives. It only warns, never blocks,
+                  and is skipped automatically below 5 GB of input
+  --clean-staging Before converting, delete staging leftovers from EARLIER runs
+                  (failed outputs kept for inspection). Only files this tool
+                  wrote, never subfolders, and nothing touched in the last hour
+                  (a concurrent run may still own it)
 ```
 
 ### Exit codes

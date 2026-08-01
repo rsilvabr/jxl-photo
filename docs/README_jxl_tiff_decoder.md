@@ -395,6 +395,10 @@ Options:
   --compression TYPE  TIFF compression: uncompressed, lzw, or zip (default: zip)
   --no-preview        Skip JPEG preview generation (smaller TIFF files)
   --staging PATH     Staging directory for output files
+  --clean-staging Before converting, delete staging leftovers from EARLIER runs
+                  (failed outputs kept for inspection). Only files this tool
+                  wrote, never subfolders, and nothing touched in the last hour
+                  (a concurrent run may still own it)
   --delete-source    Delete source JXLs after successful decode (mode 8 only)
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                      automation that already asked the user)

@@ -339,6 +339,10 @@ Options:
                       of the export marker (default: empty = all subfolders)
 
   --staging PATH     Staging directory for output files
+  --clean-staging Before converting, delete staging leftovers from EARLIER runs
+                  (failed outputs kept for inspection). Only files this tool
+                  wrote, never subfolders, and nothing touched in the last hour
+                  (a concurrent run may still own it)
   --effort 1-10      cjxl effort (default: 7)
   --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)
