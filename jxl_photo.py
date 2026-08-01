@@ -3430,19 +3430,32 @@ class InteractiveMenu:
         analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
 
         # Overlapping source trees: one entry's Source inside another's means
-        # the same files are processed twice by SEPARATE child processes —
-        # same outputs, decided by sync-mtime luck. Refuse loudly.
+        # the same files are processed twice by SEPARATE child processes. Some
+        # users do this on purpose (e.g. E:\Fotos in mode 6 + E:\Fotos\2024_EXPORT
+        # in mode 0 — different outputs, no conflict), so attended runs get a
+        # loud warning and a choice; unattended presets are refused (fail
+        # closed, like the delete gates).
         overlaps = self._manifest_source_overlaps(manifest_entries)
         if overlaps:
-            self._print_error(
-                "Aborting: manifest entries have duplicate or nested Source folders."
-            )
+            head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
+                    f"Source folders — the same files would be processed twice:")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{head}[/yellow]")
+            else:
+                print(f"WARNING: {head}")
             for a, b in overlaps[:10]:
                 print(f"  {a}  <->  {b}")
-            self._print_error(
-                "Split the run so each folder is covered by exactly one entry."
-            )
-            return False
+            if workflow.get('unattended'):
+                self._print_error(
+                    "Refusing to run unattended: split the manifest so each folder "
+                    "is covered by exactly one entry, or run it from the menu.")
+                return False
+            if RICH_AVAILABLE and console:
+                ok_overlap = Confirm.ask("Run anyway?", default=False)
+            else:
+                ok_overlap = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+            if not ok_overlap:
+                return False
 
         # Cross-entry duplicate outputs: each entry is a separate child process,
         # so no child can see a collision that spans two entries. Refuse loudly
@@ -3780,8 +3793,9 @@ class InteractiveMenu:
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
         resolver = None
+        _skip_check = None
+        _child = None
         if origin and dest:
-            _child = None
             try:
                 if origin == 'tiff' and dest == 'jxl':
                     import jxl_tiff_encoder as _child
@@ -3818,78 +3832,114 @@ class InteractiveMenu:
                         return _child.resolve_output_transcode(f, mode, src_root, origin == 'jxl')
                     return _child.resolve_output(f, mode, src_root)
 
-        # Anti ping-pong: the children skip the other direction's output
-        # folders on recursive scans (unless one was explicitly requested as
-        # the mode-7 subfolder) — the guard must skip them too, or it would
-        # report collisions the child would never produce.
-        _skip_dirs = {"16b_tiff", "tiff_16bits", "converted_tiff"} if origin == 'tiff' \
-            else {"jxl_16bits", "converted_jxl", "16b_jxl"}
-        _requested = (export_subfolder or '').lower()
-
-        def _child_skips(f: Path, root: Path) -> bool:
-            try:
-                rel_parts = f.relative_to(root).parts[:-1]
-            except ValueError:
-                return False
-            return any(p.lower() in _skip_dirs and p.lower() != _requested
-                       for p in rel_parts)
+                # Which files would the child itself skip on its scan? Mirror
+                # EXACTLY that — a wrong skip set works both ways: it reports
+                # collisions the child would never produce (false positive ->
+                # legit manifest refused) and misses files the child WOULD
+                # process (false negative -> the blind spot is back):
+                #
+                #   * encoder (tiff->jxl): skips decoder-output folders below
+                #     the export marker, and ONLY in modes 6/7 — its other
+                #     finders (flat/recursive) are unfiltered;
+                #   * transcoder ENCODE (jpeg->jxl): skips its own output
+                #     folders via _is_tool_output_path, and only on recursive
+                #     scans (modes 2-8) — the flat finders are unfiltered;
+                #   * decoder (jxl->tiff) and transcoder DECODE (jxl->jpeg):
+                #     deliberately UNFILTERED (round-trip sources must be
+                #     found) — no skip at all.
+                if _child.__name__ == 'jxl_tiff_encoder':
+                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
+                        if mode not in (6, 7):
+                            return False
+                        parts = list(f.parts[:-1])
+                        marker_lower = _child.EXPORT_MARKER.lower()
+                        idx = next((i for i, p in enumerate(parts)
+                                    if _child._marker_matches(p.lower(), marker_lower)), None)
+                        if idx is None:
+                            return False
+                        below = [p.lower() for p in parts[idx + 1:]]
+                        return _child._skip_decoder_output(below)
+                elif _child.__name__ == 'jxl_jpeg_transcoder' and origin == 'jpeg':
+                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
+                        if mode < 2:
+                            return False
+                        return _child._is_tool_output_path(f, root)
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
-        for source, dest_path, mode in manifest_entries:
-            if not dest_path:
-                continue
-            src_root = Path(source)
-            try:
-                if not src_root.is_dir():
+        # The child resolvers WARN on modes 4/5 (outside-tree outputs, missing
+        # suffix token). The real run emits those lines itself — duplicated
+        # here, one per scanned file, they are pure noise.
+        _child_logger_was_disabled = None
+        if _child is not None:
+            _child_logger_was_disabled = _child.logger.disabled
+            _child.logger.disabled = True
+        try:
+            for source, dest_path, mode in manifest_entries:
+                if not dest_path:
                     continue
-            except OSError:
-                continue
-            # Legacy manifests carry no Mode cell: the child detects the mode
-            # per folder downstream, so the flat Destination scan is the best
-            # the wrapper can do there (the old behavior for every entry).
-            if resolver is None or mode is None:
+                src_root = Path(source)
                 try:
-                    files = sorted(src_root.iterdir())
-                except OSError:
-                    continue
-                outputs = ((f, Path(dest_path)) for f in files)
-            else:
-                try:
-                    files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
-                except OSError:
-                    continue
-
-                def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path):
-                    for f in files:
-                        if _child_skips(f, src_root):
-                            continue
-                        out = resolver(f, mode, src_root, dest_path)
-                        # out is None for files the child skips (e.g. outside
-                        # the export marker in modes 6/7).
-                        yield f, (out.parent if out is not None else None)
-
-                outputs = _resolve_all(files)
-            for f, out_folder in outputs:
-                try:
-                    if not f.is_file() or f.suffix.lower() not in origin_exts:
+                    if not src_root.is_dir():
                         continue
                 except OSError:
                     continue
-                if out_folder is None:
-                    continue
-                key = os.path.normcase(str(out_folder))
-                seen = by_dest.setdefault(key, {})
-                # Outputs are named from the stem, so a stem clash is a clash
-                # whatever the target extension is. normcase (not .lower()):
-                # case-sensitive filesystems treat Foto.tif/foto.tif as
-                # distinct files and must NOT collide.
-                stem = os.path.normcase(f.stem)
-                prev = seen.get(stem)
-                if prev is None:
-                    seen[stem] = f
-                elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
-                    collisions.append((prev, f, out_folder))
+                # Legacy manifests carry no Mode cell: the child detects the mode
+                # per folder downstream, so the flat Destination scan is the best
+                # the wrapper can do there (the old behavior for every entry).
+                if resolver is None or mode is None:
+                    try:
+                        files = sorted(src_root.iterdir())
+                    except OSError:
+                        continue
+                    outputs = ((f, Path(dest_path)) for f in files)
+                else:
+                    try:
+                        files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
+                    except OSError:
+                        continue
+
+                    def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path):
+                        for f in files:
+                            # Filter BEFORE resolving: the child resolvers are
+                            # only meaningful for real source files, and running
+                            # them on directories/sidecars is wasted work.
+                            try:
+                                if not f.is_file() or f.suffix.lower() not in origin_exts:
+                                    continue
+                            except OSError:
+                                continue
+                            if _skip_check is not None and _skip_check(f, src_root, mode):
+                                continue
+                            out = resolver(f, mode, src_root, dest_path)
+                            # out is None for files the child skips (e.g. outside
+                            # the export marker in modes 6/7).
+                            yield f, (out.parent if out is not None else None)
+
+                    outputs = _resolve_all(files)
+                for f, out_folder in outputs:
+                    try:
+                        if not f.is_file() or f.suffix.lower() not in origin_exts:
+                            continue
+                    except OSError:
+                        continue
+                    if out_folder is None:
+                        continue
+                    key = os.path.normcase(str(out_folder))
+                    seen = by_dest.setdefault(key, {})
+                    # Outputs are named from the stem, so a stem clash is a clash
+                    # whatever the target extension is. normcase (not .lower()):
+                    # case-sensitive filesystems treat Foto.tif/foto.tif as
+                    # distinct files and must NOT collide.
+                    stem = os.path.normcase(f.stem)
+                    prev = seen.get(stem)
+                    if prev is None:
+                        seen[stem] = f
+                    elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
+                        collisions.append((prev, f, out_folder))
+        finally:
+            if _child is not None:
+                _child.logger.disabled = _child_logger_was_disabled
         return collisions
 
     @staticmethod
@@ -4967,6 +5017,9 @@ class InteractiveMenu:
         workflow['advanced_options']['sync'] = sync
         workflow['expert_flags'] = session.get('last_expert_flags') or ''
         workflow['auto_mode_used'] = False
+        # The manifest executor's overlap gate behaves differently when there
+        # is nobody to ask (refuse instead of confirm).
+        workflow['unattended'] = unattended
         
         # Use saved conversion type or fallback to defaults
         if last_conv_type:

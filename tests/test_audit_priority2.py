@@ -121,14 +121,170 @@ def test_mode6_file_outside_marker_is_skipped(menu, tmp_path):
 
 
 def test_decoder_output_folders_are_not_double_counted(menu, tmp_path):
-    """A TIFF sitting in a tiff_16bits subfolder is skipped by the child's
-    anti-ping-pong rule — the guard must skip it too."""
-    r = tmp_path / "r"
-    sub1, sub2 = r / "sub1", r / "sub2"
-    _tiffs(sub1 / "tiff_16bits" / "foto.tif", sub2 / "tiff_16bits" / "foto.tif")
-    entries = [(str(sub1), str(sub1), 5), (str(sub2), str(sub2), 5)]
+    """Mode 6: a TIFF inside 16b_tiff below the marker is skipped by the
+    child's anti-ping-pong rule — the guard must skip it too."""
+    sess = tmp_path / "sess"
+    e1 = sess / "_EXPORT" / "a" / "16b_tiff"
+    e2 = sess / "_EXPORT" / "b" / "16b_tiff"
+    _tiffs(e1 / "foto.tif", e2 / "foto.tif")
+    entries = [(str(sess / "_EXPORT" / "a"), str(sess / "_EXPORT" / "a"), 6),
+               (str(sess / "_EXPORT" / "b"), str(sess / "_EXPORT" / "b"), 6)]
     assert not menu._manifest_output_collisions(entries, TIF_EXTS,
-                                                origin="tiff", dest="jxl")
+                                                origin="tiff", dest="jxl",
+                                                export_marker="_EXPORT")
+
+
+def test_encoder_skip_applies_only_in_modes_6_7(menu, tmp_path):
+    """REGRESSION (2nd audit): outside modes 6/7 the encoder's finders are
+    UNFILTERED — a TIFF in a converted_tiff folder IS processed in mode 2,
+    so the guard must see the collision (it used to skip it everywhere)."""
+    out = tmp_path / "out"
+    a, b = tmp_path / "A", tmp_path / "B"
+    _tiffs(a / "converted_tiff" / "foto.tif", b / "foto.tif")
+    entries = [(str(a), str(out), 2), (str(b), str(out), 2)]
+    cols = menu._manifest_output_collisions(entries, TIF_EXTS,
+                                            origin="tiff", dest="jxl")
+    assert cols, "file the child processes (mode 2, unfiltered) was skipped by the guard"
+
+
+# ---------------------------------------------------------------------------
+# Transcoder / decoder directions (2nd audit regressions 1 and 2)
+# ---------------------------------------------------------------------------
+
+JPG_EXTS = {".jpg", ".jpeg"}
+JXL_EXTS = {".jxl"}
+
+
+def _files(*paths: Path, content=b"x"):
+    for p in paths:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+
+
+def test_transcoder_encode_skips_tool_output_dirs(menu, tmp_path):
+    """REGRESSION (2nd audit #1): JPEG->JXL skips the toolkit's own output
+    folders (recovered_jpeg etc.) on recursive scans — the guard's hardcoded
+    TIFF skip set did not cover them and REFUSED a legit manifest."""
+    out = tmp_path / "out"
+    a, b = tmp_path / "A", tmp_path / "B"
+    _files(a / "recovered_jpeg" / "foto.jpg", b / "foto.jpg")
+    entries = [(str(a), str(out), 2), (str(b), str(out), 2)]
+    cols = menu._manifest_output_collisions(entries, JPG_EXTS,
+                                            origin="jpeg", dest="jxl")
+    assert not cols, f"collision reported for a file the child never scans: {cols}"
+
+
+def test_transcoder_encode_still_flags_real_collisions(menu, tmp_path):
+    out = tmp_path / "out"
+    a, b = tmp_path / "A", tmp_path / "B"
+    _files(a / "deep" / "foto.jpg", b / "foto.jpg")
+    entries = [(str(a), str(out), 2), (str(b), str(out), 2)]
+    assert menu._manifest_output_collisions(entries, JPG_EXTS,
+                                            origin="jpeg", dest="jxl")
+
+
+def test_transcoder_decode_is_unfiltered(menu, tmp_path):
+    """JXL->JPEG finders are deliberately UNFILTERED (round-trip sources) —
+    a JXL inside 16b_jxl IS decoded, so the guard must see the collision."""
+    out = tmp_path / "out"
+    a, b = tmp_path / "A", tmp_path / "B"
+    _files(a / "16b_jxl" / "foto.jxl", b / "foto.jxl")
+    entries = [(str(a), str(out), 2), (str(b), str(out), 2)]
+    cols = menu._manifest_output_collisions(entries, JXL_EXTS,
+                                            origin="jxl", dest="jpeg")
+    assert cols, "decoder-direction file was skipped although the child reads it"
+
+
+def test_decoder_direction_is_unfiltered(menu, tmp_path):
+    """jxl->tiff (decoder) likewise skips nothing."""
+    out = tmp_path / "out"
+    a, b = tmp_path / "A", tmp_path / "B"
+    _files(a / "jxl_16bits" / "foto.jxl", b / "foto.jxl")
+    entries = [(str(a), str(out), 2), (str(b), str(out), 2)]
+    cols = menu._manifest_output_collisions(entries, JXL_EXTS,
+                                            origin="jxl", dest="tiff")
+    assert cols
+
+
+def test_guard_emits_no_child_warnings(menu, tmp_path):
+    """REGRESSION (2nd audit #3): resolving directories and sidecars through
+    the child spammed its logger (mode 4/5 warnings). The guard must filter
+    before resolving, and silence the child while it works (the real run
+    emits its own lines)."""
+    import logging
+    import jxl_tiff_encoder as enc
+    s = tmp_path / "Shoot_TIFF"
+    _tiffs(s / "foto.tif")
+    (s / "foto.xmp").write_text("<x/>")
+    (s / "subdir").mkdir()
+
+    records = []
+
+    class _H(logging.Handler):
+        def emit(self, r):
+            records.append(r)
+
+    h = _H()
+    enc.logger.addHandler(h)
+    try:
+        entries = [(str(s), str(s), 5)]
+        menu._manifest_output_collisions(entries, TIF_EXTS, origin="tiff", dest="jxl")
+    finally:
+        enc.logger.removeHandler(h)
+    assert records == [], f"guard leaked child warnings: {[r.getMessage() for r in records]}"
+    assert enc.logger.disabled is False, "child logger left disabled"
+
+
+# ---------------------------------------------------------------------------
+# W4 follow-up (2nd audit): overlap is refuse-unattended / confirm-attended
+# ---------------------------------------------------------------------------
+
+def _manifest_workflow(entries, unattended=False):
+    return {
+        'manifest_entries': entries,
+        'origin_format': 'tiff', 'dest_format': 'jxl',
+        'workers': 2, 'advanced_options': {}, 'dry_run': False,
+        'mode_config': {}, 'expert_flags': '',
+        'unattended': unattended,
+    }
+
+
+def test_overlap_refused_unattended(menu, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "2024"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    entries = [(str(root), str(root), 3), (str(sub), str(sub), 3)]
+    wf = _manifest_workflow(entries, unattended=True)
+    assert menu._execute_manifest_workflow(wf, {}) is False
+    assert "unattended" in capsys.readouterr().out
+
+
+def test_overlap_declined_attended(menu, tmp_path, monkeypatch):
+    root = tmp_path / "2024"
+    sub = root / "sub"
+    sub.mkdir(parents=True)
+    entries = [(str(root), str(root), 3), (str(sub), str(sub), 3)]
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(wp, "console", None)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    wf = _manifest_workflow(entries, unattended=False)
+    assert menu._execute_manifest_workflow(wf, {}) is False
+
+
+def test_overlap_confirmed_attended_runs(menu, tmp_path, monkeypatch):
+    root = tmp_path / "2024"
+    sub = root / "sub"
+    _tiffs(root / "a.tif", sub / "b.tif")
+    entries = [(str(root), str(root), 3), (str(sub), str(sub), 3)]
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(wp, "console", None)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    launched = []
+    monkeypatch.setattr(wp.InteractiveMenu, "_stream_child",
+                        lambda self, cmd, idle_timeout=3600: (launched.append(cmd), 0)[1])
+    wf = _manifest_workflow(entries, unattended=False)
+    assert menu._execute_manifest_workflow(wf, {}) is True
+    assert len(launched) == 2
 
 
 def test_legacy_entries_keep_flat_destination_scan(menu, tmp_path):
