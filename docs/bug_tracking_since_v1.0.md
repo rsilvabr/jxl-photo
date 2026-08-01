@@ -9,8 +9,73 @@ v1.5.2: 2026-04-13 (critical 8-bit fix)
 v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd_auto, and wrapper integration
 v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore and thumbnail handling
 v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
+v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.9.0_beta2 — Full-repo audit (2026-08-01)
+
+A fresh four-script audit (wrapper last), every finding reproduced against the
+pre-fix code before the fix was accepted. 47 new regression tests
+(`tests/test_audit_priority1-4.py`); full suite went 490 → 537. Two of the
+audit's suspected bugs were **proven false positives with real files** and are
+listed as such at the bottom.
+
+### Critical / data-safety
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 209 | **Mode-8 delete gate certified a file the run did not deliver.** With staging + overwrite of a pre-existing output, a FAILED `shutil.move` (locked destination, ACL) left the stale old file at the final path: it passed `exists()` + integrity, and the source was deleted while the fresh, verified output sat in staging under a UUID name. Same hole in all three children (decoder JXL→TIFF, encoder TIFF→JXL, both transcoder transcode and convert gates) | all 3 | ✅ FIXED (each group tracks which finals actually left staging — `moved_finals` — and the delete gate requires membership; `process_group_convert` now returns `(results, moved_finals)`) |
+| 210 | **`--delete-s` bypassed every wrapper gate.** The children run argparse with `allow_abbrev=True`, so any unambiguous prefix of `--delete-source` deletes — but `_flags_request_delete` only matched the full spelling. A preset storing `--delete-s --delete-c` passed the unattended gate and deleted originals from Task Scheduler with no confirmation anywhere — the exact scenario the gate exists to prevent | wrapper | ✅ FIXED (any unambiguous prefix of either spelling is detected; ambiguous prefixes like `--delete` / `--delete-c` alone are left to argparse's own rejection) |
+
+### Silent wrong behavior
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 211 | Auto mode with `--bit-depth 16` and no `--format` produced **8-bit PNGs via the wrong pipeline**: the JPEG+16-bit→PNG pre-switch tested `args.format == "jpeg"`, which is `None` (default JPEG) in `cmd_auto` and `"jpg"` under the alias — pairs were built as `.png` but the worker got `fmt="jpeg"` and ran djxl's JPEG branch without `--bits_per_sample=16` | transcoder | ✅ FIXED (switch evaluates the effective format in `cmd_auto` and `cmd_convert`) |
+| 212 | The manifest cross-entry collision guard only scanned each Source's **direct children**, but mode 2 is recursive-flat: `A\deep\foto.tif` (entry 1) and `B\foto.tif` (entry 2) sharing a Destination both become `<dest>\foto.jxl`, invisible to the wrapper and to any child (separate processes) | wrapper | ✅ FIXED (mode 2 scans recursively) |
+| 213 | An **empty Destination cell** (the README's recommended format for modes 1/3/4/5/6/7) falls back to Source at load time, which bucketed every entry separately and disabled the guard exactly for the mode-5 collapse (`sub1\foto.tif` + `sub2\foto.tif` → `<root>\JXL_16bits\foto.jxl`) it was built to catch | wrapper | ✅ FIXED (the guard now resolves each file's output with the child script's OWN resolver — lazy import, honoring user-edited folder constants — and skips files the child would skip: outside the export marker, decoder-output folders) |
+| 214 | Duplicate or **nested Source folders** re-processed the same files as two child processes writing the same outputs on sync-mtime luck; the collision guard deliberately ignores a file compared with itself, so it could not see this | wrapper | ✅ FIXED (manifest refused up front; `2024` vs `2024_final` is correctly NOT flagged) |
+
+### Consistency across the duplicated helpers (fixed in ALL copies)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 215 | `_replace_suffix_token` gave up when the FIRST regex match failed the left-boundary test: `MyTIFF_TIFF` → `MyTIFF_TIFF_JXL` instead of `MyTIFF_JXL` | all 4 | ✅ FIXED (`finditer`, first token-valid match; the four copies are logically identical for the first time, so the helper left `PINNED_VARIANTS` and is covered by the parity agreement test) |
+| 216 | `_marker_matches`' `endswith` had no left anchor: a custom `EXPORT_MARKER = "EXPORT"` matched a folder named `ReExport` (the default `_EXPORT` was safe — its own underscore anchors it) | all 4 | ✅ FIXED (endswith requires a token boundary or the marker's own leading anchor) |
+| 217 | `--clean-staging` only ran when `--staging` was ALSO passed — with staging from the script setting (the documented way) the flag was silently inert | encoder, decoder | ✅ FIXED (cleans the effective staging dir; warns when none is configured) |
+| 218 | The libjxl version-floor comparison accepted 0.11.0/0.11.1 while the warning text and README name 0.11.2 | encoder, decoder | ✅ FIXED |
+
+### Polish (manifest parsing, naming, logs, docs)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 219 | A fractional Mode cell (`7.5`) was silently truncated to mode 7 by `int(float())` | wrapper | ✅ FIXED (refused like any other invalid value) |
+| 220 | `_parse_child_summary` raised `ValueError` on a wrong-typed field, killing a finished manifest run at the summary block | wrapper | ✅ FIXED (wrong types degrade to 0) |
+| 221 | A manifest with mode-8 rows never got `--delete-source` from the wizard — "DELETE originals" was silently not honored, and the user was never asked | wrapper | ✅ FIXED (the wizard asks and marks `delete_source`; declining keeps sources, said out loud) |
+| 222 | Expert-flag deletion charged the wrapper's HHMM token but left the child's OWN confirmation active — a second, invisible prompt mid-stream | wrapper | ✅ FIXED (`--delete-confirm-off` appended after the flags when the wrapper gates) |
+| 223 | Comment rows could poison the Direction guard; a folder literally named `source` was eaten as the CSV header; stem comparison was unconditionally lowercased (false collisions on case-sensitive filesystems) | wrapper | ✅ FIXED (header requires a real column name; stems use `normcase`) |
+| 224 | Non-rich repeat panel showed `Quality` for distance-driven JPEG→JXL-lossy (the rich panel showed `Distance`) | wrapper | ✅ FIXED |
+| 225 | Decoder run header logged `Overwrite: no` when `OVERWRITE = True` came from the script setting | decoder | ✅ FIXED |
+| 226 | A marked 2-page group (1 real page at idx≥1 + 1 thumbnail) decoded with `--thumbnail-handling ignore` kept the `_page<N>` suffix — `scan_page1.tif` instead of `scan.tif`, breaking round-trip naming (standalone third-party `_pageN` files were and are untouched) | decoder | ✅ FIXED (`_group_naming_path` takes the pre-filter group size) |
+| 227 | Without imagecodecs, `--depth 8` decoded fine, then EVERY output failed the integrity check (which cannot read the JPEG preview page back) and was deleted as a partial — with a message blaming the TIFF | decoder | ✅ FIXED (up-front warning naming the package and `--no-preview`) |
+| 228 | The staging sweep logged `KEEP in staging (md5_fail)` for a file the worker had already deleted | transcoder | ✅ FIXED |
+| 229 | Docs drift: `--output-suffix` default, `reconvert=` log labels, "jxl_photo.py does not write a log" (it writes combined manifest logs), a decoder comment claiming ignored thumbnails are deleted (they are deliberately KEPT) | docs | ✅ FIXED |
+
+### Proven NOT bugs (with real files)
+
+- **exiftool `-s` parsing in `get_exif_software` / `read_existing_creator_tool`** —
+  the audit suspected bare-value output broke both parsers (D50 "auto" never
+  firing; the stale-ICC cleanup dead). Proven wrong against real ExifTool + a
+  real Capture One TIFF: a single `-s` still prints `Tag : value` (only
+  `-s -s -s` prints values only), the parse was correct, and
+  `should_apply_d50_patch` already returned `True` on the pre-fix code.
+  Locking tests pin the real output format.
+- **Real-run summary "omitting" marker skips** — `find_tiffs_mode6/7` filter
+  marker-outsiders before planning, so `skipped_by_mode` is unreachable and
+  `skipped_files` is always 0: dry-run and real-run summaries already agree.
 
 ---
 
