@@ -3360,11 +3360,29 @@ class InteractiveMenu:
         _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
         analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
 
+        # Overlapping source trees: one entry's Source inside another's means
+        # the same files are processed twice by SEPARATE child processes —
+        # same outputs, decided by sync-mtime luck. Refuse loudly.
+        overlaps = self._manifest_source_overlaps(manifest_entries)
+        if overlaps:
+            self._print_error(
+                "Aborting: manifest entries have duplicate or nested Source folders."
+            )
+            for a, b in overlaps[:10]:
+                print(f"  {a}  <->  {b}")
+            self._print_error(
+                "Split the run so each folder is covered by exactly one entry."
+            )
+            return False
+
         # Cross-entry duplicate outputs: each entry is a separate child process,
         # so no child can see a collision that spans two entries. Refuse loudly
         # instead of silently archiving only one of the two sources.
         collisions = self._manifest_output_collisions(
-            manifest_entries, analyzer._get_extensions(origin)
+            manifest_entries, analyzer._get_extensions(origin),
+            origin=origin, dest=dest,
+            export_marker=_marker,
+            export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
         )
         if collisions:
             self._print_error(
@@ -3657,7 +3675,10 @@ class InteractiveMenu:
             self._print_error(f"Could not write combined log: {e}")
             return None
 
-    def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set) -> List:
+    def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set,
+                                    origin: str = None, dest: str = None,
+                                    export_marker: str = None,
+                                    export_subfolder: str = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -3669,33 +3690,127 @@ class InteractiveMenu:
         A direct run aborts on this; a manifest run silently converts one and
         skips (or overwrites) the other while reporting 0 errors.
 
-        Only files DIRECTLY inside each source folder are considered: those are
-        exactly the ones that land in the entry's declared Destination. Files in
-        deeper folders resolve to a different destination and are already
-        covered by the child's own guard within its entry.
+        Outputs are resolved with the CHILD SCRIPT'S OWN resolver (imported
+        lazily, only when origin/dest are known). Two blind spots of the old
+        flat-Destination scan motivated this:
+
+          * Mode 2 is recursive-FLAT: every file under the source lands in the
+            Destination, but the old scan only looked at direct children, so
+            A/deep/foto.tif + B/foto.tif -> same foto.jxl went unseen.
+          * Modes 1/3/4/5/6/7 IGNORE the Destination column and compute their
+            output folders from script constants — and an empty Destination
+            cell falls back to Source at load time, which bucketed every entry
+            separately and detected nothing (the hand-written mode-5 manifest
+            this guard was built for).
+
+        Using the real resolver also honors user-edited folder constants and
+        returns None for files the child would skip (e.g. outside the export
+        marker in modes 6/7), keeping the guard free of collisions the child
+        would never produce.
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
+        resolver = None
+        if origin and dest:
+            _child = None
+            try:
+                if origin == 'tiff' and dest == 'jxl':
+                    import jxl_tiff_encoder as _child
+                    out_ext, conv_folder = '.jxl', _child.CONVERTED_JXL_FOLDER
+                elif origin == 'jxl' and dest == 'tiff':
+                    import jxl_tiff_decoder as _child
+                    out_ext, conv_folder = '.tif', _child.CONVERTED_TIFF_FOLDER
+                elif origin in ('jpeg', 'jxl'):
+                    import jxl_jpeg_transcoder as _child
+                    out_ext = '.jpg' if origin == 'jxl' else '.jxl'
+                    conv_folder = (_child.RECOVERED_JPEG_FOLDER if origin == 'jxl'
+                                   else _child.CONVERTED_JXL_FOLDER)
+            except ImportError:
+                _child = None
+            if _child is not None:
+                # The cmd builder passes these as CLI flags, which the children
+                # apply to the same module globals — mirror that here.
+                if export_marker:
+                    _child.EXPORT_MARKER = export_marker
+                if export_subfolder:
+                    for _g in ('EXPORT_TIFF_SUBFOLDER', 'EXPORT_JXL_SUBFOLDER',
+                               'EXPORT_JPEG_SUBFOLDER'):
+                        if hasattr(_child, _g):
+                            setattr(_child, _g, export_subfolder)
+
+                def resolver(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
+                    if mode in (0, 8):
+                        return f.parent / (f.stem + out_ext)
+                    if mode == 1:
+                        return src_root / conv_folder / (f.stem + out_ext)
+                    if mode == 2:
+                        return Path(dest_cell) / (f.stem + out_ext)
+                    if _child.__name__ == 'jxl_jpeg_transcoder':
+                        return _child.resolve_output_transcode(f, mode, src_root, origin == 'jxl')
+                    return _child.resolve_output(f, mode, src_root)
+
+        # Anti ping-pong: the children skip the other direction's output
+        # folders on recursive scans (unless one was explicitly requested as
+        # the mode-7 subfolder) — the guard must skip them too, or it would
+        # report collisions the child would never produce.
+        _skip_dirs = {"16b_tiff", "tiff_16bits", "converted_tiff"} if origin == 'tiff' \
+            else {"jxl_16bits", "converted_jxl", "16b_jxl"}
+        _requested = (export_subfolder or '').lower()
+
+        def _child_skips(f: Path, root: Path) -> bool:
+            try:
+                rel_parts = f.relative_to(root).parts[:-1]
+            except ValueError:
+                return False
+            return any(p.lower() in _skip_dirs and p.lower() != _requested
+                       for p in rel_parts)
+
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
-        for source, dest_path, _mode in manifest_entries:
+        for source, dest_path, mode in manifest_entries:
             if not dest_path:
                 continue
             src_root = Path(source)
             try:
                 if not src_root.is_dir():
                     continue
-                entries = sorted(src_root.iterdir())
             except OSError:
                 continue
-            key = os.path.normcase(str(Path(dest_path)))
-            seen = by_dest.setdefault(key, {})
-            for f in entries:
+            # Legacy manifests carry no Mode cell: the child detects the mode
+            # per folder downstream, so the flat Destination scan is the best
+            # the wrapper can do there (the old behavior for every entry).
+            if resolver is None or mode is None:
+                try:
+                    files = sorted(src_root.iterdir())
+                except OSError:
+                    continue
+                outputs = ((f, Path(dest_path)) for f in files)
+            else:
+                try:
+                    files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
+                except OSError:
+                    continue
+
+                def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path):
+                    for f in files:
+                        if _child_skips(f, src_root):
+                            continue
+                        out = resolver(f, mode, src_root, dest_path)
+                        # out is None for files the child skips (e.g. outside
+                        # the export marker in modes 6/7).
+                        yield f, (out.parent if out is not None else None)
+
+                outputs = _resolve_all(files)
+            for f, out_folder in outputs:
                 try:
                     if not f.is_file() or f.suffix.lower() not in origin_exts:
                         continue
                 except OSError:
                     continue
+                if out_folder is None:
+                    continue
+                key = os.path.normcase(str(out_folder))
+                seen = by_dest.setdefault(key, {})
                 # Outputs are named from the stem, so a stem clash is a clash
                 # whatever the target extension is.
                 stem = f.stem.lower()
@@ -3703,8 +3818,28 @@ class InteractiveMenu:
                 if prev is None:
                     seen[stem] = f
                 elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
-                    collisions.append((prev, f, dest_path))
+                    collisions.append((prev, f, out_folder))
         return collisions
+
+    @staticmethod
+    def _manifest_source_overlaps(manifest_entries: List) -> List:
+        """Find manifest entries whose Source folders are equal or nested.
+
+        Two entries covering the same tree re-process the same files as two
+        SEPARATE child processes: same outputs written twice, decided by
+        sync-mtime luck — and the collision guard above deliberately ignores
+        a file compared with itself, so it cannot see this.
+
+        Returns a list of (source_a, source_b) tuples.
+        """
+        roots = [(source, os.path.normcase(os.path.abspath(source)))
+                 for source, _dest, _mode in manifest_entries]
+        overlaps = []
+        for i, (src_a, a) in enumerate(roots):
+            for src_b, b in roots[i + 1:]:
+                if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                    overlaps.append((src_a, src_b))
+        return overlaps
 
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
                                    origin: str, dest: str, workers: int,
