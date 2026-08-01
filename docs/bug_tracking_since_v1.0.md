@@ -64,6 +64,22 @@ listed as such at the bottom.
 | 228 | The staging sweep logged `KEEP in staging (md5_fail)` for a file the worker had already deleted | transcoder | ✅ FIXED |
 | 229 | Docs drift: `--output-suffix` default, `reconvert=` log labels, "jxl_photo.py does not write a log" (it writes combined manifest logs), a decoder comment claiming ignored thumbnails are deleted (they are deliberately KEPT) | docs | ✅ FIXED |
 
+### Second-audit regressions (found in the fixes above, fixed before release)
+
+A second external audit reviewed these fixes and found three regressions in the
+priority-2 collision-guard rewrite (bugs 212/213), plus one over-strict gate:
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 230 | The guard's skip set was hardcoded and wrong for every direction: the transcoder skips ITS OWN output folders (`recovered_jpeg`/`jpeg_recovered`/`converted`) via `_is_tool_output_path`, the encoder skips decoder-output folders ONLY in modes 6/7 (its other finders are unfiltered), and the decoder and the transcoder's decode direction skip NOTHING (round-trip sources). False positive: a JPEG→JXL manifest over a tree containing `recovered_jpeg/` was refused. False negative: a mode-2 collision over `converted_tiff/` was missed | wrapper | ✅ FIXED (the guard delegates to each child's own skip logic per direction/mode) |
+| 231 | The child's resolver ran on directories and sidecars before the `is_file`/suffix filter, spamming mode-4/5 warnings (`Output outside input tree`, missing suffix token) through the wrapper — thousands of lines before the run started | wrapper | ✅ FIXED (filter before resolving; child logger silenced while the guard resolves — the real run emits its own lines) |
+| 232 | `_manifest_source_overlaps` was a hard abort, refusing legitimate intentional manifests (`E:\Fotos` in mode 6 + `E:\Fotos\2024_EXPORT` in mode 0 — different outputs, no conflict) | wrapper | ✅ CHANGED (attended: loud warning + confirmation, default No; unattended presets: still refused, fail-closed like the delete gates) |
+
+Coverage gap closed with these: the guard's tests now exercise the transcoder
+(encode/decode) and decoder directions, not just tiff2jxl.
+
+---
+
 ### Proven NOT bugs (with real files)
 
 - **exiftool `-s` parsing in `get_exif_software` / `read_existing_creator_tool`** —
