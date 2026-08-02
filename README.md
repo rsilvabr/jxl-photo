@@ -24,74 +24,13 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) and [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) to check. 
 
-## What's New
+## Current version
 
-**Current stable: v1.9.1** (2026-08-02) — recommended for everyone. This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
+**v1.9.1** (2026-08-02) — stable, recommended for everyone. A run now measures how much space it needs before it starts, stops cleanly instead of grinding when a disk fills, shows progress during a slow folder scan, reports what it left in staging, and manifest runs no longer stall silently before starting.
 
-v1.9.1 itself is a small fix on top of v1.9.0: **manifest runs no longer stall silently before starting.** The cross-entry collision guard skips its full recursive scan for the per-source output modes (0/1/3/6/7/8), where every entry writes inside its own Source tree and a cross-entry collision is impossible — mode 6/7 manifests over large libraries now start immediately. When the scan does run (modes 2/4/5, where entries can share an output folder), each entry prints `Collision check: scanning <folder> ...` so the wait is visible. No changes to conversion logic; safe update for everyone.
+[Release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1) · [What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4)
 
-> **Behaviour change in v1.9.0 — read this if you script the tools.** A run that fills its output volume now **aborts and exits 2** instead of failing every remaining file and exiting 1. Automation that treats "non-zero" as one bucket is unaffected; automation that distinguishes `1` (some files failed) from `2` (aborted) will now see `2` for a full disk — which is the retryable case.
-
-Highlights (v1.9.0):
-
-- **Space estimate before the run starts** — encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
-- **A full disk stops the run** — instead of failing every remaining file one by one. Queued files are reported as *not attempted*, and the run exits `2`.
-- **Slow folder scans show progress** — a 25-second walk on an external drive no longer looks frozen. Fast local scans stay silent.
-- **Staging leftovers are reported** — and `--clean-staging` sweeps the old ones.
-- **Distances below 0.05 do nothing** — cjxl clamps them; `0.02` and `0.05` give byte-identical files. Use `--distance 0` for real lossless.
-- **Three delete-gate bypasses closed** — `--delete-source` in the wrapper's expert-flags field could delete originals unattended.
-- **Corrupt saved workflows are refused** — a hand-edited config no longer ends the run in a traceback.
-- **Manifest entries with `..` refuse the whole file** — they used to be skipped while the run carried on.
-
-Full release notes: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1) · [v1.9.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0) · [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4)
-
----
-
-**Previous stable: v1.8.4** (2026-07-28) — superseded by v1.9.1, kept here for reference. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
-
-> **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
-
-Highlights:
-
-- **Your own distance in the menu** — entry `[2]` of Step 2 now shows the distance you set in option 4 (e.g. `d=0.05 — Your default`), instead of forcing a trip through `[4] Custom` on every single run. Ships as `0.1`, so nothing changes until you set it. `[4] Custom` comes pre-filled with the last value you used.
-- **Manifest runs are repeatable** — `Repeat last workflow` now handles them: it re-reads the CSV (so edits you made in Excel count), skips the pointless input-folder question and goes straight to overwrite/sync and dry-run. Keeping a library in sync is two keystrokes; it used to mean walking through the whole wizard again.
-- **Presets (option 7)** — save the last workflow under a name and run it later. Several recurring jobs (a nightly manifest sync, a per-shoot conversion) can coexist instead of overwriting one another in the single "last workflow" slot.
-- **Settings that actually apply** — changing workers/quality/effort/distance in option 4 now also drives the next run, repeats included. They used to write a separate value that no run ever read, so editing them appeared to do nothing.
-- **Manifest runs end with a real summary** — a per-folder table, a file-level TOTAL across every entry, and the **paths** of the files that failed. A multi-hour run over three folders used to end with `3 OK` (counting folders), the per-folder numbers already scrolled away into three separate logs. Also saved to `Logs/jxl_photo/<timestamp>.log`.
-- **Corrupt files no longer hide in the `skipped` count** — a TIFF with no readable pages was reported as "skipped by multipage policy", a policy that never asked for it. It now has its own count and its own section. Exit codes are unchanged: a damaged input is not a failed run.
-- **No silent data loss** — 16-bit decode failures, a "repaired" corrupt JXL, and weak delete verification now all fail loudly instead of quietly proceeding.
-- **Multi-page TIFFs are safe by default** — every page is kept (`--multipage-mode split`) instead of just page 0, and mode 8 refuses to delete a source whose pages were dropped.
-- **Every output is verified before being trusted** — a corrupt or partial JXL/JPEG/PNG/TIFF is caught and cleaned up instead of reported OK.
-- **Manifests are Excel-safe and collision-checked** — UTF-8 BOM for non-ASCII paths, cross-entry output collisions refused up front.
-- **Better throughput on large libraries** — the thread pool no longer stalls at folder boundaries.
-
-Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4) · [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) · [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2)
-
----
-
-## Release history
-
-| Version | Date | Highlights |
-|---------|------|------------|
-| **v1.9.1** | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
-| v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
-| v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
-| v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
-| v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
-| v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
-| v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
-| v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |
-| v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
-| v1.7.0 | 2026-07-12 | Multi-page TIFF support: split/skip/ignore, thumbnail handling, per-page ICC, marker-based reconstruction |
-| v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection |
-| v1.5.3 | 2026-04-15 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix, stable |
-| v1.4 | 2026-04-11 | JXL → JPEG workflow: lossy/lossless conversion modes |
-| v1.3 | 2026-04-11 | Auto Mode (beta), manifest system, embedded JPEG thumbnail |
-| v1.2 | 2026-04-05 | Basic/None decode modes, ICC mode selector |
-| v1.1 | 2026-04-05 | D50 patch modes, metadata strip, race-condition fixes |
-| v1.0 | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
-
-Older "What's New" sections in full: [docs/version_history.md](docs/version_history.md)
+> **If you script the tools:** since v1.9.0 a run that fills its output volume **aborts and exits 2** instead of failing every remaining file and exiting 1 — the retryable case. Details in the [changelog](#changelog).
 
 ---
 
@@ -655,7 +594,74 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-- Release notes: [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) · [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
+### What's new — v1.9.1 (current stable)
+
+**Released 2026-08-02, recommended for everyone.** This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
+
+v1.9.1 itself is a small fix on top of v1.9.0: **manifest runs no longer stall silently before starting.** The cross-entry collision guard skips its full recursive scan for the per-source output modes (0/1/3/6/7/8), where every entry writes inside its own Source tree and a cross-entry collision is impossible — mode 6/7 manifests over large libraries now start immediately. When the scan does run (modes 2/4/5, where entries can share an output folder), each entry prints `Collision check: scanning <folder> ...` so the wait is visible. No changes to conversion logic; safe update for everyone.
+
+> **Behaviour change in v1.9.0 — read this if you script the tools.** A run that fills its output volume now **aborts and exits 2** instead of failing every remaining file and exiting 1. Automation that treats "non-zero" as one bucket is unaffected; automation that distinguishes `1` (some files failed) from `2` (aborted) will now see `2` for a full disk — which is the retryable case.
+
+Highlights (v1.9.0):
+
+- **Space estimate before the run starts** — encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
+- **A full disk stops the run** — instead of failing every remaining file one by one. Queued files are reported as *not attempted*, and the run exits `2`.
+- **Slow folder scans show progress** — a 25-second walk on an external drive no longer looks frozen. Fast local scans stay silent.
+- **Staging leftovers are reported** — and `--clean-staging` sweeps the old ones.
+- **Distances below 0.05 do nothing** — cjxl clamps them; `0.02` and `0.05` give byte-identical files. Use `--distance 0` for real lossless.
+- **Three delete-gate bypasses closed** — `--delete-source` in the wrapper's expert-flags field could delete originals unattended.
+- **Corrupt saved workflows are refused** — a hand-edited config no longer ends the run in a traceback.
+- **Manifest entries with `..` refuse the whole file** — they used to be skipped while the run carried on.
+
+Full release notes: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1) · [v1.9.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0) · [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4)
+
+### v1.8.4 — previous stable
+
+**Released 2026-07-28, superseded by v1.9.1 and kept here for reference.** Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
+
+> **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
+
+Highlights:
+
+- **Your own distance in the menu** — entry `[2]` of Step 2 now shows the distance you set in option 4 (e.g. `d=0.05 — Your default`), instead of forcing a trip through `[4] Custom` on every single run. Ships as `0.1`, so nothing changes until you set it. `[4] Custom` comes pre-filled with the last value you used.
+- **Manifest runs are repeatable** — `Repeat last workflow` now handles them: it re-reads the CSV (so edits you made in Excel count), skips the pointless input-folder question and goes straight to overwrite/sync and dry-run. Keeping a library in sync is two keystrokes; it used to mean walking through the whole wizard again.
+- **Presets (option 7)** — save the last workflow under a name and run it later. Several recurring jobs (a nightly manifest sync, a per-shoot conversion) can coexist instead of overwriting one another in the single "last workflow" slot.
+- **Settings that actually apply** — changing workers/quality/effort/distance in option 4 now also drives the next run, repeats included. They used to write a separate value that no run ever read, so editing them appeared to do nothing.
+- **Manifest runs end with a real summary** — a per-folder table, a file-level TOTAL across every entry, and the **paths** of the files that failed. A multi-hour run over three folders used to end with `3 OK` (counting folders), the per-folder numbers already scrolled away into three separate logs. Also saved to `Logs/jxl_photo/<timestamp>.log`.
+- **Corrupt files no longer hide in the `skipped` count** — a TIFF with no readable pages was reported as "skipped by multipage policy", a policy that never asked for it. It now has its own count and its own section. Exit codes are unchanged: a damaged input is not a failed run.
+- **No silent data loss** — 16-bit decode failures, a "repaired" corrupt JXL, and weak delete verification now all fail loudly instead of quietly proceeding.
+- **Multi-page TIFFs are safe by default** — every page is kept (`--multipage-mode split`) instead of just page 0, and mode 8 refuses to delete a source whose pages were dropped.
+- **Every output is verified before being trusted** — a corrupt or partial JXL/JPEG/PNG/TIFF is caught and cleaned up instead of reported OK.
+- **Manifests are Excel-safe and collision-checked** — UTF-8 BOM for non-ASCII paths, cross-entry output collisions refused up front.
+- **Better throughput on large libraries** — the thread pool no longer stalls at folder boundaries.
+
+Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4) · [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) · [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2)
+
+### Release history
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **v1.9.1** | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
+| v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
+| v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
+| v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
+| v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
+| v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
+| v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
+| v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |
+| v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
+| v1.7.0 | 2026-07-12 | Multi-page TIFF support: split/skip/ignore, thumbnail handling, per-page ICC, marker-based reconstruction |
+| v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection |
+| v1.5.3 | 2026-04-15 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix, stable |
+| v1.4 | 2026-04-11 | JXL → JPEG workflow: lossy/lossless conversion modes |
+| v1.3 | 2026-04-11 | Auto Mode (beta), manifest system, embedded JPEG thumbnail |
+| v1.2 | 2026-04-05 | Basic/None decode modes, ICC mode selector |
+| v1.1 | 2026-04-05 | D50 patch modes, metadata strip, race-condition fixes |
+| v1.0 | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
+
+### Older history
+
+- Release notes before v1.8.2: [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) · [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) · [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) · [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) · [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0)
 - [Version history](docs/version_history.md) — "What's New" notes for releases before v1.8
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
