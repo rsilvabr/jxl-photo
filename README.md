@@ -145,9 +145,9 @@ Instead of memorizing modes 0-8, press **[A]** in Step 4. The wizard scans your 
 Generate a CSV to edit before running:
 ```csv
 Source,Destination,Mode,Direction
-F:\2025\Salvador\_Export\TIFF,F:\2025\Salvador\_Export\TIFF,6,tiff2jxl
-F:\2025\Ouro_Preto\_EXPORT\16bit,F:\2025\Ouro_Preto\_EXPORT\16B_JXL,7,tiff2jxl
-# F:\2025\Paraty\RAW,F:\2025\Paraty\JXL,0,tiff2jxl
+F:\2025\Rio de Janeiro\_Export\TIFF,F:\2025\Rio de Janeiro\_Export\TIFF,6,tiff2jxl
+F:\2025\São Paulo\_EXPORT\16bit,F:\2025\São Paulo\_EXPORT\16B_JXL,7,tiff2jxl
+# F:\2025\Recife\RAW,F:\2025\Recife\JXL,0,tiff2jxl
 ```
 
 - Edit paths, delete rows, reorder
