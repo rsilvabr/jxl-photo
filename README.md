@@ -368,36 +368,9 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
 
----
+### Setup feels heavy?
 
-##  Alternative: Simpler Setup (TIFF lossless compression)
-
-If the setup above feels overwhelming, there's an **easier alternative** that requires less installation:
-
-### [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate)
-A standalone PowerShell script that compresses TIFFs using ZIP/Deflate compression.
-
-**What you need:**
-- PowerShell 7 (or Windows PowerShell 5.1)
-- ImageMagick
-- ExifTool
-
-**What's NOT needed:**
-- Python or Python packages
-- libjxl (cjxl/djxl)
-
-**Compression comparison:**
-
-| Format | 16-bit Size | 8-bit Size |
-|--------|-------------|------------|
-| Uncompressed TIFF | ~260 MB | ~130 MB |
-| **ZIP/Deflate (PowerShell)** | ~220 MB (~15% smaller) | ~65 MB (~50% smaller) |
-| JXL lossless (this toolkit) | ~173 MB (~35% smaller) | ~43 MB (~67% smaller) |
-| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~8 MB (~94% smaller) |
-
-**Trade-off:** Easier to install, but less compression than JXL. Still better than nothing!
-
-When you're comfortable with ImageMagick and ExifTool, come back here for JXL with much better compression.
+There is a simpler alternative that needs no Python and no libjxl — only ImageMagick and ExifTool: [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate), a standalone PowerShell script that compresses TIFFs with ZIP/Deflate. Much less compression than JXL, but far less to install. [Side-by-side numbers at the end of this README](#related-project-a-simpler-tiff-only-alternative).
 
 ---
 
@@ -693,10 +666,25 @@ I am sharing these scripts because getting all of this to work correctly was une
 
 Getting there required finding and fixing several bugs that appears because of the specific combination of softwares I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
-
 ---
 
+## Related project: a simpler, TIFF-only alternative
 
+If this toolkit's setup is more than you want to deal with, [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate) is a standalone PowerShell script that compresses TIFFs with ZIP/Deflate compression.
+
+- **What you need:** PowerShell 7 (or Windows PowerShell 5.1), ImageMagick, ExifTool
+- **What's NOT needed:** Python or Python packages, libjxl (cjxl/djxl)
+
+| Format | 16-bit Size | 8-bit Size |
+|--------|-------------|------------|
+| Uncompressed TIFF | ~260 MB | ~130 MB |
+| **ZIP/Deflate (PowerShell)** | ~220 MB (~15% smaller) | ~65 MB (~50% smaller) |
+| JXL lossless (this toolkit) | ~173 MB (~35% smaller) | ~43 MB (~67% smaller) |
+| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~8 MB (~94% smaller) |
+
+**Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
+
+---
 
 ## License
 
