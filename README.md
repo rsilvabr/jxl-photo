@@ -118,9 +118,9 @@ The wizard guides you through: Source format → Destination → Directory → O
 
 ---
 
-##  Auto Mode (New in v1.3)
+##  Auto Mode (since v1.3)
 
-> **Beta:** Auto Mode is new and being actively tested. It works well for common folder structures, but if you encounter unexpected recommendations, use manual mode selection (0-8) which is fully stable and tested.
+> Auto Mode reads your folder structure and *recommends* a mode — it never runs anything you have not confirmed. The recommendation fits common layouts; when it does not match what you had in mind, pick the mode yourself with **[N]**.
 
 Instead of memorizing modes 0-8, press **[A]** in Step 4. The wizard scans your folder and:
 
@@ -306,9 +306,9 @@ Older versions may still work, but the current versions are what we test against
 
 #### exiftool Setup
 
-> **Note (v1.3+):** The scripts now automatically detect both `exiftool.exe` and `exiftool(-k).exe`. Renaming is no longer required, but still works if you prefer.
+> **No renaming needed:** the scripts detect both `exiftool.exe` and `exiftool(-k).exe`.
 
-The Windows download comes as `exiftool(-k).exe`. **For v1.2 and earlier, you need to rename it:**
+The Windows download comes as `exiftool(-k).exe`. If you prefer the plain name anyway:
 
 ```powershell
 # Option A: Rename the file
@@ -318,7 +318,7 @@ Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
 Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
 
-The `(-k)` suffix means "keep console open" — the original behavior. The scripts now handle both names automatically.
+The `(-k)` suffix means "keep console open" — the original behavior. Either name works.
 
 ### 3. Add to PATH (PowerShell)
 
@@ -364,7 +364,7 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
-| `exiftool` not recognized | File still named `exiftool(-k).exe` (v1.2 and earlier) | For v1.3+, automatic detection works. For earlier versions, rename to `exiftool.exe` (see step 2) |
+| `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
 | `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
