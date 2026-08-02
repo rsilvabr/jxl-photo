@@ -485,7 +485,7 @@ exiftool -Make -Model roundtrip.tif
 
 ## Behavior, Defaults & Known Limitations
 
-Mostly this is what the tools do by default and why they do it — the defaults come first, then the places where other software (film scanner suites, image viewers) does not follow along, then the genuine limits. Several of those last ones live in `cjxl`/`djxl` rather than in these scripts, and they are labelled as such. Nothing here is a bug report; when something *is* a bug, it says so.
+How the tools behave by default, where other software does not follow along, and the limits worth knowing before a large batch.
 
 ### Multi-page TIFFs: every page is converted by default
 
