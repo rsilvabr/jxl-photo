@@ -3460,12 +3460,28 @@ class InteractiveMenu:
         # Cross-entry duplicate outputs: each entry is a separate child process,
         # so no child can see a collision that spans two entries. Refuse loudly
         # instead of silently archiving only one of the two sources.
-        collisions = self._manifest_output_collisions(
-            manifest_entries, analyzer._get_extensions(origin),
-            origin=origin, dest=dest,
-            export_marker=_marker,
-            export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
-        )
+        # The scan itself walks every Source recursively and can take minutes on
+        # large trees — so skip it when collisions are impossible: modes
+        # 0/1/3/6/7/8 write only inside each Source's own tree (in-place, its
+        # subfolders, or its own _EXPORT dir), and overlapping/nested Sources
+        # were already refused above. Only modes 2/4/5 can land two entries in
+        # the same folder (shared Destination, shared sibling/rename target).
+        _entry_modes = {m for _, _, m in manifest_entries if m is not None}
+        _has_legacy_unknown_mode = any(m is None for _, _, m in manifest_entries)
+        _needs_collision_scan = _has_legacy_unknown_mode or bool(_entry_modes & {2, 4, 5})
+        if not _needs_collision_scan:
+            if RICH_AVAILABLE and console:
+                console.print("[dim]Collision check: skipped (per-source output modes).[/dim]")
+            else:
+                print("Collision check: skipped (per-source output modes).")
+            collisions = []
+        else:
+            collisions = self._manifest_output_collisions(
+                manifest_entries, analyzer._get_extensions(origin),
+                origin=origin, dest=dest,
+                export_marker=_marker,
+                export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
+            )
         if collisions:
             self._print_error(
                 "Aborting: manifest entries would write different files to the same output."
@@ -3894,6 +3910,12 @@ class InteractiveMenu:
                         continue
                     outputs = ((f, Path(dest_path)) for f in files)
                 else:
+                    # This walk is the slow part on large trees (recursive glob
+                    # + per-file stat + resolver per source file) — say so.
+                    if RICH_AVAILABLE and console:
+                        console.print(f"[dim]Collision check: scanning {src_root} ...[/dim]")
+                    else:
+                        print(f"Collision check: scanning {src_root} ...")
                     try:
                         files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
                     except OSError:
