@@ -483,7 +483,9 @@ exiftool -Make -Model roundtrip.tif
 
 ---
 
-## Known Limitations & Behaviors
+## Behavior, Defaults & Known Limitations
+
+Mostly this is what the tools do by default and why they do it — the defaults come first, then the places where other software (film scanner suites, image viewers) does not follow along, then the genuine limits. Several of those last ones live in `cjxl`/`djxl` rather than in these scripts, and they are labelled as such. Nothing here is a bug report; when something *is* a bug, it says so.
 
 ### Multi-page TIFFs: every page is converted by default
 
@@ -521,6 +523,10 @@ The spread across photos at one distance is 1.1×–2.1×, so treat any single n
 
 Counter-intuitive but reproducible across four real photos: at 8 bits, `--distance 0` produced a **smaller** file than `--distance 0.05` (38.6% vs 46.4% of source on one, 42.6% vs 47.8% on another). JXL's lossless mode is very efficient at 8 bits, while VarDCT at a very low distance carries overhead it cannot amortise. If your source is 8-bit and you want small files, measure before assuming lossy wins.
 
+### Default re-run behavior differs per script
+
+The TIFF encoder/decoder default to **smart sync** (reconvert when the source is newer than the existing output — there is no plain "skip existing" CLI mode), while the JPEG transcoder **skips existing outputs** by default. Use `--overwrite` (always) or `--sync` (source newer) to control it explicitly. See each script's README for details.
+
 ### Film scanners: IR channel / Digital ICE
 
 If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back **may break that feature**. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. **Test with one file before batch-processing important film scans.**
@@ -539,10 +545,6 @@ Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce ver
 | **XnView MP** | Shows `Color Profile: sRGB` for lossy JXL regardless of the real space | Lossy JXL stores compact numeric primaries, not an ICC blob; XnView falls back to an "sRGB" label |
 
 For reliable EXIF and color, use **XnView MP** or **digiKam**. If an image looks *heavily* desaturated, that **is** a real bug — please report it.
-
-### Default re-run behavior differs per script
-
-The TIFF encoder/decoder default to **smart sync** (reconvert when the source is newer than the existing output — there is no plain "skip existing" CLI mode), while the JPEG transcoder **skips existing outputs** by default. Use `--overwrite` (always) or `--sync` (source newer) to control it explicitly. See each script's README for details.
 
 ### Matrix decode mode is 8-bit internally
 
