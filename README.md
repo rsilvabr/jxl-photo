@@ -26,11 +26,13 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## What's New
 
-**In beta: v1.9.0** ([beta3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0_beta3)) — the release where the tool stops flying blind. A run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging. **v1.8.4 remains the recommended stable release** until v1.9.0 is promoted.
+**Current stable: v1.9.1** (2026-08-02) — recommended for everyone. This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
+
+v1.9.1 itself is a small fix on top of v1.9.0: **manifest runs no longer stall silently before starting.** The cross-entry collision guard skips its full recursive scan for the per-source output modes (0/1/3/6/7/8), where every entry writes inside its own Source tree and a cross-entry collision is impossible — mode 6/7 manifests over large libraries now start immediately. When the scan does run (modes 2/4/5, where entries can share an output folder), each entry prints `Collision check: scanning <folder> ...` so the wait is visible. No changes to conversion logic; safe update for everyone.
 
 > **Behaviour change in v1.9.0 — read this if you script the tools.** A run that fills its output volume now **aborts and exits 2** instead of failing every remaining file and exiting 1. Automation that treats "non-zero" as one bucket is unaffected; automation that distinguishes `1` (some files failed) from `2` (aborted) will now see `2` for a full disk — which is the retryable case.
 
-Highlights:
+Highlights (v1.9.0):
 
 - **Space estimate before the run starts** — encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
 - **A full disk stops the run** — instead of failing every remaining file one by one. Queued files are reported as *not attempted*, and the run exits `2`.
@@ -41,11 +43,11 @@ Highlights:
 - **Corrupt saved workflows are refused** — a hand-edited config no longer ends the run in a traceback.
 - **Manifest entries with `..` refuse the whole file** — they used to be skipped while the run carried on.
 
-Full release notes: [v1.9.0_beta3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0_beta3) · [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4) · [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3)
+Full release notes: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1) · [v1.9.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0) · [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4)
 
 ---
 
-**Last stable: v1.8.4** (2026-07-28) — recommended for everyone. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
+**Previous stable: v1.8.4** (2026-07-28) — superseded by v1.9.1, kept here for reference. Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
@@ -71,8 +73,9 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| v1.9.0 *(beta)* | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
-| **v1.8.4** | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
+| **v1.9.1** | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
+| v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
+| v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
 | v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
 | v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
 | v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
