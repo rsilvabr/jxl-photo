@@ -238,3 +238,83 @@ def test_every_listed_helper_is_actually_duplicated() -> None:
         f"SHARED_HELPERS lists helpers that no script defines: {missing}. "
         f"They were renamed or removed — update the list."
     )
+
+
+# ---------------------------------------------------------------------------
+# Call sites
+#
+# Comparing helper BODIES is not enough. The staging sweep drifted twice with
+# three byte-identical copies of _clean_staging(): the transcoder swept
+# `args.staging` (so the documented TEMP2_DIR setting was never swept) while the
+# other two swept the effective dir, and ALL THREE swept during a --dry-run.
+# Neither is visible in the function; both live at the call site.
+# ---------------------------------------------------------------------------
+
+BACKENDS = ["jxl_tiff_encoder.py", "jxl_tiff_decoder.py", "jxl_jpeg_transcoder.py"]
+
+
+def _parent_map(tree: ast.AST) -> dict:
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _calls_to(script: str, func_name: str):
+    """(call node, ancestors) for every call to `func_name` in `script`."""
+    tree = ast.parse((REPO / script).read_text(encoding="utf-8", errors="replace"))
+    parents = _parent_map(tree)
+    found = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == func_name):
+            ancestors, cur = [], node
+            while cur in parents:
+                cur = parents[cur]
+                ancestors.append(cur)
+            found.append((node, ancestors))
+    return found
+
+
+@pytest.mark.parametrize("script", BACKENDS)
+def test_clean_staging_sweeps_the_effective_staging_dir(script: str) -> None:
+    """Staging can come from the TEMP2_DIR script setting with no --staging flag
+    in sight, so sweeping `args.staging` silently skips the documented case."""
+    calls = _calls_to(script, "_clean_staging")
+    assert len(calls) == 1, (
+        f"{script}: expected exactly one _clean_staging() call, found {len(calls)}"
+    )
+    call, _ancestors = calls[0]
+    assert len(call.args) == 1
+    arg = call.args[0]
+    assert isinstance(arg, ast.Name) and arg.id == "TEMP2_DIR", (
+        f"{script}: _clean_staging() must sweep the effective staging dir "
+        f"(TEMP2_DIR), not {ast.dump(arg)}."
+    )
+
+
+@pytest.mark.parametrize("script", BACKENDS)
+def test_clean_staging_is_gated_on_dry_run(script: str) -> None:
+    """A dry run must not delete anything — and these leftovers are precisely
+    the failed outputs the KEEP path preserved for inspection."""
+    call, ancestors = _calls_to(script, "_clean_staging")[0]
+    guards = " ".join(ast.dump(a.test) for a in ancestors if isinstance(a, ast.If))
+    assert "dry_run" in guards, (
+        f"{script}: the _clean_staging() call is not guarded by a dry-run check, "
+        f"so a simulation would sweep the staging directory."
+    )
+
+
+@pytest.mark.parametrize("script", BACKENDS)
+def test_staging_leftovers_are_reported_for_the_effective_dir(script: str) -> None:
+    """Same rule as the sweep: reporting `args.staging` leaves the leak
+    invisible whenever staging came from the script setting."""
+    calls = _calls_to(script, "_report_staging_leftovers")
+    assert calls, f"{script}: nothing reports staging leftovers any more"
+    for call, _ancestors in calls:
+        arg = call.args[0]
+        assert isinstance(arg, ast.Name) and arg.id == "TEMP2_DIR", (
+            f"{script}: _report_staging_leftovers() must be given the effective "
+            f"staging dir (TEMP2_DIR), not {ast.dump(arg)}."
+        )
