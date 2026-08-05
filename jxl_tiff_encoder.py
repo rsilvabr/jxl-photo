@@ -2205,6 +2205,23 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
             rp = Path(p)
         return (os.path.splitdrive(str(rp))[0] or str(rp.anchor) or str(rp)).upper()
 
+    def _free_bytes(p):
+        """Free space on the volume holding `p`, or None.
+
+        Output folders usually do NOT exist yet at preflight time (the children
+        create them per group), and disk_usage() raises on a missing path — so
+        the destination line was silently dropped on exactly the first run,
+        when the estimate matters most. Walk up to the nearest existing
+        ancestor: it is on the same volume, which is all this measures.
+        """
+        probe = Path(p)
+        for candidate in (probe, *probe.parents):
+            try:
+                return shutil.disk_usage(str(candidate)).free
+            except OSError:
+                continue
+        return None
+
     ordered = sorted(per_group.values(), reverse=True)
     staging_vol = _volume(staging_dir) if staging_dir else None
 
@@ -2216,14 +2233,12 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
     # of all of them (that would refuse runs that fit), not just the largest.
     if staging_dir:
         peak = sum(ordered[:2]) * ratio
-        try:
-            free = shutil.disk_usage(str(staging_dir)).free
+        free = _free_bytes(staging_dir)
+        if free is not None:
             verdict = "OK" if free > peak else "NOT ENOUGH"
             line = (f"Preflight: staging {staging_dir} -- {_fmt_size(free)} free, "
                     f"peak ~{_fmt_size(peak)} ({verdict})")
             logger.warning(line) if free <= peak else logger.info(line)
-        except OSError:
-            pass
 
     # Destination volumes accumulate for the whole run, so there the sum IS the
     # number. Split by volume: two output folders can live on two drives.
@@ -2241,9 +2256,8 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
         by_vol.setdefault(_volume(dest), [Path(dest), 0])[1] += in_bytes
     for vol, (probe, in_bytes) in by_vol.items():
         need = in_bytes * ratio
-        try:
-            free = shutil.disk_usage(str(probe)).free
-        except OSError:
+        free = _free_bytes(probe)
+        if free is None:
             continue
         tight = free <= need
         if not tight and staging_vol is not None and vol == staging_vol:
@@ -3297,11 +3311,9 @@ def main():
         # byte-identical output. Someone asking for 0.02 to get "closer to
         # lossless" gets exactly the 0.05 file and should hear so, rather than
         # believe they bought quality they did not.
-        if 0 < args.distance < _MIN_EFFECTIVE_DISTANCE:
-            logger.warning(
-                f"--distance {args.distance} behaves exactly like "
-                f"{_MIN_EFFECTIVE_DISTANCE}: cjxl clamps every lossy distance below "
-                f"that to the same output. Use --distance 0 for true lossless.")
+        # The clamp WARNING is emitted after setup_logger() below, not here:
+        # the module logger has no handler yet, so it would land on raw stderr
+        # via logging.lastResort and never reach the log file.
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort
@@ -3313,14 +3325,8 @@ def main():
         USE_RAM_FOR_PNG = args.ram
     if args.staging is not None:
         TEMP2_DIR = args.staging
-    if args.clean_staging:
-        # Clean the EFFECTIVE staging dir — requiring --staging alongside
-        # made the flag silently inert whenever staging came from the
-        # script setting (the documented way).
-        if TEMP2_DIR is not None:
-            _clean_staging(TEMP2_DIR)
-        else:
-            logger.warning("--clean-staging: no staging directory configured; nothing to clean")
+    # NOTE: --clean-staging is applied after setup_logger() below (it must be
+    # auditable, and it must not run on a dry run).
     if args.export_marker:
         global EXPORT_MARKER
         EXPORT_MARKER = args.export_marker
@@ -3350,6 +3356,27 @@ def main():
     if args.strip:
         STRIP_METADATA = True
     log_file = setup_logger()
+
+    # Everything below is logged AFTER setup_logger() on purpose: on the
+    # module-level logger these have no handler at all, so INFO lines vanish
+    # and warnings go to raw stderr instead of the log file.
+    if args.distance is not None and 0 < args.distance < _MIN_EFFECTIVE_DISTANCE:
+        logger.warning(
+            f"--distance {args.distance} behaves exactly like "
+            f"{_MIN_EFFECTIVE_DISTANCE}: cjxl clamps every lossy distance below "
+            f"that to the same output. Use --distance 0 for true lossless.")
+
+    # Sweep the EFFECTIVE staging dir — requiring --staging alongside made the
+    # flag silently inert whenever staging came from the script setting (the
+    # documented way). Never on a dry run: the leftovers are failed outputs
+    # deliberately kept for inspection, and a simulation must not touch disk.
+    if args.clean_staging:
+        if TEMP2_DIR is None:
+            logger.warning("--clean-staging: no staging directory configured; nothing to clean")
+        elif args.dry_run:
+            logger.info("--clean-staging: skipped (dry run); re-run without --dry-run to sweep")
+        else:
+            _clean_staging(TEMP2_DIR)
 
     # cjxl availability is checked AFTER the dry-run block (a simulation
     # never invokes cjxl, so it must not require it). See below.
@@ -3420,6 +3447,14 @@ def main():
         else:
             tiffs = find_tiffs_recursive(args.input)
         output_root = args.input
+
+    # Mode 1 always writes to <source folder>/converted_jxl/, so an output
+    # positional is silently discarded. Accepting it without a word looked like
+    # the destination had been honored.
+    if args.mode == 1 and args.output is not None:
+        logger.warning(f"--mode 1 ignores the output folder ({args.output}): "
+                       f"outputs go to <source folder>/{CONVERTED_JXL_FOLDER}/. "
+                       f"Use --mode 2 to write everything into one folder.")
 
     logger.info(f"Files found: {len(tiffs)}")
 

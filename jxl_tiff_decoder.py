@@ -1467,6 +1467,30 @@ def apply_icc_transform(img_array, source_icc, target_icc, tmp_dir):
 # TIFF OUTPUT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# tifffile validates `subfiletype=` against its own enum, which accepts only
+# 0/1/2 and rejects 4 outright ("invalid SubfileType MASK"). Film scanners tag
+# the IR/transparency page 4, so reproducing it needs the raw TIFF tag.
+_SUBFILETYPE_TAG = 254
+_SUBFILETYPE_ACCEPTED = frozenset({1, 2})
+
+
+def _page_subfiletype_kwargs(value) -> dict:
+    """TiffWriter.write() kwargs reproducing SubfileType `value` exactly.
+
+    {} for 0 (the default — no tag needed), the documented parameter for the
+    values tifffile accepts, and a raw extratag for the rest. The old code
+    mapped everything it could not pass to 2 (PAGE), which silently demoted a
+    scanner's IR/mask page to an ordinary extra page on every round trip.
+    """
+    value = int(value or 0)
+    if value == 0:
+        return {}
+    if value in _SUBFILETYPE_ACCEPTED:
+        return {"subfiletype": value}
+    # (tag, dtype LONG, count, value, writeonce)
+    return {"extratags": [(_SUBFILETYPE_TAG, 4, 1, value, True)]}
+
+
 def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
     """Copy metadata from JXL to TIFF using exiftool."""
     try:
@@ -1786,7 +1810,7 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 'software': '',
             }
             if main_subfiletype:
-                kwargs_main['subfiletype'] = main_subfiletype
+                kwargs_main.update(_page_subfiletype_kwargs(main_subfiletype))
             if main_data.ndim == 3 and main_data.shape[2] in (2, 4):
                 kwargs_main['extrasamples'] = 'UNASSALPHA'
             if icc_data:
@@ -2167,16 +2191,13 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         kwargs['iccprofile'] = entry_icc
                     # Restore the original SubfileType when it was non-zero.
                     # Thumbnails are marked with subfiletype=1 regardless.
-                    # SubfileType 4 (MASK) is not accepted by tifffile for normal
-                    # image pages; map it to 2 (PAGE) which preserves the
-                    # "additional page" semantics.
+                    # Values tifffile refuses on its own parameter (4/MASK, used
+                    # by film scanners for the IR page) go in as a raw tag —
+                    # see _page_subfiletype_kwargs.
                     if is_thumb:
                         kwargs['subfiletype'] = 1
-                    elif entry_subfiletype != 0:
-                        if entry_subfiletype == 4:
-                            kwargs['subfiletype'] = 2
-                        else:
-                            kwargs['subfiletype'] = entry_subfiletype
+                    elif entry_subfiletype:
+                        kwargs.update(_page_subfiletype_kwargs(entry_subfiletype))
 
                     write_method(pixels, **kwargs)
 
@@ -2942,14 +2963,8 @@ Examples:
         TIFF_COMPRESSION = args.compression
     if args.staging:
         TEMP2_DIR = args.staging
-    if args.clean_staging:
-        # Clean the EFFECTIVE staging dir — requiring --staging alongside
-        # made the flag silently inert whenever staging came from the
-        # script setting (the documented way).
-        if TEMP2_DIR is not None:
-            _clean_staging(TEMP2_DIR)
-        else:
-            logger.warning("--clean-staging: no staging directory configured; nothing to clean")
+    # NOTE: --clean-staging is applied after setup_logger() below (it must be
+    # auditable, and it must not run on a dry run).
     if args.export_marker:
         global EXPORT_MARKER
         EXPORT_MARKER = args.export_marker
@@ -2967,6 +2982,18 @@ Examples:
         RECONSTRUCT_MULTIPAGE = False
 
     log_file = setup_logger()
+
+    # Sweep the EFFECTIVE staging dir, and only here: before setup_logger() the
+    # module logger has no handler, so every line of the sweep report was
+    # dropped. Never on a dry run either — the leftovers are failed outputs
+    # deliberately kept for inspection, and a simulation must not touch disk.
+    if args.clean_staging:
+        if TEMP2_DIR is None:
+            logger.warning("--clean-staging: no staging directory configured; nothing to clean")
+        elif args.dry_run:
+            logger.info("--clean-staging: skipped (dry run); re-run without --dry-run to sweep")
+        else:
+            _clean_staging(TEMP2_DIR)
 
     # Required tools first: a missing djxl/exiftool must be one clear message,
     # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
@@ -3023,6 +3050,13 @@ Examples:
             # not create folders on disk.
         else:
             output_root = args.output or args.input
+
+    # Mode 1 always writes to <source folder>/converted_tiff/, so an output
+    # positional is silently discarded (same rule as the encoder).
+    if args.mode == 1 and args.output is not None:
+        logger.warning(f"--mode 1 ignores the output folder ({args.output}): "
+                       f"outputs go to <source folder>/{CONVERTED_TIFF_FOLDER}/. "
+                       f"Use --mode 2 to write everything into one folder.")
 
     logger.info(f"Files found: {len(jxls)}")
 

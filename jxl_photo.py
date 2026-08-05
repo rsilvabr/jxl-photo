@@ -3461,19 +3461,15 @@ class InteractiveMenu:
         # so no child can see a collision that spans two entries. Refuse loudly
         # instead of silently archiving only one of the two sources.
         # The scan itself walks every Source recursively and can take minutes on
-        # large trees — so skip it when collisions are impossible: modes
-        # 0/1/3/6/7/8 write only inside each Source's own tree (in-place, its
-        # subfolders, or its own _EXPORT dir), and overlapping/nested Sources
-        # were already refused above. Only modes 2/4/5 can land two entries in
-        # the same folder (shared Destination, shared sibling/rename target).
-        _entry_modes = {m for _, _, m in manifest_entries if m is not None}
-        _has_legacy_unknown_mode = any(m is None for _, _, m in manifest_entries)
-        _needs_collision_scan = _has_legacy_unknown_mode or bool(_entry_modes & {2, 4, 5})
-        if not _needs_collision_scan:
+        # large trees, so it is skipped when collisions are IMPOSSIBLE — see
+        # _manifest_needs_collision_scan for exactly when that holds.
+        if not self._manifest_needs_collision_scan(manifest_entries, _marker):
+            _skip_msg = ("Collision check: skipped (no two entries can share an "
+                         "output folder).")
             if RICH_AVAILABLE and console:
-                console.print("[dim]Collision check: skipped (per-source output modes).[/dim]")
+                console.print(f"[dim]{_skip_msg}[/dim]")
             else:
-                print("Collision check: skipped (per-source output modes).")
+                print(_skip_msg)
             collisions = []
         else:
             collisions = self._manifest_output_collisions(
@@ -3565,6 +3561,7 @@ class InteractiveMenu:
 
             # Execute
             rc = self._run_subprocess(cmd)
+            aborted = False
             if rc == 0:
                 ok_count += 1
                 state = "ok"
@@ -3576,6 +3573,16 @@ class InteractiveMenu:
                     console.print("  [yellow]Cancelled by user[/yellow]")
                 else:
                     print("  Cancelled by user")
+            elif rc == 2:
+                # The child gave up on a condition that spans the whole run
+                # (a full output volume, a safety abort) — every remaining
+                # entry would hit the same wall. Stopping here is the point
+                # of exit 2: the children already refuse to grind on, and the
+                # manifest loop relaunching them entry after entry put that
+                # behavior straight back.
+                error_count += 1
+                state = "aborted"
+                aborted = True
             else:
                 error_count += 1
                 state = "failed"
@@ -3584,6 +3591,28 @@ class InteractiveMenu:
                 "index": i, "mode": detected_mode, "source": source,
                 "state": state, "summary": self._last_child_summary,
             })
+
+            if aborted:
+                not_started = total_entries - i
+                msg = ("Entry aborted (exit 2): stopping the manifest. "
+                       "Nothing was deleted; fix the cause and re-run — sync "
+                       "mode resumes where this stopped.")
+                if not_started:
+                    msg += f" {not_started} remaining entry(ies) were NOT started."
+                self._print_error(msg)
+                for j, (src_rest, dst_rest, m_rest) in enumerate(
+                        manifest_entries[i:], i + 1):
+                    entry_reports.append({
+                        # Resolved the same way the loop would have: the recap
+                        # formats this as an int, and a legacy manifest's empty
+                        # Mode cell arrives here as None.
+                        "index": j,
+                        "mode": analyzer.detect_mode_for_entry(
+                            src_rest, dst_rest, original_mode=m_rest),
+                        "source": src_rest,
+                        "state": "not started", "summary": None,
+                    })
+                break
 
         # Summary: per-entry recap + grand total + every failed file. A manifest
         # runs for hours and the user walks away — coming back to a single
@@ -3772,6 +3801,72 @@ class InteractiveMenu:
             # already done — the block was printed to screen either way.
             self._print_error(f"Could not write combined log: {e}")
             return None
+
+    @staticmethod
+    def _entry_marker_dir(source: str, export_marker: str) -> Optional[str]:
+        """Directory that modes 6/7 anchor `source` on, or None if the marker is
+        not part of the Source path.
+
+        Modes 6/7 write into <marker>/<constant>/, which is a SIBLING of the
+        source folder rather than a child of it — so two entries anchored on the
+        SAME marker directory share one output folder even when their Sources do
+        not overlap at all (_EXPORT/TIFF16 and _EXPORT/AdobeRGB).
+
+        Every part of a manifest Source is a directory, so (unlike the children,
+        which anchor on a FILE path) there is no filename to exclude here.
+        """
+        parts = Path(source).parts
+        marker_lower = (export_marker or "_EXPORT").lower()
+        idx = next((i for i, p in enumerate(parts)
+                    if _marker_matches(p.lower(), marker_lower)), None)
+        if idx is None:
+            return None
+        return str(Path(*parts[:idx + 1]))
+
+    def _manifest_needs_collision_scan(self, manifest_entries: List,
+                                       export_marker: str) -> bool:
+        """Can any two entries write to the same output folder?
+
+        The scan below is expensive (a recursive walk per Source), so it is worth
+        skipping when the answer is provably no. It is NOT enough to look at the
+        mode alone — the earlier "modes 0/1/3/6/7/8 write only inside their own
+        Source tree" rule was wrong twice over:
+
+          * mode 0 is the one "per-source" mode that HONORS the Destination
+            column, so it is only in-place while Destination == Source;
+          * modes 6/7 anchor on the export marker and write to a SIBLING of the
+            Source, shared by every entry under the same marker.
+
+        Modes 1/3/8 do derive their output from the Source itself (subfolder or
+        in-place), and overlapping/nested Sources were already refused above, so
+        those genuinely cannot collide across entries. Modes 2/4/5 always can.
+        """
+        marker_dirs: Dict[str, str] = {}
+        for source, dest_path, mode in manifest_entries:
+            # Legacy manifest (no Mode cell): the mode is detected per folder
+            # downstream, so nothing can be ruled out here.
+            if mode is None:
+                return True
+            if mode in (2, 4, 5):
+                return True
+            if mode == 0:
+                same = bool(dest_path) and (
+                    os.path.normcase(str(Path(dest_path)))
+                    == os.path.normcase(str(Path(source))))
+                if not same:
+                    return True
+            elif mode in (6, 7):
+                marker = self._entry_marker_dir(source, export_marker)
+                if marker is None:
+                    # The marker is BELOW the Source, so this entry's files can
+                    # anchor on any number of markers — too little information
+                    # to rule a collision out. Fail towards scanning.
+                    return True
+                key = os.path.normcase(marker)
+                if key in marker_dirs:
+                    return True
+                marker_dirs[key] = source
+        return False
 
     def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set,
                                     origin: str = None, dest: str = None,

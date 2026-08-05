@@ -1126,8 +1126,15 @@ def should_process(src: Path, dst: Path, smart: bool, reconvert_val: bool) -> bo
     if not dst.exists():
         return True
     if smart:
-        # Check if source is newer than destination
-        return src.stat().st_mtime > dst.stat().st_mtime
+        # Check if source is newer than destination. A file vanishing between
+        # the exists() above and these stats (TOCTOU) must not raise: this runs
+        # BEFORE the worker's own try block, so the exception escaped as a bare
+        # "error" with no useful message. Treat it as stale and attempt the
+        # conversion, exactly like the TIFF encoder/decoder do.
+        try:
+            return src.stat().st_mtime > dst.stat().st_mtime
+        except OSError:
+            return True
     # Not smart mode: use reconvert_val
     return reconvert_val
 
@@ -1695,13 +1702,42 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     return results
 
+def _apply_staging_args(args) -> None:
+    """Resolve the effective staging directory and sweep it when asked.
+
+    Two rules all three cmd_* entry points share, which is why they live here
+    rather than being repeated (and drifting) three times:
+
+      * `--staging` OVERRIDES the TEMP2_DIR script setting; its ABSENCE must not
+        erase it. The old unconditional `TEMP2_DIR = args.staging` made the
+        documented setting dead code (README: "Set TEMP2_DIR to SSD when source
+        is on HDD").
+      * `--clean-staging` sweeps the EFFECTIVE directory, and never on a dry
+        run: the leftovers it deletes are the failed outputs the KEEP path
+        deliberately preserved, and a simulation must not touch the disk.
+
+    Call AFTER setup_logger(): on the module-level logger these messages have no
+    handler, so the INFO lines vanish and the warnings land on raw stderr.
+    """
+    global TEMP2_DIR
+    if args.staging is not None:
+        TEMP2_DIR = args.staging
+    if not getattr(args, "clean_staging", False):
+        return
+    if TEMP2_DIR is None:
+        logger.warning("--clean-staging: no staging directory configured; nothing to clean")
+    elif getattr(args, "dry_run", False):
+        logger.info("--clean-staging: skipped (dry run); re-run without --dry-run to sweep")
+    else:
+        _clean_staging(TEMP2_DIR)
+
+
 def cmd_transcode(args, auto_decode: bool = False):
     """Returns (errors, cancelled): error count and whether the user declined
     the delete confirmation."""
     global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR
     _counter = {"done": 0, "total": 0}
 
-    TEMP2_DIR = args.staging
     # Extract reconvert settings
     smart_mode = args.sync
     reconvert_explicit = args.overwrite
@@ -1710,20 +1746,22 @@ def cmd_transcode(args, auto_decode: bool = False):
     if args.delete_source:
         DELETE_SOURCE = True
 
+    # Determine direction
+    decode = args.decode or auto_decode
+
+    log_file = setup_logger()
+    _apply_staging_args(args)
+
     # A stale staging checksums.md5 from a crashed previous run would leak
-    # wrong entries into this run's destination folders — start clean.
-    if TEMP2_DIR is not None:
+    # wrong entries into this run's destination folders — start clean. Skipped
+    # on a dry run for the same reason as the sweep above: it is a deletion.
+    if TEMP2_DIR is not None and not args.dry_run:
         try:
             stale = Path(TEMP2_DIR) / CHECKSUMS_FILENAME
             if stale.exists():
                 stale.unlink()
         except OSError:
             pass
-
-    # Determine direction
-    decode = args.decode or auto_decode
-
-    log_file = setup_logger()
 
     op_type = "TRANSCODE lossless" if not decode else "TRANSCODE decode (lossless recovery)"
     # Determine mode string
@@ -2299,15 +2337,15 @@ def cmd_convert(args, from_jxl: bool = True):
     # below (a --force-convert on a JXL folder flips from_jxl at file
     # collection; validating here would check the wrong direction).
 
-    TEMP2_DIR = args.staging
     smart_mode = args.sync
     reconvert_explicit = args.overwrite
-    
+
     # Handle DELETE_SOURCE from CLI
     if args.delete_source:
         DELETE_SOURCE = True
 
     log_file = setup_logger()
+    _apply_staging_args(args)
 
     # Determine direction and set defaults
     if from_jxl:
@@ -2588,8 +2626,6 @@ def cmd_auto(args):
         print("ERROR: --icc-profile/--to-srgb requires ImageMagick (magick) in PATH.")
         sys.exit(1)
 
-    TEMP2_DIR = args.staging
-
     # Handle --no-md5 (was silently ignored on this path)
     if args.no_md5:
         STORE_MD5 = False
@@ -2598,17 +2634,19 @@ def cmd_auto(args):
     if args.delete_source:
         DELETE_SOURCE = True
 
+    log_file = setup_logger()
+    _apply_staging_args(args)
+
     # A stale staging checksums.md5 from a crashed previous run would leak
-    # wrong entries into this run's destination folders — start clean.
-    if TEMP2_DIR is not None:
+    # wrong entries into this run's destination folders — start clean. Skipped
+    # on a dry run for the same reason as the sweep: it is a deletion.
+    if TEMP2_DIR is not None and not args.dry_run:
         try:
             stale = Path(TEMP2_DIR) / CHECKSUMS_FILENAME
             if stale.exists():
                 stale.unlink()
         except OSError:
             pass
-
-    log_file = setup_logger()
     
     # Collect JPEG files (encode direction), PNG files (convert encode direction)
     # and JXL files (decode/convert direction). Modes 0 and 1 are flat.
@@ -2958,7 +2996,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
 # MAIN ENTRY POINT (Auto-routing)
 # --------------------------------------------─
 
-def main():
+def build_parser():
+    """The CLI parser, split out of main() so tests can build an args namespace
+    without going through sys.argv (and without duplicating 90 add_argument
+    calls that would then drift)."""
     parser = argparse.ArgumentParser(
         description="JPEG XL Toolkit - Auto-routing edition",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3057,6 +3098,11 @@ Examples:
     parser.add_argument("--force-convert", action="store_true",
                         help="Force convert command")
 
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -3137,8 +3183,11 @@ Examples:
             print(f"WARNING: cjxl {'.'.join(map(str, _v))} is older than the supported "
                   f"minimum (0.11.2); conversions may fail in confusing ways.")
 
-    if args.clean_staging and args.staging:
-        _clean_staging(args.staging)
+    # NOTE: --clean-staging runs inside each cmd_* (see _apply_staging_args),
+    # not here: it needs the EFFECTIVE staging dir (which may come from the
+    # TEMP2_DIR script setting, not just --staging) and it must never run on a
+    # dry run — sweeping is a real deletion of the outputs the KEEP path
+    # deliberately preserved for inspection.
 
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.
@@ -3173,8 +3222,10 @@ Examples:
         sys.exit(3)
 
     # Whatever this run could not move out is still sitting on the staging
-    # drive; saying so is what keeps the leak from being invisible.
-    _report_staging_leftovers(args.staging)
+    # drive; saying so is what keeps the leak from being invisible. Reports the
+    # EFFECTIVE directory: staging can come from the TEMP2_DIR script setting
+    # with no --staging flag in sight.
+    _report_staging_leftovers(TEMP2_DIR)
 
     # Exit 2 = aborted, and it outranks exit 1: a run that gave up early is not
     # the same event as a run that finished with some bad files, and automation
