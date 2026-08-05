@@ -316,7 +316,9 @@ Options:
   --clean-staging Before converting, delete staging leftovers from EARLIER runs
                   (failed outputs kept for inspection). Only files this tool
                   wrote, never subfolders, and nothing touched in the last hour
-                  (a concurrent run may still own it)
+                  (a concurrent run may still own it). Sweeps the EFFECTIVE
+                  staging dir, so it works with TEMP2_DIR set in the script and
+                  no --staging flag. Never runs under --dry-run
 ```
 
 ### Exit codes

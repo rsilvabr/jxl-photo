@@ -10,8 +10,54 @@ v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd
 v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore and thumbnail handling
 v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
+v1.9.2 / 2026-08-05: Post-v1.9.1 audit — 10 bugs fixed (2 data-safety), validated against the real 738 MB scanner files (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.9.2 — Post-v1.9.1 audit (2026-08-05)
+
+Four-script audit with the codec paths exercised against the real fixtures
+(Capture One 16-bit exports, and the 738 MB RGB+IR film scans whose IR page is a
+separate `SubfileType=4` page). 32 new regression tests
+(`tests/test_audit_round23.py`) plus 9 call-site parity tests; full suite went
+546 → 587. Every fix was proven against the pre-fix code first.
+
+The core codec paths came out clean: lossless TIFF→JXL→TIFF is pixel-identical
+for RGB, grayscale, gray+alpha, RGBA and 8-bit sources, and lossy `d=0.1` shows
+no brightness bias on the big scanner profiles (the "cautious" ICC strategy
+correctly skips the 217 KB SilverFast profile). The bugs were all in the
+surrounding policy: which runs are refused, what a dry run is allowed to touch,
+and what reaches the log.
+
+### Data-safety
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 234 | **The manifest collision guard skipped the modes that actually collide.** #233 narrowed the scan to modes 2/4/5 on the premise that "modes 0/1/3/6/7/8 write only inside each Source's own tree" — false twice: mode 0 HONORS the Destination column, and modes 6/7 write to `<marker>/16B_JXL`, a **sibling** of the Source shared by every entry under the same marker. Two sibling sources under one `_EXPORT` (`TIFF16` + `AdobeRGB`, which do NOT overlap, so the overlap guard stays quiet) produced ONE output: the second entry logged `SKIP (sync: JXL up to date)` and the run exited 0. Reproduced end-to-end | wrapper | ✅ FIXED (`_manifest_needs_collision_scan`: mode 0 scanned unless Destination == Source; modes 6/7 scanned when two entries share a marker dir, or when the marker sits below the Source; 1/3/8 still skipped, and the cheap path is preserved for the auto-generated one-entry-per-export-folder shape) |
+| 235 | **`--clean-staging` deleted files during `--dry-run`.** The sweep ran at argument-parsing time, before the dry-run gate, in all three children. A simulation silently removed the failed outputs the KEEP path had preserved for inspection | all 3 | ✅ FIXED (sweep moved into the real-run path, with an explicit "skipped (dry run)" line; the transcoder's stale `checksums.md5` deletion is gated the same way) |
+
+### Consistency across the duplicated helpers (fixed in ALL copies)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 236 | **The transcoder's documented `TEMP2_DIR` setting was dead code.** All three `cmd_*` did `TEMP2_DIR = args.staging` unconditionally, wiping the script-level setting whenever `--staging` was absent — while `docs/README_jxl_jpeg_transcoder.md` tells users to edit it ("Set `TEMP2_DIR` to SSD when source is on HDD"). The encoder and decoder assign conditionally; this is the #217 fix that never reached the third copy | transcoder | ✅ FIXED (`_apply_staging_args`: `--staging` overrides, its absence does not erase; `_report_staging_leftovers` also reports the effective dir) |
+| 237 | The helper-parity test compared helper BODIES only, so three byte-identical copies of `_clean_staging` hid two call-site drifts (#235, #236) | tests | ✅ FIXED (AST call-site checks: the sweep must take `TEMP2_DIR`, must be dry-run gated, and leftovers must be reported for the effective dir — these 9 tests fail on the pre-fix tree in exactly the 5 places that had drifted) |
+
+### Visibility
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 238 | **Messages emitted before `setup_logger()` were lost.** The module logger has no handler at that point: `logger.info` was dropped outright (the entire `--clean-staging` sweep report — files vanished with no line anywhere) and `logger.warning` fell through to `logging.lastResort`, printing unformatted on stderr and never reaching the log file (the `--distance` clamp warning) | all 3 | ✅ FIXED (both moved after `setup_logger()`) |
+| 239 | **A manifest kept launching entries after a child exited 2.** Exit 2 means "the output volume filled, nothing was deleted, retry later" — the whole point of the v1.9.0 abort. The wrapper folded it into the generic failure branch and launched every remaining entry against the same full disk, restoring the grinding the abort had removed | wrapper | ✅ FIXED (rc 2 stops the loop, reports how many entries were not started, and lists them as `not started` in the recap) |
+
+### Fidelity and polish
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 240 | **`SubfileType=4` (MASK) was downgraded to 2 on decode.** Film scanners tag the IR/transparency page 4; `tifffile` rejects the value on its `subfiletype=` parameter, so the decoder mapped it to 2 (PAGE) and every round trip silently demoted the IR page to an ordinary extra page. Confirmed on the real `raw_scan`/`raw_scan_2` files | decoder | ✅ FIXED (`_page_subfiletype_kwargs` writes the raw tag 254 via `extratags` for values tifffile refuses; the real 738 MB 3-page scan now round-trips `0/1/4` exactly) |
+| 241 | Three smaller ones: `should_process()` could raise `OSError` on a TOCTOU **outside** the worker's try block (bare "error", no message) where the encoder/decoder handle it; `_preflight_space` dropped the destination estimate whenever the output folder did not exist yet — i.e. on the first run, when it matters most; and mode 1 accepted an output positional it silently ignores | transcoder, encoder, decoder | ✅ FIXED (TOCTOU treated as stale; preflight walks up to the nearest existing ancestor, same volume; mode 1 warns that the folder is ignored) |
 
 ---
 

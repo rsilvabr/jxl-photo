@@ -570,6 +570,18 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
+### Unreleased — post-v1.9.1 audit fixes
+
+Ten fixes from a four-script audit, validated against real Capture One exports and the 738 MB RGB+IR film scans. The conversion core came out clean (lossless round trips are pixel-identical for RGB, grayscale, gray+alpha, RGBA and 8-bit; lossy `d=0.1` shows no colour bias even with the 217 KB SilverFast profile); everything below is about which runs get refused, what a dry run may touch, and what reaches the log.
+
+- **The manifest collision guard was skipping the modes that actually collide.** v1.9.1 skipped the scan for modes 0/1/3/6/7/8 on the premise that each entry writes inside its own Source tree. That is wrong for mode 0, which honours the Destination column, and for modes 6/7, which write to `<marker>/16B_JXL` — a **sibling** of the Source, shared by every entry under the same marker. Two sibling sources under one `_EXPORT` produced a single output, with the second entry reporting `SKIP (sync: up to date)` and the run exiting 0. Modes 1/3/8 still skip the scan, and so do 6/7 when each entry has its own marker — the ordinary one-entry-per-export-folder manifest still starts immediately.
+- **`--clean-staging` no longer deletes anything during `--dry-run`** (all three scripts). It used to sweep at argument-parsing time, before the dry-run gate.
+- **A manifest now stops when a child aborts (exit 2)** instead of launching every remaining entry against the same full disk.
+- **Scanner IR pages keep their role.** `SubfileType=4` (MASK) was being downgraded to 2 on decode, so a film scan's IR page came back as an ordinary extra page.
+- **The transcoder's `TEMP2_DIR` setting works again** — it was being overwritten with `None` on every run, so editing it in the script did nothing despite being documented.
+- **Messages that used to vanish now reach the log** — the `--distance` clamp warning and the whole `--clean-staging` sweep report were emitted before the logger was configured.
+- Smaller: a vanished file mid-run no longer surfaces as a bare "error" in the transcoder; the space estimate no longer skips a destination folder that does not exist yet (i.e. the first run); mode 1 says so when it ignores an output folder you passed.
+
 ### What's new — v1.9.1 (current stable)
 
 **Released 2026-08-02, recommended for everyone.** This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
