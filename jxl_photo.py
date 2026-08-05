@@ -210,6 +210,28 @@ def _session_number_error(session: Dict) -> Optional[str]:
     return None
 
 
+def _session_int(session: Dict, field: str, fallback: int) -> int:
+    """A stored workflow number as a real int.
+
+    _session_number_error accepts 7.0 and "7" on purpose — Excel and
+    hand-edited JSON both produce them — but every consumer then did a plain
+    int()/str() on the raw value: `int("8.0")` raises ValueError (a traceback
+    out of a repeat/preset run), and `--workers 8.0` reached the CHILD's
+    argparse as a command line the user never typed. Validate there, coerce
+    here, so the two can never disagree again.
+
+    Anything this returns has already passed _session_number_error on the
+    normal paths; the fallback only covers absent/blank fields.
+    """
+    raw = session.get(field)
+    if raw in (None, ""):
+        return fallback
+    try:
+        return _as_exact_int(raw)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     """Replace the FIRST occurrence of suffix_from in a folder name, but only
     when it is a complete token (bounded by _, -, space, or string edges) —
@@ -299,6 +321,13 @@ def _is_manifest_header_row(row) -> bool:
         return False
     return any(cell.strip().lower() == expected
                for cell, expected in zip(row[1:4], ("destination", "mode", "direction")))
+
+
+# Manifest modes whose child walks the WHOLE tree under the Source. Modes 0 and
+# 1 are flat in all three children (find_files_mode0 / find_jxls_flat /
+# find_jpegs_flat), so a Source nested inside another Source there can never
+# hand the same file to two child processes.
+_RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -863,7 +892,9 @@ class FolderAnalyzer:
             result['recommended_mode'] = 3
             confidence = 'high'
             reasoning.append(f"Recursive structure detected — {len(result['file_distribution'])} subfolders with files")
-            reasoning.append(f"Mode 3 recommended — creates '{self.dest}_files' subfolder in each location")
+            reasoning.append(f"Mode 3 recommended — creates "
+                             f"'{_dest_folder_names(self.origin, self.dest)[1]}' "
+                             f"subfolder in each location")
 
         # Mode 2: flat output folder (only when there really are multiple
         # subfolders — a single subfolder is better served by mode 1)
@@ -878,7 +909,8 @@ class FolderAnalyzer:
             result['recommended_mode'] = 1
             confidence = 'medium'
             reasoning.append("Single subfolder structure detected")
-            reasoning.append(f"Mode 1 recommended — creates 'converted_{self.dest}' subfolder")
+            reasoning.append(f"Mode 1 recommended — creates "
+                             f"'{_dest_folder_names(self.origin, self.dest)[0]}' subfolder")
 
         # Mode 0: flat (files in root)
         elif result['has_flat_structure'] and result['total_files'] > 0:
@@ -925,11 +957,16 @@ class FolderAnalyzer:
         if len(analysis['file_distribution']) > 3:
             lines.append(f"  ... and {len(analysis['file_distribution'])-3} more folder(s)")
 
+        # Real folder names per direction — the literal "{dest}" placeholders
+        # that used to sit here were never formatted, so the report advertised
+        # folders no script creates (same class as bugs #161/#169, which fixed
+        # the wizard tables and missed the analyzer).
+        _sub1, _sub3 = _dest_folder_names(self.origin, self.dest)
         mode_names = {
             0: "In-place (same folder)",
-            1: "Subfolder (converted_{dest})",
+            1: f"Subfolder ({_sub1})",
             2: "Flat (all to one folder)",
-            3: "Recursive subfolders ({dest}_files)",
+            3: f"Recursive subfolders ({_sub3})",
             4: "Folder rename (suffix swap)",
             5: "Sibling folder",
             6: f"Marker export (full)",
@@ -954,6 +991,42 @@ class FolderAnalyzer:
         lines.append(f"{'='*60}\n")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _outermost_with_counts(eligible: List[Tuple[str, int]]) -> List[Tuple[str, int]]:
+        """Keep only the OUTERMOST folders, folding the rest into their parent.
+
+        Modes 3/4/5 make the child walk the whole tree under each Source
+        (find_tiffs_recursive and friends), so an entry nested inside another
+        entry hands the SAME files to a second child process: identical outputs
+        written twice, decided by sync-mtime luck. The wrapper's own overlap
+        guard then refuses the manifest its own Auto Mode had just generated.
+
+        The dropped folders' files are still converted — by the outer entry that
+        recurses into them — so their counts are folded in, keeping the preview
+        honest instead of under-reporting.
+
+        `eligible` is [(relative_folder, count)]; '.' means the scan root. Only
+        folders present in `eligible` count as ancestors: modes 4/5 exclude the
+        root on purpose, and it must not silently swallow every entry there.
+        """
+        def _key(folder: str) -> tuple:
+            if folder in ('.', ''):
+                return ()
+            return tuple(p.lower() for p in Path(folder).parts)
+
+        keys = {_key(f): f for f, _c in eligible}
+        # Shallowest ancestor wins: range() walks outwards-in, so a chain
+        # a/ -> a/b/ -> a/b/c/ collapses onto a/ rather than onto a/b/.
+        owner = {}
+        for folder, _count in eligible:
+            k = _key(folder)
+            owner[folder] = next((keys[k[:i]] for i in range(len(k)) if k[:i] in keys),
+                                 folder)
+        totals: Dict[str, int] = {}
+        for folder, count in eligible:
+            totals[owner[folder]] = totals.get(owner[folder], 0) + count
+        return [(f, totals[f]) for f, _c in eligible if owner[f] == f]
 
     def compute_folder_mappings(self, analysis: Dict, mode: int) -> List[Tuple[str, str, int]]:
         """Compute source -> destination folder mappings for a given mode.
@@ -1041,11 +1114,15 @@ class FolderAnalyzer:
             # from manifest runs while a direct run converted them.
             # Modes 4/5 below still exclude the root on purpose — there the
             # output would land OUTSIDE the selected input tree.
-            for folder, count in analysis['file_distribution'].items():
-                if count > 0:
-                    src = str(self.root / folder) if folder != '.' else str(self.root)
-                    dest = str(Path(src) / _dest_folder_names(self.origin, self.dest)[1])
-                    mappings.append((src, dest, count))
+            #
+            # Nested folders are dropped: the child RECURSES from each Source,
+            # so an entry inside another entry would re-run the same files as a
+            # second process (see _outermost_with_counts).
+            for folder, count in self._outermost_with_counts(
+                    [(f, c) for f, c in analysis['file_distribution'].items() if c > 0]):
+                src = str(self.root / folder) if folder != '.' else str(self.root)
+                dest = str(Path(src) / _dest_folder_names(self.origin, self.dest)[1])
+                mappings.append((src, dest, count))
 
         elif mode in [4, 5]:
             # Mode 4: rename (replace origin with dest in folder name)
@@ -1055,21 +1132,26 @@ class FolderAnalyzer:
                 'jpeg': 'JPEG_recovered',
                 'png': 'JPEG_recovered',
             }.get(self.dest, 'JXL_16bits' if self.origin == 'tiff' else 'JXL_jpeg')
-            for folder, count in analysis['file_distribution'].items():
-                if count > 0 and folder != '.':
-                    src = str(self.root / folder)
-                    if mode == 4:
-                        # Replace origin in the FOLDER NAME (not the relative
-                        # path — the scripts operate on parent.name) with the
-                        # script's actual destination suffix.
-                        _dest_suffix = 'JPEG_recovered' if self.dest in ('jpeg', 'png') else self.dest.upper()
-                        new_name = _replace_suffix_token(Path(folder).name, self.origin, _dest_suffix)
-                        if new_name == Path(folder).name:
-                            new_name = Path(folder).name + "_" + _dest_suffix
-                        dest = str(self.root / str(Path(folder).parent / new_name))
-                    else:
-                        dest = str(Path(src).parent / sibling_name)
-                    mappings.append((src, dest, count))
+            # Same recursion rule as mode 3, but the root is not an eligible
+            # entry here, so it must not be treated as an ancestor either —
+            # otherwise every entry would collapse onto a folder that is never
+            # emitted and the manifest would come out empty.
+            for folder, count in self._outermost_with_counts(
+                    [(f, c) for f, c in analysis['file_distribution'].items()
+                     if c > 0 and f != '.']):
+                src = str(self.root / folder)
+                if mode == 4:
+                    # Replace origin in the FOLDER NAME (not the relative
+                    # path — the scripts operate on parent.name) with the
+                    # script's actual destination suffix.
+                    _dest_suffix = 'JPEG_recovered' if self.dest in ('jpeg', 'png') else self.dest.upper()
+                    new_name = _replace_suffix_token(Path(folder).name, self.origin, _dest_suffix)
+                    if new_name == Path(folder).name:
+                        new_name = Path(folder).name + "_" + _dest_suffix
+                    dest = str(self.root / str(Path(folder).parent / new_name))
+                else:
+                    dest = str(Path(src).parent / sibling_name)
+                mappings.append((src, dest, count))
 
         return mappings
 
@@ -2894,11 +2976,14 @@ class InteractiveMenu:
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
                 # Multi-page TIFF options
                 mp_default = self.config.config.last_multipage_mode or "split"
+                # The default has been `split` since v1.8.2 (mp_default above
+                # says so too); advertising `ignore` as the default pointed the
+                # user at the one choice that silently discards image data.
                 console.print(
-                    "  [dim]ignore   = encode page 0 only, drop the rest (default)\n"
-                    "  skip      = leave multi-page TIFFs untouched\n"
-                    "  split     = one JXL per real page; thumbnails per the next question\n"
-                    "  split_all = one JXL per page, thumbnails always included[/dim]")
+                    "  [dim]split     = one JXL per real page; thumbnails per the next question (default)\n"
+                    "  split_all = one JXL per page, thumbnails always included\n"
+                    "  ignore    = encode page 0 only, DROP the rest\n"
+                    "  skip      = leave multi-page TIFFs untouched[/dim]")
                 multipage_mode = Prompt.ask(
                     "Multi-page TIFF handling",
                     choices=["ignore", "skip", "split", "split_all"],
@@ -2934,19 +3019,25 @@ class InteractiveMenu:
                 embed_thumb = thumb_input.startswith('y')
                 # Multi-page TIFF options
                 mp_default = self.config.config.last_multipage_mode or "split"
-                print("  ignore    = encode page 0 only, drop the rest (default)")
-                print("  skip      = leave multi-page TIFFs untouched")
-                print("  split     = one JXL per real page; thumbnails per the next question")
+                print("  split     = one JXL per real page; thumbnails per the next question (default)")
                 print("  split_all = one JXL per page, thumbnails always included")
-                mp_input = input(f"Multi-page TIFF handling (ignore/skip/split/split_all) [{mp_default}]: ").strip().lower() or mp_default
-                multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else "ignore"
+                print("  ignore    = encode page 0 only, DROP the rest")
+                print("  skip      = leave multi-page TIFFs untouched")
+                mp_input = input(f"Multi-page TIFF handling (split/split_all/ignore/skip) [{mp_default}]: ").strip().lower() or mp_default
+                # A typo must fall back to the DEFAULT, not to the one choice
+                # that discards pages: `ignore` here silently dropped the IR /
+                # mask page of every film scan. The rich branch cannot reach
+                # this (it uses choices=).
+                multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else mp_default
                 thumbnail_mode = "exclude"
                 thumbnail_suffix = "_thumbnail"
                 # split_all always includes thumbnails; only "split" has a choice.
                 if multipage_mode == "split":
                     tm_default = self.config.config.last_thumbnail_mode or "exclude"
                     tm_input = input(f"Embedded thumbnail/preview pages (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
-                    thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else "exclude"
+                    # Fall back to the DEFAULT on a typo, not to a fixed value
+                    # (same rule as multipage_mode above).
+                    thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else tm_default
                 if multipage_mode == "split_all" or thumbnail_mode == "include":
                     ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
@@ -3200,9 +3291,14 @@ class InteractiveMenu:
 
     def _wizard_confirm(self, workflow: Dict) -> bool:
         """Step 7: Final Confirmation"""
+        # Mode 8 is in-place RECURSIVE; deleting the originals is a separate
+        # opt-in that shows up below as "DELETE SOURCE: ON (!)". Calling the
+        # mode itself "DELETE originals" made a plain mode-8 run (TIFF and JXL
+        # coexisting, the default) read as destructive.
         mode_names = {
             0: "In-place", 1: "Subfolder", 2: "Flat", 3: "Recursive subfolders",
-            4: "Rename (suffix)", 5: "Sibling", 6: "EXPORT full", 7: "EXPORT only", 8: "DELETE originals"
+            4: "Rename (suffix)", 5: "Sibling", 6: "EXPORT full", 7: "EXPORT only",
+            8: "In-place recursive"
         }
 
         extra_info = []
@@ -3933,12 +4029,21 @@ class InteractiveMenu:
                             setattr(_child, _g, export_subfolder)
 
                 def resolver(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
-                    if mode in (0, 8):
+                    # Mode 0 HONORS the Destination column: the cmd builder
+                    # always passes it as the child's output positional, and
+                    # every child resolves `output_root = args.output or
+                    # args.input`. Resolving mode 0 in-place made the scan that
+                    # #234 deliberately re-opened for it find nothing at all —
+                    # two entries sharing one Destination collapsed onto a
+                    # single output in silence. Mode 0 is FLAT, so f.parent ==
+                    # src_root and a Destination equal to the Source resolves
+                    # identically: one branch covers both.
+                    if mode in (0, 2):
+                        return Path(dest_cell) / (f.stem + out_ext)
+                    if mode == 8:
                         return f.parent / (f.stem + out_ext)
                     if mode == 1:
                         return src_root / conv_folder / (f.stem + out_ext)
-                    if mode == 2:
-                        return Path(dest_cell) / (f.stem + out_ext)
                     if _child.__name__ == 'jxl_jpeg_transcoder':
                         return _child.resolve_output_transcode(f, mode, src_root, origin == 'jxl')
                     return _child.resolve_output(f, mode, src_root)
@@ -4068,15 +4173,34 @@ class InteractiveMenu:
         sync-mtime luck — and the collision guard above deliberately ignores
         a file compared with itself, so it cannot see this.
 
+        NESTING only matters when the OUTER entry's mode recurses into the inner
+        one. Modes 0 and 1 are flat in every child, so `root` next to
+        `root/sub1` there is not an overlap at all — flagging it made the
+        wrapper warn about (and, unattended, REFUSE) the mode-0/1 manifests its
+        own Auto Mode generates whenever files sit in the scan root.
+        Identical Sources are always an overlap, whatever the mode.
+        A legacy manifest with no Mode cell (None) counts as recursive: the mode
+        is detected per folder downstream, so this fails closed.
+
         Returns a list of (source_a, source_b) tuples.
         """
-        roots = [(source, os.path.normcase(os.path.abspath(source)))
-                 for source, _dest, _mode in manifest_entries]
+        def _recurses(mode) -> bool:
+            return mode is None or mode in _RECURSIVE_MANIFEST_MODES
+
+        roots = [(source, os.path.normcase(os.path.abspath(source)), mode)
+                 for source, _dest, mode in manifest_entries]
         overlaps = []
-        for i, (src_a, a) in enumerate(roots):
-            for src_b, b in roots[i + 1:]:
-                if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+        for i, (src_a, a, mode_a) in enumerate(roots):
+            for src_b, b, mode_b in roots[i + 1:]:
+                if a == b:
                     overlaps.append((src_a, src_b))
+                elif a.startswith(b + os.sep):
+                    # b CONTAINS a: a problem only if b's child recurses into it
+                    if _recurses(mode_b):
+                        overlaps.append((src_a, src_b))
+                elif b.startswith(a + os.sep):
+                    if _recurses(mode_a):
+                        overlaps.append((src_a, src_b))
         return overlaps
 
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
@@ -4713,16 +4837,20 @@ class InteractiveMenu:
         """One-line summary of a stored workflow, for the preset list."""
         origin = (session.get('last_origin_format') or '?').upper()
         dest = (session.get('last_dest_format') or '?').upper()
-        mode = session.get('last_output_mode') or '?'
+        # Coerced like _run_saved_session does: a mode stored as the NUMBER 99
+        # (or as "99.0" by a hand edit) still has to read as a manifest here,
+        # or the row advertises "mode 99" for a run that replays a CSV.
+        raw_mode = session.get('last_output_mode')
+        mode = _session_int(session, 'last_output_mode', -1)
         bits = [f"{origin}->{dest}"]
-        if mode == "99":
+        if mode == 99:
             manifest = session.get('last_manifest_path')
             bits.append(f"manifest: {Path(manifest).name}" if manifest else "manifest: (missing)")
         else:
-            bits.append(f"mode {mode}")
+            bits.append(f"mode {mode if mode >= 0 else (raw_mode or '?')}")
             if session.get('last_input_dir'):
                 bits.append(str(session['last_input_dir']))
-        bits.append(f"workers {session.get('last_workers') or 4}")
+        bits.append(f"workers {_session_int(session, 'last_workers', 4)}")
         distance = session.get('last_distance')
         if distance is not None:
             bits.append(f"d={_sane_distance(distance):g}")
@@ -4867,11 +4995,14 @@ class InteractiveMenu:
             return False
 
         last_dir = session.get('last_input_dir') or ""
-        last_mode = session.get('last_output_mode') or "0"
-        last_workers = session.get('last_workers') or 4
+        # Coerced, not just validated: see _session_int. This is also what makes
+        # a mode stored as the NUMBER 99 (rather than the string) still read as
+        # a manifest repeat below.
+        last_mode = _session_int(session, 'last_output_mode', 0)
+        last_workers = _session_int(session, 'last_workers', 4)
         last_staging = session.get('last_staging') or ""
-        last_effort = session.get('last_effort') or 7
-        last_quality = session.get('last_quality') or 95
+        last_effort = _session_int(session, 'last_effort', 7)
+        last_quality = _session_int(session, 'last_quality', 95)
         # Routed through the project's own clamp, which every other caller
         # already uses — the preset path was the one that read it raw and put
         # it straight on the cjxl command line.
@@ -4886,7 +5017,7 @@ class InteractiveMenu:
         # A manifest repeat re-reads the CSV instead of replaying a stored
         # copy of its rows, so edits made in Excel between runs take effect
         # — that is the whole point of repeating a manifest on a schedule.
-        is_manifest_repeat = last_mode == "99"
+        is_manifest_repeat = last_mode == 99
         manifest_path = session.get('last_manifest_path')
         manifest_entries = None
         if is_manifest_repeat:
@@ -4906,7 +5037,7 @@ class InteractiveMenu:
                 if is_manifest_repeat else ["Input folder", last_dir],
                 ["Source", last_origin.upper()],
                 ["Destination", last_dest.upper()],
-                ["Mode", last_mode],
+                ["Mode", str(last_mode)],
                 ["Workers", str(last_workers)],
                 ["Effort", str(last_effort)],
             ]
@@ -5036,7 +5167,7 @@ class InteractiveMenu:
             #   * --delete-source hidden in expert flags, which never touches
             #     advanced_options at all (see _flags_request_delete).
             _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
-            _mode_8 = int(last_mode or 0) == 8 or (
+            _mode_8 = last_mode == 8 or (
                 is_manifest_repeat and any(m == 8 for _, _, m in (manifest_entries or [])))
             _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
             if not dry_choice and (_flag_delete or (_adv_delete and _mode_8)):
@@ -5060,21 +5191,21 @@ class InteractiveMenu:
         if origin == 'tiff':
             workflow = {
                 'input_dir': new_folder,
-                'mode': int(last_mode or 0),
-                'workers': last_workers or 4,
+                'mode': last_mode,
+                'workers': last_workers,
                 'staging': last_staging,
-                'effort': last_effort or 7,
+                'effort': last_effort,
                 'distance': last_distance if last_distance is not None else 0.1,
                 'overwrite_mode': ow_choice,
             }
         else:
             workflow = {
                 'input_dir': new_folder,
-                'mode': int(last_mode or 0),
-                'workers': last_workers or 4,
+                'mode': last_mode,
+                'workers': last_workers,
                 'staging': last_staging,
-                'effort': last_effort or 7,
-                'quality': last_quality or 95,
+                'effort': last_effort,
+                'quality': last_quality,
                 'overwrite_mode': ow_choice,
             }
             if last_distance is not None:

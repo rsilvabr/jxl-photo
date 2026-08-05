@@ -556,6 +556,30 @@ def _cjxl_buffering_flag():
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
 
+_MIN_EFFECTIVE_DISTANCE = 0.05
+# cjxl clamps every lossy distance at or below this to the same value:
+# --distance 0.005 and 0.05 were measured producing BYTE-IDENTICAL output.
+# Same constant, and the same warning, as jxl_tiff_encoder.py.
+
+
+def _warn_distance_clamp(distance) -> None:
+    """Say so when a requested distance buys nothing.
+
+    Call AFTER setup_logger(): on the module-level logger a warning falls
+    through to logging.lastResort — unformatted on stderr, never in the log
+    file (bug #238).
+    """
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        return
+    if 0 < d < _MIN_EFFECTIVE_DISTANCE:
+        logger.warning(
+            f"--distance {d} behaves exactly like {_MIN_EFFECTIVE_DISTANCE}: cjxl "
+            f"clamps every lossy distance below that to the same output. "
+            f"Use --distance 0 for true lossless.")
+
+
 def _abort_on_duplicate_outputs(pairs):
     """Abort the run if two outputs map to the same destination file.
 
@@ -1789,6 +1813,11 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     if not files:
         logger.warning("No input files found.")
+        # An empty run still owes the wrapper a summary: without one the
+        # manifest recap prints "(no summary - ok)" in red, whose documented
+        # meaning is "the child crashed, was killed, or never launched".
+        record_summary(ok=0, overwritten=0, skipped=0, errors=0,
+                       log_file=log_file, dry_run=args.dry_run)
         return (0, False)
 
     logger.info(f"Files found: {len(files)}")
@@ -1812,6 +1841,12 @@ def cmd_transcode(args, auto_decode: bool = False):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be processed.")
+        # Returning without this left emit_summary_json printing the UNTOUCHED
+        # default (dry_run=false, ok=0, log=""), so the wrapper's recap showed a
+        # simulation as a finished real run with zeros and never printed its
+        # [DRY RUN] banner. The encoder and decoder report the planned count.
+        record_summary(ok=len(pairs), overwritten=0, skipped=0, errors=0,
+                       log_file=log_file, dry_run=True)
         return (0, False)
 
     # Create the mode-2 output dir only for real runs (dry-run must not write)
@@ -2346,6 +2381,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
     log_file = setup_logger()
     _apply_staging_args(args)
+    _warn_distance_clamp(args.distance)
 
     # Determine direction and set defaults
     if from_jxl:
@@ -2411,6 +2447,9 @@ def cmd_convert(args, from_jxl: bool = True):
 
     if not files:
         logger.warning("No input files found.")
+        # See cmd_transcode: an empty run still owes the wrapper a summary.
+        record_summary(ok=0, overwritten=0, skipped=0, errors=0,
+                       log_file=log_file, dry_run=args.dry_run)
         return (0, False)
 
     # --icc-profile guards, AFTER direction auto-detection is final.
@@ -2497,6 +2536,10 @@ def cmd_convert(args, from_jxl: bool = True):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be converted.")
+        # Same rule as cmd_transcode: without this the wrapper reads the
+        # untouched default and reports the simulation as a real run.
+        record_summary(ok=len(pairs), overwritten=0, skipped=0, errors=0,
+                       log_file=log_file, dry_run=True)
         return (0, False)
 
     # Create the mode-2 output dir only for real runs (dry-run must not write)
@@ -2636,6 +2679,7 @@ def cmd_auto(args):
 
     log_file = setup_logger()
     _apply_staging_args(args)
+    _warn_distance_clamp(args.distance)
 
     # A stale staging checksums.md5 from a crashed previous run would leak
     # wrong entries into this run's destination folders — start clean. Skipped
@@ -2679,6 +2723,9 @@ def cmd_auto(args):
 
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")
+        # See cmd_transcode: an empty run still owes the wrapper a summary.
+        record_summary(ok=0, overwritten=0, skipped=0, errors=0,
+                       log_file=log_file, dry_run=args.dry_run)
         return (0, False)
 
     # Separate JXL files by jbrd presence
@@ -2827,10 +2874,16 @@ def cmd_auto(args):
         logger.error(f"RUN ABORTED: {_aborted()}")
         logger.error(f"  {totals['aborted']} file(s) were never attempted (not failures).")
     logger.info(f"Log: {log_file}")
-    record_summary(ok=totals["ok"], overwritten=0, skipped=totals["skipped"],
-                   errors=totals["err"], log_file=log_file,
-                   failures=all_failures, dry_run=args.dry_run,
-                   extras={"Not attempted (run aborted)": totals["aborted"]})
+    record_summary(
+        # A dry run converts nothing, so `totals` is all zeros — report the
+        # PLANNED output count instead, matching what the encoder/decoder put
+        # in their dry-run summaries. Otherwise the wrapper's recap shows a
+        # simulation of 5000 files as a row of zeros.
+        ok=len(all_pairs) if args.dry_run else totals["ok"],
+        overwritten=0, skipped=totals["skipped"],
+        errors=totals["err"], log_file=log_file,
+        failures=all_failures, dry_run=args.dry_run,
+        extras={"Not attempted (run aborted)": totals["aborted"]})
     return (totals["err"], False)
 
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
@@ -3125,6 +3178,17 @@ def main():
     if args.decode and args.input.is_file() and args.input.suffix.lower() != '.jxl':
         print(f"ERROR: --decode requires a .jxl input (got {args.input.name})")
         sys.exit(1)
+
+    # Range checks the encoder has done all along. Without them --distance 99
+    # and --quality 500 sailed through argparse and failed inside cjxl/djxl
+    # once PER FILE, with the real cause named nowhere. Exit 2 = "aborted /
+    # invalid arguments", matching the documented exit-code table.
+    if not 0 <= args.distance <= 15:
+        print("ERROR: --distance must be between 0 and 15")
+        sys.exit(2)
+    if not 1 <= args.quality <= 100:
+        print("ERROR: --quality must be between 1 and 100")
+        sys.exit(2)
 
     # Normalize format: jpg -> jpeg
     if args.format == "jpg":

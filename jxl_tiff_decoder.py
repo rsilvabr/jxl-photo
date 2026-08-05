@@ -3062,6 +3062,14 @@ Examples:
 
     if len(jxls) == 0:
         logger.warning("No JXL files found")
+        # An empty run still owes the wrapper a summary: without one the
+        # manifest recap prints "(no summary - ok)" in red, whose documented
+        # meaning is "the child crashed, was killed, or never launched" — an
+        # empty or mistyped Source folder was reported as a crash.
+        emit_summary_json(
+            args.summary_json, ok=0, overwritten=0, skipped=0, errors=0,
+            log_file=log_file, dry_run=args.dry_run,
+        )
         return
 
     # Group JXLs into multi-page TIFF sets
