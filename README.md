@@ -592,7 +592,7 @@ v1.9.1 itself is a small fix on top of v1.9.0: **manifest runs no longer stall s
 
 Highlights (v1.9.0):
 
-- **Space estimate before the run starts** — encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
+- **Space estimate before the run starts** *(TIFF → JXL only)* — `jxl_tiff_encoder.py` encodes three crops of your own files to measure this batch, then warns if the output will not fit staging or destination. Warns only, never blocks. `--no-preflight` skips it.
 - **A full disk stops the run** — instead of failing every remaining file one by one. Queued files are reported as *not attempted*, and the run exits `2`.
 - **Slow folder scans show progress** — a 25-second walk on an external drive no longer looks frozen. Fast local scans stay silent.
 - **Staging leftovers are reported** — and `--clean-staging` sweeps the old ones.

@@ -11,8 +11,61 @@ v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore a
 v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 v1.9.2 / 2026-08-05: Post-v1.9.1 audit — 10 bugs fixed (2 data-safety), validated against the real 738 MB scanner files (see top section)
+v1.9.3 / 2026-08-06: Round-24 audit — 10 bugs fixed (3 data-safety/blocking), all in the wrapper's manifest layer and the summary contract (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.9.3 — Round-24 audit (2026-08-06)
+
+Four-script audit, wrapper last. 40 new regression tests
+(`tests/test_audit_round24.py`); full suite went 587 → 627. Every fix was
+proven against the pre-fix code first: 31 of the 40 fail on the v1.9.2 tree,
+the other 9 are deliberate "do not over-fix" guards (mode 0 in-place, mode 8,
+disjoint folders, identical Sources, legacy `None` modes, valid ranges).
+
+The codec paths came out clean again and were re-validated end to end after the
+edits: lossless TIFF→JXL→TIFF is pixel-identical on a Capture One 16-bit
+ProPhoto export, and the 739 MB 3-page RGB+IR scan round-trips
+`SubfileType 0/1/4` exactly. Everything below is the wrapper's manifest layer
+and the child→wrapper summary contract.
+
+### Data-safety
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 242 | **The manifest collision guard was still blind for mode 0.** #234 re-opened the (expensive) scan for mode 0 on the correct premise that mode 0 HONORS the Destination column — but `_manifest_output_collisions`' resolver still returned `f.parent` for it, so the scan ran and found nothing. Two entries sharing one Destination collapsed onto a single output: reproduced end to end with the real encoder, entry 2 logging `SKIP (sync: JXL up to date)` and the run exiting 0. Applies to all three directions | wrapper | ✅ FIXED (mode 0 resolves through the Destination cell, like mode 2; mode 8 keeps its own in-place branch. Mode 0 is flat, so `f.parent == src_root` and Destination == Source resolves identically) |
+| 243 | **Auto-generated manifests for the RECURSIVE modes processed every file several times.** `compute_folder_mappings` emits one entry per folder holding origin files, but modes 3/4/5 make the child walk the whole tree from each Source — so the root entry already covered every subfolder entry. N child processes writing the same outputs, decided by sync-mtime luck | wrapper | ✅ FIXED (`_outermost_with_counts` keeps only the outermost folders and folds the dropped folders' counts into their parent, so the preview stays honest; modes 4/5 exclude the root as an ancestor too, since it is not an eligible entry there) |
+
+### Blocking / false refusals
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 244 | **The overlap guard ignored the mode and flagged nested Sources in the FLAT modes.** Modes 0/1 are non-recursive in all three children, so `root` next to `root/sub1` cannot hand the same file to two processes — but `_manifest_source_overlaps` compared paths only. Every mode-0/1 manifest the wrapper's own Auto Mode generates with files in the scan root triggered it; **unattended (`--run-preset`) that is a hard refusal**, so a scheduled mode-0 manifest preset simply never ran | wrapper | ✅ FIXED (nesting only counts when the CONTAINING entry's mode recurses; identical Sources always count; a legacy manifest with no Mode cell is treated as recursive — fail closed) |
+| 245 | **`_session_number_error` blessed `"7.0"` and every consumer then did a plain `int()`/`str()`.** `_as_exact_int` accepts `7.0` and `"7"` on purpose (Excel and hand-edited JSON produce both), but `int("8.0")` raises — a raw ValueError traceback out of a repeat/preset run — and `--workers 8.0` reached the CHILD's argparse as a command line the user never typed. A mode stored as the NUMBER `99` also failed the `== "99"` manifest test and fell through to "No manifest entries found!" | wrapper | ✅ FIXED (`_session_int` coerces what the validator blesses; used by `_run_saved_session` and `_describe_session`) |
+
+### The child → wrapper summary contract
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 246 | **Transcoder dry runs reported themselves as real runs.** `cmd_transcode` and `cmd_convert` returned before `record_summary()`, so `emit_summary_json` printed the untouched module default: `dry_run: false, ok: 0, log: ""`. The manifest recap showed the simulation as a finished run with a row of zeros and never printed its `[DRY RUN]` banner. `cmd_auto` set the flag but still reported 0 planned outputs | transcoder | ✅ FIXED (all three dry-run paths record the PLANNED count with `dry_run=True`, matching the encoder and decoder) |
+| 247 | **A child that found no files emitted no summary at all (decoder) or a blank one (transcoder).** The recap then printed `(no summary - ok)` in RED, whose documented meaning is "the child crashed, was killed, or never launched" — an empty or mistyped Source folder was reported as a crash, and the transcoder's `log: ""` also dropped that entry from the "Child logs" list | decoder, transcoder | ✅ FIXED (all four "no input files" paths report an honest zeroed summary with the log path) |
+
+### Wrong information on screen
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 248 | **The Auto Mode report promised folder names no script creates.** `FolderAnalyzer.format_report`'s `mode_names` carried literal, never-formatted `{dest}` placeholders (`"Subfolder (converted_{dest})"`, `"Recursive subfolders ({dest}_files)"`), and `_recommend` printed `creates 'jxl_files' subfolder` where the real folder is `JXL_16bits`. Same class as #161/#169, which fixed the wizard tables and missed the analyzer | wrapper | ✅ FIXED (both go through `_dest_folder_names`, the helper #161 created for exactly this) |
+| 249 | **The multi-page help announced the wrong default, and the plain-text branch fell back to it.** Both branches printed `ignore = encode page 0 only, drop the rest (default)` — the default has been `split` since v1.8.2, and `mp_default` two lines below says so. Worse, the non-`rich` branch resolved an unrecognised answer to `"ignore"`, so a typo silently selected the one mode that discards image data: on the real film scans that drops the `SubfileType=4` IR page of every file. (The `rich` branch cannot reach it — it uses `choices=`.) | wrapper | ✅ FIXED (help lists `split` first and marks it the default; both plain-text fallbacks resolve to the DEFAULT, not to a fixed value) |
+| 250 | Mode 8 was labelled `DELETE originals` in the Step-7 summary even with `delete_source` off. Mode 8 is in-place recursive; the deletion is a separate opt-in already shown as `DELETE SOURCE: ON (!)` right below | wrapper | ✅ FIXED (`In-place recursive`) |
+
+### Polish
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 251 | **The transcoder validated neither `--distance` nor `--quality`.** `--distance 99` and `--quality 500` sailed through argparse and failed inside cjxl/djxl once per file, with the real cause named nowhere; the encoder has rejected out-of-range distances up front all along. The transcoder also lacked the encoder's "cjxl clamps every lossy distance below 0.05" warning, although the wrapper feeds it `--distance` on the `convert_lossy` workflow | transcoder | ✅ FIXED (both ranges checked in `main()`, exit 2 = invalid arguments; `_warn_distance_clamp` called after `setup_logger()` in `cmd_convert`/`cmd_auto`, per #238) |
+| — | Docs: the README's space-estimate bullet read as a toolkit-wide feature; only `jxl_tiff_encoder.py` has a preflight | docs | ✅ FIXED (scoped to TIFF → JXL) |
 
 ---
 
