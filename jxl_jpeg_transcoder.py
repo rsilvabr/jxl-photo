@@ -934,6 +934,10 @@ logger = logging.getLogger("jxl_jpeg_transcoder")
 counter_lock = threading.Lock()
 _md5_db_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
+# What the deletion actually did. Module-level because the delete gate lives in
+# process_group while main() owns the summary — without this the most
+# destructive thing the tool does never reached emit_summary_json.
+_delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
 # Machine-readable run summary for the jxl_photo.py wrapper.
 #
@@ -1010,6 +1014,7 @@ def setup_logger():
     ch.setFormatter(fmt)
     logger.addHandler(fh)
     logger.addHandler(ch)
+    _log_delete_summary()
     logger.info(f"Log: {log_file}")
     return log_file
 
@@ -1798,6 +1803,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     # exists sends the user hunting for nothing.
                 continue
             if not write_out.exists():
+                _delete_stats["kept"] += 1
                 logger.warning(f"  KEEP (staging file missing) | {write_out.name}")
                 continue
             try:
@@ -1918,6 +1924,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             # silently delete nothing whenever staging is configured.
             if (use_staging and not was_skipped
                     and os.path.normcase(str(final_file)) not in moved_finals):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
             if was_skipped:
@@ -1931,6 +1938,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 stored = read_md5_db(final_file if not decode else src_path)
                 if stored is None:
                     if DELETE_SOURCE_REQUIRE_MD5:
+                        _delete_stats["kept"] += 1
                         logger.warning(
                             f" KEEP (already archived, but no checksum to prove it came "
                             f"from this file) | {src_path.name}")
@@ -1941,6 +1949,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 else:
                     actual = md5_of_file(src_path if not decode else final_file)
                     if actual != stored:
+                        _delete_stats["kept"] += 1
                         logger.warning(
                             f" KEEP (already-archived output does NOT match this source: "
                             f"checksum mismatch) | {src_path.name}")
@@ -1948,6 +1957,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     logger.debug(f" provenance OK (MD5) | {src_path.name}")
             elif STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
                 if src_md5 is None or read_md5_db(final_file) is None:
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
                     continue
             if not decode:
@@ -1957,6 +1967,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # check is INDEPENDENT of MD5 storage (--no-md5 must not
                 # weaken it).
                 if final_file.suffix.lower() == '.jxl' and not has_jbrd_box(final_file):
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
                     continue
             if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
@@ -1972,14 +1983,19 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # against the original's stored md5 — which is the very
                 # bit-exactness this check is a proxy for.
                 if not result[3]:
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
                     continue
             if not _verify_file_integrity(final_file):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                 continue
             try:
                 src_path.unlink()
                 deleted += 1
+                _delete_stats["deleted"] += 1
+                if was_skipped:
+                    _delete_stats["deleted_archived"] += 1
                 if was_skipped:
                     deleted_skipped += 1
                     logger.info(f" DELETED source (already archived) | {src_path.name}")
@@ -1988,6 +2004,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             except OSError as e:
                 # PermissionError is common on Windows (AV, Explorer preview,
                 # open viewer) — warn and continue instead of killing the batch.
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
         if deleted:
             _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
@@ -2054,6 +2071,25 @@ def _provenance_filter(pairs, mode, decode_lossless=False):
             ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
              " If you MOVED the sources, re-run with --provenance content."))
     return kept, refused
+
+
+def _delete_extras() -> dict:
+    """Deletion counts for the run summary, so the wrapper's manifest recap can
+    report the most destructive thing the tool does instead of staying silent."""
+    return {
+        "Sources deleted": _delete_stats["deleted"],
+        "Sources deleted (already archived)": _delete_stats["deleted_archived"],
+        "Sources KEPT by a delete gate": _delete_stats["kept"],
+    }
+
+
+def _log_delete_summary() -> None:
+    if not DELETE_SOURCE:
+        return
+    logger.info(f"Sources DELETED: {_delete_stats['deleted']}"
+                + (f" ({_delete_stats['deleted_archived']} already archived)"
+                   if _delete_stats["deleted_archived"] else "")
+                + f" | kept by a gate: {_delete_stats['kept']}")
 
 
 def _apply_staging_args(args) -> None:
@@ -2243,6 +2279,7 @@ def cmd_transcode(args, auto_decode: bool = False):
         logger.info(f"Done: {ok} OK | {skipped} skipped | {err} errors ({md5_fail} MD5 failures)")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} reconverted | {skipped} up to date | {err} errors")
+    _log_delete_summary()
     logger.info(f"Log: {log_file}")
     if _aborted():
         logger.error(f"RUN ABORTED: {_aborted()}")
@@ -2250,7 +2287,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
                    log_file=log_file, failures=failed_files,
                    extras={"MD5 failures": md5_fail,
-                           "Not attempted (run aborted)": aborted})
+                           "Not attempted (run aborted)": aborted,
+                           **_delete_extras()})
     return (err, False)
 
 # --------------------------------------------─
@@ -2979,18 +3017,24 @@ def cmd_convert(args, from_jxl: bool = True):
             # path would be a stale pre-existing one, not this run's output.
             if (TEMP2_DIR is not None and not was_skipped
                     and os.path.normcase(str(final_file)) not in moved_finals):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
             if final_file is None or not _verify_file_integrity(final_file):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                 continue
             try:
                 src_path.unlink()
                 deleted += 1
+                _delete_stats["deleted"] += 1
+                if was_skipped:
+                    _delete_stats["deleted_archived"] += 1
                 logger.info(f" DELETED source"
                             f"{' (already archived)' if was_skipped else ''}"
                             f" | {src_path.name}")
             except OSError as e:
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
         if deleted:
             logger.info(f" -> Deleted {deleted} source file(s)")
@@ -3017,10 +3061,11 @@ def cmd_convert(args, from_jxl: bool = True):
     if _aborted():
         logger.error(f"RUN ABORTED: {_aborted()}")
         logger.error(f"  {aborted} file(s) were never attempted (not failures).")
+    _log_delete_summary()
     logger.info(f"Log: {log_file}")
     record_summary(ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
                    log_file=log_file, failures=failed_files,
-                   extras={"Not attempted (run aborted)": aborted})
+                   extras={"Not attempted (run aborted)": aborted, **_delete_extras()})
     return (err, False)
 
 # --------------------------------------------─
@@ -3251,6 +3296,7 @@ def cmd_auto(args):
     if _aborted():
         logger.error(f"RUN ABORTED: {_aborted()}")
         logger.error(f"  {totals['aborted']} file(s) were never attempted (not failures).")
+    _log_delete_summary()
     logger.info(f"Log: {log_file}")
     record_summary(
         # A dry run converts nothing, so `totals` is all zeros — report the
@@ -3261,7 +3307,7 @@ def cmd_auto(args):
         overwritten=totals["overwritten"], skipped=totals["skipped"],
         errors=totals["err"], log_file=log_file,
         failures=all_failures, dry_run=args.dry_run,
-        extras={"Not attempted (run aborted)": totals["aborted"]})
+        extras={"Not attempted (run aborted)": totals["aborted"], **_delete_extras()})
     return (totals["err"], False)
 
 def _process_file_group(files, args, use_transcode=True, direction="from_jxl", collect_only=None):
@@ -3337,6 +3383,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if args.dry_run:
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
+        if DELETE_SOURCE:
+            logger.warning(
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
+                f"file(s) in this group would be DELETED.")
         return {"ok": 0, "err": 0, "skipped": 0}
 
     if not pairs:
@@ -3423,18 +3473,24 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 # final path would be a stale pre-existing one.
                 if (TEMP2_DIR is not None and not was_skipped
                         and os.path.normcase(str(final_file)) not in moved_finals):
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
                 if final_file is None or not _verify_file_integrity(final_file):
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                     continue
                 try:
                     src_path.unlink()
                     deleted += 1
+                    _delete_stats["deleted"] += 1
+                    if was_skipped:
+                        _delete_stats["deleted_archived"] += 1
                     logger.info(f" DELETED source"
                                 f"{' (already archived)' if was_skipped else ''}"
                                 f" | {src_path.name}")
                 except OSError as e:
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
             if deleted:
                 logger.info(f" -> Deleted {deleted} source file(s)")

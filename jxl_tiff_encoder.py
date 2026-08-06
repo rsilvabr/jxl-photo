@@ -972,6 +972,11 @@ _discarded_thumb_sources = set()
 # real error off the screen. The full totals always land in the run summary.
 DISCARD_WARN_LIMIT = 20
 _discard_warned = {"count": 0, "suppressed": 0}
+# What the deletion actually did. Module-level because process_group owns the
+# delete gate but main() owns the summary — without this the most destructive
+# thing the tool does never reached emit_summary_json, so the wrapper's
+# end-of-manifest recap could not say a single word about it.
+_delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
 def _capped_discard_warning(msg: str):
     """Log a per-file discard warning, but only up to DISCARD_WARN_LIMIT of them.
@@ -3435,6 +3440,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 _hint = (" | its output already exists; pass --delete-skipped to "
                          "delete sources that are already archived"
                          if _blocked_by_skip else "")
+                _delete_stats["kept"] += 1
                 logger.warning(
                     f"  KEEP source (not all pages succeeded) | {Path(tiff_key).name}{_hint}")
                 continue
@@ -3450,6 +3456,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             # so this is the only place that can stop the deletion. Fail closed:
             # a page that exists only in the source must keep the source alive.
             if os.path.normcase(tiff_key) in _discarded_real_page_sources:
+                _delete_stats["kept"] += 1
                 logger.warning(
                     f"  KEEP source (pages were discarded, deleting would lose them) | "
                     f"{Path(tiff_key).name} | re-run with --multipage-mode split to encode "
@@ -3491,6 +3498,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     break
 
             if not can_delete:
+                _delete_stats["kept"] += 1
                 logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
                 continue
 
@@ -3511,6 +3519,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     logger.debug(f"  verify page{_page} OK ({detail}) | {Path(tiff_key).name}")
                 if verify_failed is not None:
                     _page, detail = verify_failed
+                    _delete_stats["kept"] += 1
                     # An output this run did NOT write is the likeliest thing to
                     # fail here, and for a reason that has nothing to do with a
                     # bad encode: a pre-existing archive made at a different
@@ -3537,13 +3546,21 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 # Named apart from a fresh delete: this source was cleared by a
                 # file THIS RUN DID NOT WRITE, and the log should not blur the
                 # two — that distinction is the whole reason the flag is opt-in.
-                if skipped_finals:
+                # "already archived" only when NOTHING was written for this
+                # source this run. A mixed source (one page skipped, one freshly
+                # converted) is a normal delete with a note, not an archived one.
+                _all_skipped = len(skipped_finals) == len({r[2] for r in tiff_results})
+                if _all_skipped:
                     deleted_skipped += 1
+                    _delete_stats["deleted_archived"] += 1
                     logger.info(f"  DELETED source (already archived) | "
                                 f"{src_tiff.name}{thumb_note}")
                 else:
-                    logger.info(f"  DELETED source | {src_tiff.name}{thumb_note}")
+                    _note = " (partly already archived)" if skipped_finals else ""
+                    logger.info(f"  DELETED source{_note} | {src_tiff.name}{thumb_note}")
+                _delete_stats["deleted"] += 1
             except OSError as e:
+                _delete_stats["kept"] += 1
                 logger.warning(f"  KEEP (could not delete source) | {src_tiff.name}: {e}")
         if deleted:
             _sk = (f" ({deleted_skipped} already archived)" if deleted_skipped else "")
@@ -4198,6 +4215,15 @@ def main():
             gray_label = " [grayscale]" if samples == 1 else ""
             logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
+        # A dry run of a DELETE run must say so. Without this the flag that
+        # destroys originals was the one thing the simulation never mentioned.
+        if DELETE_SOURCE:
+            _srcs = {str(t) for t, *_ in all_items}
+            logger.warning(
+                f"Dry run: --delete-source is ARMED. Up to {len(_srcs)} source TIFF(s) "
+                f"would be DELETED, each only after its output is written to the "
+                f"mode's destination and passes the integrity check"
+                + (" and the round-trip comparison" if VERIFY_ROUNDTRIP else "") + ".")
 
         # Preview --delete-skipped. A dry run returns before process_group, so
         # without this the one destructive option that acts on files this run
@@ -4377,6 +4403,14 @@ def main():
             unique_label = f" ({unique_profiles} unique profiles)" if unique_profiles != actually_patched else ""
             logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
 
+    if DELETE_SOURCE:
+        logger.info(f"Sources DELETED: {_delete_stats['deleted']}"
+                    + (f" ({_delete_stats['deleted_archived']} already archived)"
+                       if _delete_stats["deleted_archived"] else "")
+                    + f" | kept by a gate: {_delete_stats['kept']}"
+                    + (f" | refused (output belongs to another source): "
+                       f"{len(provenance_blocked)}" if provenance_blocked else ""))
+
     logger.info(f"Log: {log_file}")
 
     # Emitted BEFORE the exit below: a run with failures is exactly the run the
@@ -4393,6 +4427,10 @@ def main():
             "Multipage pages ignored": _multipage_ignored["pages"],
             "D50 patched": (applied - applied_already_correct) if D50_PATCH_MODE != "off" else 0,
             "Not attempted (run aborted)": aborted,
+            "Sources deleted": _delete_stats["deleted"],
+            "Sources deleted (already archived)": _delete_stats["deleted_archived"],
+            "Sources KEPT by a delete gate": _delete_stats["kept"],
+            "Refused (output belongs to another source)": len(provenance_blocked),
         },
         failures=failed_files,
         unreadable=unreadable_files,

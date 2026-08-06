@@ -2557,20 +2557,62 @@ class InteractiveMenu:
         return True
 
     def _count_origin_files(self, workflow: Dict, mode: int) -> int:
-        """How many source files this mode would actually see, for the delete
-        preview. Flat for modes 0/1, recursive for the rest — the same split
-        every child's finder makes (_RECURSIVE_MANIFEST_MODES)."""
+        """How many source files this mode would ACTUALLY see, for the delete
+        preview. Returns -1 when it cannot be determined.
+
+        Asks the child's OWN finder wherever possible. Counting by extension
+        was wrong for exactly the modes this user runs most: mode 6 announced
+        "23 TIFF file(s)" for a run that touches 3, because the marker filter
+        (and the tool-output filters) were ignored. The count is the whole point
+        of the confirmation — it is what makes a wrong folder visible before the
+        HHMM token is charged — so an inflated one is worse than none.
+        """
+        origin = workflow.get('origin_format')
+        dest = workflow.get('dest_format')
         try:
             root = Path(workflow['input_dir'])
-            exts = FolderAnalyzer(root, workflow['origin_format'],
-                                  workflow['dest_format'])._get_extensions(
-                                      workflow['origin_format'])
+            exts = FolderAnalyzer(root, origin, dest)._get_extensions(origin)
             if root.is_file():
                 return 1 if root.suffix.lower() in exts else 0
+
+            child = None
+            try:
+                if origin == 'tiff' and dest == 'jxl':
+                    import jxl_tiff_encoder as child
+                    finders = {6: 'find_tiffs_mode6', 7: 'find_tiffs_mode7',
+                               0: 'find_files_mode0', 1: 'find_files_mode0'}
+                    recursive = 'find_tiffs_recursive'
+                elif origin == 'jxl' and dest == 'tiff':
+                    import jxl_tiff_decoder as child
+                    finders = {6: 'find_jxls_mode6', 7: 'find_jxls_mode7',
+                               0: 'find_jxls_flat', 1: 'find_jxls_flat'}
+                    recursive = 'find_jxls_recursive'
+            except ImportError:
+                child = None
+
+            if child is not None:
+                marker = (workflow.get('mode_config', {}) or {}).get('export_marker') \
+                    or self.config.config.export_marker
+                _saved = getattr(child, 'EXPORT_MARKER', None)
+                _was_disabled = child.logger.disabled
+                child.logger.disabled = True        # its finders log; this is a preview
+                try:
+                    if marker:
+                        child.EXPORT_MARKER = marker
+                    fn = getattr(child, finders.get(mode, recursive))
+                    return len(fn(root))
+                finally:
+                    child.logger.disabled = _was_disabled
+                    if _saved is not None:
+                        child.EXPORT_MARKER = _saved
+
+            # Transcoder directions: no single finder covers them (JPEG, PNG and
+            # JXL are scanned separately), so fall back to the extension count
+            # with the same flat/recursive split the children use.
             it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
             return sum(1 for f in it
                        if f.suffix.lower() in exts and f.is_file())
-        except OSError:
+        except (OSError, KeyError, AttributeError):
             return -1   # unreadable: the preview says so instead of claiming 0
 
     def _wizard_delete_gateway(self, workflow: Dict, modes: List) -> bool:
@@ -4278,6 +4320,27 @@ class InteractiveMenu:
         lines.append((f"  {'TOTAL files':<36}{totals['ok']:>7}{totals['overwritten']:>7}"
                       f"{totals['skipped']:>7}{totals['unreadable']:>8}{totals['errors']:>7}",
                       "bold red" if totals["errors"] else "bold"))
+
+        # Deletions get their own line, above the rest and not dimmed: they are
+        # the only irreversible thing in the block, and burying them among
+        # "Thumbnails excluded" made a run that removed 50 000 masters look
+        # exactly like one that removed none.
+        _del = extras_total.pop("Sources deleted", 0)
+        _del_arch = extras_total.pop("Sources deleted (already archived)", 0)
+        _kept = extras_total.pop("Sources KEPT by a delete gate", 0)
+        _refused = extras_total.pop("Refused (output belongs to another source)", 0)
+        if _del or _kept or _refused:
+            lines.append((rule, "dim"))
+            _txt = f"  SOURCES DELETED: {_del}"
+            if _del_arch:
+                _txt += f"  ({_del_arch} already archived)"
+            lines.append((_txt, "bold red" if _del else "bold"))
+            if _kept:
+                lines.append((f"  Sources KEPT by a delete gate: {_kept} "
+                              f"(see the child logs for why)", "yellow"))
+            if _refused:
+                lines.append((f"  Refused, output belongs to another source: {_refused}",
+                              "yellow"))
 
         if extras_total:
             lines.append((rule, "dim"))

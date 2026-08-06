@@ -851,6 +851,11 @@ LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
 logger = logging.getLogger("jxl_decode")
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
+# What the deletion actually did. Module-level because the delete gate lives in
+# process_group while main() owns the summary — without this the most
+# destructive thing the tool does never reached emit_summary_json.
+_delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
+
 
 def setup_logger():
     global logger
@@ -2698,9 +2703,11 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             # worked and silently delete nothing whenever staging is configured.
             if (use_staging and not was_skipped
                     and os.path.normcase(str(final_tiff)) not in moved_finals):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
                 continue
             if not _verify_tiff_integrity(final_tiff):
+                _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
             # Pages of this group were not in the run. Every check above passes
@@ -2708,6 +2715,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             # the only place that can stop the deletion. Fail closed: a page
             # that exists only in the source must keep the source alive.
             if os.path.normcase(str(task["main_jxl"])) in _incomplete_groups:
+                _delete_stats["kept"] += 1
                 logger.warning(
                     f" KEEP (incomplete multi-page group; deleting would lose the "
                     f"missing pages) | {task['main_jxl'].name} | re-run against the "
@@ -2734,9 +2742,12 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                     # by a TIFF this run did not write.
                     logger.info(f" DELETED source{_tag} | {jxl_path.name}")
                     deleted += 1
+                    _delete_stats["deleted"] += 1
                     if was_skipped:
                         deleted_skipped += 1
+                        _delete_stats["deleted_archived"] += 1
                 except Exception as e:
+                    _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
         if deleted:
             _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
@@ -3463,6 +3474,12 @@ Examples:
             detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
+        if DELETE_SOURCE:
+            _n = sum(len(t["entries"]) for t in tasks)
+            logger.warning(
+                f"Dry run: --delete-source is ARMED. Up to {_n} source JXL(s) would be "
+                f"DELETED, each only after its TIFF is written and passes the "
+                f"integrity check.")
 
         # Preview --delete-skipped: a dry run returns before process_group, so
         # without this the one destructive option acting on files this run does
@@ -3610,6 +3627,12 @@ Examples:
     if _aborted():
         logger.error(f"RUN ABORTED: {_aborted()}")
         logger.error(f"  {aborted} file(s) were never attempted (not failures).")
+    if DELETE_SOURCE:
+        logger.info(f"Sources DELETED: {_delete_stats['deleted']}"
+                    + (f" ({_delete_stats['deleted_archived']} already archived)"
+                       if _delete_stats["deleted_archived"] else "")
+                    + f" | kept by a gate: {_delete_stats['kept']}")
+
     logger.info(f"Log: {log_file}")
 
     # Emitted BEFORE the exit below: a run with failures is exactly the run the
@@ -3618,7 +3641,10 @@ Examples:
         args.summary_json,
         ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
         log_file=log_file, failures=failed_files,
-        extras={"Not attempted (run aborted)": aborted},
+        extras={"Not attempted (run aborted)": aborted,
+                "Sources deleted": _delete_stats["deleted"],
+                "Sources deleted (already archived)": _delete_stats["deleted_archived"],
+                "Sources KEPT by a delete gate": _delete_stats["kept"]},
     )
 
     _report_staging_leftovers(TEMP2_DIR)

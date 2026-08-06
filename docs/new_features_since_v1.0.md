@@ -152,9 +152,31 @@ The wizard asks for this right after you arm `[D]`, but only for the modes where
 it means something, and pressing Enter gives the cheap, safe default. When
 `path` refuses, the message names `--provenance content` as the way out.
 
-> ⚠️ The decoder and transcoder have **no such record yet**. They now warn at
-> startup when deletion is armed in a collapsing mode; until they get the same
-> markers, prefer modes 0/1/3/8 when deleting there.
+All three scripts record and check it. The one exception is the **lossless
+JXL → JPEG** path, whose output must stay byte-identical to the original and
+therefore cannot carry a marker — there `checksums.md5` already holds the
+original JPEG's hash keyed by the JXL, which is a stronger proof anyway.
+
+### Deletions are now reported
+
+The delete gates were correct but silent. `deleted` and `kept` were locals, so
+the run summary had no count and the wrapper's manifest recap could not say a
+word about the only irreversible thing the toolkit does — a 20-entry manifest
+could remove 50 000 masters and look identical to one that removed none.
+
+Every script now reports **sources deleted**, how many of those were *already
+archived*, and — just as important — **sources KEPT by a refusing gate**. That
+last number is the one that says something needs looking at: an integrity
+failure, a failed round-trip, a checksum mismatch. The wrapper gives them their
+own line, above the rest and not dimmed.
+
+A **dry run** with `--delete-source` armed now says so, with the count and the
+gates standing in front of it. Previously the flag that destroys originals was
+the one thing the simulation never mentioned.
+
+And the `[D]` confirmation counts with the **child's own finder** instead of by
+file extension, so mode 6 no longer announces 23 files for a run that touches 3.
+That count is what makes a wrong folder visible before the token is charged.
 
 ### `[D]` in the wizard
 
