@@ -53,6 +53,43 @@ emit near-black images (see `ICC_PNG_STRATEGY`), and such a file passes every
 structural check there is. Measured on a real encode: the correct image scores
 58.4 dB, a different image 8.5 dB, a black frame fails on brightness alone.
 
+### `--delete-skipped`: finishing an interrupted archive
+
+A source whose output already exists is reported as SKIP, and a skip blocks the
+delete. That is the right default, but it means an archive interrupted between
+the encode and the unlink — a locked file, antivirus, Ctrl+C — can never be
+finished: the leftover is skipped on every later run, and the only way out was
+`--overwrite`, i.e. re-encoding the whole library to delete a handful of files.
+
+`--delete-skipped` covers those too. It is opt-in and gated harder than a normal
+delete, because a SKIP proves much less than a conversion:
+
+| | what the gate proves |
+|---|---|
+| converted | this run wrote the file **and** it passed the integrity check |
+| SKIP | a file with that **name** exists and its mtime is not older than the source |
+
+mtime is not content. It reads "newer" after a copy, a backup restore, a cloud
+sync or a `touch`, and it says nothing about whether that JXL came from *this*
+photo. So a skipped source is never deleted on the timestamp: the output must
+still exist and pass `_verify_jxl_integrity` — the same structural floor a fresh
+conversion gets — and with `--verify-roundtrip` it must decode back to the source
+pixels. There is deliberately **no** "just delete it" mode.
+
+Pair it with `--verify-roundtrip`. It matters *more* here than for a fresh
+conversion: there is no "this run wrote it" to lean on, so the pixel comparison
+is the only thing tying that JXL to that photo. Proven against the real files —
+a JXL from a different photo placed under the right name with a newer timestamp,
+and a re-edited version of the same photo at identical dimensions, are both
+caught and the master is kept.
+
+The cost is self-limiting: the check only runs for sources that still exist,
+which is exactly the set pending deletion. After one clean pass that is empty.
+
+`--dry-run` previews it (`would DELETE N already-archived source(s)`, with the
+paths), using the cheap checks and saying so — a destructive option that could
+not be previewed would be the wrong kind of opt-in.
+
 ### `[D]` in the wizard
 
 Deleting is not a layout, so it is not a mode. `[D]` charges a confirmation,

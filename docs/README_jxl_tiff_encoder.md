@@ -299,6 +299,15 @@ Options:
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after their JXL is written to the mode's
                   destination and verified. Works in EVERY mode. IRREVERSIBLE
+  --delete-skipped
+                  [with --delete-source] Also delete sources whose output ALREADY
+                  EXISTS -- the files reported as SKIP. Without it an archive
+                  interrupted between the encode and the unlink can never be
+                  finished: the leftover is skipped on every later run, and a skip
+                  blocks the delete. NEVER acts on the timestamp alone -- the output
+                  must exist and pass the integrity check. Pair it with
+                  --verify-roundtrip: a SKIP carries no proof that the JXL came
+                  from that photo
   --verify-roundtrip
                   Before deleting a source, decode its JXL and compare it with
                   the source page. --distance 0: the pixels must match exactly.

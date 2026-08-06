@@ -671,6 +671,33 @@ VERIFY_LOSSY_MIN_PSNR = 20.0
 # turned to noise sits at 5-15 dB. The gap is wide, so this rejects
 # catastrophes without ever second-guessing a legitimate lossy encode.
 
+DELETE_SKIPPED = False
+# [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS, i.e. the
+# files this run reports as SKIP.
+#
+# Without this, an archive run can never be finished: if a delete failed once
+# (locked file, antivirus, a run interrupted between the encode and the unlink),
+# that TIFF is skipped on every later run — and a skip blocks the delete — so it
+# sits there forever unless the whole library is re-encoded with --overwrite.
+#
+# The reason this is opt-in and gated harder than a normal delete: a SKIP proves
+# far less than a conversion does. A conversion means "this run wrote the file
+# AND it passed the integrity check". A skip means only "a file with that NAME
+# exists and its mtime is not older than the source" — and mtime is not content.
+# It says "newer" after a copy, a backup restore, a cloud sync, a touch, or on a
+# filesystem with second granularity, and it says nothing at all about whether
+# that JXL came from THIS photo.
+#
+# So a skipped source is never deleted on the strength of the timestamp. The
+# output must still exist and pass _verify_jxl_integrity — the same structural
+# floor a freshly converted file gets — and, with VERIFY_ROUNDTRIP, decode back
+# to the source pixels. That last one matters MORE here than for a conversion:
+# there is no "this run wrote it" to fall back on, so the pixel comparison is
+# the only thing tying that JXL to that photo.
+#
+# Cost is self-limiting: the check only runs for sources that still exist, which
+# is exactly the set still pending deletion. After one clean pass that is empty.
+
 DELETE_SOURCE = False
 # Whether to delete the source TIFF after successful encoding. Available in
 # EVERY mode: the mode decides where the JXL lands, this decides whether the
@@ -2439,6 +2466,26 @@ def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
     return True, detail
 
 
+def _would_skip(tiff_path: Path, final_path: Path) -> bool:
+    """Would convert_one report SKIP for this pair?
+
+    Mirrors the decision at the top of convert_one exactly — including its
+    TOCTOU fallback, where an unreadable stat means "stale, convert it". Used
+    only by the dry-run preview of --delete-skipped: a destructive option that
+    could not be previewed would be the wrong kind of opt-in.
+    """
+    if not final_path.exists():
+        return False
+    if OVERWRITE is False:
+        return True
+    if OVERWRITE == "smart":
+        try:
+            return tiff_path.stat().st_mtime <= final_path.stat().st_mtime
+        except OSError:
+            return False
+    return False        # OVERWRITE True: always reconvert, never a skip
+
+
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
                 is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3, multipage_group: str = None):
     """
@@ -3167,6 +3214,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # to one output abort the run instead of costing two originals.
     if DELETE_SOURCE:
         deleted = 0
+        deleted_skipped = 0
         # Group results by source TIFF path
         results_by_tiff: Dict[str, list] = {}
         for result in results:
@@ -3180,14 +3228,32 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             by_final[str(final_jxl)] = final_jxl
 
         for tiff_key, tiff_results in results_by_tiff.items():
-            # Every page must have freshly succeeded. Skipped pages (r[3] is None)
-            # intentionally block deletion: if a page was skipped we can't be sure
-            # this run produced/verified it, so we keep the source rather than risk
-            # deleting a TIFF whose JXLs weren't all (re)written this pass.
-            all_ok = all(r[1] in ("ok", "overwrite") and r[3] is not None for r in tiff_results)
+            # Every page must have freshly succeeded — or, with DELETE_SKIPPED,
+            # have been skipped because its output was already there. A skip
+            # carries NO proof of its own (see the DELETE_SKIPPED note): it is
+            # admitted here only so the checks below can judge it on the file
+            # itself, never on the timestamp that produced the skip.
+            def _page_settled(r) -> bool:
+                if r[1] in ("ok", "overwrite") and r[3] is not None:
+                    return True
+                return DELETE_SKIPPED and r[1] == "skipped"
+
+            all_ok = all(_page_settled(r) for r in tiff_results)
             if not all_ok:
-                logger.warning(f"  KEEP source (not all pages succeeded) | {Path(tiff_key).name}")
+                _blocked_by_skip = (not DELETE_SKIPPED
+                                    and any(r[1] == "skipped" for r in tiff_results))
+                _hint = (" | its output already exists; pass --delete-skipped to "
+                         "delete sources that are already archived"
+                         if _blocked_by_skip else "")
+                logger.warning(
+                    f"  KEEP source (not all pages succeeded) | {Path(tiff_key).name}{_hint}")
                 continue
+
+            # Which of this TIFF's outputs were skipped rather than written.
+            # Needed twice below: the staging gate cannot apply to them (nothing
+            # was staged, correctly), and the log line names them differently.
+            skipped_finals = {os.path.normcase(r[2]) for r in tiff_results
+                              if r[1] == "skipped"}
 
             # Pages this run chose NOT to encode. Every downstream check passes
             # in this case — the JXL that was written is valid and complete —
@@ -3218,7 +3284,16 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 # but it is not the file this run wrote and verified. The
                 # delete gate must certify THIS run's output, not whatever
                 # was already sitting there.
-                if use_staging and os.path.normcase(str(final_jxl)) not in moved_finals:
+                #
+                # A SKIPPED page is the one legitimate exception: nothing was
+                # written, so nothing was staged, so it can never appear in
+                # moved_finals. Without this the flag would look like it worked
+                # and silently delete nothing whenever staging is configured.
+                # It is not a hole — such a page is judged entirely by the
+                # exists()/integrity/round-trip checks around this one.
+                if (use_staging
+                        and os.path.normcase(str(final_jxl)) not in moved_finals
+                        and os.path.normcase(str(final_jxl)) not in skipped_finals):
                     can_delete = False
                     break
                 if not _verify_jxl_integrity(Path(final_jxl)):
@@ -3246,9 +3321,18 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     logger.debug(f"  verify page{_page} OK ({detail}) | {Path(tiff_key).name}")
                 if verify_failed is not None:
                     _page, detail = verify_failed
+                    # An output this run did NOT write is the likeliest thing to
+                    # fail here, and for a reason that has nothing to do with a
+                    # bad encode: a pre-existing archive made at a different
+                    # --distance is judged against THIS run's thresholds. Say so
+                    # rather than let it read as corruption.
+                    _pre = (" | this output was not written by this run (SKIP); "
+                            "if it was archived at a different --distance, re-run "
+                            "with that distance or drop --verify-roundtrip"
+                            if skipped_finals else "")
                     logger.warning(
                         f"  KEEP source (round-trip verification FAILED on page {_page}: "
-                        f"{detail}) | {Path(tiff_key).name}")
+                        f"{detail}) | {Path(tiff_key).name}{_pre}")
                     continue
 
             src_tiff = Path(tiff_key)
@@ -3260,11 +3344,20 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 # will not have that preview page back — say so at delete time.
                 thumb_note = (" (embedded thumbnail page not encoded)"
                               if os.path.normcase(tiff_key) in _discarded_thumb_sources else "")
-                logger.info(f"  DELETED source | {src_tiff.name}{thumb_note}")
+                # Named apart from a fresh delete: this source was cleared by a
+                # file THIS RUN DID NOT WRITE, and the log should not blur the
+                # two — that distinction is the whole reason the flag is opt-in.
+                if skipped_finals:
+                    deleted_skipped += 1
+                    logger.info(f"  DELETED source (already archived) | "
+                                f"{src_tiff.name}{thumb_note}")
+                else:
+                    logger.info(f"  DELETED source | {src_tiff.name}{thumb_note}")
             except OSError as e:
                 logger.warning(f"  KEEP (could not delete source) | {src_tiff.name}: {e}")
         if deleted:
-            logger.info(f"  -> Deleted {deleted} source TIFF(s)")
+            _sk = (f" ({deleted_skipped} already archived)" if deleted_skipped else "")
+            logger.info(f"  -> Deleted {deleted} source TIFF(s){_sk}")
 
     return results
 
@@ -3398,6 +3491,15 @@ def main():
                         help="Delete source TIFFs after their JXL is written to the "
                              "mode's destination and verified. Works in EVERY mode "
                              "(0-8), not just 8. IRREVERSIBLE.")
+    parser.add_argument("--delete-skipped", action="store_true",
+                        help="[with --delete-source] Also delete sources whose output "
+                             "ALREADY EXISTS (the files reported as SKIP), so an archive "
+                             "interrupted between the encode and the unlink can be "
+                             "finished without re-encoding everything. NEVER on the "
+                             "timestamp alone: the output must still exist and pass the "
+                             "integrity check, and --verify-roundtrip is strongly "
+                             "recommended here — a SKIP carries no proof that the JXL "
+                             "came from that photo.")
     parser.add_argument("--verify-roundtrip", action="store_true",
                         help="Before deleting a source, decode its JXL and compare it "
                              "against the source page: pixel-identical for --distance 0, "
@@ -3461,7 +3563,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -3512,6 +3614,8 @@ def main():
         DELETE_CONFIRM = False
     if args.verify_roundtrip:
         VERIFY_ROUNDTRIP = True
+    if args.delete_skipped:
+        DELETE_SKIPPED = True
 
     if args.export_subfolder is not None:
         global EXPORT_TIFF_SUBFOLDER
@@ -3606,6 +3710,20 @@ def main():
         sys.exit(1)
     if not args.dry_run:
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
+
+    if DELETE_SKIPPED and not DELETE_SOURCE:
+        logger.warning("--delete-skipped has no effect without --delete-source: it only "
+                       "widens which sources the deletion covers. Nothing will be deleted.")
+    elif DELETE_SKIPPED and not VERIFY_ROUNDTRIP and not args.dry_run:
+        # Not fatal — the structural check still stands between a skip and the
+        # unlink — but this is the one combination where the toolkit deletes a
+        # master on the strength of a file it did not write.
+        logger.warning(
+            "--delete-skipped without --verify-roundtrip: sources whose output already "
+            "exists will be deleted after a STRUCTURAL check only (valid, complete JXL "
+            "container). Nothing compares the pixels, so a JXL that came from a "
+            "different photo with the same name would pass. Add --verify-roundtrip "
+            "unless you know the archive's provenance.")
 
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
@@ -3831,6 +3949,39 @@ def main():
             gray_label = " [grayscale]" if samples == 1 else ""
             logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
+
+        # Preview --delete-skipped. A dry run returns before process_group, so
+        # without this the one destructive option that acts on files this run
+        # does NOT touch would have no preview at all. Uses the cheap checks
+        # only; the round-trip is not run here and the report says so.
+        if DELETE_SOURCE and DELETE_SKIPPED:
+            _by_src: Dict[str, list] = {}
+            for t, j, page_idx, _th, _sf, _sp in all_items:
+                _by_src.setdefault(str(t), []).append(j)
+            _would_delete, _would_keep = [], []
+            for _src, _finals in _by_src.items():
+                if not all(_would_skip(Path(_src), j) for j in _finals):
+                    continue        # not a fully-skipped source: the normal path
+                if os.path.normcase(_src) in _discarded_real_page_sources:
+                    _would_keep.append((_src, "pages were discarded"))
+                elif all(_verify_jxl_integrity(j) for j in _finals):
+                    _would_delete.append(_src)
+                else:
+                    _would_keep.append((_src, "output failed the integrity check"))
+            if _would_delete or _would_keep:
+                logger.warning(
+                    f"Dry run: --delete-skipped would DELETE {len(_would_delete)} "
+                    f"already-archived source(s), and keep {len(_would_keep)}.")
+                for _s in _would_delete[:10]:
+                    logger.warning(f"  would DELETE | {_s}")
+                if len(_would_delete) > 10:
+                    logger.warning(f"  ... and {len(_would_delete) - 10} more")
+                for _s, _why in _would_keep[:10]:
+                    logger.info(f"  would KEEP ({_why}) | {_s}")
+                if VERIFY_ROUNDTRIP:
+                    logger.warning(
+                        "  NOTE: the round-trip check was NOT run in this preview — it "
+                        "decodes every file, so the real run may keep more than this.")
         # A dry run is exactly where the user checks whether pages get dropped,
         # so the discard totals must print here too — the real-run summary below
         # is never reached.

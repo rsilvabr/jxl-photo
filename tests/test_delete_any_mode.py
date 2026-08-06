@@ -468,6 +468,201 @@ def test_wrapper_emits_verify_only_alongside_delete(menu, launched, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# --delete-skipped: finishing an interrupted archive
+# ---------------------------------------------------------------------------
+
+def _skip_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
+              verify=None, staging=None, mtime_newer=True):
+    """One source whose output ALREADY exists, so convert_one reports SKIP.
+
+    Returns the source path so the caller can assert on its survival.
+    """
+    src = tmp_path / "photo.tif"
+    _tiff(src)
+    final = tmp_path / "out" / "photo.jxl"
+    final.parent.mkdir()
+    final.write_bytes(b"already archived")
+    # The output must look up to date for smart sync to skip it.
+    stamp = src.stat().st_mtime + (100 if mtime_newer else -100)
+    import os as _os
+    _os.utime(final, (stamp, stamp))
+
+    enc.setup_logger()
+    monkeypatch.setattr(enc, "DELETE_SOURCE", True)
+    monkeypatch.setattr(enc, "DELETE_SKIPPED", delete_skipped)
+    monkeypatch.setattr(enc, "OVERWRITE", "smart")
+    monkeypatch.setattr(enc, "TEMP2_DIR", staging)
+    monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", verify is not None)
+    monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: integrity)
+    if verify is not None:
+        monkeypatch.setattr(enc, "_verify_roundtrip_page",
+                            lambda *a, **k: (verify, "stubbed"))
+    enc.process_group([(src, final, 0, False, 0, 3)], 1, 3)
+    return src
+
+
+def test_skipped_source_is_kept_by_default(tmp_path, monkeypatch):
+    """The historical rule, unchanged: a SKIP blocks the delete."""
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=False)
+    assert src.exists()
+
+
+def test_delete_skipped_removes_an_already_archived_source(tmp_path, monkeypatch):
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=True)
+    assert not src.exists()
+
+
+def test_delete_skipped_still_requires_the_integrity_check(tmp_path, monkeypatch):
+    """The structural floor is what makes this safe at all — a SKIP proves
+    nothing on its own, so a broken output must still keep the source."""
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=True, integrity=False)
+    assert src.exists()
+
+
+def test_delete_skipped_honours_a_failed_roundtrip(tmp_path, monkeypatch):
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=True, verify=False)
+    assert src.exists()
+
+
+def test_delete_skipped_passes_with_a_good_roundtrip(tmp_path, monkeypatch):
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=True, verify=True)
+    assert not src.exists()
+
+
+def test_delete_skipped_works_with_staging_configured(tmp_path, monkeypatch):
+    """The trap: a skipped page is never in moved_finals (nothing was staged),
+    so the staging gate would block it and the flag would silently do nothing."""
+    staging = tmp_path / "stg"
+    staging.mkdir()
+    src = _skip_run(tmp_path, monkeypatch, delete_skipped=True, staging=str(staging))
+    assert not src.exists(), "the staging gate swallowed the skipped delete"
+
+
+def test_stale_output_is_not_classified_as_archived(tmp_path, monkeypatch):
+    """An output OLDER than its source is not a skip at all — it is reconverted,
+    and the normal (stronger) delete path applies. --delete-skipped must not
+    widen to cover it, or a stale archive would be treated as a finished one.
+    """
+    import os as _os
+    src = tmp_path / "photo.tif"
+    _tiff(src)
+    final = tmp_path / "photo.jxl"
+    final.write_bytes(b"stale")
+
+    monkeypatch.setattr(enc, "OVERWRITE", "smart")
+    stamp = src.stat().st_mtime - 100
+    _os.utime(final, (stamp, stamp))
+    assert enc._would_skip(src, final) is False, "an out-of-date output is not archived"
+
+    stamp = src.stat().st_mtime + 100
+    _os.utime(final, (stamp, stamp))
+    assert enc._would_skip(src, final) is True
+
+    final.unlink()
+    assert enc._would_skip(src, final) is False, "a missing output is never a skip"
+
+    # --overwrite reconverts everything, so nothing is ever classified archived.
+    final.write_bytes(b"x")
+    _os.utime(final, (stamp, stamp))
+    monkeypatch.setattr(enc, "OVERWRITE", True)
+    assert enc._would_skip(src, final) is False
+
+
+def test_delete_skipped_still_blocked_by_discarded_pages(tmp_path, monkeypatch):
+    """A source that lost real pages keeps its veto whatever else is on."""
+    import os as _os
+    src = tmp_path / "photo.tif"
+    _tiff(src)
+    final = tmp_path / "out" / "photo.jxl"
+    final.parent.mkdir()
+    final.write_bytes(b"archived")
+    stamp = src.stat().st_mtime + 100
+    _os.utime(final, (stamp, stamp))
+
+    enc.setup_logger()
+    monkeypatch.setattr(enc, "DELETE_SOURCE", True)
+    monkeypatch.setattr(enc, "DELETE_SKIPPED", True)
+    monkeypatch.setattr(enc, "OVERWRITE", "smart")
+    monkeypatch.setattr(enc, "TEMP2_DIR", None)
+    monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", False)
+    monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: True)
+    monkeypatch.setattr(enc, "_discarded_real_page_sources",
+                        {_os.path.normcase(str(src))})
+
+    enc.process_group([(src, final, 0, False, 0, 3)], 1, 3)
+    assert src.exists()
+
+
+def test_delete_skipped_needs_every_page_of_a_split(tmp_path, monkeypatch):
+    """One page freshly converted, one skipped: both must clear their own gate."""
+    import os as _os
+    src = tmp_path / "scan.tif"
+    _tiff(src)
+    out = tmp_path / "out"
+    out.mkdir()
+    f0, f2 = out / "scan.jxl", out / "scan_page2.jxl"
+    f0.write_bytes(b"archived")            # exists -> skipped
+    stamp = src.stat().st_mtime + 100
+    _os.utime(f0, (stamp, stamp))
+    # f2 does not exist -> converted this run
+
+    enc.setup_logger()
+    monkeypatch.setattr(enc, "DELETE_SOURCE", True)
+    monkeypatch.setattr(enc, "DELETE_SKIPPED", True)
+    monkeypatch.setattr(enc, "OVERWRITE", "smart")
+    monkeypatch.setattr(enc, "TEMP2_DIR", None)
+    monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", False)
+    # page 2's output is never actually written -> exists() fails -> KEEP
+    monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: True)
+    real_convert = enc.convert_one
+    monkeypatch.setattr(enc, "convert_one",
+                        lambda t, w, f, p=0, *a, **k: (real_convert(t, w, f, p)
+                                                       if p == 0 else
+                                                       ((str(t), p), "ok", str(f), t)))
+    enc.process_group([(src, f0, 0, False, 0, 3), (src, f2, 2, False, 0, 3)], 1, 3)
+    assert src.exists(), "a missing page's output must still veto the delete"
+
+
+def test_delete_skipped_without_delete_source_is_a_no_op(tmp_path):
+    _tiff(tmp_path / "a.tif")
+    r = subprocess.run(
+        [sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(tmp_path),
+         "--mode", "0", "--distance", "0", "--delete-skipped"],
+        capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no effect without --delete-source" in r.stdout
+    assert (tmp_path / "a.tif").exists()
+
+
+def test_dry_run_previews_what_delete_skipped_would_remove(tmp_path):
+    """A destructive option that cannot be previewed is the wrong opt-in."""
+    _tiff(tmp_path / "a.tif")
+    out = tmp_path / "out"
+    out.mkdir()
+    # A real, valid JXL at the destination, newer than the source.
+    subprocess.run([sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(tmp_path),
+                    str(out), "--mode", "2", "--distance", "0"],
+                   capture_output=True, text=True, timeout=300, check=True)
+    r = subprocess.run(
+        [sys.executable, str(REPO / "jxl_tiff_encoder.py"), str(tmp_path), str(out),
+         "--mode", "2", "--distance", "0", "--delete-source", "--delete-skipped",
+         "--dry-run"],
+        capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "would DELETE 1 already-archived source(s)" in r.stdout
+    assert (tmp_path / "a.tif").exists(), "a dry run must not delete anything"
+
+
+def test_wrapper_emits_delete_skipped_only_alongside_delete(menu, launched, monkeypatch):
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
+    menu.execute_workflow(_wf(3, advanced_options={"delete_source": True,
+                                                   "delete_skipped": True}), STATUS)
+    assert "--delete-skipped" in launched[-1]
+    menu.execute_workflow(_wf(3, advanced_options={"delete_skipped": True}), STATUS)
+    assert "--delete-skipped" not in launched[-1]
+
+
+# ---------------------------------------------------------------------------
 # The wizard's [D] entry
 # ---------------------------------------------------------------------------
 
@@ -485,18 +680,33 @@ def _gateway(menu, monkeypatch, answers, layout="3", origin="tiff", dest="jxl"):
 
 
 def test_D_arms_delete_on_the_chosen_layout(menu, monkeypatch):
-    # gate 1 yes, layout 3, gate 2 yes, verify no
-    ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "n"])
+    # gate 1 yes, layout 3, gate 2 yes, verify no, delete-skipped no
+    ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "n", "n"])
     assert ok is True
     assert wf["mode"] == 3
     assert wf["delete_source"] is True
     assert wf.get("verify_roundtrip") is False
+    assert wf.get("delete_skipped") is False
 
 
 def test_D_can_arm_verify_too(menu, monkeypatch):
-    ok, wf = _gateway(menu, monkeypatch, ["y", "5", "y", "y"])
+    ok, wf = _gateway(menu, monkeypatch, ["y", "5", "y", "y", "n"])
     assert wf["mode"] == 5
     assert wf["verify_roundtrip"] is True
+
+
+def test_D_can_arm_delete_skipped(menu, monkeypatch):
+    ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "y", "y"])
+    assert wf["verify_roundtrip"] is True
+    assert wf["delete_skipped"] is True
+
+
+def test_D_warns_when_delete_skipped_has_no_pixel_check(menu, monkeypatch, capsys):
+    """The one combination that deletes a master on a file this run did not
+    write, with nothing comparing the pixels. It must say so."""
+    _gateway(menu, monkeypatch, ["y", "3", "y", "n", "y"])
+    out = _out(capsys)
+    assert "structurally valid" in out
 
 
 def test_D_first_gate_declined_arms_nothing(menu, monkeypatch):

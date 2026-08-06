@@ -348,6 +348,15 @@ twice, which trains you to answer it twice):
    is the one that catches a wrong folder, because the count is visible;
 3. the **HHMM token** at execution time. A dry run never asks for it.
 
+**Already-converted originals** (offered inside `[D]`): sources whose JXL already
+exists are reported as SKIP and normally **kept**, which means an archive
+interrupted between the encode and the delete can never be finished without
+re-encoding everything. Turning this on deletes them too — but never on the
+timestamp: the output must exist and be a valid, complete JXL, and with the
+round-trip check on, it must decode back to the source. That check matters *more*
+here than for a fresh conversion, because there is no "this run wrote it" to fall
+back on — it is the only thing tying that JXL to that photo.
+
 **Round-trip verification** (TIFF → JXL only, offered inside `[D]`): decodes each
 JXL and compares it with the source before deleting. With `--distance 0` the pixels
 must match **exactly**; on a lossy run it is a brightness + PSNR **sanity** check

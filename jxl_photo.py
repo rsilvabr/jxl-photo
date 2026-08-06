@@ -386,6 +386,8 @@ class ToolConfig:
     # field rather than a key inside last_advanced_options, so a preset saved
     # before it existed simply reads as None/off.
     last_verify_roundtrip: Optional[bool] = None
+    # Whether a delete run also covers sources whose output already exists.
+    last_delete_skipped: Optional[bool] = None
     last_advanced_options: Optional[Dict] = None
     last_use_ram: Optional[bool] = None
     last_compression: Optional[str] = None
@@ -2577,6 +2579,40 @@ class InteractiveMenu:
             workflow['verify_roundtrip'] = bool(verify)
             self.config.config.last_verify_roundtrip = bool(verify)
 
+            # Already-archived sources. Offered only here, and only after the
+            # verify question, because the honest answer to "is this safe?"
+            # depends on the previous answer.
+            ds_default = bool(self.config.config.last_delete_skipped)
+            ds_explain = (
+                "Sources whose JXL already exists are reported as SKIP and are normally "
+                "KEPT — which means an archive interrupted between the encode and the "
+                "delete can never be finished without re-encoding everything. Turning "
+                "this on deletes them too. They are never deleted on the timestamp "
+                "alone: the output must exist and be a valid, complete JXL"
+                + (", and it must decode back to the source." if verify else
+                   " — but with the verify above OFF, nothing compares the pixels, so a "
+                   "JXL that came from a different photo with the same name would pass."))
+            if RICH_AVAILABLE and console:
+                console.print(f"\n[dim]{ds_explain}[/dim]")
+                del_skipped = Confirm.ask(
+                    "[cyan]Also delete originals that were already converted?[/cyan]",
+                    default=ds_default)
+            else:
+                print(f"\n{ds_explain}")
+                _di = input(f"Also delete originals that were already converted? "
+                            f"[{'Y/n' if ds_default else 'y/N'}]: ").strip().lower()
+                del_skipped = (not _di.startswith('n')) if ds_default else _di.startswith('y')
+            workflow['delete_skipped'] = bool(del_skipped)
+            self.config.config.last_delete_skipped = bool(del_skipped)
+            if del_skipped and not verify:
+                _w = ("Deleting already-converted originals with the round-trip check OFF: "
+                      "the only thing standing between a stale or wrong JXL and your master "
+                      "is that the file is structurally valid.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_w}[/yellow]")
+                else:
+                    print(_w)
+
         msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
                f"time (HHMM) once more before anything runs — a dry run never asks.")
         if RICH_AVAILABLE and console:
@@ -3122,6 +3158,8 @@ class InteractiveMenu:
                 advanced_options['delete_source'] = True
             if workflow.get('verify_roundtrip'):
                 advanced_options['verify_roundtrip'] = True
+            if workflow.get('delete_skipped'):
+                advanced_options['delete_skipped'] = True
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -3216,6 +3254,8 @@ class InteractiveMenu:
             advanced_options['delete_source'] = delete_src
             if workflow.get('verify_roundtrip'):
                 advanced_options['verify_roundtrip'] = True
+            if workflow.get('delete_skipped'):
+                advanced_options['delete_skipped'] = True
             advanced_options['embed_thumbnail'] = embed_thumb
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
@@ -3352,6 +3392,8 @@ class InteractiveMenu:
             advanced_options['delete_source'] = delete_src
             if workflow.get('verify_roundtrip'):
                 advanced_options['verify_roundtrip'] = True
+            if workflow.get('delete_skipped'):
+                advanced_options['delete_skipped'] = True
             advanced_options['thumbnail_handling'] = thumbnail_handling
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
             advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
@@ -3387,6 +3429,8 @@ class InteractiveMenu:
             advanced_options['delete_source'] = delete_src
             if workflow.get('verify_roundtrip'):
                 advanced_options['verify_roundtrip'] = True
+            if workflow.get('delete_skipped'):
+                advanced_options['delete_skipped'] = True
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
@@ -3472,6 +3516,8 @@ class InteractiveMenu:
             extra_info.append("Verify round-trip: ON"
                               if _adv.get('verify_roundtrip')
                               else "Verify round-trip: off (structural check only)")
+            if _adv.get('delete_skipped'):
+                extra_info.append("Also deletes ALREADY-CONVERTED originals (!)")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('dry_run'):
@@ -4446,6 +4492,8 @@ class InteractiveMenu:
                 # front of the unlink), so it is emitted inside this branch.
                 if advanced.get('verify_roundtrip'):
                     cmd.append('--verify-roundtrip')
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -4820,6 +4868,8 @@ class InteractiveMenu:
                 # front of the unlink), so it is emitted inside this branch.
                 if advanced.get('verify_roundtrip'):
                     cmd.append('--verify-roundtrip')
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -5466,6 +5516,8 @@ class InteractiveMenu:
         # Only meaningful with delete_source, which the child enforces anyway.
         if session.get('last_verify_roundtrip'):
             workflow['advanced_options']['verify_roundtrip'] = True
+        if session.get('last_delete_skipped'):
+            workflow['advanced_options']['delete_skipped'] = True
         workflow['expert_flags'] = session.get('last_expert_flags') or ''
         workflow['auto_mode_used'] = False
         # The manifest executor's overlap gate behaves differently when there
