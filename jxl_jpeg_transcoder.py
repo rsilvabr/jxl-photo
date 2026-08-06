@@ -1699,7 +1699,10 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 except OSError:
                     pass
 
-    if DELETE_SOURCE and mode == 8:
+    # Any mode, not just 8: the mode decides where the output lands, deleting
+    # the source is a separate opt-in. Every gate below certifies THIS run's
+    # output at its FINAL path, which is mode-independent.
+    if DELETE_SOURCE:
         deleted = 0
         src_map = {str(s): (s, f) for s, _, f in tasks}
         for result in results:
@@ -1887,7 +1890,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     for f, out in pairs:
         groups.setdefault(out.parent, []).append((f, out))
 
-    if args.mode == 8 and DELETE_SOURCE:
+    # Charged for EVERY mode: deletion is a separate opt-in from the layout.
+    if DELETE_SOURCE:
         if DELETE_CONFIRM:
             # Transcode is lossless in both directions (decode requires the jbrd
             # box, checked per file in decode_one_transcode), so the simple
@@ -2603,9 +2607,9 @@ def cmd_convert(args, from_jxl: bool = True):
 
     logger.info(f"Output groups: {len(groups)}")
 
-    # Safety confirmation for Mode 8 + DELETE_SOURCE
+    # Safety confirmation for DELETE_SOURCE, in every mode
     # Determine if operation is lossy based on direction and settings
-    if args.mode == 8 and DELETE_SOURCE:
+    if DELETE_SOURCE:
         if DELETE_CONFIRM:
             if direction == "to_jxl":
                 # PNG/JPEG -> JXL: lossy if distance > 0
@@ -2640,8 +2644,8 @@ def cmd_convert(args, from_jxl: bool = True):
         False, smart_mode
     )
 
-    # Handle DELETE_SOURCE for convert mode (lossy)
-    if DELETE_SOURCE and args.mode == 8:
+    # Handle DELETE_SOURCE for convert mode (lossy), in every mode
+    if DELETE_SOURCE:
         deleted = 0
         src_map = {str(s): (s, out) for s, out in pairs}
         for result in results:
@@ -2864,9 +2868,9 @@ def cmd_auto(args):
     # Confirm source deletion BEFORE any processing — but AFTER the collision
     # checks above, so a doomed run never asks for the token in vain.
     # Lossy conversion requires stricter confirmation than lossless transcode.
-    # Only meaningful in mode 8. Skipped on dry runs (nothing is converted, so
-    # nothing would be deleted) and when DELETE_CONFIRM is off.
-    if args.mode == 8 and DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
+    # Skipped on dry runs (nothing is converted, so nothing would be deleted)
+    # and when DELETE_CONFIRM is off. Charged in every mode.
+    if DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
         # Lossiness from the PLANNED pairs (post mode-6/7 filter), not the raw
         # lists — otherwise a fully filtered-out group still asks for the token.
         has_lossy = bool(planned["JXL-lossy"]) or bool(planned["PNG"])
@@ -3068,8 +3072,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             use_internal_srgb=False, smart=args.sync
         )
         _accumulate(results)
-        # Handle DELETE_SOURCE for lossy convert (auto mode), only in mode 8
-        if DELETE_SOURCE and args.mode == 8:
+        # Handle DELETE_SOURCE for lossy convert (auto mode), in every mode
+        if DELETE_SOURCE:
             deleted = 0
             src_map = {str(s): (s, out) for s, out in pairs}
             for result in results:

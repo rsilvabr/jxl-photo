@@ -12,6 +12,7 @@ Requirements:
 """
 
 import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys, shutil, base64, uuid, hashlib, json
+import math
 import re
 import functools
 from pathlib import Path
@@ -636,17 +637,61 @@ EMBED_JPEG_THUMBNAIL = False
 # The thumbnail is generated from the PNG intermediate and injected via exiftool
 # after the JXL encoding is complete.
 
+VERIFY_ROUNDTRIP = False
+# Opt-in extra gate before DELETE_SOURCE removes a source TIFF: decode the JXL
+# that was just written and compare it against the source page. Costs one full
+# decode per output, so it roughly doubles a run — worth it exactly when the
+# original is about to stop existing.
+#
+# _verify_jxl_integrity, which always runs, proves the file is a well-formed,
+# untruncated container with a codestream. It does NOT prove the pixels came
+# back. This does.
+#
+#   distance = 0  -> the decoded pixels must be IDENTICAL, or the source stays.
+#   distance > 0  -> a sanity check, not a quality check: it answers "is this
+#                    the same picture", not "is it a good encode". Quality loss
+#                    is what you asked for; a BLACK frame is not. See the
+#                    ICC_PNG_STRATEGY note above — some scanner profiles make
+#                    cjxl emit near-black images that pass every structural
+#                    check, and that is precisely the failure this catches.
+#
+# Has no effect without DELETE_SOURCE (it is a delete gate); a run that sets it
+# alone says so and carries on. Requires djxl and imagecodecs.
+
+VERIFY_LOSSY_MIN_MEAN_RATIO = 0.7
+# [VERIFY_ROUNDTRIP, distance > 0] Decoded mean / source mean must stay within
+# this factor in BOTH directions (0.7 -> between 0.7x and ~1.43x). Same constant
+# and same reasoning as _CAU_MIN_RATIO in the cautious ICC test, which already
+# uses a mean ratio to detect exactly this failure on a synthetic probe.
+
+VERIFY_LOSSY_MIN_PSNR = 20.0
+# [VERIFY_ROUNDTRIP, distance > 0] dB floor. Deliberately permissive: real
+# photos land at 40-50 dB at d=1 and still 25-30 dB at d=15 (the highest
+# distance this script accepts), while a different image or a decode that
+# turned to noise sits at 5-15 dB. The gap is wide, so this rejects
+# catastrophes without ever second-guessing a legitimate lossy encode.
+
 DELETE_SOURCE = False
-# [MODE 8 only] Whether to delete the source TIFF after successful encoding.
+# Whether to delete the source TIFF after successful encoding. Available in
+# EVERY mode: the mode decides where the JXL lands, this decides whether the
+# TIFF survives it.
 # Only deletes if ALL of the following are true:
 #   - encode status is ok or overwrite (never deletes on error or skip)
-#   - the JXL file exists at its final destination (after staging move if applicable)
+#   - no page of that TIFF was dropped by the multi-page policy
+#   - the JXL exists at its FINAL destination (after the staging move, and the
+#     move itself must have succeeded — a stale file already sitting there does
+#     not count)
+#   - it passes _verify_jxl_integrity there
+#   - and, with VERIFY_ROUNDTRIP above, the decoded pixels match the source
 #
-# False (default) -> never delete source TIFFs. JXL and TIFF coexist in the same folder.
+# False (default) -> never delete source TIFFs.
 # True            -> delete source TIFF after confirmed successful encode.
 #
 # WARNING: irreversible. Only enable after testing on a small batch first.
-# Has no effect on modes 0–7.
+# Works in every mode. In modes that COLLAPSE folders (2 flattens a tree, 5
+# merges siblings, 6/7 drop one level under the marker) what keeps this safe is
+# _abort_on_duplicate_outputs: two sources mapping to one output abort the run
+# before anything is written, rather than costing two originals.
 
 MULTIPAGE_TIFF_MODE = "split"
 # How to handle TIFFs with more than one page.
@@ -2299,6 +2344,101 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
         logger.warning(line) if tight else logger.info(line)
 
 
+# --- Round-trip verification (opt-in delete gate) --------------------------
+# A 45 MP RGB page is ~550 MB as uint16 and the real film scans are bigger, so
+# every step here is written to avoid materialising a second full-size float
+# copy: the statistics are accumulated over row blocks instead.
+_VERIFY_CHUNK_ROWS = 512
+
+
+def _canon_for_compare(a: np.ndarray) -> np.ndarray:
+    """Both sides of the comparison in one shape/dtype convention.
+
+    The encoder feeds cjxl a 3D array (2D pages get a trailing axis) and
+    promotes 8-bit to 16-bit with *257; djxl gives back 2D for a grayscale JXL.
+    Squeeze the single-channel axis away on both so a grayscale page compares
+    as (H, W) either way.
+    """
+    if a.ndim == 3 and a.shape[2] == 1:
+        a = a[:, :, 0]
+    if a.dtype == np.uint8:
+        return a.astype(np.uint16) * 257
+    if a.dtype != np.uint16:
+        return a.astype(np.uint16)
+    return a
+
+
+def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path) -> np.ndarray:
+    """Decode a JXL back to pixels. Raises on any failure — a verification that
+    cannot run must never read as a verification that passed."""
+    png_path = tmp_dir / "verify.png"
+    r = subprocess.run(["djxl", str(jxl_path), str(png_path)],
+                       capture_output=True, timeout=CJXL_TIMEOUT)
+    if r.returncode != 0 or not png_path.exists():
+        raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+    # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
+    # 8-bit, which would make every lossless comparison fail for a reason that
+    # has nothing to do with the encode. Checked up front in main().
+    import imagecodecs
+    return imagecodecs.png_decode(png_path.read_bytes())
+
+
+def _compare_stats(src: np.ndarray, dec: np.ndarray):
+    """(source mean, decoded mean, MSE), accumulated over row blocks."""
+    total = src.size
+    s_sum = d_sum = sq = 0.0
+    for y in range(0, src.shape[0], _VERIFY_CHUNK_ROWS):
+        a = src[y:y + _VERIFY_CHUNK_ROWS].astype(np.float64)
+        b = dec[y:y + _VERIFY_CHUNK_ROWS].astype(np.float64)
+        s_sum += float(a.sum())
+        d_sum += float(b.sum())
+        diff = a - b
+        sq += float((diff * diff).sum())
+    return s_sum / total, d_sum / total, sq / total
+
+
+def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
+                           distance: float):
+    """Does `jxl_path` really hold page `page_idx` of `tiff_path`?
+
+    Returns (ok, detail). Any failure to even run the check returns False: this
+    gates an irreversible delete, so "could not tell" must mean "keep".
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="jxl_verify_", dir=TEMP_DIR) as tmp:
+            dec = _decode_jxl_for_verify(jxl_path, Path(tmp))
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            if page_idx >= len(tif.pages):
+                return False, f"source page {page_idx} no longer exists"
+            src = tif.pages[page_idx].asarray()
+    except Exception as e:
+        return False, f"could not verify: {e}"
+
+    src, dec = _canon_for_compare(src), _canon_for_compare(dec)
+    if src.shape != dec.shape:
+        return False, f"shape mismatch: source {src.shape} vs decoded {dec.shape}"
+
+    if distance == 0:
+        # Lossless means lossless. No tolerance, no statistics.
+        if np.array_equal(src, dec):
+            return True, "pixel-identical"
+        return False, "lossless encode did not decode back pixel-identical"
+
+    s_mean, d_mean, mse = _compare_stats(src, dec)
+    ratio = (d_mean / s_mean) if s_mean > 0 else (1.0 if d_mean == 0 else 0.0)
+    psnr = float("inf") if mse <= 0 else 10.0 * math.log10((65535.0 ** 2) / mse)
+    # Bounded on BOTH sides: the documented scanner-ICC failure darkens the
+    # image, but a decode that blows out is just as wrong.
+    lo = VERIFY_LOSSY_MIN_MEAN_RATIO
+    hi = 1.0 / lo if lo > 0 else float("inf")
+    detail = f"mean ratio {ratio:.3f}, PSNR {psnr:.1f} dB"
+    if not (lo <= ratio <= hi):
+        return False, f"{detail} — brightness is not the source's"
+    if psnr < VERIFY_LOSSY_MIN_PSNR:
+        return False, f"{detail} — below the {VERIFY_LOSSY_MIN_PSNR} dB floor"
+    return True, detail
+
+
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
                 is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3, multipage_group: str = None):
     """
@@ -3013,10 +3153,19 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             if use_staging and pending_by_dest[dest] == 0:
                 _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
-    # Delete source TIFFs after confirmed encode — only for mode 8, only after staging.
+    # Delete source TIFFs after confirmed encode, in ANY mode, only after staging.
     # A source TIFF is deleted only if ALL of its encoded pages succeeded and every
     # resulting JXL exists at its final destination.
-    if DELETE_SOURCE and mode == 8:
+    #
+    # Mode 8 used to be the only mode allowed here, which made "archive to
+    # another folder and drop the master" impossible. Nothing in the gates
+    # below was ever mode-specific: they all certify THIS run's output at its
+    # FINAL path, which for modes 1-7 is the destination folder. What keeps the
+    # collapsing modes safe (5 merges sibling folders, 6/7 drop one level under
+    # the marker, 2 flattens a whole tree) is _abort_on_duplicate_outputs, which
+    # runs in every mode before the first byte is written — two sources mapping
+    # to one output abort the run instead of costing two originals.
+    if DELETE_SOURCE:
         deleted = 0
         # Group results by source TIFF path
         results_by_tiff: Dict[str, list] = {}
@@ -3079,6 +3228,28 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             if not can_delete:
                 logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
                 continue
+
+            # Last gate, and the only one that looks at PIXELS. Everything above
+            # certifies the FILE; this certifies the IMAGE. Runs per page, so a
+            # split multi-page TIFF only dies once every one of its pages came
+            # back. Failure is a hard KEEP: the whole point is that the source
+            # is about to stop existing.
+            if VERIFY_ROUNDTRIP:
+                verify_failed = None
+                for r in tiff_results:
+                    _page = r[0][1]
+                    ok_v, detail = _verify_roundtrip_page(
+                        Path(tiff_key), _page, Path(r[2]), CJXL_DISTANCE)
+                    if not ok_v:
+                        verify_failed = (_page, detail)
+                        break
+                    logger.debug(f"  verify page{_page} OK ({detail}) | {Path(tiff_key).name}")
+                if verify_failed is not None:
+                    _page, detail = verify_failed
+                    logger.warning(
+                        f"  KEEP source (round-trip verification FAILED on page {_page}: "
+                        f"{detail}) | {Path(tiff_key).name}")
+                    continue
 
             src_tiff = Path(tiff_key)
             try:
@@ -3224,7 +3395,16 @@ def main():
     parser.add_argument("--no-ram",         action="store_true", default=None,
                         help="Write PNG intermediate to disk (slower, less memory)")
     parser.add_argument("--delete-source",   action="store_true",
-                        help="Delete source TIFFs after successful encode (mode 8 only)")
+                        help="Delete source TIFFs after their JXL is written to the "
+                             "mode's destination and verified. Works in EVERY mode "
+                             "(0-8), not just 8. IRREVERSIBLE.")
+    parser.add_argument("--verify-roundtrip", action="store_true",
+                        help="Before deleting a source, decode its JXL and compare it "
+                             "against the source page: pixel-identical for --distance 0, "
+                             "or a brightness+PSNR sanity check for lossy (catches a "
+                             "black/scrambled encode, not quality loss). Roughly doubles "
+                             "the run. Needs djxl and imagecodecs. Only affects "
+                             "--delete-source.")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user (DELETE_CONFIRM stays "
@@ -3281,7 +3461,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -3330,6 +3510,8 @@ def main():
         DELETE_SOURCE = True
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
+    if args.verify_roundtrip:
+        VERIFY_ROUNDTRIP = True
 
     if args.export_subfolder is not None:
         global EXPORT_TIFF_SUBFOLDER
@@ -3424,6 +3606,34 @@ def main():
         sys.exit(1)
     if not args.dry_run:
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
+
+    # --verify-roundtrip needs tools the rest of the encoder does not. Checked
+    # up front, and fatally: a verification that silently could not run would
+    # be worse than no verification at all — it gates an irreversible delete.
+    if VERIFY_ROUNDTRIP and not args.dry_run:
+        if not DELETE_SOURCE:
+            logger.warning("--verify-roundtrip has no effect without --delete-source: "
+                           "it is a gate in front of the deletion, not a standalone check. "
+                           "Nothing will be verified.")
+        else:
+            if shutil.which("djxl") is None:
+                logger.error("--verify-roundtrip needs djxl in PATH (it decodes each JXL "
+                             "back to compare it with the source).")
+                sys.exit(1)
+            try:
+                import imagecodecs  # noqa: F401
+            except ImportError:
+                logger.error("--verify-roundtrip needs imagecodecs (pip install imagecodecs): "
+                             "PIL quantises 16-bit RGB PNGs to 8-bit, which would fail every "
+                             "lossless comparison for the wrong reason.")
+                sys.exit(1)
+            if CJXL_DISTANCE > 0:
+                logger.info(
+                    f"Round-trip verification (lossy, distance={CJXL_DISTANCE}): checks that the "
+                    f"JXL holds the SAME IMAGE, not that it is a good encode — mean ratio within "
+                    f"{VERIFY_LOSSY_MIN_MEAN_RATIO}x and PSNR >= {VERIFY_LOSSY_MIN_PSNR} dB.")
+            else:
+                logger.info("Round-trip verification (lossless): decoded pixels must be identical.")
 
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
@@ -3645,8 +3855,18 @@ def main():
     if args.mode == 2 and not args.input.is_file():
         output_root.mkdir(parents=True, exist_ok=True)
 
-    if args.mode == 8 and DELETE_SOURCE:
-        logger.info("Mode 8 -- in-place recursive | DELETE_SOURCE=True: source TIFFs will be deleted after successful encode")
+    # Deletion is available in EVERY mode, not just 8: the mode decides where
+    # the JXL lands, deleting the source is a separate opt-in. The confirmation
+    # therefore has to be charged here for every mode too, or a direct
+    # `--mode 3 --delete-source` would delete without ever asking.
+    if DELETE_SOURCE:
+        _where = ("next to each source TIFF" if args.mode == 8
+                  else "in the mode's destination folder")
+        logger.info(f"DELETE_SOURCE=True (mode {args.mode}): source TIFFs will be deleted "
+                    f"after their JXL is written {_where} and verified")
+        if VERIFY_ROUNDTRIP:
+            logger.info("  Round-trip verification is ON: each JXL is decoded and compared "
+                        "against its source before the source is deleted")
         if DELETE_CONFIRM:
             is_lossy = CJXL_DISTANCE > 0
             if not confirm_deletion_tiff(is_lossy):

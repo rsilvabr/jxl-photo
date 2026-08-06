@@ -382,6 +382,10 @@ class ToolConfig:
     last_thumbnail_handling: Optional[str] = None
     last_no_reconstruct_multipage: Optional[bool] = None
     last_depth_policy: Optional[str] = None
+    # Round-trip verification before a delete (TIFF -> JXL only). Its own
+    # field rather than a key inside last_advanced_options, so a preset saved
+    # before it existed simply reads as None/off.
+    last_verify_roundtrip: Optional[bool] = None
     last_advanced_options: Optional[Dict] = None
     last_use_ram: Optional[bool] = None
     last_compression: Optional[str] = None
@@ -2322,8 +2326,8 @@ class InteractiveMenu:
              f"ONLY files INSIDE folders matching '{export_marker}' — ignores everything outside"),
             ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
              f"Like mode 6, but only one subfolder of the export marker (asked in Step 5; empty = all = mode 6)"),
-            ("8", "DELETE originals ⚠️",
-             "DELETES source files after conversion - IRREVERSIBLE")
+            ("8", "In-place recursive",
+             "JXL next to each source file, all subfolders (originals kept — use [D] to delete)")
         ]
 
         if RICH_AVAILABLE and console:
@@ -2345,10 +2349,11 @@ class InteractiveMenu:
                 console.print(f"    {desc}\n")
 
             console.print("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
+            console.print("[D] [bold red]Convert and DELETE the originals[/bold red] ⚠️  — pick any layout above, then the sources are removed once each output is written and verified")
             console.print("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
             console.print()
 
-            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "a", "m"]
+            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "D", "a", "m", "d"]
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice:
@@ -2374,12 +2379,14 @@ class InteractiveMenu:
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"    {clean}\n")
             print("[M] Run from manifest — execute a previously generated manifest CSV")
+            print("[D] Convert and DELETE the originals  ** IRREVERSIBLE ** — pick any layout above,")
+            print("    then the sources are removed once each output is written and verified")
             print("[?] See detailed mode explanation")
             print()
 
-            valid_choices = [m[0] for m in modes] + ["?", "A", "M"]
+            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "D"]
             while True:
-                choice = input("Mode (0-8, A for auto, M for manifest, or ? for details): ").strip().upper()
+                choice = input("Mode (0-8, D to delete originals, A for auto, M for manifest, ? for details): ").strip().upper()
                 if choice in valid_choices:
                     break
 
@@ -2395,11 +2402,13 @@ class InteractiveMenu:
         if choice == "M":
             return self._wizard_run_from_manifest(workflow)
 
+        # Handle [D] — the delete-the-originals path
+        if choice == "D":
+            return self._wizard_delete_gateway(workflow, modes)
+
         # Handle mode 8: only MARK delete_source here. The HHMM confirmation
         # happens at execution time (execute_workflow), AFTER the user had the
         # chance to pick dry-run — a simulation never charges the token.
-        if choice == "8":
-            workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
 
@@ -2408,8 +2417,6 @@ class InteractiveMenu:
             "in [bold cyan]Edit default settings (option 4)[/bold cyan]. Folder names like 'converted_jxl'",
             "are script settings (edit the scripts directly).",
         ]
-        if int(choice) == 8:
-            note_lines.append("[bold red]WARNING: Mode 8 will DELETE your original files after conversion![/bold red]")
         if RICH_AVAILABLE and console:
             console.print()
             console.print(Panel(
@@ -2434,6 +2441,150 @@ class InteractiveMenu:
 
         return True
 
+    def _count_origin_files(self, workflow: Dict, mode: int) -> int:
+        """How many source files this mode would actually see, for the delete
+        preview. Flat for modes 0/1, recursive for the rest — the same split
+        every child's finder makes (_RECURSIVE_MANIFEST_MODES)."""
+        try:
+            root = Path(workflow['input_dir'])
+            exts = FolderAnalyzer(root, workflow['origin_format'],
+                                  workflow['dest_format'])._get_extensions(
+                                      workflow['origin_format'])
+            if root.is_file():
+                return 1 if root.suffix.lower() in exts else 0
+            it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
+            return sum(1 for f in it
+                       if f.suffix.lower() in exts and f.is_file())
+        except OSError:
+            return -1   # unreadable: the preview says so instead of claiming 0
+
+    def _wizard_delete_gateway(self, workflow: Dict, modes: List) -> bool:
+        """[D] — convert, verify, then DELETE the originals.
+
+        Deletion is not a layout, so it is not a mode: this asks for the layout
+        (0-8) and sets `delete_source` alongside it, producing exactly the same
+        `--mode N --delete-source` a CLI user would type. Reusing "8" as the
+        gateway would have made `--mode 8` mean two different things.
+
+        Three gates, each MORE specific than the last, rather than the same
+        question twice — a repeated y/N trains people to answer it twice:
+
+          1. here, a plain y/N (default No), to undo a mis-keyed 'D';
+          2. after the layout is known, the CONCRETE consequence — how many
+             files, from which folder, to where. This is the one that catches
+             a real mistake, because a wrong folder is visible in the count;
+          3. the HHMM token at execution time (execute_workflow), which cannot
+             be answered by reflex and is charged only on a non-dry run.
+
+        The token is deliberately NOT asked twice: the second prompt can roll
+        into the next minute and fail spuriously (see _run_saved_session).
+        """
+        origin = workflow['origin_format']
+        dest = workflow['dest_format']
+
+        # --- Gate 1: undo a mis-key ---------------------------------------
+        warn = (f"[D] deletes your original {origin.upper()} files after converting them. "
+                f"This cannot be undone.")
+        if RICH_AVAILABLE and console:
+            console.print()
+            console.print(Panel(f"[bold red]{warn}[/bold red]", border_style="red"))
+            go = Confirm.ask("[bold]Continue?[/bold]", default=False)
+        else:
+            print(f"\n{warn}")
+            go = input("Continue? [y/N]: ").strip().lower().startswith('y')
+        if not go:
+            if RICH_AVAILABLE and console:
+                console.print("[dim]Cancelled — back to the mode list.[/dim]")
+            else:
+                print("Cancelled — back to the mode list.")
+            return self._wizard_select_mode(workflow)
+
+        # --- The layout, same 0-8 as the normal path ----------------------
+        if RICH_AVAILABLE and console:
+            console.print("\n[bold cyan]Where should the converted files go?[/bold cyan]")
+            for key, name, _desc in modes:
+                console.print(f"  [{key}] {name}")
+            layout = Prompt.ask("Layout", choices=[m[0] for m in modes], default="0")
+        else:
+            print("\nWhere should the converted files go?")
+            for key, name, _desc in modes:
+                print(f"  [{key}] {name}")
+            layout = ""
+            while layout not in [m[0] for m in modes]:
+                layout = input("Layout [0]: ").strip() or "0"
+        mode = int(layout)
+
+        # --- Gate 2: the concrete consequence -----------------------------
+        m1_name, m3_name = _dest_folder_names(origin, dest)
+        where = {
+            0: "the same folder as each source file",
+            1: f"a '{m1_name}' subfolder in each source folder",
+            2: "one flat folder, chosen in the next step",
+            3: f"a '{m3_name}' subfolder in each source folder",
+            4: "a renamed sibling folder (suffix swap)",
+            5: "a sibling folder next to each source folder",
+            6: f"<{self.config.config.export_marker}>/16B_JXL/",
+            7: f"<{self.config.config.export_marker}>/16B_JXL/ (one subfolder only)",
+            8: "the same folder as each source file (recursive)",
+        }.get(mode, "the mode's destination")
+        n = self._count_origin_files(workflow, mode)
+        count_str = (f"{n} {origin.upper()} file(s)" if n >= 0
+                     else f"an unknown number of {origin.upper()} file(s) (folder unreadable)")
+        lines = [
+            f"{count_str} under:",
+            f"    {workflow['input_dir']}",
+            f"will be converted to {dest.upper()} in {where},",
+            "and then DELETED from where they are now.",
+        ]
+        if RICH_AVAILABLE and console:
+            console.print()
+            console.print(Panel("\n".join(lines), title="[bold red]About to delete originals[/bold red]",
+                                border_style="red"))
+            sure = Confirm.ask("[bold red]Is that what you want?[/bold red]", default=False)
+        else:
+            print()
+            for ln in lines:
+                print(ln)
+            sure = input("Is that what you want? [y/N]: ").strip().lower().startswith('y')
+        if not sure:
+            if RICH_AVAILABLE and console:
+                console.print("[dim]Cancelled — back to the mode list.[/dim]")
+            else:
+                print("Cancelled — back to the mode list.")
+            return self._wizard_select_mode(workflow)
+
+        workflow['mode'] = mode
+        workflow['delete_source'] = True
+
+        # Round-trip verification. Offered only here, because it is a gate in
+        # front of the deletion and nowhere else, and only for TIFF -> JXL,
+        # which is the direction where the source is the master.
+        if origin == 'tiff' and dest == 'jxl':
+            vr_default = bool(self.config.config.last_verify_roundtrip)
+            explain = ("Decode each JXL and compare it with the source before deleting. "
+                       "Lossless: the pixels must match exactly. Lossy: a brightness and "
+                       "PSNR sanity check that catches a black or scrambled encode (not "
+                       "quality loss — that is what you asked for). Roughly doubles the run.")
+            if RICH_AVAILABLE and console:
+                console.print(f"\n[dim]{explain}[/dim]")
+                verify = Confirm.ask("[cyan]Verify each output before deleting its source?[/cyan]",
+                                     default=vr_default)
+            else:
+                print(f"\n{explain}")
+                _vi = input(f"Verify each output before deleting its source? "
+                            f"[{'Y/n' if vr_default else 'y/N'}]: ").strip().lower()
+                verify = (not _vi.startswith('n')) if vr_default else _vi.startswith('y')
+            workflow['verify_roundtrip'] = bool(verify)
+            self.config.config.last_verify_roundtrip = bool(verify)
+
+        msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
+               f"time (HHMM) once more before anything runs — a dry run never asks.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{msg}[/yellow]")
+        else:
+            print(msg)
+        return True
+
     def _wizard_select_mode_manual(self, workflow: Dict) -> bool:
         """Manual mode selection (called after declining auto recommendation)."""
         origin = workflow['origin_format']
@@ -2450,7 +2601,7 @@ class InteractiveMenu:
             ("5", "Sibling", f"Creates sibling folder next to source"),
             ("6", f"Marker {export_marker} (full)", f"Only inside folders matching '{export_marker}'"),
             ("7", f"Marker {export_marker} (subfolder)", f"Only one subfolder of '{export_marker}'"),
-            ("8", "DELETE originals ⚠️", "DELETES source files!"),
+            ("8", "In-place recursive", "Output next to each source, all subfolders"),
         ]
 
         if RICH_AVAILABLE and console:
@@ -2472,10 +2623,6 @@ class InteractiveMenu:
             choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
             while choice not in valid_choices:
                 choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
-
-        if choice == "8":
-            # Only mark; HHMM confirmation happens at execution time.
-            workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
         return True
@@ -2576,10 +2723,6 @@ class InteractiveMenu:
 
         if choice == "M":
             return self._wizard_run_from_manifest(workflow)
-
-        if choice == "8":
-            # Only mark; HHMM confirmation happens at execution time.
-            workflow['delete_source'] = True
 
         workflow['mode'] = int(choice)
         return True
@@ -2974,9 +3117,11 @@ class InteractiveMenu:
             for key in ('matrix', 'basic', 'none', 'target_icc'):
                 if key in existing:
                     advanced_options[key] = existing[key]
-            # Preserve mode-8 delete_source chosen in Step 4
+            # Preserve the delete decision (and its verify gate) taken in Step 4's [D]
             if workflow.get('delete_source'):
                 advanced_options['delete_source'] = True
+            if workflow.get('verify_roundtrip'):
+                advanced_options['verify_roundtrip'] = True
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -3019,8 +3164,6 @@ class InteractiveMenu:
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    delete_src = Confirm.ask("Delete source TIFFs after conversion? (mode 8)", default=False)
             else:
                 strip_input = input("Strip metadata? [y/N]: ").strip().lower()
                 strip_meta = strip_input.startswith('y')
@@ -3057,9 +3200,6 @@ class InteractiveMenu:
                     thumbnail_suffix = ts_input if ts_input else ts_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    delete_src_input = input("Delete source TIFFs after conversion? [y/N]: ").strip().lower()
-                    delete_src = delete_src_input.startswith('y')
 
             if overwrite_mode == "1":
                 overwrite, sync = True, False
@@ -3074,6 +3214,8 @@ class InteractiveMenu:
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
+            if workflow.get('verify_roundtrip'):
+                advanced_options['verify_roundtrip'] = True
             advanced_options['embed_thumbnail'] = embed_thumb
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
@@ -3135,8 +3277,6 @@ class InteractiveMenu:
                 )
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    delete_src = Confirm.ask("Delete source JXLs after conversion? (mode 8)", default=False)
             else:
                 _prev = workflow.get('advanced_options', {})
                 _already_asked = workflow.get('decode_mode_asked') is not None
@@ -3194,9 +3334,6 @@ class InteractiveMenu:
                 depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    delete_src_input = input("Delete source JXLs after conversion? [y/N]: ").strip().lower()
-                    delete_src = delete_src_input.startswith('y')
 
             if overwrite_mode == "1":
                 overwrite, sync = True, False
@@ -3213,6 +3350,8 @@ class InteractiveMenu:
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
+            if workflow.get('verify_roundtrip'):
+                advanced_options['verify_roundtrip'] = True
             advanced_options['thumbnail_handling'] = thumbnail_handling
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
             advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
@@ -3224,8 +3363,6 @@ class InteractiveMenu:
                 no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    delete_src = Confirm.ask("Delete source after conversion?", default=False)
                 output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
             else:
                 md5_input = input("Skip MD5 verification? [y/N]: ").strip().lower()
@@ -3234,9 +3371,6 @@ class InteractiveMenu:
                 no_verify = verify_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                if not delete_src and workflow.get('mode') == 8:
-                    del_input = input("Delete source after? [y/N]: ").strip().lower()
-                    delete_src = del_input.startswith('y')
                 output_suffix = input("Output suffix (e.g., _converted): ").strip()
 
             if overwrite_mode == "1":
@@ -3251,6 +3385,8 @@ class InteractiveMenu:
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
+            if workflow.get('verify_roundtrip'):
+                advanced_options['verify_roundtrip'] = True
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
@@ -3331,6 +3467,11 @@ class InteractiveMenu:
             extra_info.append("Advanced: Yes")
         if _adv.get('delete_source'):
             extra_info.append("DELETE SOURCE: ON (!)")
+            # Say which gate stands in front of the unlink, because "verified"
+            # means two very different things with and without this.
+            extra_info.append("Verify round-trip: ON"
+                              if _adv.get('verify_roundtrip')
+                              else "Verify round-trip: off (structural check only)")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('dry_run'):
@@ -4301,6 +4442,10 @@ class InteractiveMenu:
                 # this the child would ask again on an invisible stdin prompt
                 # and the run would appear to hang.
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source (it is the gate in
+                # front of the unlink), so it is emitted inside this branch.
+                if advanced.get('verify_roundtrip'):
+                    cmd.append('--verify-roundtrip')
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -4671,6 +4816,10 @@ class InteractiveMenu:
                 # this the child would ask again on an invisible stdin prompt
                 # and the run would appear to hang.
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source (it is the gate in
+                # front of the unlink), so it is emitted inside this branch.
+                if advanced.get('verify_roundtrip'):
+                    cmd.append('--verify-roundtrip')
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -5312,6 +5461,11 @@ class InteractiveMenu:
         # not a stale value from a previous session's last_advanced_options.
         workflow['advanced_options']['overwrite'] = overwrite
         workflow['advanced_options']['sync'] = sync
+        # Its own config field, so a preset saved before the option existed (no
+        # 'verify_roundtrip' key inside last_advanced_options) still gets it.
+        # Only meaningful with delete_source, which the child enforces anyway.
+        if session.get('last_verify_roundtrip'):
+            workflow['advanced_options']['verify_roundtrip'] = True
         workflow['expert_flags'] = session.get('last_expert_flags') or ''
         workflow['auto_mode_used'] = False
         # The manifest executor's overlap gate behaves differently when there

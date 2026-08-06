@@ -261,7 +261,7 @@ OVERWRITE = "smart"
 # "smart" → same as --sync: reconvert only if JXL is newer than TIFF
 
 DELETE_SOURCE = False
-# [Mode 8 only] False → JXL and TIFF coexist (safe default)
+# [Any mode] False → JXL and TIFF coexist (safe default)
 # True  → delete source JXL after confirmed successful decode (irreversible)
 
 # — Safety (DELETE_SOURCE only) —
@@ -402,7 +402,8 @@ Options:
                   (a concurrent run may still own it). Sweeps the EFFECTIVE
                   staging dir, so it works with TEMP2_DIR set in the script and
                   no --staging flag. Never runs under --dry-run
-  --delete-source    Delete source JXLs after successful decode (mode 8 only)
+  --delete-source    Delete source JXLs after successful decode. Works in EVERY
+                     mode, not just 8. IRREVERSIBLE
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                      automation that already asked the user)
   --export-subfolder NAME

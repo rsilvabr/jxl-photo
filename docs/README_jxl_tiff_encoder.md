@@ -202,7 +202,12 @@ OVERWRITE = "smart"
 # "smart" → same as --sync: reconvert only if TIFF is newer than JXL
 
 DELETE_SOURCE = False
-# [Mode 8 only] Whether to delete the source TIFF after successful encode.
+# Whether to delete the source TIFF after successful encode. Works in EVERY
+# mode (0-8): the mode decides where the JXL lands, this decides whether the
+# TIFF survives it. The source only goes once its JXL exists at the FINAL
+# destination (after the staging move, and that move must have succeeded),
+# passes the integrity check there, and — with --verify-roundtrip — decodes
+# back to the source pixels.
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
 # — Safety (mode 8 + DELETE_SOURCE only) —
@@ -292,7 +297,15 @@ Options:
                   and ~2.4x the RAM per worker)
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
-  --delete-source Delete source TIFFs after successful encode (mode 8 only)
+  --delete-source Delete source TIFFs after their JXL is written to the mode's
+                  destination and verified. Works in EVERY mode. IRREVERSIBLE
+  --verify-roundtrip
+                  Before deleting a source, decode its JXL and compare it with
+                  the source page. --distance 0: the pixels must match exactly.
+                  Lossy: a brightness + PSNR sanity check that catches a black or
+                  scrambled encode -- NOT a quality check, since quality loss is
+                  what you asked for. Roughly doubles the run. Needs djxl and
+                  imagecodecs. Only affects --delete-source
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                    automation that already asked the user)
   --export-subfolder NAME

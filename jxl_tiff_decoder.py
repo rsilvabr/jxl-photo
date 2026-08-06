@@ -2435,7 +2435,12 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             if use_staging and pending_by_dest[dest] == 0:
                 _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
-    if DELETE_SOURCE and mode == 8:
+    # Any mode, not just 8: the mode decides where the TIFF lands, deleting the
+    # source JXL is a separate opt-in. Every gate below certifies THIS run's
+    # output at its FINAL path, which is mode-independent, and
+    # _abort_on_duplicate_outputs (run in every mode, before the first write)
+    # is what stops two sources from being spent on one output.
+    if DELETE_SOURCE:
         deleted = 0
         # Map status by main_jxl path — results arrive in completion order
         # (as_completed), NOT submission order, so a positional zip with `tasks`
@@ -3190,9 +3195,12 @@ Examples:
         )
         return
 
-    # Mode 8 confirmation (after dry-run so simulations never prompt)
-    if args.mode == 8 and DELETE_SOURCE:
-        logger.info("Mode 8 -- DELETE_SOURCE=True: source JXLs will be deleted after successful decode")
+    # Delete confirmation (after dry-run so simulations never prompt). Charged
+    # for EVERY mode: deletion is a separate opt-in from the output layout, so a
+    # direct `--mode 3 --delete-source` must ask exactly like mode 8 does.
+    if DELETE_SOURCE:
+        logger.info(f"DELETE_SOURCE=True (mode {args.mode}): source JXLs will be deleted "
+                    f"after their TIFF is written and verified")
         if DELETE_CONFIRM:
             if not confirm_deletion_jxl():
                 logger.info("Deletion not confirmed -- exiting.")

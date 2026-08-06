@@ -131,7 +131,7 @@ STORE_MD5 = True
 # False → no MD5 stored; decode cannot verify integrity.
 
 DELETE_SOURCE = False
-# [Mode 8 only] Delete source JPEG after successful encode.
+# [Any mode] Delete source JPEG after successful encode.
 # WARNING: irreversible. Only enable after testing on a small batch.
 # Requires confirmation (DELETE_CONFIRM = True) unless disabled.
 # 
@@ -291,7 +291,7 @@ Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Like mode 6 but only specific `EXPORT_MARKER` subfolder. Both marker and subfolder are configurable. | `.../_EXPORT/JPEG_recovered/...` |
 | `8` | File or folder | Recursive — walks all subfolders | In-place **recursive** | `.../session/photo.jpg` (next to each JXL) |
 
-**Note:** Mode 8 with `--delete-source` is the "archive and replace" workflow — verify your setup with a small batch first. Remember: **lossy operations require HHMM confirmation**, while lossless only requires "yes".
+**Note:** `--delete-source` is the "archive and replace" workflow and works in any mode (mode 8 keeps the output next to the source; modes 1-7 put it elsewhere and still delete the original) — verify your setup with a small batch first. Remember: **lossy operations require HHMM confirmation**, while lossless only requires "yes".
 
 * * *
 
@@ -329,7 +329,8 @@ Options:
 
   --no-md5           Skip MD5 storage (encode only)
   --no-verify        Skip MD5 verification (decode only)
-  --delete-source    Delete source after mode 8 encode (requires confirmation)
+  --delete-source    Delete source after a verified encode, in any mode
+                     (requires confirmation)
   --delete-confirm-off Skip the interactive delete confirmation (for
                       wrappers/automation that already asked the user)
   --from-jxl         [Auto mode] Restrict processing to .jxl files only;

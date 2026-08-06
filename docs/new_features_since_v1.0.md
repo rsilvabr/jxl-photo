@@ -1,5 +1,72 @@
 # New Features Since v1.0
 
+## v1.10.0
+
+Date: 2026-08-06
+
+### Archive and replace: delete the originals from any mode
+
+`--delete-source` used to work in mode 8 only, which meant "delete the master"
+was locked to "keep the JXL next to it". The usual archival workflow — convert
+into a separate tree and drop the originals — was impossible.
+
+Deleting is now available in **every** mode (0-8) in all three scripts. Nothing
+in the delete gates was ever mode-specific: they certify THIS run's output at
+its FINAL path, which for modes 1-7 is the destination folder. A source is
+removed only when
+
+* every page of it encoded `ok`/`overwrite` **this run** (a skipped file blocks
+  the delete — it cannot be certified);
+* no page was dropped by the multi-page policy;
+* the output exists at its final destination, and if staging was used, the move
+  there actually succeeded (a stale file already sitting at that path does not
+  count);
+* it passes the integrity check **there**;
+* and, with `--verify-roundtrip`, it decodes back to the source pixels.
+
+In the modes that COLLAPSE folders — 2 flattens a tree, 5 merges siblings, 6/7
+drop one level under the marker — what makes this safe is
+`_abort_on_duplicate_outputs`, which runs in every mode before the first byte is
+written: two inputs mapping to one output abort the run rather than costing two
+originals.
+
+```powershell
+# archive a shoot into a sibling folder and drop the masters
+py jxl_tiff_encoder.py "E:\shoot" --mode 5 --distance 0 --delete-source --verify-roundtrip
+```
+
+### `--verify-roundtrip`: the only gate that looks at pixels
+
+The integrity check that always runs proves the file is a well-formed,
+untruncated JXL container with a codestream. It does not prove the image came
+back. This does, and it is opt-in because it costs one full decode per output.
+
+* `--distance 0` → the decoded pixels must be **identical**, or the source stays.
+* `--distance > 0` → a **sanity** check, not a quality check: mean brightness
+  within a factor and PSNR above a permissive floor. Real photos land at 40-50 dB
+  at d=1 and still 25-30 dB at d=15; a different image or a decode that turned to
+  noise sits at 5-15 dB, so the gap is wide enough to reject catastrophes without
+  ever second-guessing a legitimate lossy encode.
+
+That lossy case is not hypothetical. Some large scanner ICC profiles make cjxl
+emit near-black images (see `ICC_PNG_STRATEGY`), and such a file passes every
+structural check there is. Measured on a real encode: the correct image scores
+58.4 dB, a different image 8.5 dB, a black frame fails on brightness alone.
+
+### `[D]` in the wizard
+
+Deleting is not a layout, so it is not a mode. `[D]` charges a confirmation,
+asks which layout (`0`-`8`), then shows **how many files, from which folder, to
+where** before charging the HHMM token at execution. Three gates, each more
+specific than the last — a repeated yes/no just trains you to answer it twice.
+
+Mode 8 no longer implies deletion anywhere: it is "in-place recursive", and it
+keeps your files.
+
+**Safety note:** the wrapper's HHMM gates and the unattended `--run-preset`
+refusal now key on `delete_source` rather than on mode 8, so a mode-3 delete is
+confirmed (and, scheduled, refused) exactly like mode 8 always was.
+
 ## v1.8.4
 
 Date: 2026-07-28

@@ -165,10 +165,12 @@ never waits on stdin.
 silently ignored — a stray `--dry-run` that did nothing would mean a real
 conversion for someone who asked for a simulation.
 
-> **Mode 8 presets cannot run unattended.** A preset that deletes sources is
-> refused with an explanation: that confirmation is a typed token, and honouring
-> it automatically would let a scheduled task delete originals on its own. Run it
-> from the menu, or add `--dry-run` to simulate it.
+> **Presets that delete sources cannot run unattended — in any mode.** A preset
+> with `delete_source` on is refused with an explanation: that confirmation is a
+> typed token, and honouring it automatically would let a scheduled task delete
+> originals on its own. Run it from the menu, or add `--dry-run` to simulate it.
+> (This used to be keyed on mode 8; deleting is available in every mode now, and
+> so is the refusal.)
 
 * * *
 
@@ -319,9 +321,39 @@ How output files are organized. Press `?` for detailed explanations with visual 
 | `5` | Directory | Recursive — all subfolders | Sibling folder | Creates sibling: `JXL_16bits/`, `TIFF_16bits/` (by direction) |
 | `6` | Directory | Recursive, **only inside `EXPORT_MARKER`** (default: `_EXPORT`) | Marker _EXPORT (full) | ONLY files INSIDE `EXPORT_MARKER` — ignores everything outside. Marker name is configurable. |
 | `7` | Directory | Recursive, **only inside specific `EXPORT_MARKER` subfolder** (configurable) | Marker _EXPORT (subfolder) | Like mode 6 but only a specific subfolder of `EXPORT_MARKER`. Both the marker name and the subfolder are configurable. |
-| `8` | File or folder | Recursive — walks all subfolders | DELETE originals ⚠️ | In-place **recursive**. Same folder as source, walks subfolders. Deletes source files — IRREVERSIBLE |
+| `8` | File or folder | Recursive — walks all subfolders | In-place recursive | Same folder as source, walks subfolders. Originals are KEPT — use `[D]` to delete them |
+| `D` | — | (follows the layout you pick) | **Convert and DELETE originals** ⚠️ | Not a layout: pick any mode `0`-`8`, then the sources are removed once each output is written to that mode's destination and verified — IRREVERSIBLE |
 
-Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
+Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**.
+
+### `[D]` — convert, verify, then delete the originals
+
+Deleting is **not a layout**, so it is not a mode. `[D]` asks which layout you want
+(`0`-`8`) and arms the deletion alongside it — on the command line that is simply
+`--mode 3 --delete-source`. Mode `8` on its own is just "in-place recursive" and
+keeps your files.
+
+A source is removed only after its output **exists at the mode's destination**
+(after the staging move, and that move must have succeeded), and **passes the
+integrity check there**. If two inputs would map to the same output — mode 5 merges
+sibling folders, modes 6/7 drop one level under the marker, mode 2 flattens a whole
+tree — the run **aborts before writing anything** rather than spending two originals
+on one file.
+
+Three confirmations, each more specific than the last (rather than the same question
+twice, which trains you to answer it twice):
+
+1. a plain yes/no, so a mis-keyed `D` costs nothing;
+2. the concrete consequence — **how many files, from which folder, to where**. This
+   is the one that catches a wrong folder, because the count is visible;
+3. the **HHMM token** at execution time. A dry run never asks for it.
+
+**Round-trip verification** (TIFF → JXL only, offered inside `[D]`): decodes each
+JXL and compares it with the source before deleting. With `--distance 0` the pixels
+must match **exactly**; on a lossy run it is a brightness + PSNR **sanity** check
+that catches a black or scrambled encode — not a quality check, since quality loss
+is what you asked for. It roughly doubles the run, which is why it is opt-in — but
+it is the only gate that looks at pixels rather than at file structure. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
 
 ### Modes 6 and 7
 
