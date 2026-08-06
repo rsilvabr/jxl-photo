@@ -272,3 +272,104 @@ def test_decoder_helpers_match_the_encoder(tmp_path):
     f = tmp_path / "blob.bin"
     f.write_bytes(b"hello provenance")
     assert dec._file_content_id(f) == tr._file_content_id([f])
+
+
+# ---------------------------------------------------------------------------
+# Transcoder. Same guard, with one constraint the other two do not have: the
+# LOSSLESS JXL -> JPEG output must stay byte-identical to the original, so it
+# cannot carry a marker. checksums.md5 already holds the original JPEG's hash
+# keyed by the JXL, which is a stronger proof anyway.
+# ---------------------------------------------------------------------------
+
+import jxl_jpeg_transcoder as tr
+
+TRANSCODER = str(REPO / "jxl_jpeg_transcoder.py")
+
+
+def _runt(*args, cwd):
+    return subprocess.run([sys.executable, TRANSCODER, *args],
+                          capture_output=True, text=True, timeout=600,
+                          cwd=str(cwd), stdin=subprocess.DEVNULL)
+
+
+def _jpeg(path: Path, seed: int):
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    y, x = np.mgrid[0:96, 0:128]
+    a = ((np.sin((x + seed) / 9.0) * .25 + np.cos((y + seed) / 11.0) * .25 + .5) * 255)
+    a = a.astype(np.uint8)
+    Image.fromarray(np.stack([a, a, a], axis=2)).save(str(path), quality=92)
+
+
+TR_ARCHIVE = ["--force-transcode", "--mode", "5", "--delete-source",
+              "--delete-confirm-off"]
+
+
+def test_transcoder_refuses_an_output_made_by_another_source(tmp_path):
+    _jpeg(tmp_path / "root" / "A" / "foto.jpg", 0)
+    assert _runt("root", *TR_ARCHIVE, cwd=tmp_path).returncode == 0
+    assert not (tmp_path / "root" / "A" / "foto.jpg").exists()
+
+    _jpeg(tmp_path / "root" / "B" / "foto.jpg", 50)
+    r = _runt("root", *TR_ARCHIVE, "--delete-skipped", cwd=tmp_path)
+    assert "REFUSING" in r.stdout, r.stdout
+    assert (tmp_path / "root" / "B" / "foto.jpg").exists(), "B was deleted"
+
+
+def test_transcoder_allows_reconverting_the_same_source(tmp_path):
+    src = tmp_path / "root" / "A" / "foto.jpg"
+    _jpeg(src, 0)
+    assert _runt("root", *TR_ARCHIVE, cwd=tmp_path).returncode == 0
+    _jpeg(src, 0)                                   # same location again
+    r = _runt("root", *TR_ARCHIVE, "--overwrite", cwd=tmp_path)
+    assert "REFUSING" not in r.stdout, r.stdout
+    assert not src.exists()
+
+
+def test_transcoder_content_matching_survives_a_moved_source(tmp_path):
+    a = tmp_path / "root" / "A" / "foto.jpg"
+    _jpeg(a, 0)
+    keep = tmp_path / "keep.jpg"
+    keep.write_bytes(a.read_bytes())
+    assert _runt("root", *TR_ARCHIVE, cwd=tmp_path).returncode == 0
+
+    moved = tmp_path / "root" / "C" / "foto.jpg"
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(keep.read_bytes())            # identical bytes, new place
+
+    r = _runt("root", *TR_ARCHIVE, "--delete-skipped", cwd=tmp_path)
+    assert "REFUSING" in r.stdout
+    assert moved.exists()
+
+    r = _runt("root", *TR_ARCHIVE, "--delete-skipped", "--provenance", "content",
+              cwd=tmp_path)
+    assert "REFUSING" not in r.stdout, r.stdout
+    assert not moved.exists()
+
+
+def test_lossless_jpeg_recovery_stays_byte_identical(tmp_path):
+    """The markers must not touch the one output that has to match the original
+    byte for byte — the whole promise of the lossless path."""
+    src = tmp_path / "orig.jpg"
+    _jpeg(src, 3)
+    original = src.read_bytes()
+
+    assert _runt("orig.jpg", "--force-transcode", cwd=tmp_path).returncode == 0
+    jxl = tmp_path / "orig.jxl"
+    assert tr.has_jbrd_box(jxl), "jbrd lost"
+    marks = tr._read_source_markers_batch([jxl])[str(jxl)]
+    assert marks["src"], "the JXL carries no provenance marker"
+
+    src.unlink()
+    r = _runt("orig.jxl", "--force-transcode", "--decode", cwd=tmp_path)
+    assert "MD5 PASS" in r.stdout, r.stdout
+    assert src.read_bytes() == original, "recovered JPEG is not byte-identical"
+
+
+def test_transcoder_non_collapsing_modes_are_untouched(tmp_path):
+    src = tmp_path / "root" / "A" / "foto.jpg"
+    _jpeg(src, 0)
+    r = _runt("root", "--force-transcode", "--mode", "8", "--delete-source",
+              "--delete-confirm-off", cwd=tmp_path)
+    assert "Provenance:" not in r.stdout
+    assert not src.exists()

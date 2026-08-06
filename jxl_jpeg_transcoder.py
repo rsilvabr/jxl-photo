@@ -501,6 +501,20 @@ CJXL_BUFFERING = None
 STORE_MD5 = True
 # Store MD5 checksums during transcode encode (for verify during decode)
 
+PROVENANCE_CHECK = "path"
+# [with DELETE_SOURCE, modes 2/4/5/6/7] How an EXISTING output is matched to
+# the source about to replace it. Those modes drop folder structure, so two
+# sources in different folders resolve to the same output; without this a
+# second run overwrote the first archive and deleted both originals.
+# "path" (default) compares the recorded LOCATION; "content" also accepts
+# matching source bytes, so it survives MOVED folders. See _provenance_ok.
+#
+# NOTE: the JXL -> JPEG LOSSLESS path writes no marker. Its output has to
+# stay byte-identical to the original JPEG, and injecting XMP would break
+# exactly the promise that path exists to keep. It uses checksums.md5
+# instead: the stored hash IS the original JPEG, so an existing output that
+# matches it came from this JXL.
+
 DELETE_SKIPPED = False
 # [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
 # files this run reports as SKIP.
@@ -1556,6 +1570,16 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
+        # WHICH source made this output. Written BEFORE reorder_jxl_boxes:
+        # every exiftool edit re-appends its boxes after the codestream, so
+        # doing it afterwards would undo the reorder (bug #134's class).
+        try:
+            _run_exiftool_argfile(
+                ["-overwrite_original"] + _provenance_marker_args(src_path)
+                + [str(write_path)], timeout=60)
+        except Exception as _e_prov:
+            logger.debug(f"Provenance marker skipped: {_e_prov}")
+
         reorder_jxl_boxes(write_path)
 
         # Validate EVERY successful output (a tool returning 0 does not
@@ -1971,6 +1995,67 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     return results
 
+def _provenance_filter(pairs, mode, decode_lossless=False):
+    """Drop pairs whose output already exists and came from a DIFFERENT source.
+
+    Only meaningful in the folder-collapsing modes with DELETE_SOURCE armed:
+    elsewhere the output path is derived from the source's own folder, and
+    without deletion an overwrite is recoverable.
+
+    decode_lossless: the JXL -> JPEG recovery path, whose output must stay
+    byte-identical and therefore carries no marker. checksums.md5 holds the
+    ORIGINAL JPEG's hash keyed by the JXL, so an existing output matching it
+    came from this source — that is a stronger proof than any marker.
+
+    Returns (kept_pairs, refused) — refused is [(src, out, why)].
+    """
+    if not (DELETE_SOURCE and mode in _COLLAPSING_MODES):
+        return pairs, []
+    existing = sorted({out for _s, out in pairs if out.exists()})
+    if not existing:
+        return pairs, []
+    logger.info(f"Provenance: checking {len(existing)} existing output(s) "
+                f"(--provenance {PROVENANCE_CHECK})...")
+    marks = {} if decode_lossless else _read_source_markers_batch(existing)
+    kept, refused = [], []
+    for src, out in pairs:
+        if not out.exists():
+            kept.append((src, out))
+            continue
+        if decode_lossless:
+            stored = read_md5_db(src)
+            if stored is not None and stored == md5_of_file(out):
+                kept.append((src, out))
+                continue
+            why = ("no checksum to prove it" if stored is None
+                   else "the existing JPEG is not the one this JXL holds")
+        else:
+            info = marks.get(str(out)) or {"src": None, "srcsum": None}
+            if _provenance_ok(info, src, PROVENANCE_CHECK):
+                kept.append((src, out))
+                continue
+            why = ("no provenance marker (written by an older version)"
+                   if not (info.get("src") or info.get("srcsum"))
+                   else "it was made from a different source")
+        refused.append((src, out, why))
+    if refused:
+        logger.error(
+            f"REFUSING {len(refused)} file(s): their output already exists and did "
+            f"not come from them. Converting would overwrite someone else's output, "
+            f"and --delete-source would then destroy what it held.")
+        for _s, _o, _w in refused[:10]:
+            logger.error(f"    {_s}")
+            logger.error(f"      -> {_o} ({_w})")
+        if len(refused) > 10:
+            logger.error(f"    ... and {len(refused) - 10} more")
+        logger.error(
+            "  These were NOT converted and NOTHING was deleted. Rename them, pick a "
+            "mode that keeps folder structure (0/1/3/8), or drop --delete-source." +
+            ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
+             " If you MOVED the sources, re-run with --provenance content."))
+    return kept, refused
+
+
 def _apply_staging_args(args) -> None:
     """Resolve the effective staging directory and sweep it when asked.
 
@@ -2081,6 +2166,9 @@ def cmd_transcode(args, auto_decode: bool = False):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
+    pairs, _refused = _provenance_filter(pairs, args.mode, decode_lossless=decode)
+    if _refused:
+        _counter["total"] = len(pairs)
 
     if args.dry_run:
         for f, out in pairs:
@@ -2332,6 +2420,12 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
 
         # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode
         _copy_metadata(src_path, write_path)
+        try:
+            _run_exiftool_argfile(
+                ["-overwrite_original"] + _provenance_marker_args(src_path)
+                + [str(write_path)], timeout=60)
+        except Exception as _e_prov:
+            logger.debug(f"Provenance marker skipped: {_e_prov}")
 
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
@@ -2511,6 +2605,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
 
         # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop
         _copy_metadata(jxl_path, actual_out)
+        try:
+            _run_exiftool_argfile(
+                ["-overwrite_original"] + _provenance_marker_args(jxl_path)
+                + [str(actual_out)], timeout=60)
+        except Exception as _e_prov:
+            logger.debug(f"Provenance marker skipped: {_e_prov}")
 
         # Validate EVERY successful output (rc=0 does not guarantee a
         # well-formed file).
@@ -2799,6 +2899,9 @@ def cmd_convert(args, from_jxl: bool = True):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
+    pairs, _refused = _provenance_filter(pairs, args.mode)
+    if _refused:
+        _counter["total"] = len(pairs)
 
     if args.dry_run:
         for f, out in pairs:
@@ -3224,6 +3327,12 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))
 
     _abort_on_duplicate_outputs(pairs)
+    pairs, _refused = _provenance_filter(
+        pairs, args.mode,
+        decode_lossless=(use_transcode and all(
+            s.suffix.lower() == '.jxl' for s, _o in pairs)))
+    if _refused:
+        _counter["total"] = max(0, _counter.get("total", 0) - len(_refused))
 
     if args.dry_run:
         for f, out in pairs:
@@ -3405,6 +3514,15 @@ Examples:
     parser.add_argument("--delete-source", action="store_true",
                         help="Delete source after a verified conversion, in ANY mode. "
                              "IRREVERSIBLE")
+    parser.add_argument("--provenance", type=str, default=None,
+                        choices=["path", "content"],
+                        help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
+                             "output is matched to the source about to overwrite it: "
+                             "path (default, free) compares the recorded LOCATION; "
+                             "content also accepts matching source bytes, so it "
+                             "survives MOVED folders. The lossless JXL->JPEG path "
+                             "uses checksums.md5 instead, since its output must stay "
+                             "byte-identical and cannot carry a marker.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (reported as SKIP), so an archive interrupted "
@@ -3498,7 +3616,7 @@ def main():
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK
     if args.export_marker:
         EXPORT_MARKER = args.export_marker
     if args.export_subfolder is not None:
@@ -3509,20 +3627,8 @@ def main():
         DELETE_SOURCE = True
     if args.delete_skipped:
         DELETE_SKIPPED = True
-
-    # The TIFF encoder records WHICH source made each output and refuses to
-    # overwrite-and-delete when it does not match. This script has no such
-    # record, so the cross-run collision of bug #268 is still possible here: in
-    # a folder-collapsing mode a file added later, in another folder, resolves
-    # to the same output. checksums.md5 does not help — a second run simply
-    # appends its own entry and read_md5_db returns the newest.
-    if DELETE_SOURCE and args.mode in (2, 4, 5, 6, 7):
-        print(f"WARNING: --delete-source in mode {args.mode}: this mode DROPS folder "
-              f"structure, so two sources with the same name in different folders")
-        print("         resolve to the same output. This script cannot yet verify that an "
-              "EXISTING output came from the file about to replace it -- an")
-        print("         output written by an earlier run can be overwritten by an unrelated "
-              "file, and both originals then deleted. Prefer mode 0/1/3/8.")
+    if args.provenance is not None:
+        PROVENANCE_CHECK = args.provenance
 
     if DELETE_SKIPPED and not DELETE_SOURCE:
         print("WARNING: --delete-skipped has no effect without --delete-source: it only "
