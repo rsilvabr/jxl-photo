@@ -116,15 +116,47 @@ def _flags_request_delete(flags: Optional[str]) -> bool:
     # are ambiguous and argparse rejects them, so they are not flagged here.
     source_spellings = ('--delete-source', '--delete_source')
     confirm_spellings = ('--delete-confirm-off', '--delete_confirm_off')
+    # --delete-skipped exists now, so a prefix like `--delete-s` matches BOTH it
+    # and --delete-source. argparse rejects an ambiguous abbreviation outright,
+    # so such a token can never delete anything — treating it as a delete
+    # request would charge the HHMM token for a run that then dies on
+    # "ambiguous option". _flags_ambiguous_delete reports those separately so
+    # the caller can refuse before asking for the token.
+    skipped_spellings = ('--delete-skipped', '--delete_skipped')
     for t in _split_expert_flags(flags or ''):
         tok = t.split('=', 1)[0]
         if not tok.startswith('--'):
             continue
+        if any(c.startswith(tok) for c in confirm_spellings):
+            continue        # ambiguous with --delete-confirm-off; argparse refuses
+        if any(c.startswith(tok) for c in skipped_spellings) and not any(
+                s == tok for s in source_spellings):
+            # Matches --delete-skipped too. Only an EXACT --delete-source spelling
+            # survives this: anything shorter is ambiguous and cannot run.
+            continue
         for spelling in source_spellings:
-            if spelling.startswith(tok) and not any(
-                    c.startswith(tok) for c in confirm_spellings):
+            if spelling.startswith(tok):
                 return True
     return False
+
+
+def _flags_ambiguous_delete(flags: Optional[str]) -> Optional[str]:
+    """The first expert-flag token that is an AMBIGUOUS delete abbreviation.
+
+    `--delete-s` matches both --delete-source and --delete-skipped, so argparse
+    exits with "ambiguous option" and the child never runs. Caught up front, the
+    user is told to spell it out instead of typing a token for a doomed run.
+    """
+    families = ('--delete-source', '--delete_source',
+                '--delete-skipped', '--delete_skipped',
+                '--delete-confirm-off', '--delete_confirm_off')
+    for t in _split_expert_flags(flags or ''):
+        tok = t.split('=', 1)[0]
+        if not tok.startswith('--') or tok in families:
+            continue
+        if sum(1 for f in families if f.startswith(tok)) > 1:
+            return tok
+    return None
 
 
 def _strip_surrounding_quotes(value: str) -> str:
@@ -2346,12 +2378,14 @@ class InteractiveMenu:
             console.print()
 
             for key, name, desc in modes:
-                style = "red" if key == "8" else "green"
-                console.print(f"[{key}] [bold {style}]{name}[/bold {style}]")
+                # Nothing in this list destroys anything any more — mode 8 keeps
+                # your files. [D] below is the destructive entry and carries the
+                # red, or the warning colour would point at the wrong option.
+                console.print(f"[{key}] [bold green]{name}[/bold green]")
                 console.print(f"    {desc}\n")
 
             console.print("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
-            console.print("[D] [bold red]Convert and DELETE the originals[/bold red] ⚠️  — pick any layout above, then the sources are removed once each output is written and verified")
+            console.print(self._delete_entry_line())
             console.print("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
             console.print()
 
@@ -2366,8 +2400,7 @@ class InteractiveMenu:
             print("[A] Auto Mode — analyze folder and recommend best mode")
             print()
             for key, name, desc in modes:
-                warning = " ⚠️ WARNING!" if key == "8" else ""
-                print(f"[{key}] {name}{warning}")
+                print(f"[{key}] {name}")
                 clean = (desc.replace("[bold green]", "").replace("[/bold green]", "")
                          .replace("[bold red]", "").replace("[/bold red]", "")
                          .replace("[bold blue]", "").replace("[/bold blue]", "")
@@ -2381,8 +2414,7 @@ class InteractiveMenu:
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"    {clean}\n")
             print("[M] Run from manifest — execute a previously generated manifest CSV")
-            print("[D] Convert and DELETE the originals  ** IRREVERSIBLE ** — pick any layout above,")
-            print("    then the sources are removed once each output is written and verified")
+            print(self._delete_entry_line(plain=True))
             print("[?] See detailed mode explanation")
             print()
 
@@ -2404,13 +2436,9 @@ class InteractiveMenu:
         if choice == "M":
             return self._wizard_run_from_manifest(workflow)
 
-        # Handle [D] — the delete-the-originals path
-        if choice == "D":
-            return self._wizard_delete_gateway(workflow, modes)
-
-        # Handle mode 8: only MARK delete_source here. The HHMM confirmation
-        # happens at execution time (execute_workflow), AFTER the user had the
-        # chance to pick dry-run — a simulation never charges the token.
+        _handled = self._handle_mode_choice(workflow, choice, modes)
+        if _handled is not None:
+            return _handled
 
         workflow['mode'] = int(choice)
 
@@ -2441,6 +2469,83 @@ class InteractiveMenu:
                       .replace("[yellow]", "").replace("[/yellow]", "")
                       .replace("[dim]", "").replace("[/dim]", ""))
 
+        return True
+
+    # Every mode selector has to offer [D], or deletion becomes unreachable from
+    # whichever one forgets it — which is exactly what happened when [D] was
+    # added to the Step-4 menu alone: Auto Mode -> "pick manually" and the "?"
+    # detail view both lost the delete workflow entirely, silently.
+    #
+    # The three menus deliberately keep their own presentation (full, compact,
+    # detailed), so what is shared is the CHOICE, not the rendering:
+    # _DELETE_CHOICE goes into every valid_choices list and _handle_mode_choice
+    # resolves it. tests/test_delete_any_mode.py enumerates the selectors and
+    # asserts both, so a fourth one cannot quietly skip it.
+    _DELETE_CHOICE = "D"
+
+    def _delete_entry_line(self, plain: bool = False) -> str:
+        """The [D] line, worded the same wherever the menu is drawn."""
+        if plain:
+            return ("[D] Convert and DELETE the originals  ** IRREVERSIBLE **\n"
+                    "    Pick any layout above; sources are removed once each output is\n"
+                    "    written to that layout's destination and verified")
+        return ("[D] [bold red]Convert and DELETE the originals[/bold red] ⚠️  — pick any "
+                "layout above, then the sources are removed once each output is written "
+                "and verified")
+
+    def _handle_mode_choice(self, workflow: Dict, choice: str, modes: List):
+        """Resolve a mode-menu key. Returns None when it was a plain layout."""
+        if choice.upper() == self._DELETE_CHOICE:
+            return self._wizard_delete_gateway(workflow, modes)
+        return None
+
+    # Conversion types where an already-archived source can be tied to its
+    # output: the transcoder stores the source's md5 keyed by the output's name.
+    _PROVABLE_CONVERSIONS = ('transcode_lossless', 'jxl_to_jpeg_lossless')
+    # ...and the ones where nothing can: no checksum is stored and the output
+    # cannot reproduce the source.
+    _LOSSY_CONVERSIONS = ('convert_lossy', 'jxl_to_jpeg_force', 'jxl_to_png',
+                          'jxl_to_jpeg_auto')
+
+    def _confirm_lossy_delete_skipped(self, workflow: Dict) -> bool:
+        """Extra gate for `delete_skipped` on a direction that can prove nothing.
+
+        Lives here rather than inside the [D] wizard so that REPEATS and PRESETS
+        get it too — they rebuild advanced_options from the stored session and
+        never walk through [D]. The wizard marks the workflow once it has asked,
+        so the question is never posed twice in one run.
+
+        Returns False only if the user cancels outright; declining the deletion
+        simply turns `delete_skipped` off and lets the run continue.
+        """
+        adv = workflow.get('advanced_options') or {}
+        if not (adv.get('delete_source') and adv.get('delete_skipped')):
+            return True
+        if workflow.get('conversion_type', '') not in self._LOSSY_CONVERSIONS:
+            return True
+        if workflow.get('_lossy_skip_confirmed') or workflow.get('dry_run'):
+            return True
+
+        msg = ("This direction is LOSSY and stores no checksum. For originals that were "
+               "already converted, the ONLY check is that the existing output is a "
+               "structurally valid file — nothing ties it to the original being deleted.")
+        if RICH_AVAILABLE and console:
+            console.print()
+            console.print(Panel(f"[bold red]{msg}[/bold red]", border_style="red"))
+            go = Confirm.ask("[bold red]Delete already-converted originals anyway?[/bold red]",
+                             default=False)
+        else:
+            print(f"\n{msg}")
+            go = input("Delete already-converted originals anyway? [y/N]: "
+                       ).strip().lower().startswith('y')
+        if not go:
+            adv['delete_skipped'] = False
+            note = "Already-converted originals will be KEPT."
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{note}[/yellow]")
+            else:
+                print(note)
+        workflow['_lossy_skip_confirmed'] = True
         return True
 
     def _count_origin_files(self, workflow: Dict, mode: int) -> int:
@@ -2626,29 +2731,15 @@ class InteractiveMenu:
             del_skipped = (not _di.startswith('n')) if ds_default else _di.startswith('y')
 
         if del_skipped and _lossy:
-            # A separate, explicit confirmation: this is the only combination
-            # where the toolkit deletes a file it cannot tie to the output by
-            # ANY means — no checksum, no reproducible pixels. Default No.
-            _q = ("This direction is LOSSY and stores no checksum. For originals that "
-                  "were already converted, the ONLY check is that the existing output "
-                  "is a structurally valid file — nothing ties it to the original you "
-                  "are about to delete.")
-            if RICH_AVAILABLE and console:
-                console.print()
-                console.print(Panel(f"[bold red]{_q}[/bold red]", border_style="red"))
-                _go = Confirm.ask("[bold red]Delete already-converted originals anyway?[/bold red]",
-                                  default=False)
-            else:
-                print(f"\n{_q}")
-                _go = input("Delete already-converted originals anyway? [y/N]: "
-                            ).strip().lower().startswith('y')
-            if not _go:
-                del_skipped = False
-                _m = "Already-converted originals will be KEPT."
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_m}[/yellow]")
-                else:
-                    print(_m)
+            # Same gate execute_workflow applies to repeats and presets, asked
+            # here so the choice is made while the user is still configuring.
+            # The shared helper reads advanced_options, which does not exist yet
+            # at this point in the wizard — hand it a view of the decision.
+            _probe = dict(workflow)
+            _probe['advanced_options'] = {'delete_source': True, 'delete_skipped': True}
+            self._confirm_lossy_delete_skipped(_probe)
+            del_skipped = bool(_probe['advanced_options'].get('delete_skipped'))
+            workflow['_lossy_skip_confirmed'] = True
 
         workflow['delete_skipped'] = bool(del_skipped)
         self.config.config.last_delete_skipped = bool(del_skipped)
@@ -2691,23 +2782,29 @@ class InteractiveMenu:
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Select Mode Manually[/bold cyan]")
             for key, name, desc in modes:
-                style = "red" if key == "8" else "green"
-                console.print(f"[{key}] [bold {style}]{name}[/bold {style}] — {desc}")
+                console.print(f"[{key}] [bold green]{name}[/bold green] — {desc}")
+            console.print(self._delete_entry_line())
 
-            valid_choices = [m[0] for m in modes]
+            valid_choices = ([m[0] for m in modes]
+                             + [self._DELETE_CHOICE, self._DELETE_CHOICE.lower()])
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice:
+                    choice = choice.upper()
                     break
         else:
             print("\n--- Select Mode Manually ---")
             for key, name, desc in modes:
                 print(f"[{key}] {name} — {desc}")
-            valid_choices = [m[0] for m in modes]
-            choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
+            print(self._delete_entry_line(plain=True))
+            valid_choices = [m[0] for m in modes] + [self._DELETE_CHOICE]
+            choice = input(f"Select ({'/'.join(valid_choices)}): ").strip().upper()
             while choice not in valid_choices:
-                choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
+                choice = input(f"Select ({'/'.join(valid_choices)}): ").strip().upper()
 
+        _handled = self._handle_mode_choice(workflow, choice, modes)
+        if _handled is not None:
+            return _handled
         workflow['mode'] = int(choice)
         return True
 
@@ -2760,21 +2857,32 @@ class InteractiveMenu:
              f"Files in other subfolders within export folders are ignored.\n"
              f"Use when you keep different color-space variants in separate subfolders."),
 
-            ("8", "DELETE originals",
-             f"[bold red]DANGEROUS![/bold red] In-place RECURSIVE (walks all subfolders) — and\n"
-             f"[bold red]DELETES the original {origin.upper()} files after successful conversion.[/bold red]\n"
-             f"This is IRREVERSIBLE. Always test with a small batch first."),
+            ("8", "In-place recursive",
+             f"Like mode 0, but RECURSIVE: walks every subfolder and writes each output\n"
+             f"next to its source.\n"
+             f"[bold green]Your originals are KEPT.[/bold green] Deleting them is [bold red][D][/bold red], "
+             f"below — it is not a mode."),
+
+            ("D", "Convert and DELETE the originals",
+             f"[bold red]IRREVERSIBLE.[/bold red] Not a layout: you pick any mode 0-8 above, and the\n"
+             f"original {origin.upper()} files are removed once each output has been written to\n"
+             f"that mode's destination and verified.\n"
+             f"You are asked to confirm, then shown exactly how many files from which\n"
+             f"folder, then asked for the current time (HHMM). A dry run never deletes."),
         ]
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]--- Mode Detailed Explanations ---[/bold cyan]\n")
             for key, name, desc in details:
-                style = "red" if key == "8" else "blue"
+                # Red marks what actually destroys data — which is [D], not
+                # mode 8. Mode 8 keeps your files.
+                style = "red" if key == self._DELETE_CHOICE else "blue"
                 console.print(f"[{key}] [bold {style}]{name}[/bold {style}]")
                 console.print(Panel.fit(desc, border_style=style))
                 console.print()
 
-            valid_choices = [d[0] for d in details] + ["A", "M", "a", "m"]
+            valid_choices = [d[0] for d in details] + ["A", "M", "a", "m",
+                                                       self._DELETE_CHOICE.lower()]
             while True:
                 choice = Prompt.ask("Select mode", choices=valid_choices)
                 if choice in valid_choices:
@@ -2797,9 +2905,9 @@ class InteractiveMenu:
                          .replace("[dim]", "").replace("[/dim]", ""))
                 print(f"   {clean}\n")
             valid_choices = [d[0] for d in details] + ["A", "M"]
-            choice = input("Select mode [0-8/A/M]: ").strip().upper()
+            choice = input("Select mode [0-8/D/A/M]: ").strip().upper()
             while choice not in valid_choices:
-                choice = input("Select mode [0-8/A/M]: ").strip().upper()
+                choice = input("Select mode [0-8/D/A/M]: ").strip().upper()
 
         # Handle Auto and Manifest from detail view
         if choice == "A":
@@ -2807,6 +2915,14 @@ class InteractiveMenu:
 
         if choice == "M":
             return self._wizard_run_from_manifest(workflow)
+
+        # [D] is in `details` (so it is explained here too), which means it is
+        # already in valid_choices — but it still has to be RESOLVED, or int()
+        # below would raise on it.
+        _modes = [(k, n, "") for k, n, _d in details if k != self._DELETE_CHOICE]
+        _handled = self._handle_mode_choice(workflow, choice, _modes)
+        if _handled is not None:
+            return _handled
 
         workflow['mode'] = int(choice)
         return True
@@ -4842,9 +4958,26 @@ class InteractiveMenu:
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
 
+        # An ambiguous --delete-* abbreviation cannot run: argparse exits with
+        # "ambiguous option" before the child does anything. Caught here, ahead
+        # of every gate, so the user is not charged an HHMM token for a doomed
+        # run (and is told what to type instead).
+        _amb = _flags_ambiguous_delete(workflow.get('expert_flags'))
+        if _amb:
+            self._print_error(
+                f"Expert flag {_amb!r} is an ambiguous abbreviation: it matches more than "
+                f"one of --delete-source / --delete-skipped / --delete-confirm-off, and the "
+                f"child scripts reject it. Spell the flag out in full.")
+            return False
+
         # Handle manifest mode (mode 99)
         if workflow.get('mode') == 99:
             return self._execute_manifest_workflow(workflow, status)
+
+        # Lossy + delete_skipped: the one combination with no provenance of any
+        # kind. Applied here so repeats and presets are gated too, not just [D].
+        if not self._confirm_lossy_delete_skipped(workflow):
+            return False
 
         # Delete gate, at EXECUTION time (was Step 4): the user has already had
         # the chance to pick dry-run, and a simulation never charges the HHMM

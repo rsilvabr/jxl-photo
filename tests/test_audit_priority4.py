@@ -125,7 +125,7 @@ def test_wizard_manifest_mode8_decline_keeps_sources(menu, tmp_path, monkeypatch
 
 def test_expert_flag_delete_gets_confirm_off():
     cmd = ["child.py"]
-    wp._append_expert_flags(cmd, "--delete-s --effort 9")
+    wp._append_expert_flags(cmd, "--delete-so --effort 9")
     assert cmd.count("--delete-confirm-off") == 1
     assert cmd[-1] == "--delete-confirm-off"
 

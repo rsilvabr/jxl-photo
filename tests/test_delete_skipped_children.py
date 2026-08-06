@@ -288,8 +288,62 @@ def _wf(origin, dest, conv, **over):
 def test_wrapper_emits_delete_skipped_for_every_direction(menu, launched, monkeypatch,
                                                           origin, dest, conv):
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
+    # The lossy gate is exercised on its own below; here it must not block.
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
+                        lambda self, workflow: True)
     menu.execute_workflow(_wf(origin, dest, conv), STATUS)
     assert "--delete-skipped" in launched[-1]
+
+
+# --- the lossy gate reaches repeats and presets, not just [D] --------------
+
+def test_lossy_gate_fires_on_a_repeat(menu, monkeypatch, capsys):
+    """A preset/repeat rebuilds advanced_options from the stored session and
+    never walks through [D], so the gate has to live at execution time too."""
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    wf = _wf("jxl", "jpeg", "jxl_to_jpeg_force")
+    assert menu._confirm_lossy_delete_skipped(wf) is True
+    assert wf["advanced_options"]["delete_skipped"] is False, (
+        "declining must turn the option off, not cancel the run")
+    assert "nothing ties it to the original" in _out(capsys)
+
+
+def test_lossy_gate_accepts(menu, monkeypatch):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    wf = _wf("jxl", "jpeg", "jxl_to_jpeg_force")
+    menu._confirm_lossy_delete_skipped(wf)
+    assert wf["advanced_options"]["delete_skipped"] is True
+
+
+@pytest.mark.parametrize("conv,adv,dry", [
+    # provable direction — no gate
+    ("transcode_lossless", {"delete_source": True, "delete_skipped": True}, False),
+    # encoder — no gate (it has --verify-roundtrip instead)
+    ("jxl_tiff_encoder", {"delete_source": True, "delete_skipped": True}, False),
+    # delete_skipped off — nothing to gate
+    ("jxl_to_jpeg_force", {"delete_source": True}, False),
+    # a dry run deletes nothing
+    ("jxl_to_jpeg_force", {"delete_source": True, "delete_skipped": True}, True),
+])
+def test_lossy_gate_stays_quiet_when_it_should(menu, monkeypatch, conv, adv, dry):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    def _boom(*a):
+        raise AssertionError("asked when it should not have")
+    monkeypatch.setattr("builtins.input", _boom)
+    wf = _wf("jxl", "jpeg", conv, advanced_options=adv, dry_run=dry)
+    assert menu._confirm_lossy_delete_skipped(wf) is True
+
+
+def test_lossy_gate_is_not_asked_twice(menu, monkeypatch):
+    """[D] marks the workflow, so execution time does not re-ask."""
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    def _boom(*a):
+        raise AssertionError("asked twice")
+    monkeypatch.setattr("builtins.input", _boom)
+    wf = _wf("jxl", "jpeg", "jxl_to_jpeg_force", _lossy_skip_confirmed=True)
+    assert menu._confirm_lossy_delete_skipped(wf) is True
 
 
 def test_wrapper_omits_it_without_delete_source(menu, launched, monkeypatch):
@@ -342,3 +396,62 @@ def test_D_decoder_direction_says_it_is_structural_only(menu, monkeypatch, capsy
                        "jxl", "tiff", "jxl_tiff_decoder")
     assert wf["delete_skipped"] is True
     assert "nothing compares the contents" in _out(capsys)
+
+
+# ---------------------------------------------------------------------------
+# [D] must be reachable from EVERY mode selector
+#
+# It was added to the Step-4 menu alone, and the `choice == "8"` arming was
+# removed from all three at the same time — so Auto Mode -> "pick manually" and
+# the "?" detail view silently lost the delete workflow entirely. Nothing in the
+# suite noticed, because [D] was only ever tested in isolation.
+# ---------------------------------------------------------------------------
+
+MODE_SELECTORS = [
+    "_wizard_select_mode",
+    "_wizard_select_mode_manual",
+    "_show_mode_details_and_select",
+]
+
+
+@pytest.mark.parametrize("selector", MODE_SELECTORS)
+def test_every_mode_selector_routes_D_to_the_gateway(menu, monkeypatch, selector):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a: "D")
+    seen = {}
+
+    def _fake_gateway(self, workflow, modes):
+        seen["modes"] = modes
+        return "GATEWAY"
+
+    monkeypatch.setattr(wp.InteractiveMenu, "_wizard_delete_gateway", _fake_gateway)
+
+    wf = {"origin_format": "tiff", "dest_format": "jxl", "input_dir": ".",
+          "conversion_type": "jxl_tiff_encoder"}
+    assert getattr(menu, selector)(wf) == "GATEWAY", f"{selector} ignored [D]"
+    # The gateway needs a usable layout list to offer
+    assert [m[0] for m in seen["modes"]] == [str(i) for i in range(9)]
+
+
+@pytest.mark.parametrize("selector", MODE_SELECTORS)
+def test_every_mode_selector_still_takes_a_plain_layout(menu, monkeypatch, selector):
+    """No over-fix: picking a number must still just set the mode."""
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a: "5")
+    monkeypatch.setattr(wp.InteractiveMenu, "_wizard_delete_gateway",
+                        lambda self, workflow, modes: pytest.fail("gateway on a plain layout"))
+    wf = {"origin_format": "tiff", "dest_format": "jxl", "input_dir": "."}
+    assert getattr(menu, selector)(wf) is True
+    assert wf["mode"] == 5
+    assert wf.get("delete_source") is not True
+
+
+@pytest.mark.parametrize("selector", MODE_SELECTORS)
+def test_no_mode_selector_arms_delete_on_mode_8(menu, monkeypatch, selector):
+    """Mode 8 is 'in-place recursive' and keeps your files, everywhere."""
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a: "8")
+    wf = {"origin_format": "tiff", "dest_format": "jxl", "input_dir": "."}
+    getattr(menu, selector)(wf)
+    assert wf["mode"] == 8
+    assert wf.get("delete_source") is not True

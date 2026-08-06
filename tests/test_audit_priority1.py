@@ -122,10 +122,9 @@ def test_stale_icc_stripped_with_real_reader(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("flags", [
-    "--delete-s",
     "--delete-so",
-    "--delete_s",
-    "--delete-s --delete-c",
+    "--delete_so",
+    "--delete-so --delete-c",
     '--effort 9 --delete-source --delete-c',
 ])
 def test_delete_flag_abbreviations_are_detected(flags):
@@ -133,8 +132,8 @@ def test_delete_flag_abbreviations_are_detected(flags):
 
 
 @pytest.mark.parametrize("flags", [
-    # Ambiguous prefixes (argparse rejects these itself: they also match
-    # --delete-confirm-off), the confirm flag alone, and near-misses.
+    # Ambiguous prefixes (argparse rejects these itself, so they can never
+    # delete anything), the confirm flag alone, and near-misses.
     "--delete",
     "--delete-",
     "--delete-c",
@@ -144,9 +143,38 @@ def test_delete_flag_abbreviations_are_detected(flags):
     "--effort 9",
     None,
     "",
+    # Ambiguous since --delete-skipped exists: matches it AND --delete-source.
+    "--delete-s",
+    "--delete_s",
+    "--delete-s --delete-c",
+    # Unambiguous, but it is --delete-skipped, which deletes nothing on its own.
+    "--delete-sk",
+    "--delete-skipped",
 ])
 def test_non_delete_or_ambiguous_flags_are_not_flagged(flags):
     assert wp._flags_request_delete(flags) is False
+
+
+@pytest.mark.parametrize("flags,expected", [
+    # --delete-skipped made these prefixes ambiguous. argparse exits with
+    # "ambiguous option" before the child does anything, so the wrapper must
+    # refuse UP FRONT rather than charge an HHMM token for a doomed run.
+    ("--delete-s", "--delete-s"),
+    ("--delete_s", "--delete_s"),
+    ("--delete-", "--delete-"),
+    ("--effort 9 --delete-s", "--delete-s"),
+    # Unambiguous spellings are not flagged.
+    ("--delete-source", None),
+    ("--delete-so", None),
+    ("--delete-skipped", None),
+    ("--delete-sk", None),
+    ("--delete-confirm-off", None),
+    ("--effort 9", None),
+    ("", None),
+    (None, None),
+])
+def test_ambiguous_delete_abbreviations_are_reported(flags, expected):
+    assert wp._flags_ambiguous_delete(flags) == expected
 
 
 def test_abbreviated_delete_is_refused_unattended(tmp_path, monkeypatch, capsys):
@@ -173,7 +201,7 @@ def test_abbreviated_delete_is_refused_unattended(tmp_path, monkeypatch, capsys)
         "last_conversion_type": "jxl_tiff_encoder",
         "last_advanced_options": {"overwrite": False, "sync": True},
         "last_input_dir": str(src),
-        "last_expert_flags": "--delete-s --delete-c",
+        "last_expert_flags": "--delete-so --delete-c",
     })
     status = {k: True for k in
               ("cjxl", "djxl", "exiftool", "magick", "tifffile", "pillow", "imagecodecs")}

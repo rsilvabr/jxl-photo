@@ -12,9 +12,42 @@ v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 v1.9.2 / 2026-08-05: Post-v1.9.1 audit — 10 bugs fixed (2 data-safety), validated against the real 738 MB scanner files (see top section)
 v1.9.3 / 2026-08-06: Round-24 audit — 10 bugs fixed (3 data-safety/blocking), all in the wrapper's manifest layer and the summary contract (see top section)
+v1.10.1 / 2026-08-07: Round-26 audit — 6 bugs fixed in the new delete/verify layer, 5 of them introduced by round 25's own feature work (see top section)
 v1.9.4 / 2026-08-06: Round-25 audit — 8 bugs fixed (1 crash, 1 silent page drop, 1 delete gate), plus the decoder/transcoder worker-pool parity the encoder got in v1.9.0 (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.10.1 — Round-26 audit (2026-08-07)
+
+An audit of what the delete/verify work itself changed, rather than of the
+toolkit at large. **Five of the six findings were introduced by that work**, and
+the suite was green for all of them — every one sat in a gap the new tests did
+not cover.
+
+32 new regression tests; full suite 731 → 763.
+
+### Unreachable feature
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 260 | **`[D]` existed in only ONE of the three mode selectors.** The `choice == "8"` arming was removed from all three at once, but `[D]` was added to the Step-4 menu alone — so Auto Mode → "pick manually" (`_wizard_select_mode_manual`) and the `?` detail view (`_show_mode_details_and_select`) lost the delete workflow ENTIRELY, with no hint that it existed. Worse than a dead end: typing `D` there looped forever, because the key was not in `valid_choices` and the prompt just re-asked | wrapper | ✅ FIXED (`_DELETE_CHOICE` + `_handle_mode_choice` + `_delete_entry_line` are shared by all three; the menus keep their own presentation, only the CHOICE is common. `tests/test_delete_skipped_children.py` enumerates the selectors and asserts each routes `D`, still takes a plain layout, and never arms delete on mode 8 — so a fourth selector cannot quietly skip it) |
+
+### Wrong information on screen
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 261 | **The abort said "nothing was deleted" and then deleted on the next line.** `_signal_abort` logs during the pool; the delete gate runs after the pool drains, so sources whose output was written and verified BEFORE the abort latched are still removed. The behaviour is right — each one passed every gate — but the message flatly contradicted the log below it. Pre-existing for mode 8; round 25 widened it to every mode and to `--delete-skipped` | encoder, decoder, transcoder | ✅ FIXED (the message now says queued files were not attempted and that already-verified sources may still be deleted below. Suppressing the deletes instead would strand a whole run's worth of archived masters for no safety gain) |
+| 262 | **Mode 8 was still painted red with "⚠️ WARNING!" in four places, while `[D]` — the entry that actually deletes — was a plain line.** Mode 8 no longer deletes anything; the danger colour pointed at the safe option and away from the destructive one. Same class as #250, which fixed the Step-7 summary and missed the Step-4 menus | wrapper | ✅ FIXED (red and the warning move to `[D]`; mode 8 reads "In-place recursive" and its detail panel says the originals are kept) |
+| 265 | A comment still explained the mode-8 delete arming that had been deleted | wrapper | ✅ FIXED |
+
+### Gates
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 263 | **`--delete-skipped` made `--delete-s` an ambiguous abbreviation.** argparse rejects it outright, so a preset carrying it in expert flags now: charged the HHMM token (`_flags_request_delete` still matched it against `--delete-source`), launched the child, and died on "ambiguous option". A silent regression for anything already saved | wrapper | ✅ FIXED (`_flags_request_delete` no longer claims a prefix that also matches `--delete-skipped`; `_flags_ambiguous_delete` reports it and `execute_workflow` refuses BEFORE any gate, telling the user to spell the flag out) |
+| 264 | **The lossy `delete_skipped` confirmation lived inside `[D]` only.** "Repeat last workflow" and presets rebuild `advanced_options` from the stored session and never walk through the wizard, so the extra gate for the one direction that can prove nothing was skipped there. The HHMM token was still charged, so it was not unprotected — but the gate was not universal | wrapper | ✅ FIXED (`_confirm_lossy_delete_skipped` runs at execution time, covering wizard, repeat and preset alike; `[D]` marks the workflow so it is never asked twice, and a dry run never asks) |
 
 ---
 

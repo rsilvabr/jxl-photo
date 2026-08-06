@@ -118,8 +118,14 @@ def _signal_abort(reason):
             return
         _abort_reason = reason
     logger.error(f"ABORTING RUN: {reason}")
-    logger.error("  Queued files were NOT attempted and nothing was deleted. "
-                 "Free space, then re-run: sync mode resumes where this stopped.")
+    # NOT "nothing was deleted": the delete gate runs after the pool drains,
+    # so sources whose output was already written and verified BEFORE this
+    # latched are still removed. That is safe — each one passed every gate —
+    # but the old wording contradicted the very next line of the log.
+    logger.error("  Queued files were NOT attempted. Sources already converted and "
+                 "verified in this run may still be deleted below; nothing that was "
+                 "not attempted is touched.")
+    logger.error("  Free space, then re-run: sync mode resumes where this stopped.")
 
 
 def _abort_if_disk_full(write_dir, needed):
