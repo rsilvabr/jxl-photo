@@ -681,6 +681,140 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                 pass
 
 
+SRC_PREFIX = "jxlphoto-src:"
+SRCSUM_PREFIX = "jxlphoto-srcsum:"
+# Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX: they record
+# WHICH source made an output, so a later run can refuse to overwrite one
+# archive with a different file that happens to share its name.
+
+# --- Provenance: which source made this output -----------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md); enforced by
+# tests/test_helper_parity.py. Fix bugs in ALL copies.
+#
+# The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
+# from the output path, so two sources in different folders resolve to the same
+# output. _abort_on_duplicate_outputs catches that inside one run; only a
+# recorded marker catches it ACROSS runs — and with --delete-source the second
+# run would otherwise overwrite the first archive and delete both originals.
+_COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
+
+
+def _source_path_id(src_path) -> str:
+    """Stable id for a source's LOCATION. Free to compute."""
+    norm = os.path.normcase(os.path.abspath(str(src_path)))
+    return hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _file_content_id(paths) -> str:
+    """Stable id for a source's BYTES (one path, or a group of them in order).
+
+    Hashing the file rather than the decoded image on purpose: recomputing this
+    at check time must not cost a full decode. Read in 1 MB blocks so a 700 MB
+    source is never held in memory.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    outer = hashlib.sha256()
+    for p in paths:
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+        outer.update(h.digest())
+    return outer.hexdigest()[:16]
+
+
+def _read_source_markers_batch(outputs: list) -> dict:
+    """{output path: {'src': id|None, 'srcsum': id|None}} in as few exiftool
+    calls as possible — one per file would be minutes on a large library.
+
+    A file whose markers cannot be read comes back with both None, which the
+    caller treats as "cannot prove anything": fail closed.
+    """
+    markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
+    if not outputs:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(outputs), BATCH):
+        chunk = outputs[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                logger.warning(f"Provenance: could not read markers for a batch of "
+                               f"{len(chunk)} file(s) (rc={r.returncode})")
+                continue
+            # exiftool exits non-zero when it fails on ANY file of the batch but
+            # still prints valid JSON for the rest — use what came back.
+            data = json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                values = rel if isinstance(rel, list) else [str(rel)]
+                info = {"src": None, "srcsum": None}
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(SRC_PREFIX):
+                        info["src"] = token[len(SRC_PREFIX):]
+                    elif token.startswith(SRCSUM_PREFIX):
+                        info["srcsum"] = token[len(SRCSUM_PREFIX):]
+                key = str(Path(src))
+                if key in markers:
+                    markers[key] = info
+        except Exception as e:
+            logger.warning(f"Provenance: marker batch failed ({e}); "
+                           f"{len(chunk)} file(s) cannot be verified")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
+def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
+    """Did `src_paths` make the output these markers came from?
+
+    `path` compares the recorded LOCATION: free, and it survives re-converting a
+    file in place. `content` also accepts a matching set of source BYTES, so it
+    survives a MOVED folder — deliberately a superset, because content alone
+    would refuse a legitimately re-exported file and break the sync workflow.
+    """
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    if info.get("src") and info["src"] == _source_path_id(first):
+        return True
+    if mode_check == "content" and info.get("srcsum"):
+        try:
+            return info["srcsum"] == _file_content_id(src_paths)
+        except OSError:
+            return False
+    return False
+
+
+def _provenance_marker_args(src_paths):
+    """exiftool argfile lines recording WHICH source made an output."""
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    lines = ["-XMP-dc:Relation+=" + SRC_PREFIX + _source_path_id(first)]
+    try:
+        lines.append("-XMP-dc:Relation+=" + SRCSUM_PREFIX + _file_content_id(src_paths))
+    except OSError:
+        pass        # never fail a conversion over a marker
+    return lines
+
+
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
 

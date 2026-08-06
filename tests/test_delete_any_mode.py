@@ -722,18 +722,25 @@ def test_D_can_choose_content_matching(menu, monkeypatch, capsys):
     assert "noticeably longer" in _out(capsys)
 
 
-def test_wrapper_emits_provenance_only_for_the_encoder(menu, launched, monkeypatch):
+def test_wrapper_emits_provenance_for_the_tiff_directions(menu, launched, monkeypatch):
+    """Both the encoder and the decoder record provenance markers, so both take
+    the flag. The transcoder does not have it yet."""
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
                         lambda self, workflow: True)
     adv = {"delete_source": True, "provenance": "content"}
+
     menu.execute_workflow(_wf(5, advanced_options=adv), STATUS)
     assert "--provenance" in launched[-1] and "content" in launched[-1]
 
-    # the decoder and transcoder have no such flag
     menu.execute_workflow(_wf(5, origin_format="jxl", dest_format="tiff",
                               conversion_type="jxl_tiff_decoder",
                               compression="zip", bit_depth=16,
+                              advanced_options=adv), STATUS)
+    assert "--provenance" in launched[-1]
+
+    menu.execute_workflow(_wf(5, origin_format="jpeg", dest_format="jxl",
+                              conversion_type="transcode_lossless",
                               advanced_options=adv), STATUS)
     assert "--provenance" not in launched[-1]
 

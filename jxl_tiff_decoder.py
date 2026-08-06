@@ -18,7 +18,7 @@ Requirements:
  exiftool → https://exiftool.org
 """
 
-import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io, json
+import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io, json, hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -448,6 +448,134 @@ def _warn_if_libjxl_too_old(exe: str = "djxl") -> None:
             f"upgrade libjxl: https://github.com/libjxl/libjxl/releases")
 
 
+# --- Provenance: which source made this output -----------------------------
+# Duplicated across the backend scripts on purpose (see AGENTS.md); enforced by
+# tests/test_helper_parity.py. Fix bugs in ALL copies.
+#
+# The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
+# from the output path, so two sources in different folders resolve to the same
+# output. _abort_on_duplicate_outputs catches that inside one run; only a
+# recorded marker catches it ACROSS runs — and with --delete-source the second
+# run would otherwise overwrite the first archive and delete both originals.
+_COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
+
+
+def _source_path_id(src_path) -> str:
+    """Stable id for a source's LOCATION. Free to compute."""
+    norm = os.path.normcase(os.path.abspath(str(src_path)))
+    return hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _file_content_id(paths) -> str:
+    """Stable id for a source's BYTES (one path, or a group of them in order).
+
+    Hashing the file rather than the decoded image on purpose: recomputing this
+    at check time must not cost a full decode. Read in 1 MB blocks so a 700 MB
+    source is never held in memory.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    outer = hashlib.sha256()
+    for p in paths:
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+        outer.update(h.digest())
+    return outer.hexdigest()[:16]
+
+
+def _read_source_markers_batch(outputs: list) -> dict:
+    """{output path: {'src': id|None, 'srcsum': id|None}} in as few exiftool
+    calls as possible — one per file would be minutes on a large library.
+
+    A file whose markers cannot be read comes back with both None, which the
+    caller treats as "cannot prove anything": fail closed.
+    """
+    markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
+    if not outputs:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(outputs), BATCH):
+        chunk = outputs[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                logger.warning(f"Provenance: could not read markers for a batch of "
+                               f"{len(chunk)} file(s) (rc={r.returncode})")
+                continue
+            # exiftool exits non-zero when it fails on ANY file of the batch but
+            # still prints valid JSON for the rest — use what came back.
+            data = json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                values = rel if isinstance(rel, list) else [str(rel)]
+                info = {"src": None, "srcsum": None}
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(SRC_PREFIX):
+                        info["src"] = token[len(SRC_PREFIX):]
+                    elif token.startswith(SRCSUM_PREFIX):
+                        info["srcsum"] = token[len(SRCSUM_PREFIX):]
+                key = str(Path(src))
+                if key in markers:
+                    markers[key] = info
+        except Exception as e:
+            logger.warning(f"Provenance: marker batch failed ({e}); "
+                           f"{len(chunk)} file(s) cannot be verified")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
+def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
+    """Did `src_paths` make the output these markers came from?
+
+    `path` compares the recorded LOCATION: free, and it survives re-converting a
+    file in place. `content` also accepts a matching set of source BYTES, so it
+    survives a MOVED folder — deliberately a superset, because content alone
+    would refuse a legitimately re-exported file and break the sync workflow.
+    """
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    if info.get("src") and info["src"] == _source_path_id(first):
+        return True
+    if mode_check == "content" and info.get("srcsum"):
+        try:
+            return info["srcsum"] == _file_content_id(src_paths)
+        except OSError:
+            return False
+    return False
+
+
+def _provenance_marker_args(src_paths):
+    """exiftool argfile lines recording WHICH source made an output."""
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    lines = ["-XMP-dc:Relation+=" + SRC_PREFIX + _source_path_id(first)]
+    try:
+        lines.append("-XMP-dc:Relation+=" + SRCSUM_PREFIX + _file_content_id(src_paths))
+    except OSError:
+        pass        # never fail a conversion over a marker
+    return lines
+
+
 def _verify_tiff_integrity(tiff_path: Path) -> bool:
     """Verify TIFF file integrity before deleting source JXL.
 
@@ -599,6 +727,17 @@ OVERWRITE = "smart"
 # False → skip existing TIFFs (safe for resuming)
 # True → always overwrite
 # "smart" → only reconvert if JXL is newer than TIFF
+
+PROVENANCE_CHECK = "path"
+# [with DELETE_SOURCE, modes 2/4/5/6/7] How an EXISTING output is matched to
+# the source about to replace it. Those modes drop folder structure, so two
+# sources in different folders resolve to the same output; without this a
+# second run overwrote the first archive and deleted both originals.
+# "path"    -> the recorded LOCATION must match. Free. Survives re-decoding
+#              in place, not a moved folder.
+# "content" -> also accepts matching source BYTES, so it survives moved
+#              folders, at the cost of reading each source. A superset of
+#              "path" on purpose (see _provenance_ok).
 
 DELETE_SKIPPED = False
 # [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
@@ -1531,8 +1670,14 @@ def _page_subfiletype_kwargs(value) -> dict:
     return {"extratags": [(_SUBFILETYPE_TAG, 4, 1, value, True)]}
 
 
-def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
-    """Copy metadata from JXL to TIFF using exiftool."""
+def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
+                  provenance_sources=None):
+    """Copy metadata from JXL to TIFF using exiftool.
+
+    provenance_sources: every JXL of the group, in page order. Recorded on
+    the output so a LATER run can tell whether an existing TIFF came from
+    these files — see _provenance_ok.
+    """
     try:
         # Copy all metadata from JXL. Writes on large TIFFs can take a while
         # on slow disks — use generous timeouts (was 10s, which silently
@@ -1637,6 +1782,17 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
                     _run_exiftool_argfile(add_lines, timeout=60)
         except Exception as e_rel:
             logger.debug(f"Relation marker cleanup skipped: {e_rel}")
+
+        # Record WHICH JXLs made this TIFF. Written AFTER the cleanup above,
+        # which clears dc:Relation wholesale — doing it earlier would wipe it.
+        if provenance_sources:
+            try:
+                _run_exiftool_argfile(
+                    ["-overwrite_original"]
+                    + _provenance_marker_args(list(provenance_sources))
+                    + [str(tiff_path)], timeout=60)
+            except Exception as e_prov:
+                logger.debug(f"Provenance marker skipped: {e_prov}")
     except Exception as e:
         logger.warning(f"Metadata copy warning: {e}")
 
@@ -2284,7 +2440,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
 
             if strategy != 'none':
                 # Full metadata copy (order: preview already added above)
-                copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage)
+                copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage,
+                              provenance_sources=[e[0] for e in page_entries])
                 cleanup_xmp_icc(write_path)
             else:
                 # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Clear
@@ -3030,6 +3187,14 @@ Examples:
     parser.add_argument("--delete-source", action="store_true",
                         help="Delete source JXLs after successful decode. Works in EVERY "
                              "mode, not just 8. IRREVERSIBLE")
+    parser.add_argument("--provenance", type=str, default=None,
+                        choices=["path", "content"],
+                        help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
+                             "output is matched to the source about to overwrite it: "
+                             "path (default, free) compares the recorded LOCATION; "
+                             "content also accepts matching source bytes, so it "
+                             "survives MOVED folders at the cost of reading each "
+                             "source. A mismatch fails closed.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (reported as SKIP), so a decode interrupted "
@@ -3094,7 +3259,7 @@ Examples:
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK
 
     if args.sync:
         OVERWRITE = "smart"
@@ -3105,6 +3270,8 @@ Examples:
         DELETE_SOURCE = True
     if args.delete_skipped:
         DELETE_SKIPPED = True
+    if args.provenance is not None:
+        PROVENANCE_CHECK = args.provenance
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.export_subfolder is not None:
@@ -3331,21 +3498,48 @@ Examples:
         )
         return
 
-    # The encoder records WHICH source made each output (jxlphoto-src/srcsum) and
-    # refuses to overwrite-and-delete when it does not match. This script has no
-    # such record yet, so the cross-run collision of bug #268 is still possible
-    # here: in a folder-collapsing mode a file added later, in another folder,
-    # resolves to the same output and its deletion would destroy whatever the
-    # earlier archive held. Say so rather than let it be silent.
-    if DELETE_SOURCE and args.mode in (2, 4, 5, 6, 7):
-        logger.warning(
-            f"--delete-source in mode {args.mode}: this mode DROPS folder structure, so "
-            f"two sources with the same name in different folders resolve to the same "
-            f"output. Unlike the TIFF encoder, this script cannot yet verify that an "
-            f"EXISTING output came from the file about to replace it — an output written "
-            f"by an earlier run can be overwritten by an unrelated file, and both "
-            f"originals then be deleted. Prefer mode 0/1/3/8 when deleting, or check the "
-            f"destination first.")
+    # Cross-RUN output collision (bug #268). _abort_on_duplicate_outputs only
+    # sees collisions inside THIS run; in the collapsing modes an output written
+    # by an earlier run can belong to different sources entirely, and
+    # overwriting it while deleting the new sources destroys the earlier photo.
+    if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
+        _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
+        if _existing:
+            logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
+                        f"(--provenance {PROVENANCE_CHECK})...")
+            _marks = _read_source_markers_batch(_existing)
+            _blocked = []
+            for _t in list(tasks):
+                _out = _t["final_tiff"]
+                if not _out.exists():
+                    continue
+                _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
+                _srcs = [e[0] for e in _t["entries"]]
+                if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
+                    continue
+                _why = ("no provenance marker (written by an older version)"
+                        if not (_info.get("src") or _info.get("srcsum"))
+                        else "it was made from a different source")
+                _blocked.append((_t, _why))
+            if _blocked:
+                logger.error(
+                    f"REFUSING {len(_blocked)} group(s): their output already exists and "
+                    f"did not come from them. Converting would overwrite someone else's "
+                    f"output, and --delete-source would then destroy what it held.")
+                for _t, _why in _blocked[:10]:
+                    logger.error(f"    {_t['main_jxl']}")
+                    logger.error(f"      -> {_t['final_tiff']} ({_why})")
+                if len(_blocked) > 10:
+                    logger.error(f"    ... and {len(_blocked) - 10} more")
+                logger.error(
+                    "  These were NOT converted and NOTHING was deleted. Rename them, "
+                    "pick a mode that keeps folder structure (0/1/3/8), or drop "
+                    "--delete-source." +
+                    ("" if PROVENANCE_CHECK == "content" else
+                     " If you MOVED the sources, re-run with --provenance content."))
+                _bad = {id(_t) for _t, _ in _blocked}
+                tasks = [t for t in tasks if id(t) not in _bad]
+                _counter["total"] = len(tasks)
 
     # Delete confirmation (after dry-run so simulations never prompt). Charged
     # for EVERY mode: deletion is a separate opt-in from the output layout, so a

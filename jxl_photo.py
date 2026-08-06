@@ -2757,7 +2757,8 @@ class InteractiveMenu:
         # (2/4/5/6/7), where two sources in different folders resolve to the
         # same output. Modes 0/1/3/8 derive the output from the source's own
         # folder, so there is nothing to confuse and nothing to ask.
-        if origin == 'tiff' and dest == 'jxl' and mode in _COLLAPSING_MODES:
+        if (origin in ('tiff', 'jxl') and dest in ('tiff', 'jxl')
+                and mode in _COLLAPSING_MODES):
             pv_default = self.config.config.last_provenance or 'path'
             pv_explain = (
                 f"Mode {mode} drops folder structure, so two files with the same name in "
@@ -4712,7 +4713,6 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                # Encoder-only: the cross-run provenance check lives there.
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('multipage_mode'):
@@ -4750,6 +4750,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -5116,7 +5118,6 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                # Encoder-only: the cross-run provenance check lives there.
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('sync'):
@@ -5188,6 +5189,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
