@@ -331,6 +331,10 @@ Options:
   --no-verify        Skip MD5 verification (decode only)
   --delete-source    Delete source after a verified encode, in any mode
                      (requires confirmation)
+  --delete-skipped   [with --delete-source] Also delete sources whose output ALREADY
+                     EXISTS (reported as SKIP), so an archive interrupted between
+                     the conversion and the unlink can be finished. What backs it up
+                     depends entirely on the direction -- see the table below
   --delete-confirm-off Skip the interactive delete confirmation (for
                       wrappers/automation that already asked the user)
   --from-jxl         [Auto mode] Restrict processing to .jxl files only;
@@ -366,6 +370,44 @@ Options:
 | `1` | One or more files failed, or invalid input |
 | `2` | Aborted (e.g. duplicate output destinations) |
 | `3` | User declined the delete-source confirmation |
+
+* * *
+
+## Deleting already-converted sources (`--delete-skipped`)
+
+A source whose output already exists is reported as SKIP, and a skip normally
+**blocks** the delete. That is the right default, but it means an archive
+interrupted between the conversion and the unlink can never be finished: the
+leftover is skipped on every later run, and the only way out was `--overwrite`,
+i.e. redoing everything to delete a handful of files.
+
+`--delete-skipped` covers those. It never acts on the timestamp — the output
+must exist and pass the integrity check — but **what stands behind it depends
+entirely on the direction, and the difference is large**:
+
+| Direction | Flags | What backs the delete |
+|---|---|---|
+| JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected |
+| JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it |
+| JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Structural check only** |
+| JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Structural check only** |
+
+> ### ⚠️ The lossy directions cannot prove anything
+>
+> Nothing is stored for a lossy conversion, and a lossy output cannot reproduce
+> its source, so there is **no way to tell** that the existing file came from the
+> source you are about to delete. The only check is that the output is a
+> structurally valid file of the right type — **an unrelated file with the same
+> name would pass**.
+>
+> Use it there only when you know the archive's provenance yourself. The run
+> prints this warning at startup, and `jxl_photo.py` charges a separate
+> confirmation (default **No**) before arming it on a lossy direction.
+
+Without a stored checksum, the lossless directions refuse by default
+(`DELETE_SOURCE_REQUIRE_MD5 = True`) rather than fall back to the structural
+check. Setting it to `False` allows the delete and logs the missing provenance
+per file.
 
 * * *
 

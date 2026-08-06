@@ -495,8 +495,34 @@ CJXL_BUFFERING = None
 STORE_MD5 = True
 # Store MD5 checksums during transcode encode (for verify during decode)
 
+DELETE_SKIPPED = False
+# [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
+# files this run reports as SKIP.
+#
+# Without it an archive interrupted between the conversion and the unlink can
+# never be finished: the leftover is skipped on every later run, and a skip
+# blocks the delete, so it stays until everything is redone with --overwrite.
+#
+# A SKIP proves far less than a conversion. A conversion means "this run wrote
+# the file AND it passed the integrity check". A skip means only "a file with
+# that NAME exists and its mtime is not older than the source", and mtime is not
+# content: it reads "newer" after a copy, a backup restore or a touch, and says
+# nothing about whether that output came from THIS file.
+#
+# What stands in its place depends on the direction, and the difference is large
+# enough that the two are not the same feature:
+#
+#   * LOSSLESS transcode (JPEG <-> JXL) — checksums.md5 holds the SOURCE's md5
+#     keyed by the OUTPUT's name, so provenance can be PROVEN: hash the source
+#     and compare. That is stronger than any pixel comparison and cheaper (no
+#     decode). Applied whenever a checksum exists.
+#   * LOSSY convert (JXL -> JPEG/PNG, or PNG/JPEG -> JXL lossy) — nothing is
+#     stored and nothing can be re-derived, so the gate is the STRUCTURAL check
+#     alone. There is no way to prove that output came from that source. The run
+#     warns, and the wrapper asks for an extra confirmation.
+
 DELETE_SOURCE = False
-# [MODE 8 only] Delete source after successful encode/decode
+# Delete source after successful encode/decode, in ANY mode.
 # WARNING: irreversible. Only enable after testing on a small batch.
 
 DELETE_SOURCE_REQUIRE_MD5 = True
@@ -1704,11 +1730,16 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     # output at its FINAL path, which is mode-independent.
     if DELETE_SOURCE:
         deleted = 0
+        deleted_skipped = 0
         src_map = {str(s): (s, f) for s, _, f in tasks}
         for result in results:
             status = result[1]
             src_md5 = result[3] if len(result) > 3 else None
-            if status not in ("ok", "reconvert"):
+            # A skip is admitted only with DELETE_SKIPPED, and only so the
+            # checks below can judge it on the FILE — never on the timestamp
+            # that produced the skip.
+            was_skipped = status == "skipped"
+            if status not in ("ok", "reconvert") and not (DELETE_SKIPPED and was_skipped):
                 continue
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None or not final_file.exists():
@@ -1716,10 +1747,42 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             # A staged output whose move FAILED leaves a stale pre-existing
             # file at the final path: it passes exists()+integrity below, but
             # it is not the file this run wrote and verified. Fail closed.
-            if use_staging and os.path.normcase(str(final_file)) not in moved_finals:
+            #
+            # A SKIPPED file is the one legitimate exception: nothing was
+            # written, so nothing was staged, so it can never be in
+            # moved_finals. Without this the flag would look like it worked and
+            # silently delete nothing whenever staging is configured.
+            if (use_staging and not was_skipped
+                    and os.path.normcase(str(final_file)) not in moved_finals):
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
-            if STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
+            if was_skipped:
+                # This run wrote nothing, so there is no src_md5 from it — but
+                # checksums.md5 can PROVE provenance, which is stronger than
+                # anything the encoder's pixel comparison offers: it holds the
+                # SOURCE's md5 keyed by the OUTPUT's name.
+                #   encode (JPEG -> JXL): hash the source JPEG, compare.
+                #   decode (JXL -> JPEG): the stored md5 IS the original JPEG's,
+                #     so compare it against the recovered JPEG on disk.
+                stored = read_md5_db(final_file if not decode else src_path)
+                if stored is None:
+                    if DELETE_SOURCE_REQUIRE_MD5:
+                        logger.warning(
+                            f" KEEP (already archived, but no checksum to prove it came "
+                            f"from this file) | {src_path.name}")
+                        continue
+                    logger.warning(
+                        f" DELETING an already-archived source with NO provenance check "
+                        f"(no checksum stored) | {src_path.name}")
+                else:
+                    actual = md5_of_file(src_path if not decode else final_file)
+                    if actual != stored:
+                        logger.warning(
+                            f" KEEP (already-archived output does NOT match this source: "
+                            f"checksum mismatch) | {src_path.name}")
+                        continue
+                    logger.debug(f" provenance OK (MD5) | {src_path.name}")
+            elif STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
                 if src_md5 is None or read_md5_db(final_file) is None:
                     logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
                     continue
@@ -1732,13 +1795,18 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 if final_file.suffix.lower() == '.jxl' and not has_jbrd_box(final_file):
                     logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
                     continue
-            if decode and not _tool_at_least("djxl", 0, 12):
+            if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
                 # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
                 # is NOT guaranteed by the tool. The source may only be
                 # deleted when the MD5 comparison ran AND passed THIS run
                 # (result[3]). --no-verify skips that comparison entirely —
                 # without it, deletion would rest on the structural SOI/EOI
                 # check alone: too weak for an irreversible gate.
+                #
+                # Not applied to a SKIP: no djxl ran at all there, and the
+                # provenance block above already compared the JPEG on disk
+                # against the original's stored md5 — which is the very
+                # bit-exactness this check is a proxy for.
                 if not result[3]:
                     logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
                     continue
@@ -1748,13 +1816,18 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             try:
                 src_path.unlink()
                 deleted += 1
-                logger.info(f" DELETED source | {src_path.name}")
+                if was_skipped:
+                    deleted_skipped += 1
+                    logger.info(f" DELETED source (already archived) | {src_path.name}")
+                else:
+                    logger.info(f" DELETED source | {src_path.name}")
             except OSError as e:
                 # PermissionError is common on Windows (AV, Explorer preview,
                 # open viewer) — warn and continue instead of killing the batch.
                 logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
         if deleted:
-            logger.info(f" -> Deleted {deleted} source file(s)")
+            _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
+            logger.info(f" -> Deleted {deleted} source file(s){_sk}")
 
     return results
 
@@ -2650,14 +2723,19 @@ def cmd_convert(args, from_jxl: bool = True):
         src_map = {str(s): (s, out) for s, out in pairs}
         for result in results:
             status = result[1]
-            if status not in ("ok", "reconvert"):
+            # LOSSY direction: see the note in _process_file_group — the
+            # structural check is the whole gate for an already-archived source.
+            was_skipped = status == "skipped"
+            if (status not in ("ok", "reconvert")
+                    and not (DELETE_SKIPPED and was_skipped)):
                 continue
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None:
                 continue
             # Fail closed on a failed staging move: the file at the final
             # path would be a stale pre-existing one, not this run's output.
-            if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+            if (TEMP2_DIR is not None and not was_skipped
+                    and os.path.normcase(str(final_file)) not in moved_finals):
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
             if final_file is None or not _verify_file_integrity(final_file):
@@ -2666,7 +2744,9 @@ def cmd_convert(args, from_jxl: bool = True):
             try:
                 src_path.unlink()
                 deleted += 1
-                logger.info(f" DELETED source | {src_path.name}")
+                logger.info(f" DELETED source"
+                            f"{' (already archived)' if was_skipped else ''}"
+                            f" | {src_path.name}")
             except OSError as e:
                 logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
         if deleted:
@@ -3078,14 +3158,22 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             src_map = {str(s): (s, out) for s, out in pairs}
             for result in results:
                 status = result[1]
-                if status not in ("ok", "reconvert"):
+                # LOSSY direction: nothing is stored and nothing can be
+                # re-derived, so an already-archived source is judged by the
+                # STRUCTURAL check alone. There is no way to prove that output
+                # came from that source — main() warns and the wrapper asks
+                # for its own confirmation.
+                was_skipped = status == "skipped"
+                if (status not in ("ok", "reconvert")
+                        and not (DELETE_SKIPPED and was_skipped)):
                     continue
                 src_path, final_file = src_map.get(result[0], (None, None))
                 if src_path is None:
                     continue
                 # Fail closed on a failed staging move: the file at the
                 # final path would be a stale pre-existing one.
-                if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+                if (TEMP2_DIR is not None and not was_skipped
+                        and os.path.normcase(str(final_file)) not in moved_finals):
                     logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
                 if final_file is None or not _verify_file_integrity(final_file):
@@ -3094,7 +3182,9 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 try:
                     src_path.unlink()
                     deleted += 1
-                    logger.info(f" DELETED source | {src_path.name}")
+                    logger.info(f" DELETED source"
+                                f"{' (already archived)' if was_skipped else ''}"
+                                f" | {src_path.name}")
                 except OSError as e:
                     logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
             if deleted:
@@ -3172,7 +3262,16 @@ Examples:
     parser.add_argument("--decode", action="store_true", help="Force decode direction")
     parser.add_argument("--no-md5", action="store_true", help="Skip MD5 storage")
     parser.add_argument("--no-verify", action="store_true", help="Skip MD5 verify on decode")
-    parser.add_argument("--delete-source", action="store_true", help="Delete after mode 8")
+    parser.add_argument("--delete-source", action="store_true",
+                        help="Delete source after a verified conversion, in ANY mode. "
+                             "IRREVERSIBLE")
+    parser.add_argument("--delete-skipped", action="store_true",
+                        help="[with --delete-source] Also delete sources whose output "
+                             "ALREADY EXISTS (reported as SKIP), so an archive interrupted "
+                             "between the conversion and the unlink can be finished. "
+                             "Lossless JPEG<->JXL: provenance is PROVEN against "
+                             "checksums.md5. LOSSY directions: structural check only — "
+                             "nothing can prove that output came from that source")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user.")
@@ -3259,13 +3358,32 @@ def main():
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE
     if args.export_marker:
         EXPORT_MARKER = args.export_marker
     if args.export_subfolder is not None:
         EXPORT_JPEG_SUBFOLDER = args.export_subfolder
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
+    if args.delete_source:
+        DELETE_SOURCE = True
+    if args.delete_skipped:
+        DELETE_SKIPPED = True
+
+    if DELETE_SKIPPED and not DELETE_SOURCE:
+        print("WARNING: --delete-skipped has no effect without --delete-source: it only "
+              "widens which sources the deletion covers. Nothing will be deleted.")
+    elif DELETE_SKIPPED:
+        # The strength of this flag depends entirely on the direction, and the
+        # difference is big enough that it has to be said out loud. setup_logger()
+        # runs inside each cmd_*, so print() is the right channel here.
+        print("NOTE: --delete-skipped will delete sources whose output already exists.")
+        print("      Lossless JPEG<->JXL: provenance is PROVEN against checksums.md5 "
+              "(the stored hash must match).")
+        print("      LOSSY directions (JXL -> JPEG/PNG, lossy encodes): STRUCTURAL CHECK "
+              "ONLY. Nothing can prove")
+        print("      that the existing output came from that source -- an unrelated file "
+              "with the same name would pass.")
 
     # Handle --to-srgb shortcut
     if args.to_srgb:

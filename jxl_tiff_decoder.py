@@ -586,8 +586,34 @@ OVERWRITE = "smart"
 # True → always overwrite
 # "smart" → only reconvert if JXL is newer than TIFF
 
+DELETE_SKIPPED = False
+# [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
+# groups this run reports as SKIP.
+#
+# Without it a decode-and-replace run can never be finished: if one delete failed
+# (locked file, antivirus, an interrupted run), that JXL is skipped on every
+# later run — and a skip blocks the delete — so it stays until the whole library
+# is re-decoded with --overwrite.
+#
+# A SKIP proves far less than a conversion. A conversion means "this run wrote
+# the TIFF AND it passed the integrity check". A skip means only "a file with
+# that NAME exists and its mtime is not older than the newest JXL in the group",
+# and mtime is not content: it reads "newer" after a copy, a backup restore, a
+# cloud sync or a touch, and says nothing about whether that TIFF came from
+# THESE JXLs.
+#
+# So a skipped source is never deleted on the timestamp: the output must still
+# exist and pass _verify_tiff_integrity, the same structural floor a freshly
+# written TIFF gets. There is deliberately no "just delete it" mode.
+#
+# NOTE: unlike the encoder, this script has no --verify-roundtrip. Its output is
+# the product of a pipeline with several knobs (--depth, --depth-policy,
+# --matrix/--basic/--none, --target-icc, plus the appended JPEG preview page), so
+# re-deriving it to compare would reject perfectly good archives whenever the
+# settings differ from the run that made them.
+
 DELETE_SOURCE = False
-# [MODE 8 only] Delete source JXL after successful decode
+# Delete source JXL after successful decode, in ANY mode.
 # WARNING: irreversible
 
 DELETE_CONFIRM = True
@@ -2046,6 +2072,27 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
         return pixels, djxl_icc, reason, mode
 
 
+def _would_skip_group(page_entries, final_path: Path) -> bool:
+    """Would convert_multipage_jxl_group report SKIP for this group?
+
+    Mirrors the decision at the top of that function exactly, including its
+    TOCTOU fallback (an unreadable stat means "stale, convert it"). Used only by
+    the dry-run preview of --delete-skipped: a destructive option that cannot be
+    previewed is the wrong kind of opt-in.
+    """
+    if not final_path.exists():
+        return False
+    if OVERWRITE is False:
+        return True
+    if OVERWRITE == "smart":
+        try:
+            newest = max(j.stat().st_mtime for j, _, _, _, _, _, _ in page_entries)
+            return newest <= final_path.stat().st_mtime
+        except (OSError, ValueError):
+            return False
+    return False        # OVERWRITE True: always reconvert, never a skip
+
+
 def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, target_icc_path=None):
     """
     Convert a group of JXLs belonging to the same multi-page TIFF into a single
@@ -2442,6 +2489,7 @@ def process_group(group_tasks, workers, mode, target_icc=None):
     # is what stops two sources from being spent on one output.
     if DELETE_SOURCE:
         deleted = 0
+        deleted_skipped = 0
         # Map status by main_jxl path — results arrive in completion order
         # (as_completed), NOT submission order, so a positional zip with `tasks`
         # would cross statuses under concurrency and could delete sources of
@@ -2449,7 +2497,14 @@ def process_group(group_tasks, workers, mode, target_icc=None):
         status_by_main = {r[0]: r[1] for r in results}
         for task in tasks:
             status = status_by_main.get(str(task["main_jxl"]), "error")
-            if status not in ("ok", "overwrite"):
+            # A skip is admitted only with DELETE_SKIPPED, and only so the
+            # checks below can judge it on the FILE — never on the timestamp
+            # that produced the skip (see the DELETE_SKIPPED note).
+            was_skipped = status == "skipped"
+            if status not in ("ok", "overwrite") and not (DELETE_SKIPPED and was_skipped):
+                if was_skipped and not DELETE_SKIPPED:
+                    logger.debug(f" KEEP (output already exists; --delete-skipped covers "
+                                 f"these) | {task['main_jxl'].name}")
                 continue
             final_tiff = task["final_tiff"]
             if not final_tiff.exists():
@@ -2459,7 +2514,13 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             # it is not the file this run verified and delivered. Without this
             # check the gate would certify the old file and delete the JXLs
             # while the fresh output sits in staging under a UUID name.
-            if use_staging and os.path.normcase(str(final_tiff)) not in moved_finals:
+            #
+            # A SKIPPED group is the one legitimate exception: nothing was
+            # written, so nothing was staged, so it can never appear in
+            # moved_finals. Without this exemption the flag would look like it
+            # worked and silently delete nothing whenever staging is configured.
+            if (use_staging and not was_skipped
+                    and os.path.normcase(str(final_tiff)) not in moved_finals):
                 logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
                 continue
             if not _verify_tiff_integrity(final_tiff):
@@ -2488,15 +2549,21 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                     f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
                     f"(--thumbnail-handling ignore); delete them yourself if you "
                     f"do not want them")
+            _tag = " (already archived)" if was_skipped else ""
             for jxl_path, _, _, _, _, _, _ in task["entries"]:
                 try:
                     jxl_path.unlink()
-                    logger.info(f" DELETED source | {jxl_path.name}")
+                    # Named apart from a fresh delete: this source was cleared
+                    # by a TIFF this run did not write.
+                    logger.info(f" DELETED source{_tag} | {jxl_path.name}")
                     deleted += 1
+                    if was_skipped:
+                        deleted_skipped += 1
                 except Exception as e:
                     logger.warning(f" KEEP (could not delete) | {jxl_path.name}: {e}")
         if deleted:
-            logger.info(f" >Deleted {deleted} source JXL(s)")
+            _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
+            logger.info(f" >Deleted {deleted} source JXL(s){_sk}")
 
     return results
 
@@ -2941,7 +3008,14 @@ Examples:
     parser.add_argument("--export-marker", type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
     parser.add_argument("--delete-source", action="store_true",
-                        help="Delete source JXLs after successful decode (mode 8 only)")
+                        help="Delete source JXLs after successful decode. Works in EVERY "
+                             "mode, not just 8. IRREVERSIBLE")
+    parser.add_argument("--delete-skipped", action="store_true",
+                        help="[with --delete-source] Also delete sources whose output "
+                             "ALREADY EXISTS (reported as SKIP), so a decode interrupted "
+                             "between the write and the unlink can be finished without "
+                             "re-decoding everything. Never acts on the timestamp alone: "
+                             "the output must exist and pass the integrity check.")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user.")
@@ -3000,7 +3074,7 @@ Examples:
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED
 
     if args.sync:
         OVERWRITE = "smart"
@@ -3009,6 +3083,8 @@ Examples:
 
     if args.delete_source:
         DELETE_SOURCE = True
+    if args.delete_skipped:
+        DELETE_SKIPPED = True
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.export_subfolder is not None:
@@ -3072,6 +3148,18 @@ Examples:
     # Required tools first: a missing djxl/exiftool must be one clear message,
     # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
     # to standalone pages).
+    if DELETE_SKIPPED and not DELETE_SOURCE:
+        logger.warning("--delete-skipped has no effect without --delete-source: it only "
+                       "widens which sources the deletion covers. Nothing will be deleted.")
+    elif DELETE_SKIPPED:
+        # This script has no pixel-level verify (see the DELETE_SKIPPED note),
+        # so the structural check is the whole gate. Say so rather than let the
+        # flag read as strong as the encoder's.
+        logger.warning(
+            "--delete-skipped: sources whose TIFF already exists will be deleted after a "
+            "STRUCTURAL check only (valid, readable TIFF). Nothing compares the pixels, so "
+            "a TIFF that came from different JXLs with the same name would pass.")
+
     _check_external_tools(dry_run=args.dry_run)
     _warn_if_libjxl_too_old("djxl")
 
@@ -3188,6 +3276,34 @@ Examples:
             detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
+
+        # Preview --delete-skipped: a dry run returns before process_group, so
+        # without this the one destructive option acting on files this run does
+        # NOT write would have no preview at all.
+        if DELETE_SOURCE and DELETE_SKIPPED:
+            _would_delete, _would_keep = [], []
+            for task in tasks:
+                if not _would_skip_group(task["entries"], task["final_tiff"]):
+                    continue
+                if os.path.normcase(str(task["main_jxl"])) in _incomplete_groups:
+                    _would_keep.append((task["main_jxl"], "incomplete multi-page group"))
+                elif _verify_tiff_integrity(task["final_tiff"]):
+                    _would_delete.append(task)
+                else:
+                    _would_keep.append((task["main_jxl"], "output failed the integrity check"))
+            if _would_delete or _would_keep:
+                _n_files = sum(len(t["entries"]) for t in _would_delete)
+                logger.warning(
+                    f"Dry run: --delete-skipped would DELETE {_n_files} already-archived "
+                    f"source JXL(s) from {len(_would_delete)} group(s), and keep "
+                    f"{len(_would_keep)}.")
+                for _t in _would_delete[:10]:
+                    for _j, *_ in _t["entries"]:
+                        logger.warning(f"  would DELETE | {_j}")
+                if len(_would_delete) > 10:
+                    logger.warning(f"  ... and {len(_would_delete) - 10} more group(s)")
+                for _j, _why in _would_keep[:10]:
+                    logger.info(f"  would KEEP ({_why}) | {_j}")
         emit_summary_json(
             args.summary_json,
             ok=len(tasks), overwritten=0, skipped=0, errors=0,

@@ -669,12 +669,13 @@ def test_wrapper_emits_delete_skipped_only_alongside_delete(menu, launched, monk
 MODES_STUB = [(str(i), f"mode {i}", "") for i in range(9)]
 
 
-def _gateway(menu, monkeypatch, answers, layout="3", origin="tiff", dest="jxl"):
+def _gateway(menu, monkeypatch, answers, layout="3", origin="tiff", dest="jxl",
+             conv="jxl_tiff_encoder"):
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
     it = iter(answers)
     monkeypatch.setattr("builtins.input", lambda *a: next(it))
     wf = {"origin_format": origin, "dest_format": dest, "input_dir": ".",
-          "mode": None}
+          "mode": None, "conversion_type": conv}
     ok = menu._wizard_delete_gateway(wf, MODES_STUB)
     return ok, wf
 

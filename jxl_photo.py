@@ -2578,40 +2578,88 @@ class InteractiveMenu:
                 verify = (not _vi.startswith('n')) if vr_default else _vi.startswith('y')
             workflow['verify_roundtrip'] = bool(verify)
             self.config.config.last_verify_roundtrip = bool(verify)
+        else:
+            verify = False
 
-            # Already-archived sources. Offered only here, and only after the
-            # verify question, because the honest answer to "is this safe?"
-            # depends on the previous answer.
-            ds_default = bool(self.config.config.last_delete_skipped)
-            ds_explain = (
-                "Sources whose JXL already exists are reported as SKIP and are normally "
-                "KEPT — which means an archive interrupted between the encode and the "
-                "delete can never be finished without re-encoding everything. Turning "
-                "this on deletes them too. They are never deleted on the timestamp "
-                "alone: the output must exist and be a valid, complete JXL"
-                + (", and it must decode back to the source." if verify else
-                   " — but with the verify above OFF, nothing compares the pixels, so a "
-                   "JXL that came from a different photo with the same name would pass."))
+        # Already-archived sources — asked for EVERY direction, but what stands
+        # behind it differs enormously, so the wording follows the direction
+        # instead of promising the same thing everywhere.
+        conv = workflow.get('conversion_type', '')
+        # Only these two can PROVE provenance: the transcoder stores the
+        # source's md5 keyed by the output's name, so the hash must match.
+        _provable = conv in ('transcode_lossless', 'jxl_to_jpeg_lossless')
+        # No provenance possible at all, and the output cannot reproduce the
+        # source either. This is the combination that gets its own confirmation.
+        _lossy = conv in ('convert_lossy', 'jxl_to_jpeg_force', 'jxl_to_png',
+                          'jxl_to_jpeg_auto')
+
+        if _provable:
+            _guarantee = ("the stored checksum must match, which PROVES that output "
+                          "came from this exact file.")
+        elif verify:
+            _guarantee = "it must also decode back to the source pixels."
+        elif _lossy:
+            _guarantee = ("and that is ALL — this direction stores no checksum and the "
+                          "output cannot reproduce the source, so nothing can prove that "
+                          "file came from this one. An unrelated file with the same name "
+                          "would pass.")
+        else:
+            _guarantee = ("and that is all — nothing compares the contents, so a file "
+                          "that came from a different source with the same name would pass.")
+
+        ds_default = bool(self.config.config.last_delete_skipped)
+        ds_explain = (
+            "Sources whose output already exists are reported as SKIP and are normally "
+            "KEPT — which means a run interrupted between the conversion and the delete "
+            "can never be finished without redoing everything. Turning this on deletes "
+            "them too. They are never deleted on the timestamp alone: the output must "
+            "exist and be structurally valid, " + _guarantee)
+        if RICH_AVAILABLE and console:
+            console.print(f"\n[dim]{ds_explain}[/dim]")
+            del_skipped = Confirm.ask(
+                "[cyan]Also delete originals that were already converted?[/cyan]",
+                default=ds_default)
+        else:
+            print(f"\n{ds_explain}")
+            _di = input(f"Also delete originals that were already converted? "
+                        f"[{'Y/n' if ds_default else 'y/N'}]: ").strip().lower()
+            del_skipped = (not _di.startswith('n')) if ds_default else _di.startswith('y')
+
+        if del_skipped and _lossy:
+            # A separate, explicit confirmation: this is the only combination
+            # where the toolkit deletes a file it cannot tie to the output by
+            # ANY means — no checksum, no reproducible pixels. Default No.
+            _q = ("This direction is LOSSY and stores no checksum. For originals that "
+                  "were already converted, the ONLY check is that the existing output "
+                  "is a structurally valid file — nothing ties it to the original you "
+                  "are about to delete.")
             if RICH_AVAILABLE and console:
-                console.print(f"\n[dim]{ds_explain}[/dim]")
-                del_skipped = Confirm.ask(
-                    "[cyan]Also delete originals that were already converted?[/cyan]",
-                    default=ds_default)
+                console.print()
+                console.print(Panel(f"[bold red]{_q}[/bold red]", border_style="red"))
+                _go = Confirm.ask("[bold red]Delete already-converted originals anyway?[/bold red]",
+                                  default=False)
             else:
-                print(f"\n{ds_explain}")
-                _di = input(f"Also delete originals that were already converted? "
-                            f"[{'Y/n' if ds_default else 'y/N'}]: ").strip().lower()
-                del_skipped = (not _di.startswith('n')) if ds_default else _di.startswith('y')
-            workflow['delete_skipped'] = bool(del_skipped)
-            self.config.config.last_delete_skipped = bool(del_skipped)
-            if del_skipped and not verify:
-                _w = ("Deleting already-converted originals with the round-trip check OFF: "
-                      "the only thing standing between a stale or wrong JXL and your master "
-                      "is that the file is structurally valid.")
+                print(f"\n{_q}")
+                _go = input("Delete already-converted originals anyway? [y/N]: "
+                            ).strip().lower().startswith('y')
+            if not _go:
+                del_skipped = False
+                _m = "Already-converted originals will be KEPT."
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_w}[/yellow]")
+                    console.print(f"[yellow]{_m}[/yellow]")
                 else:
-                    print(_w)
+                    print(_m)
+
+        workflow['delete_skipped'] = bool(del_skipped)
+        self.config.config.last_delete_skipped = bool(del_skipped)
+        if del_skipped and not verify and not _provable:
+            _w = ("Deleting already-converted originals with no content check: the only "
+                  "thing standing between a stale or unrelated output and your original "
+                  "is that the file is structurally valid.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{_w}[/yellow]")
+            else:
+                print(_w)
 
         msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
                f"time (HHMM) once more before anything runs — a dry run never asks.")
@@ -4525,6 +4573,10 @@ class InteractiveMenu:
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source: it widens which
+                # sources the deletion covers, it does not enable one.
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -4587,6 +4639,10 @@ class InteractiveMenu:
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source: it widens which
+                # sources the deletion covers, it does not enable one.
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -4935,6 +4991,10 @@ class InteractiveMenu:
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source: it widens which
+                # sources the deletion covers, it does not enable one.
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -5038,6 +5098,10 @@ class InteractiveMenu:
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source: it widens which
+                # sources the deletion covers, it does not enable one.
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 

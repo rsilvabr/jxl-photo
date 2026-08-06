@@ -404,6 +404,15 @@ Options:
                   no --staging flag. Never runs under --dry-run
   --delete-source    Delete source JXLs after successful decode. Works in EVERY
                      mode, not just 8. IRREVERSIBLE
+  --delete-skipped   [with --delete-source] Also delete sources whose TIFF ALREADY
+                     EXISTS (reported as SKIP), so a decode interrupted between the
+                     write and the unlink can be finished without redoing the whole
+                     library. Never acts on the timestamp alone -- the output must
+                     exist and pass the integrity check.
+                     WARNING: that is a STRUCTURAL check only. This script has no
+                     --verify-roundtrip (the encoder does), so nothing compares the
+                     pixels: a TIFF that came from different JXLs with the same name
+                     would pass
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                      automation that already asked the user)
   --export-subfolder NAME

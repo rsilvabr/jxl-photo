@@ -90,6 +90,31 @@ which is exactly the set pending deletion. After one clean pass that is empty.
 paths), using the cheap checks and saying so — a destructive option that could
 not be previewed would be the wrong kind of opt-in.
 
+### `--delete-skipped` in the decoder and the transcoder too
+
+Same flag, same rule — never on the timestamp, the output must exist and pass
+the integrity check — but the guarantee behind it differs by direction, and the
+scripts, the docs and the wizard all now say which one you are in:
+
+| Direction | What backs the delete |
+|---|---|
+| JPEG ↔ JXL (lossless transcode) | **Provenance PROVEN.** `checksums.md5` already stores the SOURCE's md5 keyed by the OUTPUT's name, so the source is re-hashed and compared. Stronger than any pixel comparison, and cheaper — no decode |
+| TIFF → JXL | Structural check + the optional `--verify-roundtrip` pixel comparison |
+| JXL → TIFF | Structural check only. The decoder deliberately has no round-trip verify: its output depends on `--depth`, `--depth-policy`, `--matrix/--basic/--none`, `--target-icc` and the appended preview page, so re-deriving it would reject good archives whenever the settings differ from the run that made them |
+| Lossy (JXL → JPEG/PNG, lossy encodes) | ⚠️ Structural check only, and **nothing better is possible** — no checksum is stored and the output cannot reproduce the source |
+
+The lossless directions refuse by default when no checksum exists
+(`DELETE_SOURCE_REQUIRE_MD5`), rather than silently falling back to the weaker
+check.
+
+For the lossy directions the wizard's `[D]` charges a **separate confirmation**
+(default No) before arming it, and both the run and the docs state plainly that
+an unrelated file with the same name would pass.
+
+Proven on real files: a JPEG archived to JXL, then swapped for a different photo
+under the same name, is rejected on checksum mismatch; restored to the correct
+source it is deleted and logged as already archived.
+
 ### `[D]` in the wizard
 
 Deleting is not a layout, so it is not a mode. `[D]` charges a confirmation,

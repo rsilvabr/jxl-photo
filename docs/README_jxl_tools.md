@@ -357,6 +357,22 @@ round-trip check on, it must decode back to the source. That check matters *more
 here than for a fresh conversion, because there is no "this run wrote it" to fall
 back on — it is the only thing tying that JXL to that photo.
 
+What backs that up depends on the direction, and `[D]` says which one you are in:
+
+| Direction | What backs a delete of an already-converted original |
+|---|---|
+| JPEG ↔ JXL lossless | **Provenance PROVEN** — `checksums.md5` holds the source's hash; it must match |
+| TIFF → JXL | Structural check, plus the round-trip pixel comparison below if you enable it |
+| JXL → TIFF | Structural check only |
+| Any lossy direction | ⚠️ Structural check only, **and nothing better is possible** |
+
+> ### ⚠️ Lossy directions
+>
+> A lossy conversion stores no checksum and its output cannot reproduce the
+> source, so nothing can tie the existing file to the original you are about to
+> delete — an unrelated file with the same name would pass. `[D]` charges a
+> **separate confirmation** (default **No**) before arming it there.
+
 **Round-trip verification** (TIFF → JXL only, offered inside `[D]`): decodes each
 JXL and compares it with the source before deleting. With `--distance 0` the pixels
 must match **exactly**; on a lossy run it is a brightness + PSNR **sanity** check
