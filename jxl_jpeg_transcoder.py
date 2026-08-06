@@ -1568,8 +1568,16 @@ def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity)
         pass
 
 
-def process_group_transcode(group_pairs: list, workers: int, decode: bool, 
+def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                             verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
+    """Transcode every pair in parallel.
+
+    Called ONCE with every planned pair. It used to be called once per output
+    FOLDER, which throttled the run: a folder with fewer files than `workers`
+    could never fill the pool and every folder boundary drained it. The staging
+    move stays per-folder and still runs in bulk — it fires when that folder's
+    last file lands, so staging holds only the folders still in flight.
+    """
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
     if use_staging:
@@ -1581,30 +1589,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         write_out = (staging_dir / f"{uuid.uuid4().hex}_{src.stem}{ext}") if use_staging else final_out
         tasks.append((src, write_out, final_out))
 
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        if decode:
-            futures = {ex.submit(decode_one_transcode, s, w, f, verify, reconvert_val, smart): (s, w, f) 
-                      for s, w, f in tasks}
-        else:
-            futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, effort, smart): (s, w, f) 
-                       for s, w, f in tasks}
-        for fut in as_completed(futures):
-            task = futures[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                # An exception escaped the worker entirely — one bad file must
-                # not kill the whole batch.
-                n, total = next_count()
-                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
-                results.append((str(task[0]), "error", str(e), None))
-
     moved_finals = set()
-    if use_staging:
+
+    def _move_dest_from_staging(dest_tasks, status_map):
+        """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
-        status_map = {r[0]: r[1] for r in results}
-        for src, write_out, final_out in tasks:
+        for src, write_out, final_out in dest_tasks:
             status = status_map.get(str(src), "error")
             if status not in ("ok", "reconvert"):
                 # "aborted" is as silent as "skipped": nothing was written,
@@ -1629,7 +1619,49 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # A locked/readonly destination must not abort the whole batch:
                 # keep the file in staging and log it for manual recovery.
                 logger.error(f"  MOVE FAILED, kept in staging | {write_out.name} -> {final_out} | {e}")
+        if moved:
+            logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
 
+    # Per-destination bookkeeping so a folder can be flushed the moment its last
+    # file lands, instead of stalling the pool at every folder boundary.
+    tasks_by_dest = {}
+    pending_by_dest = {}
+    for task in tasks:
+        dest = task[2].parent
+        tasks_by_dest.setdefault(dest, []).append(task)
+        pending_by_dest[dest] = pending_by_dest.get(dest, 0) + 1
+
+    results = []
+    status_map = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        if decode:
+            futures = {ex.submit(decode_one_transcode, s, w, f, verify, reconvert_val, smart): (s, w, f)
+                      for s, w, f in tasks}
+        else:
+            futures = {ex.submit(encode_one_transcode, s, w, f, reconvert_val, effort, smart): (s, w, f)
+                       for s, w, f in tasks}
+        for fut in as_completed(futures):
+            task = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                # An exception escaped the worker entirely — one bad file must
+                # not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                result = (str(task[0]), "error", str(e), None)
+            results.append(result)
+            status_map[result[0]] = result[1]
+
+            # Flush this destination folder once every one of its files is done.
+            # Runs on the main thread (inside the as_completed loop), so no two
+            # moves ever race for the same file.
+            dest = task[2].parent
+            pending_by_dest[dest] -= 1
+            if use_staging and pending_by_dest[dest] == 0:
+                _move_dest_from_staging(tasks_by_dest[dest], status_map)
+
+    if use_staging:
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists() and tasks:
@@ -1666,9 +1698,6 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     staging_db.unlink()
                 except OSError:
                     pass
-
-        if moved:
-            logger.info(f" -> Moved {moved} file(s) from staging to destination")
 
     if DELETE_SOURCE and mode == 8:
         deleted = 0
@@ -1874,34 +1903,35 @@ def cmd_transcode(args, auto_decode: bool = False):
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = []
-    for dest_folder, group_pairs in groups.items():
-        if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
+    # ONE pool for the whole run: feeding it folder by folder meant a folder
+    # with fewer files than --workers could never fill it, and every folder
+    # boundary drained it. The staging move is still per-folder and still in
+    # bulk (see process_group_transcode).
+    results = process_group_transcode(pairs, args.workers, decode,
+                                      not args.no_verify, args.mode, reconvert_explicit,
+                                      smart_mode, args.effort)
 
-        results = process_group_transcode(group_pairs, args.workers, decode,
-                                         not args.no_verify, args.mode, reconvert_explicit, smart_mode, args.effort)
-
-        for result in results:
-            status = result[1]
-            if status == "ok":
-                ok += 1
-            # Counted apart from BOTH skipped and errors: the run gave
-            # up before these were tried, so they are neither a policy
-            # decision nor a failure.
-            elif status == "aborted":
-                aborted += 1
-            elif status == "reconvert":
-                ok += 1
-                overwritten += 1
-            elif status == "skipped":
-                skipped += 1
-            elif status == "md5_fail":
-                err += 1
-                md5_fail += 1
-                failed_files.append((str(result[0]), "MD5 verification failed"))
-            elif status == "error":
-                err += 1
-                failed_files.append((str(result[0]), str(result[2])))
+    for result in results:
+        status = result[1]
+        if status == "ok":
+            ok += 1
+        # Counted apart from BOTH skipped and errors: the run gave
+        # up before these were tried, so they are neither a policy
+        # decision nor a failure.
+        elif status == "aborted":
+            aborted += 1
+        elif status == "reconvert":
+            ok += 1
+            overwritten += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "md5_fail":
+            err += 1
+            md5_fail += 1
+            failed_files.append((str(result[0]), "MD5 verification failed"))
+        elif status == "error":
+            err += 1
+            failed_files.append((str(result[0]), str(result[2])))
 
     logger.info(f"\n{'-'*50}")
     if decode and md5_fail:
@@ -2314,31 +2344,12 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
             write_out = final_out
         tasks.append((src, write_out, final_out))
 
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        if direction == "to_jxl":
-            futures = {ex.submit(encode_to_jxl, s, w, f, effort, distance, reconvert_val, smart): (s, w, f) 
-                      for s, w, f in tasks}
-        else:
-            futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth,
-                                output_icc, use_ram, reconvert_val, smart): (s, w, f)
-                       for s, w, f in tasks}
-        for fut in as_completed(futures):
-            task = futures[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                # An exception escaped the worker entirely — one bad file must
-                # not kill the whole batch.
-                n, total = next_count()
-                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
-                results.append((str(task[0]), "error", str(e), None))
-
     moved_finals = set()
-    if use_staging:
+
+    def _move_dest_from_staging(dest_tasks, status_map):
+        """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
-        status_map = {r[0]: r[1] for r in results}
-        for src, write_out, final_out in tasks:
+        for src, write_out, final_out in dest_tasks:
             status = status_map.get(str(src), "error")
             if status in ("ok", "reconvert", "overwrite") and write_out.exists():
                 try:
@@ -2355,7 +2366,47 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 # final destination. Leave it in staging so the user can inspect.
                 logger.warning(f"Staging: not promoting {write_out.name} (status={status})")
         if moved:
-            logger.info(f" -> Moved {moved} file(s) from staging to destination")
+            logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
+
+    # Per-destination bookkeeping so a folder can be flushed the moment its last
+    # file lands, instead of stalling the pool at every folder boundary.
+    tasks_by_dest = {}
+    pending_by_dest = {}
+    for task in tasks:
+        dest = task[2].parent
+        tasks_by_dest.setdefault(dest, []).append(task)
+        pending_by_dest[dest] = pending_by_dest.get(dest, 0) + 1
+
+    results = []
+    status_map = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        if direction == "to_jxl":
+            futures = {ex.submit(encode_to_jxl, s, w, f, effort, distance, reconvert_val, smart): (s, w, f)
+                      for s, w, f in tasks}
+        else:
+            futures = {ex.submit(decode_to_image, s, w, f, quality, fmt, bit_depth,
+                                output_icc, use_ram, reconvert_val, smart): (s, w, f)
+                       for s, w, f in tasks}
+        for fut in as_completed(futures):
+            task = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                # An exception escaped the worker entirely — one bad file must
+                # not kill the whole batch.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task[0].name} | {e}")
+                result = (str(task[0]), "error", str(e), None)
+            results.append(result)
+            status_map[result[0]] = result[1]
+
+            # Flush this destination folder once every one of its files is done.
+            # Runs on the main thread (inside the as_completed loop), so no two
+            # moves ever race for the same file.
+            dest = task[2].parent
+            pending_by_dest[dest] -= 1
+            if use_staging and pending_by_dest[dest] == 0:
+                _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
     # moved_finals lets the mode-8 delete gate distinguish "this run's output
     # arrived at the final path" from a stale pre-existing file whose
@@ -2579,61 +2630,60 @@ def cmd_convert(args, from_jxl: bool = True):
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = []
-    for dest_folder, group_pairs in groups.items():
-        if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_pairs)} file(s))")
+    # ONE pool for the whole run (see process_group_convert): the per-folder
+    # loop this replaces could never fill the pool from a small folder and
+    # drained it at every boundary.
+    results, moved_finals = process_group_convert(
+        pairs, args.workers, direction,
+        args.quality, args.distance, args.format, args.bit_depth,
+        args.icc_profile, args.ram, args.effort, reconvert_explicit,
+        False, smart_mode
+    )
 
-        results, moved_finals = process_group_convert(
-            group_pairs, args.workers, direction,
-            args.quality, args.distance, args.format, args.bit_depth,
-            args.icc_profile, args.ram, args.effort, reconvert_explicit,
-            False, smart_mode
-        )
-        
-        # Handle DELETE_SOURCE for convert mode (lossy)
-        if DELETE_SOURCE and args.mode == 8:
-            deleted = 0
-            src_map = {str(s): (s, out) for s, out in group_pairs}
-            for result in results:
-                status = result[1]
-                if status not in ("ok", "reconvert"):
-                    continue
-                src_path, final_file = src_map.get(result[0], (None, None))
-                if src_path is None:
-                    continue
-                # Fail closed on a failed staging move: the file at the final
-                # path would be a stale pre-existing one, not this run's output.
-                if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
-                    logger.warning(f" KEEP (output never left staging) | {src_path.name}")
-                    continue
-                if final_file is None or not _verify_file_integrity(final_file):
-                    logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
-                    continue
-                try:
-                    src_path.unlink()
-                    deleted += 1
-                    logger.info(f" DELETED source | {src_path.name}")
-                except OSError as e:
-                    logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
-            if deleted:
-                logger.info(f" -> Deleted {deleted} source file(s)")
+    # Handle DELETE_SOURCE for convert mode (lossy)
+    if DELETE_SOURCE and args.mode == 8:
+        deleted = 0
+        src_map = {str(s): (s, out) for s, out in pairs}
+        for result in results:
+            status = result[1]
+            if status not in ("ok", "reconvert"):
+                continue
+            src_path, final_file = src_map.get(result[0], (None, None))
+            if src_path is None:
+                continue
+            # Fail closed on a failed staging move: the file at the final
+            # path would be a stale pre-existing one, not this run's output.
+            if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+                logger.warning(f" KEEP (output never left staging) | {src_path.name}")
+                continue
+            if final_file is None or not _verify_file_integrity(final_file):
+                logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                continue
+            try:
+                src_path.unlink()
+                deleted += 1
+                logger.info(f" DELETED source | {src_path.name}")
+            except OSError as e:
+                logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
+        if deleted:
+            logger.info(f" -> Deleted {deleted} source file(s)")
 
-        for src, status, detail, _ in results:
-            if status == "ok":
-                ok += 1
-            # Counted apart from BOTH skipped and errors: the run gave
-            # up before these were tried, so they are neither a policy
-            # decision nor a failure.
-            elif status == "aborted":
-                aborted += 1
-            elif status == "reconvert":
-                ok += 1
-                overwritten += 1
-            elif status == "skipped":
-                skipped += 1
-            elif status == "error":
-                err += 1
-                failed_files.append((str(src), str(detail)))
+    for src, status, detail, _ in results:
+        if status == "ok":
+            ok += 1
+        # Counted apart from BOTH skipped and errors: the run gave
+        # up before these were tried, so they are neither a policy
+        # decision nor a failure.
+        elif status == "aborted":
+            aborted += 1
+        elif status == "reconvert":
+            ok += 1
+            overwritten += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "error":
+            err += 1
+            failed_files.append((str(src), str(detail)))
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"Done: {ok} OK | {overwritten} reconverts | {skipped} skipped | {err} errors")
@@ -2833,7 +2883,7 @@ def cmd_auto(args):
     # Decode groups run BEFORE encode groups, so a same-stem pair can never
     # have its JXL source overwritten before decoding (extra belt on top of
     # the collision guard above).
-    totals = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0}
+    totals = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "overwritten": 0}
     _reset_abort()  # once per RUN, not per group: the four _process_file_group
                     # calls below must share one latch, so an abort in the first
                     # stops the rest instead of being forgotten between them.
@@ -2869,7 +2919,8 @@ def cmd_auto(args):
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"AUTO MODE complete | Total: {total_files} files | "
-                f"{totals['ok']} OK | {totals['skipped']} skipped | {totals['err']} errors")
+                f"{totals['ok']} OK | {totals['overwritten']} reconverted | "
+                f"{totals['skipped']} skipped | {totals['err']} errors")
     if _aborted():
         logger.error(f"RUN ABORTED: {_aborted()}")
         logger.error(f"  {totals['aborted']} file(s) were never attempted (not failures).")
@@ -2880,7 +2931,7 @@ def cmd_auto(args):
         # in their dry-run summaries. Otherwise the wrapper's recap shows a
         # simulation of 5000 files as a row of zeros.
         ok=len(all_pairs) if args.dry_run else totals["ok"],
-        overwritten=0, skipped=totals["skipped"],
+        overwritten=totals["overwritten"], skipped=totals["skipped"],
         errors=totals["err"], log_file=log_file,
         failures=all_failures, dry_run=args.dry_run,
         extras={"Not attempted (run aborted)": totals["aborted"]})
@@ -2958,13 +3009,20 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     if not pairs:
         return {"ok": 0, "err": 0, "skipped": 0}
 
-    tally = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "failures": []}
+    tally = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "overwritten": 0,
+             "failures": []}
 
     def _accumulate(results):
         for r in results:
             st = r[1]
             if st in ("ok", "reconvert", "overwrite"):
                 tally["ok"] += 1
+                # Counted as well as folded into ok, exactly like cmd_transcode
+                # and cmd_convert do. Without this cmd_auto reported
+                # overwritten=0 on every run, so the wrapper's manifest recap
+                # showed "ovw 0" for a pass that reconverted the whole folder.
+                if st in ("reconvert", "overwrite"):
+                    tally["overwritten"] += 1
             elif st == "skipped":
                 tally["skipped"] += 1
             elif st == "aborted":
@@ -2979,67 +3037,64 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 reason = "MD5 verification failed" if st == "md5_fail" else str(r[2])
                 tally["failures"].append((str(r[0]), reason))
 
-    # Group by output folder
-    groups = {}
-    for f, out in pairs:
-        groups.setdefault(out.parent, []).append((f, out))
-
-    # Process each group
-    for dest_folder, group_pairs in groups.items():
-        if use_transcode:
-            # Separate JPEG encode vs JXL decode within the transcode group
-            encode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')]
-            decode_pairs = [(s, f) for s, f in group_pairs if s.suffix.lower() == '.jxl']
-            if encode_pairs:
-                _accumulate(process_group_transcode(
-                    encode_pairs, args.workers, decode=False,
-                    verify=not args.no_verify, mode=args.mode,
-                    reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
-                ))
-            if decode_pairs:
-                _accumulate(process_group_transcode(
-                    decode_pairs, args.workers, decode=True,
-                    verify=not args.no_verify, mode=args.mode,
-                    reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
-                ))
-        else:
-            results, moved_finals = process_group_convert(
-                group_pairs, args.workers, direction=direction,
-                quality=args.quality, distance=args.distance,
-                fmt=args.format or "jpeg",
-                bit_depth=args.bit_depth or (default_depth if direction == "from_jxl" else 8),
-                output_icc=args.icc_profile, use_ram=args.ram,
-                effort=args.effort, reconvert_val=args.overwrite,
-                use_internal_srgb=False, smart=args.sync
-            )
-            _accumulate(results)
-            # Handle DELETE_SOURCE for lossy convert (auto mode), only in mode 8
-            if DELETE_SOURCE and args.mode == 8:
-                deleted = 0
-                src_map = {str(s): (s, out) for s, out in group_pairs}
-                for result in results:
-                    status = result[1]
-                    if status not in ("ok", "reconvert"):
-                        continue
-                    src_path, final_file = src_map.get(result[0], (None, None))
-                    if src_path is None:
-                        continue
-                    # Fail closed on a failed staging move: the file at the
-                    # final path would be a stale pre-existing one.
-                    if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
-                        logger.warning(f" KEEP (output never left staging) | {src_path.name}")
-                        continue
-                    if final_file is None or not _verify_file_integrity(final_file):
-                        logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
-                        continue
-                    try:
-                        src_path.unlink()
-                        deleted += 1
-                        logger.info(f" DELETED source | {src_path.name}")
-                    except OSError as e:
-                        logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
-                if deleted:
-                    logger.info(f" -> Deleted {deleted} source file(s)")
+    # ONE pool per direction for the whole group, not one per output FOLDER:
+    # auto mode runs on mixed libraries where modes 3/5/6/7 create a folder per
+    # shoot, and the old per-folder loop could never fill the pool from any of
+    # them. process_group_* still flushes staging per folder.
+    if use_transcode:
+        # Separate JPEG encode vs JXL decode: they call different workers.
+        encode_pairs = [(s, f) for s, f in pairs if s.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')]
+        decode_pairs = [(s, f) for s, f in pairs if s.suffix.lower() == '.jxl']
+        if encode_pairs:
+            _accumulate(process_group_transcode(
+                encode_pairs, args.workers, decode=False,
+                verify=not args.no_verify, mode=args.mode,
+                reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
+            ))
+        if decode_pairs:
+            _accumulate(process_group_transcode(
+                decode_pairs, args.workers, decode=True,
+                verify=not args.no_verify, mode=args.mode,
+                reconvert_val=args.overwrite, smart=args.sync, effort=args.effort
+            ))
+    else:
+        results, moved_finals = process_group_convert(
+            pairs, args.workers, direction=direction,
+            quality=args.quality, distance=args.distance,
+            fmt=args.format or "jpeg",
+            bit_depth=args.bit_depth or (default_depth if direction == "from_jxl" else 8),
+            output_icc=args.icc_profile, use_ram=args.ram,
+            effort=args.effort, reconvert_val=args.overwrite,
+            use_internal_srgb=False, smart=args.sync
+        )
+        _accumulate(results)
+        # Handle DELETE_SOURCE for lossy convert (auto mode), only in mode 8
+        if DELETE_SOURCE and args.mode == 8:
+            deleted = 0
+            src_map = {str(s): (s, out) for s, out in pairs}
+            for result in results:
+                status = result[1]
+                if status not in ("ok", "reconvert"):
+                    continue
+                src_path, final_file = src_map.get(result[0], (None, None))
+                if src_path is None:
+                    continue
+                # Fail closed on a failed staging move: the file at the
+                # final path would be a stale pre-existing one.
+                if TEMP2_DIR is not None and os.path.normcase(str(final_file)) not in moved_finals:
+                    logger.warning(f" KEEP (output never left staging) | {src_path.name}")
+                    continue
+                if final_file is None or not _verify_file_integrity(final_file):
+                    logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                    continue
+                try:
+                    src_path.unlink()
+                    deleted += 1
+                    logger.info(f" DELETED source | {src_path.name}")
+                except OSError as e:
+                    logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
+            if deleted:
+                logger.info(f" -> Deleted {deleted} source file(s)")
 
     return tally
 
@@ -3076,8 +3131,13 @@ Examples:
 
     # Global options
     parser.add_argument("input", type=Path, help="Input file or folder")
-    parser.add_argument("--mode", type=int, default=None,
-                        help="Output mode (0=in-place, 1=subfolder, etc)")
+    # choices, like the encoder and decoder: without it --mode 9 sailed through
+    # argparse and died deep inside resolve_output_transcode with a raw
+    # ValueError traceback, after the log header and "Files found: N" had
+    # already been printed. default stays None — main() picks the per-command
+    # default (TRANSCODE_DEFAULT_MODE / CONVERT_DEFAULT_MODE) from it.
+    parser.add_argument("--mode", type=int, default=None, choices=range(9),
+                        help="Output mode 0-8 (0=in-place, 1=subfolder, etc)")
     parser.add_argument("--workers", type=int, default=min(os.cpu_count() or 4, 16),
                         help="Parallel workers")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")

@@ -790,6 +790,11 @@ class FolderAnalyzer:
             # only a display sample and is truncated to 5.
             result['subfolder_count'] = len(immediate_subfolders)
             result['subfolders'] = [str(d) for d in immediate_subfolders[:5]]
+            # ALL immediate subfolder names, for decisions that must not be made
+            # on a display sample. The mode-4 heuristic used to read
+            # subfolders[:3], so a tree whose only '*_TIFF' folder sorted past
+            # position 5 never got the rename mode recommended.
+            result['subfolder_names'] = [d.name for d in immediate_subfolders]
 
             # Check if it's a flat structure (origin files in root)
             if any(f.parent == self.root for f in origin_files):
@@ -882,7 +887,10 @@ class FolderAnalyzer:
         # Checked before the generic recursive/flat modes — a folder tree
         # named after the origin format (e.g. "..._TIFF") is the strongest
         # signal for a rename workflow. (Previously nearly unreachable.)
-        elif result['has_subfolders'] and any(self.origin.lower() in Path(p).name.lower() for p in result['subfolders'][:3]):
+        elif result['has_subfolders'] and any(
+                self.origin.lower() in n.lower()
+                for n in result.get('subfolder_names')
+                or [Path(p).name for p in result['subfolders']]):
             result['recommended_mode'] = 4
             confidence = 'medium'
             reasoning.append(f"Folder names contain '{self.origin}' — Mode 4 (rename/suffix) recommended")
@@ -945,11 +953,16 @@ class FolderAnalyzer:
                 lines.append(f"  ... and {len(analysis['export_marker_paths'])-2} more")
 
         if analysis['has_subfolders']:
-            lines.append(f"Subfolders: {len(analysis['subfolders'])}")
+            # The REAL count, not len() of the 5-item display sample analyze()
+            # stores in 'subfolders' — a tree with 40 shoots reported
+            # "Subfolders: 5 ... and 2 more". Same class as #248: _recommend was
+            # taught to use subfolder_count and this report was missed.
+            _sub_total = analysis.get('subfolder_count', len(analysis['subfolders']))
+            lines.append(f"Subfolders: {_sub_total}")
             for sub in analysis['subfolders'][:3]:
                 lines.append(f"  - {sub}")
-            if len(analysis['subfolders']) > 3:
-                lines.append(f"  ... and {len(analysis['subfolders'])-3} more")
+            if _sub_total > 3:
+                lines.append(f"  ... and {_sub_total - 3} more")
 
         lines.append(f"\nFile distribution: {len(analysis['file_distribution'])} folder(s)")
         for folder, count in list(analysis['file_distribution'].items())[:3]:
@@ -3330,6 +3343,13 @@ class InteractiveMenu:
         if workflow.get('mode') == 99:
             manifest_path = workflow.get('manifest_path', 'unknown')
             manifest_entries = workflow.get('manifest_entries', [])
+            # The multi-page line belongs here too. Its whole reason to exist is
+            # to be the last word on what happens to extra pages before the user
+            # types YES — and a manifest run is the LARGEST run this wrapper
+            # starts, so leaving it out meant an `ignore`/`skip` manifest
+            # discarded the IR page of every film scan without one word.
+            _mp = (self._multipage_summary(workflow)
+                   if origin == 'tiff' and dest == 'jxl' else None)
             if RICH_AVAILABLE and console:
                 console.print("\n[bold cyan]Step 7: Summary (Manifest Mode)[/bold cyan]")
                 table = Table.grid(expand=True)
@@ -3339,6 +3359,9 @@ class InteractiveMenu:
                 table.add_row("Manifest:", manifest_path)
                 table.add_row("Entries:", str(len(manifest_entries)))
                 table.add_row("Workers:", str(workflow['workers']))
+                if _mp:
+                    table.add_row("Multi-page TIFF:",
+                                  f"[yellow]{_mp[0]}[/yellow]" if _mp[1] else _mp[0])
                 if extra_info:
                     table.add_row("Config:", ", ".join(extra_info))
                 console.print(Panel(table, border_style="green"))
@@ -3354,6 +3377,14 @@ class InteractiveMenu:
                 print(f"Manifest: {manifest_path}")
                 print(f"Entries: {len(manifest_entries)}")
                 print(f"Workers: {workflow['workers']}")
+                if _mp:
+                    print(f"Multi-page TIFF: {_mp[0]}")
+                # extra_info carries DELETE SOURCE, DRY RUN, staging and the
+                # expert-flags warning. The rich branch has always shown it;
+                # this one never did, so a plain terminal asked for YES on a
+                # manifest that deletes originals without saying so.
+                if extra_info:
+                    print(f"Config: {', '.join(extra_info)}")
                 print("\nType YES to confirm:")
                 confirm = input("> ").strip()
                 if confirm.upper() != "YES":
@@ -3525,13 +3556,27 @@ class InteractiveMenu:
         _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
         analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
 
+        # Resolve every entry's mode ONCE, here, and hand the guards below the
+        # same modes the children will actually run with. A legacy manifest (no
+        # Mode cell) arrives as None and is resolved to 0/6/7 by
+        # detect_mode_for_entry — but the guards used to receive the raw None
+        # and fall back to a flat Destination scan, which models a write that
+        # modes 6/7 never perform. Fail-closed behaviour is unchanged: an entry
+        # that still resolves to None keeps counting as "unknown, assume the
+        # worst" inside each guard.
+        resolved_entries = [
+            (source, dest_path,
+             analyzer.detect_mode_for_entry(source, dest_path, original_mode=entry_mode))
+            for source, dest_path, entry_mode in manifest_entries
+        ]
+
         # Overlapping source trees: one entry's Source inside another's means
         # the same files are processed twice by SEPARATE child processes. Some
         # users do this on purpose (e.g. E:\Fotos in mode 6 + E:\Fotos\2024_EXPORT
         # in mode 0 — different outputs, no conflict), so attended runs get a
         # loud warning and a choice; unattended presets are refused (fail
         # closed, like the delete gates).
-        overlaps = self._manifest_source_overlaps(manifest_entries)
+        overlaps = self._manifest_source_overlaps(resolved_entries)
         if overlaps:
             head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
                     f"Source folders — the same files would be processed twice:")
@@ -3559,7 +3604,7 @@ class InteractiveMenu:
         # The scan itself walks every Source recursively and can take minutes on
         # large trees, so it is skipped when collisions are IMPOSSIBLE — see
         # _manifest_needs_collision_scan for exactly when that holds.
-        if not self._manifest_needs_collision_scan(manifest_entries, _marker):
+        if not self._manifest_needs_collision_scan(resolved_entries, _marker):
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
             if RICH_AVAILABLE and console:
@@ -3569,7 +3614,7 @@ class InteractiveMenu:
             collisions = []
         else:
             collisions = self._manifest_output_collisions(
-                manifest_entries, analyzer._get_extensions(origin),
+                resolved_entries, analyzer._get_extensions(origin),
                 origin=origin, dest=dest,
                 export_marker=_marker,
                 export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
@@ -3599,7 +3644,7 @@ class InteractiveMenu:
         # never reaches `advanced`, and it applies to every entry at once.
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
                             or (advanced.get('delete_source')
-                                and any(m == 8 for _, _, m in manifest_entries))):
+                                and any(m == 8 for _, _, m in resolved_entries))):
             if not self._confirm_archive_mode():
                 return False
 
@@ -3623,10 +3668,11 @@ class InteractiveMenu:
                 print("DRY RUN MODE")
             print()
 
-        for i, (source, dest_path, entry_mode) in enumerate(manifest_entries, 1):
-            # Preserve the mode the manifest was generated with (important for modes 6/7)
-            detected_mode = analyzer.detect_mode_for_entry(source, dest_path, original_mode=entry_mode)
-
+        # resolved_entries, not manifest_entries: the modes were resolved once
+        # above (detect_mode_for_entry preserves an explicit Mode cell and only
+        # detects for legacy manifests), so the guards and the run can never
+        # disagree about what mode an entry is.
+        for i, (source, dest_path, detected_mode) in enumerate(resolved_entries, 1):
             if RICH_AVAILABLE and console:
                 console.print(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {self._truncate_path(source, 40)} → {self._truncate_path(dest_path, 40)}")
             else:
@@ -3696,15 +3742,13 @@ class InteractiveMenu:
                 if not_started:
                     msg += f" {not_started} remaining entry(ies) were NOT started."
                 self._print_error(msg)
-                for j, (src_rest, dst_rest, m_rest) in enumerate(
-                        manifest_entries[i:], i + 1):
+                for j, (src_rest, _dst_rest, m_rest) in enumerate(
+                        resolved_entries[i:], i + 1):
                     entry_reports.append({
-                        # Resolved the same way the loop would have: the recap
-                        # formats this as an int, and a legacy manifest's empty
-                        # Mode cell arrives here as None.
+                        # Already resolved above, like the loop's own entries —
+                        # the recap formats this as an int.
                         "index": j,
-                        "mode": analyzer.detect_mode_for_entry(
-                            src_rest, dst_rest, original_mode=m_rest),
+                        "mode": m_rest,
                         "source": src_rest,
                         "state": "not started", "summary": None,
                     })

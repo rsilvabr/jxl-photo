@@ -309,6 +309,7 @@ Options:
   --workers N        Parallel threads (tested up to 32 on a Ryzen 9 5950X)
   --overwrite        Always overwrite existing files
   --sync             Smart mode: only process if source is newer than destination
+                     (wins over --overwrite if both are given)
                      (checks file modification time: src.stat().st_mtime > dst.stat().st_mtime)
 
   --format jpeg|png  Output format for JXL decode (default: jpeg)

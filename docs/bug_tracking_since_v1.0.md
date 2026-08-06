@@ -12,8 +12,68 @@ v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 v1.9.2 / 2026-08-05: Post-v1.9.1 audit — 10 bugs fixed (2 data-safety), validated against the real 738 MB scanner files (see top section)
 v1.9.3 / 2026-08-06: Round-24 audit — 10 bugs fixed (3 data-safety/blocking), all in the wrapper's manifest layer and the summary contract (see top section)
+v1.9.4 / 2026-08-06: Round-25 audit — 8 bugs fixed (1 crash, 1 silent page drop, 1 delete gate), plus the decoder/transcoder worker-pool parity the encoder got in v1.9.0 (see top section)
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v1.9.4 — Round-25 audit (2026-08-06)
+
+Four-script audit, wrapper last. 24 new regression tests
+(`tests/test_audit_round25.py`); full suite went 627 → 651. Every fix was
+proven against the pre-fix code first: 17 of the 24 fail on the v1.9.3 tree,
+the other 7 are deliberate "do not over-fix" guards (valid modes 0-8, split
+mode's existing thumbnail accounting, a single-page TIFF with no thumbnail,
+non-TIFF directions, per-folder staging flush, a complete group still
+deleting, explicit Mode cells).
+
+The codec paths came out clean again and were re-validated end to end after
+the edits, against the real files rather than fixtures: the 739 MB 3-page
+RGB+IR scan round-trips with the RGB page AND the `SubfileType=4` IR page
+pixel-identical and the 217 KB scanner ICC byte-identical, and a Capture One
+16-bit ProPhoto export round-trips pixel-identical with its preview page
+restored. A two-folder mode-3 decode with staging and a two-folder JPEG↔JXL
+transcode (MD5 PASS both ways) exercised the new single-pool paths on real
+files.
+
+### Crash
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 252 | **The transcoder was the only script whose `--mode` had no `choices`.** `--mode 9` (or `-1`, or `42`) sailed through argparse and died inside `resolve_output_transcode` with a raw `ValueError` traceback — after `setup_logger()`, the settings header and `Files found: N` had already been printed, so it read as a mid-run crash rather than a bad flag. Reachable from the wrapper too: expert flags are appended to the child's argv verbatim. The encoder has had `choices=[0..8]` and the decoder `choices=range(9)` all along | transcoder | ✅ FIXED (`choices=range(9)`; `default=None` kept, since `main()` picks `TRANSCODE_DEFAULT_MODE`/`CONVERT_DEFAULT_MODE` from it. Exit 2 = invalid arguments, per the documented table) |
+
+### Silent data drop
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 253 | **`--multipage-mode skip` discarded thumbnail pages without a single word.** `skip` refuses genuinely multi-page files, so a TIFF with ONE real page sails through it — but its embedded preview does not, and the `skip` planner never touched `_thumbnails_dropped` or `_discarded_thumb_sources`. No summary line, no `extras["Thumbnails excluded"]` for the wrapper's recap, and in mode 8 + delete the `(embedded thumbnail page not encoded)` note — the one thing that warns the decoded TIFF will not have that page back — never fired. That is the shape of **every** file in the Capture One fixtures and of the film scans, so on a real library this was silent on every file. Reproduced against the real `_DSC0003_ProPhoto-g22_v1.tif` | encoder | ✅ FIXED (`_record_dropped_thumbnails` is now the single accounting path for both the `split` and `skip` planners, so the two cannot drift again; the summary names `--multipage-mode skip` and points at `split_all`, because `--thumbnail-mode include` does nothing in skip mode) |
+
+### Delete gates
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 258 | **A marked multi-page group arriving with pages MISSING decoded to a valid one-page TIFF, and mode 8 deleted the JXL for it.** `collect_multipage_groups` groups on whatever files the run was given, so decoding `scan_page2.jxl` alone (a single-file input, or a folder holding only part of a split) produced `scan_page2.tif` and, with `--delete-source`, removed the source. Every downstream check passes — the file that was written IS complete — so nothing could notice. Same blind spot the encoder closed with `_discarded_real_page_sources` | decoder | ✅ FIXED (a marked group whose only member is not page 0 is logged as INCOMPLETE and recorded in `_incomplete_groups`; the mode-8 gate refuses it, fail-closed. A lone page 0 is the ordinary single-output case and is untouched) |
+
+### Wrong information on screen
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 254 | **The Auto Mode report printed the display SAMPLE as the subfolder count.** `analyze()` stores the real count in `subfolder_count` and truncates `subfolders` to five for display — the fix #248 made for `_recommend` and missed here — so a tree with 12 shoots reported `Subfolders: 5` and `... and 2 more`. The mode-4 heuristic read `subfolders[:3]` of that same sample, so a `*_TIFF` folder sorted past position 5 never got the rename mode recommended | wrapper | ✅ FIXED (report uses `subfolder_count`; `analyze()` also exports `subfolder_names` — every immediate subfolder — and the mode-4 heuristic decides on that, not on a display sample) |
+| 255 | **The plain-text Step-7 manifest summary dropped the whole Config line.** The `rich` branch has always rendered `extra_info`; the non-`rich` branch printed Mode/Manifest/Entries/Workers and went straight to `Type YES`. On a terminal without `rich`, a manifest that deletes originals asked for confirmation without ever saying so — `DELETE SOURCE: ON (!)`, `DRY RUN`, staging and the expert-flags warning were all invisible. Same class as #163/#168. Neither branch showed the multi-page line either, although its whole purpose is to be the last word on what happens to extra pages before YES — and a manifest is the largest run the wrapper starts | wrapper | ✅ FIXED (plain-text branch prints `Config:`; both branches print `Multi-page TIFF:` for TIFF→JXL, with the same yellow flag on the page-dropping choices) |
+| 257 | `cmd_auto` folded `"reconvert"` into `ok` and never counted it, then passed `overwritten=0` to `record_summary()`. The wrapper's manifest recap showed `ovw 0` for every JXL↔JPEG auto entry, even on a pass that reconverted the whole folder. `cmd_transcode` and `cmd_convert` both report it | transcoder | ✅ FIXED (tallied like the other two; the AUTO MODE complete line shows it as well) |
+
+### Performance parity
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 256 | **The decoder and the transcoder still drained the worker pool at every output-folder boundary.** The encoder fixed exactly this in v1.9.0 and measured it: 10s in a single folder vs 33s spread over eight, on eight real 45 MP TIFFs. Both other scripts still ran `for dest_folder, group_pairs in groups.items(): process_group_*(...)` — one pool per folder — and modes 3/5/6/7 create one output folder per shoot, so a library decode ran at a fraction of `--workers` (four call sites: decoder `main`, `cmd_transcode`, `cmd_convert`, `_process_file_group`) | decoder, transcoder | ✅ FIXED (one pool per run, with the encoder's per-destination flush ported over: each folder's outputs leave staging the moment that folder's last file lands, so staging still never holds the whole batch. Verified on real files: a two-folder mode-3 decode ran both folders concurrently and drained staging per folder) |
+
+### Latent
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 259 | **The three manifest guards ran on the RAW manifest mode while the run used the DETECTED one.** A legacy manifest (no Mode cell) reaches `_manifest_source_overlaps` / `_manifest_needs_collision_scan` / `_manifest_output_collisions` as `mode=None`, so the collision scan falls back to a flat-Destination model — but `_execute_manifest_workflow` then runs those entries through `detect_mode_for_entry`, which resolves them to 0/6/7. For anything detected as 6/7 the guard was checking a folder the child never writes to | wrapper | ✅ FIXED (modes are resolved ONCE, up front, and the same resolved list feeds the guards, the mode-8 gate, the run loop and the not-started recap. Explicit Mode cells are returned unchanged by `detect_mode_for_entry`, so nothing about non-legacy manifests moves) |
 
 ---
 

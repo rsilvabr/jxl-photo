@@ -838,9 +838,12 @@ _d50_patch_lock = threading.Lock()
 # can say it out loud: per-file warnings scroll away in a large batch.
 _multipage_ignored = {"files": 0, "pages": 0}
 _multipage_ignored_lock = threading.Lock()
-# Thumbnail pages dropped by --multipage-mode split + --thumbnail-mode exclude.
-# Tracked SEPARATELY from _multipage_ignored: mixing them made the summary blame
-# "--multipage-mode ignore" for a drop that happened in split mode.
+# Thumbnail pages dropped WITHOUT their real page being dropped too — by
+# --multipage-mode split + --thumbnail-mode exclude, and by --multipage-mode
+# skip, which encodes the single real page and silently left its embedded
+# preview behind. Tracked SEPARATELY from _multipage_ignored: mixing them made
+# the summary blame "--multipage-mode ignore" for a drop that happened
+# elsewhere.
 _thumbnails_dropped = {"files": 0, "pages": 0}
 # Source TIFFs that lost REAL image pages at planning time (--multipage-mode
 # ignore). Mode 8 consults this before deleting: encoding page 0 and then
@@ -873,6 +876,27 @@ def _capped_discard_warning(msg: str):
         _discard_warned["suppressed"] += 1
 
 
+def _record_dropped_thumbnails(tiff_path, pages: int):
+    """Book one TIFF whose thumbnail page(s) this run chose not to encode.
+
+    Shared by the `split` and `skip` planners so the two can never drift again:
+    `skip` used to drop the embedded preview of every single-real-page TIFF
+    without touching a counter, so nothing said so — not the run summary, not
+    the wrapper's `extras`, and not the mode-8 delete line, which is the one
+    place that warns the decoded TIFF will come back without that page.
+    """
+    if pages <= 0:
+        return
+    with _multipage_ignored_lock:
+        _thumbnails_dropped["files"] += 1
+        _thumbnails_dropped["pages"] += pages
+        _discarded_thumb_sources.add(os.path.normcase(str(tiff_path)))
+        if WARN_DISCARDED_THUMBNAILS:
+            _capped_discard_warning(
+                f"DISCARDING {pages} thumbnail page(s) | {tiff_path.name} | "
+                f"--multipage-mode {MULTIPAGE_TIFF_MODE} does not encode them")
+
+
 def _log_discard_summary():
     """Report every page the run chose not to encode.
 
@@ -890,10 +914,18 @@ def _log_discard_summary():
     # Thumbnails excluded on purpose: informational, not a warning — the user
     # asked for it. Still printed so the count is never a surprise.
     if _thumbnails_dropped["files"]:
+        # Name the setting that actually caused it. --thumbnail-mode is only
+        # consulted in split, so pointing a `skip` run at it would advertise a
+        # fix that changes nothing.
+        if MULTIPAGE_TIFF_MODE.lower() == "skip":
+            hint = ("--multipage-mode skip encodes the single real page only). "
+                    "Use --multipage-mode split_all to encode them too.")
+        else:
+            hint = ("--thumbnail-mode exclude, as requested). "
+                    "Use --thumbnail-mode include to encode them too.")
         logger.info(
             f"Thumbnails: excluded {_thumbnails_dropped['pages']} thumbnail page(s) from "
-            f"{_thumbnails_dropped['files']} TIFF(s) (--thumbnail-mode exclude, as requested). "
-            f"Use --thumbnail-mode include to encode them too.")
+            f"{_thumbnails_dropped['files']} TIFF(s) ({hint}")
 
     if _discard_warned["suppressed"]:
         logger.info(f"({_discard_warned['suppressed']} per-file discard warning(s) suppressed; "
@@ -2798,6 +2830,12 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             is_thumb = 0 in thumb_pages
         info = page_info.get(idx, {'subfiletype': 0, 'samples': 3})
         pages_to_encode.append((idx, is_thumb, info['subfiletype'], info['samples']))
+        # Every thumbnail page except the one actually being encoded is being
+        # dropped here. `skip` is about MULTI-page files, so a 1-real-page TIFF
+        # sails through it — but its embedded preview does not, and nothing
+        # used to say so. That is the shape of every Capture One export and of
+        # the film scans, so on a real library this was silent on every file.
+        _record_dropped_thumbnails(tiff_path, len([i for i in thumb_pages if i != idx]))
 
     elif mp_mode == "split":
         for idx in real_pages:
@@ -2813,14 +2851,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             # file (--warn-thumbnail-discard brings the per-file lines back).
             # Counted apart from _multipage_ignored so the summary can name the
             # right setting.
-            with _multipage_ignored_lock:
-                _thumbnails_dropped["files"] += 1
-                _thumbnails_dropped["pages"] += len(thumb_pages)
-                _discarded_thumb_sources.add(os.path.normcase(str(tiff_path)))
-                if WARN_DISCARDED_THUMBNAILS:
-                    _capped_discard_warning(
-                        f"DISCARDING {len(thumb_pages)} thumbnail page(s) | {tiff_path.name} | "
-                        f"--thumbnail-mode exclude (use include to keep them)")
+            _record_dropped_thumbnails(tiff_path, len(thumb_pages))
         if not pages_to_encode:
             if not real_pages and not thumb_pages:
                 raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")

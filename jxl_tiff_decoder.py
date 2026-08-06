@@ -2320,6 +2320,17 @@ def process_group(group_tasks, workers, mode, target_icc=None):
       - main_jxl: Path to the main JXL
       - entries: list of (jxl_path, page_idx, is_thumbnail, icc_inherited, subfiletype, grayscale, depth)
       - final_tiff: Path to final TIFF destination
+
+    Called ONCE with every planned task. It used to be called once per output
+    FOLDER, which throttled the whole run: a folder holding fewer tasks than
+    `workers` could never fill the pool, and the pool drained at every folder
+    boundary. Modes 3/5/6/7 create one output folder per shoot, so on a photo
+    library that turned N workers into roughly one — the same defect the
+    encoder measured at 10s vs 33s on eight real 45 MP files.
+
+    The staging move stays per-folder and still runs in bulk: each folder's
+    outputs move as soon as that folder's last task finishes, so staging holds
+    only the folders still in flight rather than the entire batch.
     """
     use_staging = TEMP2_DIR is not None
     staging_dir = Path(TEMP2_DIR) if use_staging else None
@@ -2343,35 +2354,12 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             "final_tiff": final_tiff,
         })
 
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {}
-        for task in tasks:
-            fut = ex.submit(
-                convert_multipage_jxl_group,
-                task["main_jxl"],
-                task["entries"],
-                task["write_path"],
-                task["final_tiff"],
-                target_icc,
-            )
-            futures[fut] = task
-        for fut in as_completed(futures):
-            task = futures[fut]
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                # An exception escaped convert_multipage_jxl_group entirely
-                # (e.g. temp-dir failure). One bad group must not kill the run.
-                n, total = next_count()
-                logger.error(f"[{n}/{total}] ERROR | {task['main_jxl'].name} | {e}")
-                results.append((str(task["main_jxl"]), "error", str(e)))
-
     moved_finals = set()
-    if use_staging:
+
+    def _move_dest_from_staging(dest_tasks, status_map):
+        """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
-        status_map = {r[0]: r[1] for r in results}
-        for task in tasks:
+        for task in dest_tasks:
             main_jxl = task["main_jxl"]
             write_path = task["write_path"]
             final_tiff = task["final_tiff"]
@@ -2400,7 +2388,52 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 # keep the file in staging and log it for manual recovery.
                 logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> {final_tiff} | {e}")
         if moved:
-            logger.info(f" >Moved {moved} file(s) from staging to final")
+            logger.info(f" >Moved {moved} file(s) from staging to "
+                        f"{dest_tasks[0]['final_tiff'].parent}")
+
+    # Per-destination bookkeeping so a folder can be flushed the moment its last
+    # task lands, instead of stalling the pool at every folder boundary.
+    tasks_by_dest = {}
+    pending_by_dest = {}
+    for task in tasks:
+        dest = task["final_tiff"].parent
+        tasks_by_dest.setdefault(dest, []).append(task)
+        pending_by_dest[dest] = pending_by_dest.get(dest, 0) + 1
+
+    results = []
+    status_map = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {}
+        for task in tasks:
+            fut = ex.submit(
+                convert_multipage_jxl_group,
+                task["main_jxl"],
+                task["entries"],
+                task["write_path"],
+                task["final_tiff"],
+                target_icc,
+            )
+            futures[fut] = task
+        for fut in as_completed(futures):
+            task = futures[fut]
+            try:
+                result = fut.result()
+            except Exception as e:
+                # An exception escaped convert_multipage_jxl_group entirely
+                # (e.g. temp-dir failure). One bad group must not kill the run.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {task['main_jxl'].name} | {e}")
+                result = (str(task["main_jxl"]), "error", str(e))
+            results.append(result)
+            status_map[result[0]] = result[1]
+
+            # Flush this destination folder once every one of its tasks is done.
+            # Runs on the main thread (inside the as_completed loop), so no two
+            # moves ever race for the same file.
+            dest = task["final_tiff"].parent
+            pending_by_dest[dest] -= 1
+            if use_staging and pending_by_dest[dest] == 0:
+                _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
     if DELETE_SOURCE and mode == 8:
         deleted = 0
@@ -2426,6 +2459,16 @@ def process_group(group_tasks, workers, mode, target_icc=None):
                 continue
             if not _verify_tiff_integrity(final_tiff):
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
+                continue
+            # Pages of this group were not in the run. Every check above passes
+            # — the single-page TIFF written is valid and complete — so this is
+            # the only place that can stop the deletion. Fail closed: a page
+            # that exists only in the source must keep the source alive.
+            if os.path.normcase(str(task["main_jxl"])) in _incomplete_groups:
+                logger.warning(
+                    f" KEEP (incomplete multi-page group; deleting would lose the "
+                    f"missing pages) | {task['main_jxl'].name} | re-run against the "
+                    f"folder holding every page of the split")
                 continue
             # Delete only the sources whose pixels actually made it into the
             # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
@@ -2689,6 +2732,15 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 
 
 
+# Main JXLs whose marked multi-page group arrived with pages missing, keyed by
+# os.path.normcase(str(main_jxl)). Mode 8 consults this before deleting: the
+# one-page TIFF that was written is perfectly valid, so no integrity check
+# downstream can tell that the other pages of the original only exist in the
+# JXLs this run is about to remove. Same fail-closed rule as the encoder's
+# _discarded_real_page_sources.
+_incomplete_groups = set()
+
+
 def collect_multipage_groups(jxls: list) -> dict:
     """Group JXLs that belong to the same multi-page TIFF.
 
@@ -2706,6 +2758,9 @@ def collect_multipage_groups(jxls: list) -> dict:
     output filenames stable).
     """
     groups: dict = {}
+    # One run per process normally, but the wrapper's tests (and a second call
+    # in the same interpreter) must not inherit a previous run's verdicts.
+    _incomplete_groups.clear()
 
     # Read markers first; they are needed even when reconstruction is disabled
     # so that per-file metadata (inheritance, grayscale, depth) is available.
@@ -2786,7 +2841,21 @@ def collect_multipage_groups(jxls: list) -> dict:
             else:
                 main_entry = min(entries, key=lambda e: e[1])
         main_jxl = main_entry[0]
-        groups[main_jxl] = sorted(entries, key=lambda e: e[1])
+        # A marked group with a SINGLE member that is not page 0 means the rest
+        # of the split is not in this run's file list (a single-file input, or a
+        # folder holding only part of the split). The decode still produces a
+        # valid TIFF — of one page — so nothing downstream can notice, and with
+        # --mode 8 --delete-source the JXL would be deleted for it. Say so, and
+        # mark the group so the delete gate can refuse (see process_group).
+        entries_sorted = sorted(entries, key=lambda e: e[1])
+        if len(entries_sorted) == 1 and entries_sorted[0][1] != 0:
+            logger.warning(
+                f"Multi-page group is INCOMPLETE: only page {entries_sorted[0][1]} of "
+                f"group {_marker[1]} is present | {main_jxl.name} | decoding it as a "
+                f"single-page TIFF; point the run at the folder holding every page "
+                f"to rebuild the original")
+            _incomplete_groups.add(os.path.normcase(str(main_jxl)))
+        groups[main_jxl] = entries_sorted
 
     # Standalone files: one single-page group each
     for entry in standalone:
@@ -3147,32 +3216,34 @@ Examples:
     # walks away from a multi-hour manifest and needs the paths on return.
     failed_files = []
 
-    for dest_folder, group_tasks in groups.items():
-        if len(groups) > 1:
-            logger.info(f"-- Group: {dest_folder} ({len(group_tasks)} file(s))")
+    # ONE pool for the whole run. Feeding it folder by folder meant a folder
+    # with fewer files than --workers could never fill the pool, and every
+    # folder boundary drained it — modes 3/5/6/7 create one output folder per
+    # shoot, so a big library ran at a fraction of the requested concurrency.
+    # The staging move is still per-folder and still in bulk; it now fires when
+    # that folder's last task lands (see process_group).
+    results = process_group(tasks, args.workers, args.mode,
+                            target_icc=args.target_icc)
 
-        results = process_group(group_tasks, args.workers, args.mode,
-                               target_icc=args.target_icc)
-
-        for result in results:
-            status = result[1]
-            if status == "ok":
-                ok += 1
-            elif status == "overwrite":
-                ok += 1
-                overwritten += 1
-            elif status == "skipped":
-                skipped += 1
-            # Counted apart from BOTH skipped and errors: the run gave up
-            # before these were tried, so they are neither a policy decision
-            # nor a failure.
-            elif status == "aborted":
-                aborted += 1
-            elif status == "error":
-                err += 1
-                # result[0] is the source JXL path; result[2] is the reason.
-                failed_files.append((str(result[0]),
-                                     str(result[2]) if len(result) > 2 else "unknown error"))
+    for result in results:
+        status = result[1]
+        if status == "ok":
+            ok += 1
+        elif status == "overwrite":
+            ok += 1
+            overwritten += 1
+        elif status == "skipped":
+            skipped += 1
+        # Counted apart from BOTH skipped and errors: the run gave up
+        # before these were tried, so they are neither a policy decision
+        # nor a failure.
+        elif status == "aborted":
+            aborted += 1
+        elif status == "error":
+            err += 1
+            # result[0] is the source JXL path; result[2] is the reason.
+            failed_files.append((str(result[0]),
+                                 str(result[2]) if len(result) > 2 else "unknown error"))
 
     logger.info("\n" + "-"*50)
     if args.sync:

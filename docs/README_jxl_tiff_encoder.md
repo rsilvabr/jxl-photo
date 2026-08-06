@@ -284,6 +284,7 @@ Options:
                   RAM is the real ceiling — see "RAM per worker" in Performance
   --overwrite     Always overwrite existing JXLs
   --sync          Reconvert only TIFFs newer than their JXL
+                  (wins over --overwrite if both are given)
   --distance N    JXL distance (0=lossless, 0.1=near-lossless, default: from script)
   --effort 1-10  Compression effort (default: from script setting)
   --buffering 0-3 [libjxl >= 0.12] cjxl buffering level (default: off = use cjxl default;
