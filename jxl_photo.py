@@ -361,6 +361,11 @@ def _is_manifest_header_row(row) -> bool:
 # hand the same file to two child processes.
 _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 
+# Modes whose output path DROPS folder structure, so two sources in different
+# folders resolve to the same output and an archive can be overwritten by an
+# unrelated photo. Mirrors _COLLAPSING_MODES in jxl_tiff_encoder.py.
+_COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
+
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
@@ -420,6 +425,9 @@ class ToolConfig:
     last_verify_roundtrip: Optional[bool] = None
     # Whether a delete run also covers sources whose output already exists.
     last_delete_skipped: Optional[bool] = None
+    # 'path' or 'content' — how an existing output is matched to the source
+    # about to replace it, in the folder-collapsing modes.
+    last_provenance: Optional[str] = None
     last_advanced_options: Optional[Dict] = None
     last_use_ram: Optional[bool] = None
     last_compression: Optional[str] = None
@@ -2743,6 +2751,42 @@ class InteractiveMenu:
 
         workflow['delete_skipped'] = bool(del_skipped)
         self.config.config.last_delete_skipped = bool(del_skipped)
+
+        # How an EXISTING output is matched to the source about to replace it.
+        # Only asked where it can bite: the modes that collapse folder structure
+        # (2/4/5/6/7), where two sources in different folders resolve to the
+        # same output. Modes 0/1/3/8 derive the output from the source's own
+        # folder, so there is nothing to confuse and nothing to ask.
+        if origin == 'tiff' and dest == 'jxl' and mode in _COLLAPSING_MODES:
+            pv_default = self.config.config.last_provenance or 'path'
+            pv_explain = (
+                f"Mode {mode} drops folder structure, so two files with the same name in "
+                f"different folders land on the same output. Before overwriting an output "
+                f"that already exists — and deleting the file that made it — the run "
+                f"checks the archive really came from this source.\n"
+                f"  path    = compares the recorded LOCATION. Instant. Handles re-exporting "
+                f"a file in place.\n"
+                f"  content = also accepts a matching IMAGE. SLOWER (reads and hashes every "
+                f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.")
+            if RICH_AVAILABLE and console:
+                console.print(f"\n[dim]{pv_explain}[/dim]")
+                provenance = Prompt.ask(
+                    "[cyan]Match existing outputs by[/cyan]",
+                    choices=["path", "content"], default=pv_default)
+            else:
+                print(f"\n{pv_explain}")
+                _pi = input(f"Match existing outputs by (path/content) "
+                            f"[{pv_default}]: ").strip().lower()
+                provenance = _pi if _pi in ("path", "content") else pv_default
+            workflow['provenance'] = provenance
+            self.config.config.last_provenance = provenance
+            if provenance == 'content':
+                _n = ("Content matching reads every source file — expect the run to take "
+                      "noticeably longer.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_n}[/yellow]")
+                else:
+                    print(_n)
         if del_skipped and not verify and not _provable:
             _w = ("Deleting already-converted originals with no content check: the only "
                   "thing standing between a stale or unrelated output and your original "
@@ -3324,6 +3368,8 @@ class InteractiveMenu:
                 advanced_options['verify_roundtrip'] = True
             if workflow.get('delete_skipped'):
                 advanced_options['delete_skipped'] = True
+            if workflow.get('provenance'):
+                advanced_options['provenance'] = workflow['provenance']
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -3420,6 +3466,8 @@ class InteractiveMenu:
                 advanced_options['verify_roundtrip'] = True
             if workflow.get('delete_skipped'):
                 advanced_options['delete_skipped'] = True
+            if workflow.get('provenance'):
+                advanced_options['provenance'] = workflow['provenance']
             advanced_options['embed_thumbnail'] = embed_thumb
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
@@ -3558,6 +3606,8 @@ class InteractiveMenu:
                 advanced_options['verify_roundtrip'] = True
             if workflow.get('delete_skipped'):
                 advanced_options['delete_skipped'] = True
+            if workflow.get('provenance'):
+                advanced_options['provenance'] = workflow['provenance']
             advanced_options['thumbnail_handling'] = thumbnail_handling
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
             advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
@@ -3595,6 +3645,8 @@ class InteractiveMenu:
                 advanced_options['verify_roundtrip'] = True
             if workflow.get('delete_skipped'):
                 advanced_options['delete_skipped'] = True
+            if workflow.get('provenance'):
+                advanced_options['provenance'] = workflow['provenance']
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
@@ -3682,6 +3734,8 @@ class InteractiveMenu:
                               else "Verify round-trip: off (structural check only)")
             if _adv.get('delete_skipped'):
                 extra_info.append("Also deletes ALREADY-CONVERTED originals (!)")
+            if _adv.get('provenance'):
+                extra_info.append(f"Match existing outputs by: {_adv['provenance']}")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('dry_run'):
@@ -4658,6 +4712,9 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                # Encoder-only: the cross-run provenance check lives there.
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -5059,6 +5116,9 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                # Encoder-only: the cross-run provenance check lives there.
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -5715,6 +5775,8 @@ class InteractiveMenu:
             workflow['advanced_options']['verify_roundtrip'] = True
         if session.get('last_delete_skipped'):
             workflow['advanced_options']['delete_skipped'] = True
+        if session.get('last_provenance'):
+            workflow['advanced_options']['provenance'] = session['last_provenance']
         workflow['expert_flags'] = session.get('last_expert_flags') or ''
         workflow['auto_mode_used'] = False
         # The manifest executor's overlap gate behaves differently when there

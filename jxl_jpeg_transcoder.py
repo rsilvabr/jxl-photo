@@ -3376,6 +3376,20 @@ def main():
     if args.delete_skipped:
         DELETE_SKIPPED = True
 
+    # The TIFF encoder records WHICH source made each output and refuses to
+    # overwrite-and-delete when it does not match. This script has no such
+    # record, so the cross-run collision of bug #268 is still possible here: in
+    # a folder-collapsing mode a file added later, in another folder, resolves
+    # to the same output. checksums.md5 does not help — a second run simply
+    # appends its own entry and read_md5_db returns the newest.
+    if DELETE_SOURCE and args.mode in (2, 4, 5, 6, 7):
+        print(f"WARNING: --delete-source in mode {args.mode}: this mode DROPS folder "
+              f"structure, so two sources with the same name in different folders")
+        print("         resolve to the same output. This script cannot yet verify that an "
+              "EXISTING output came from the file about to replace it -- an")
+        print("         output written by an earlier run can be overwritten by an unrelated "
+              "file, and both originals then deleted. Prefer mode 0/1/3/8.")
+
     if DELETE_SKIPPED and not DELETE_SOURCE:
         print("WARNING: --delete-skipped has no effect without --delete-source: it only "
               "widens which sources the deletion covers. Nothing will be deleted.")

@@ -568,6 +568,14 @@ PAGE_PREFIX = "jxlphoto-page:"
 # split page so reconstruction does not depend on the filename (which breaks
 # for sources named *_page<N> or *_thumbnail).
 
+SRC_PREFIX = "jxlphoto-src:"
+SRCSUM_PREFIX = "jxlphoto-srcsum:"
+# Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX. They record WHICH
+# source made a JXL, so a later encode can refuse to overwrite one archive with
+# a different photo that happens to share its name. Nothing here uses them —
+# they are listed so the reconstructed TIFF is stripped of them like every other
+# internal marker.
+
 THUMB_FLAG = "jxlphoto-thumb"
 # Must match the encoder's THUMB_XMP_FLAG. Marks thumbnail pages of a split
 # without relying on the _thumbnail filename suffix.
@@ -1601,6 +1609,12 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False):
                             or t.startswith(SUBFILETYPE_PREFIX)
                             or t.startswith(DEPTH_FLAG)
                             or t.startswith(PAGE_PREFIX)
+                            # Provenance markers the ENCODER writes so a later
+                            # run can tell which source made an output. They
+                            # describe the JXL, not the picture, and must not
+                            # ride along into the reconstructed TIFF.
+                            or t.startswith(SRC_PREFIX)
+                            or t.startswith(SRCSUM_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -3316,6 +3330,22 @@ Examples:
             log_file=log_file, dry_run=True,
         )
         return
+
+    # The encoder records WHICH source made each output (jxlphoto-src/srcsum) and
+    # refuses to overwrite-and-delete when it does not match. This script has no
+    # such record yet, so the cross-run collision of bug #268 is still possible
+    # here: in a folder-collapsing mode a file added later, in another folder,
+    # resolves to the same output and its deletion would destroy whatever the
+    # earlier archive held. Say so rather than let it be silent.
+    if DELETE_SOURCE and args.mode in (2, 4, 5, 6, 7):
+        logger.warning(
+            f"--delete-source in mode {args.mode}: this mode DROPS folder structure, so "
+            f"two sources with the same name in different folders resolve to the same "
+            f"output. Unlike the TIFF encoder, this script cannot yet verify that an "
+            f"EXISTING output came from the file about to replace it — an output written "
+            f"by an earlier run can be overwritten by an unrelated file, and both "
+            f"originals then be deleted. Prefer mode 0/1/3/8 when deleting, or check the "
+            f"destination first.")
 
     # Delete confirmation (after dry-run so simulations never prompt). Charged
     # for EVERY mode: deletion is a separate opt-in from the output layout, so a

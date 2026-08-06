@@ -115,6 +115,47 @@ Proven on real files: a JPEG archived to JXL, then swapped for a different photo
 under the same name, is rejected on checksum mismatch; restored to the correct
 source it is deleted and logged as already archived.
 
+### `--provenance`: which source does this archive belong to?
+
+The modes that **collapse folder structure** — 2 flattens a tree, 4 renames the
+parent, 5 merges siblings, 6/7 drop one level under the marker — can send two
+files with the same name, from different folders, to the same output.
+`_abort_on_duplicate_outputs` catches that inside one run. Across runs it was
+blind, and with `--delete-source` that destroyed photos:
+
+```
+run 1   root/A/foto.tif  →  root/JXL_16bits/foto.jxl   [source deleted]
+        (later, root/B/foto.tif appears — a different photo, same name)
+run 2   B is newer than the archive → reconverted OVER it → B deleted too
+        "Done: 1 OK | 1 overwrites"
+        → A's photo now exists nowhere.
+```
+
+Every encode now records **which source made it** — `jxlphoto-src:` (location)
+and `jxlphoto-srcsum:` (image) — in the same `dc:Relation` bag as the multi-page
+markers. Both are always written: the content id is hashed from the pixel array
+already in memory, so recording it costs almost nothing and lets you change the
+matching mode later without re-encoding the archive.
+
+With `--delete-source` in a collapsing mode, an existing output whose marker
+does not match the source about to replace it is **refused**: not converted, not
+overwritten, nothing deleted.
+
+| `--provenance` | Matches on | Re-export in place | Moved folder | Cost |
+|---|---|---|---|---|
+| `path` (default) | recorded location | ✅ allowed | ❌ refused (safely) | free |
+| `content` | location **or** image | ✅ allowed | ✅ allowed | reads every source |
+
+`content` is deliberately a **superset** of `path`: matching on content alone
+would refuse a legitimately re-edited file and break the ordinary sync workflow.
+The wizard asks for this right after you arm `[D]`, but only for the modes where
+it means something, and pressing Enter gives the cheap, safe default. When
+`path` refuses, the message names `--provenance content` as the way out.
+
+> ⚠️ The decoder and transcoder have **no such record yet**. They now warn at
+> startup when deletion is armed in a collapsing mode; until they get the same
+> markers, prefer modes 0/1/3/8 when deleting there.
+
 ### `[D]` in the wizard
 
 Deleting is not a layout, so it is not a mode. `[D]` charges a confirmation,

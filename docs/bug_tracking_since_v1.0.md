@@ -19,17 +19,21 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ---
 
-## OPEN — Round-27 audit (2026-08-07), not yet fixed
+## Round-27 audit (2026-08-07) — #268 fixed, 266/267/269/270 still OPEN
 
-Full-toolkit audit after the delete/verify work. Recorded here BEFORE the fix so
-a later regression check has something to compare against. Nothing below is
-fixed yet.
+Full-toolkit audit after the delete/verify work. Recorded BEFORE fixing so a
+later regression check has something to compare against.
+
+**#268 (data loss) is fixed in the encoder — 9 new tests in
+`tests/test_provenance.py`, 6 of which fail on the pre-fix tree; the other 3
+are the do-not-over-fix guards (re-export in place still allowed, non-collapsing
+modes untouched, no check without --delete-source). The remaining four are open.**
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
 | 266 | **Deletions never reach the run summary.** `deleted`/`deleted_skipped` are locals in `process_group`; nothing propagates them, so `emit_summary_json` has no count and the wrapper's end-of-manifest recap never says how many originals were removed. A 20-entry manifest can delete 50 000 masters and the recap shows only OK/ovw/skip/corrupt/err. Sources KEPT by a refusing gate (integrity, round-trip, checksum mismatch) are likewise per-file WARNING lines that no summary aggregates | encoder, decoder, transcoder, wrapper | ❌ OPEN |
 | 267 | **`--dry-run` does not preview the deletions.** A dry run of `--delete-source` prints the planned outputs and stops; not one line says deletion is armed or how many sources would go. Only the `--delete-skipped` subset is previewed (encoder and decoder; the transcoder has no preview at all). The dry run is exactly where this is checked | encoder, decoder, transcoder | ❌ OPEN |
-| 268 | **Cross-RUN output collision destroys data in the collapsing modes.** `_abort_on_duplicate_outputs` only sees collisions WITHIN one run. In modes 2/4/5/6/7 the output path drops folder structure, so a file added later in a different folder resolves to the same output. Reproduced: mode 5, `root/A/foto.tif` archived and deleted; later `root/B/foto.tif` (different image, same stem) is newer than the archive, so smart sync RECONVERTS over it and deletes B too. **A's photo then exists nowhere** — its TIFF was deleted in run 1 and its JXL overwritten in run 2. The log says "1 overwrites", which reads as routine. `--verify-roundtrip` does NOT help: B verifies correctly against B. The commit that opened deletion to every mode claimed `_abort_on_duplicate_outputs` "keeps the collapsing modes safe" — that is true within a run and false across runs | encoder, decoder, transcoder | ❌ OPEN — **critical** |
+| 268 | **Cross-RUN output collision destroys data in the collapsing modes.** `_abort_on_duplicate_outputs` only sees collisions WITHIN one run. In modes 2/4/5/6/7 the output path drops folder structure, so a file added later in a different folder resolves to the same output. Reproduced: mode 5, `root/A/foto.tif` archived and deleted; later `root/B/foto.tif` (different image, same stem) is newer than the archive, so smart sync RECONVERTS over it and deletes B too. **A's photo then exists nowhere** — its TIFF was deleted in run 1 and its JXL overwritten in run 2. The log said "1 overwrites". `--verify-roundtrip` does NOT help: B verifies correctly against B. The commit that opened deletion to every mode claimed `_abort_on_duplicate_outputs` "keeps the collapsing modes safe" — true within a run, false across runs | encoder, decoder, transcoder | ✅ FIXED in the encoder (every output now records WHICH source made it: `jxlphoto-src:` = location, `jxlphoto-srcsum:` = image, both written always since the content id is hashed from the array already in memory. With `--delete-source` in a collapsing mode, an EXISTING output whose marker does not match the source about to replace it is refused: not converted, not overwritten, nothing deleted. `--provenance path` (default) compares the location — free, and survives re-exporting in place; `--provenance content` also accepts a matching image, so it survives MOVED folders, at the cost of reading each source. content is deliberately a SUPERSET of path: content alone would refuse a legitimately re-edited file and break the sync workflow. ⚠️ The decoder and transcoder have no such record yet — they now WARN at startup when delete is armed in a collapsing mode; the real fix is pending) |
 | 269 | **The `[D]` confirmation over-counts for modes 6/7.** `_count_origin_files` counts by extension (flat for 0/1, recursive otherwise) and ignores the marker filter and the tool-output filters, so gate 2 announced "23 TIFF file(s)" for a mode-6 run that touches 3. The count is the whole point of that gate — it is what makes a wrong folder visible before the token is charged | wrapper | ❌ OPEN |
 | 270 | Minor delete-reporting inconsistencies: the encoder labels a MIXED source (one page skipped, one freshly converted) as "already archived" because `skipped_finals` is merely non-empty; and `deleted_skipped` is tracked only in `process_group_transcode`, so the transcoder's two lossy paths never print the "(N already archived)" total | encoder, transcoder | ❌ OPEN |
 

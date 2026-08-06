@@ -299,6 +299,18 @@ Options:
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after their JXL is written to the mode's
                   destination and verified. Works in EVERY mode. IRREVERSIBLE
+  --provenance path|content
+                  [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
+                  structure, so two files with the same name in different folders
+                  land on the same output. Before overwriting an output that already
+                  exists -- and deleting the file that made it -- the run checks the
+                  archive really came from this source, using markers every encode
+                  writes (jxlphoto-src = location, jxlphoto-srcsum = image).
+                  path (default): compares the LOCATION. Free. Handles re-exporting a
+                  file in place, but a MOVED folder reads as a different file.
+                  content: also accepts a matching IMAGE, so it survives moved
+                  folders -- slower, it reads and hashes every source. A mismatch
+                  always fails closed: not converted, nothing overwritten or deleted
   --delete-skipped
                   [with --delete-source] Also delete sources whose output ALREADY
                   EXISTS -- the files reported as SKIP. Without it an archive

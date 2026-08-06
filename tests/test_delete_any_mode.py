@@ -691,9 +691,51 @@ def test_D_arms_delete_on_the_chosen_layout(menu, monkeypatch):
 
 
 def test_D_can_arm_verify_too(menu, monkeypatch):
-    ok, wf = _gateway(menu, monkeypatch, ["y", "5", "y", "y", "n"])
+    # mode 5 collapses folders, so a provenance answer is asked too
+    ok, wf = _gateway(menu, monkeypatch, ["y", "5", "y", "y", "n", ""])
     assert wf["mode"] == 5
     assert wf["verify_roundtrip"] is True
+
+
+# --- provenance: asked only where an output can be claimed by another source --
+
+@pytest.mark.parametrize("layout", ["2", "4", "5", "6", "7"])
+def test_D_asks_provenance_for_collapsing_modes(menu, monkeypatch, layout, capsys):
+    ok, wf = _gateway(menu, monkeypatch, ["y", layout, "y", "n", "n", ""])
+    assert wf["provenance"] == "path", "Enter must give the cheap, safe default"
+    out = _out(capsys)
+    assert "MOVED FOLDERS" in out, "the slow option must say when it is needed"
+
+
+@pytest.mark.parametrize("layout", ["0", "1", "3", "8"])
+def test_D_skips_provenance_when_the_output_cannot_be_claimed(menu, monkeypatch, layout):
+    """Modes 0/1/3/8 derive the output from the source's own folder, so there is
+    nothing to confuse — do not ask a question that has no meaning."""
+    ok, wf = _gateway(menu, monkeypatch, ["y", layout, "y", "n", "n"])
+    assert wf["mode"] == int(layout)
+    assert "provenance" not in wf
+
+
+def test_D_can_choose_content_matching(menu, monkeypatch, capsys):
+    ok, wf = _gateway(menu, monkeypatch, ["y", "5", "y", "n", "n", "content"])
+    assert wf["provenance"] == "content"
+    assert "noticeably longer" in _out(capsys)
+
+
+def test_wrapper_emits_provenance_only_for_the_encoder(menu, launched, monkeypatch):
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
+                        lambda self, workflow: True)
+    adv = {"delete_source": True, "provenance": "content"}
+    menu.execute_workflow(_wf(5, advanced_options=adv), STATUS)
+    assert "--provenance" in launched[-1] and "content" in launched[-1]
+
+    # the decoder and transcoder have no such flag
+    menu.execute_workflow(_wf(5, origin_format="jxl", dest_format="tiff",
+                              conversion_type="jxl_tiff_decoder",
+                              compression="zip", bit_depth=16,
+                              advanced_options=adv), STATUS)
+    assert "--provenance" not in launched[-1]
 
 
 def test_D_can_arm_delete_skipped(menu, monkeypatch):
