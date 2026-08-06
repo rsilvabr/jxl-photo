@@ -194,7 +194,9 @@ def test_plain_mode_8_preset_still_refused_unattended(menu, launched, tmp_path, 
 
     assert ok is False
     assert launched == []
-    assert "mode 8 + delete_source" in _out(capsys)
+    # Wording follows the gate: it is no longer keyed on mode 8 (the children
+    # honour --delete-source in every mode), so the message names the setting.
+    assert "delete_source is on" in _out(capsys)
 
 
 def test_harmless_preset_still_runs_unattended(menu, launched, tmp_path):

@@ -3637,14 +3637,16 @@ class InteractiveMenu:
             )
             return False
 
-        # Manifest entries with mode 8 + delete_source get --delete-confirm-off
-        # from the cmd builder — so the wrapper MUST gate them with the same
-        # HHMM confirmation the wizard/repeat paths enforce. Ask once, before
-        # anything runs. Expert-flag deletion is gated on its own here too: it
-        # never reaches `advanced`, and it applies to every entry at once.
+        # delete_source gets --delete-confirm-off from the cmd builder — so the
+        # wrapper MUST charge the HHMM token itself, or nothing asks at all.
+        #
+        # NOT keyed on mode 8. The cmd builder appends --delete-source for ANY
+        # mode, so the mode test only ever held because the children then
+        # ignored it outside mode 8. Now that they honour it everywhere, a
+        # mode-3 manifest with delete_source would have deleted originals with
+        # no confirmation anywhere in the chain.
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
-                            or (advanced.get('delete_source')
-                                and any(m == 8 for _, _, m in resolved_entries))):
+                            or advanced.get('delete_source')):
             if not self._confirm_archive_mode():
                 return False
 
@@ -4597,14 +4599,17 @@ class InteractiveMenu:
 
         # Delete gate, at EXECUTION time (was Step 4): the user has already had
         # the chance to pick dry-run, and a simulation never charges the HHMM
-        # token. `--delete-source` typed into expert flags is gated on its own,
-        # without the mode 8 condition: it bypasses advanced_options entirely,
-        # and a later `--mode 8` in those same flags can override the mode this
-        # check would otherwise trust.
+        # token.
+        #
+        # Deliberately NOT keyed on the mode. Deleting is orthogonal to layout —
+        # the children honour --delete-source in every mode — and the cmd
+        # builder appends `--delete-source --delete-confirm-off` for any mode,
+        # so a mode test here would suppress the ONLY confirmation in the chain.
+        # (It used to be `and mode == 8`, which held only because the children
+        # then ignored the flag outside mode 8.)
         _flag_delete = _flags_request_delete(workflow.get('expert_flags'))
         _adv_delete = bool(workflow.get('advanced_options', {}).get('delete_source'))
-        if (not workflow.get('dry_run')
-                and (_flag_delete or (_adv_delete and workflow['mode'] == 8))):
+        if not workflow.get('dry_run') and (_flag_delete or _adv_delete):
             if not self._confirm_archive_mode():
                 return False
 
@@ -5202,22 +5207,22 @@ class InteractiveMenu:
             # say what to do instead.
             #
             # Three ways a stored run can reach a deletion, all of them checked:
-            #   * mode 8 + advanced_options['delete_source'] (the menu's own path);
-            #   * a MANIFEST preset (mode 99) whose entries are mode 8 — the mode
-            #     recorded on the session is 99, so a plain `== 8` test misses it
-            #     and the run fell through to _execute_manifest_workflow, which
-            #     printed an interactive HHMM prompt into the scheduler log before
-            #     failing on EOF. Safe, but unreadable at 3am;
+            #   * advanced_options['delete_source'] (the menu's own path), in ANY
+            #     mode — deleting is orthogonal to layout, and keying this on
+            #     mode 8 let a mode-3 preset through;
+            #   * a MANIFEST preset (mode 99), whose entries carry their own
+            #     modes — the session records 99, so a plain `== 8` test missed
+            #     it and the run fell through to _execute_manifest_workflow,
+            #     which printed an interactive HHMM prompt into the scheduler
+            #     log before failing on EOF. Safe, but unreadable at 3am;
             #   * --delete-source hidden in expert flags, which never touches
             #     advanced_options at all (see _flags_request_delete).
             _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
-            _mode_8 = last_mode == 8 or (
-                is_manifest_repeat and any(m == 8 for _, _, m in (manifest_entries or [])))
             _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
-            if not dry_choice and (_flag_delete or (_adv_delete and _mode_8)):
+            if not dry_choice and (_flag_delete or _adv_delete):
                 self._print_error(
                     "This preset deletes source files "
-                    f"({'--delete-source in expert flags' if _flag_delete else 'mode 8 + delete_source'}). "
+                    f"({'--delete-source in expert flags' if _flag_delete else 'delete_source is on'}). "
                     "That confirmation cannot be given unattended - run it from "
                     "the menu, or add --dry-run to simulate it here.")
                 return False
