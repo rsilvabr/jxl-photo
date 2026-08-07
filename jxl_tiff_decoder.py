@@ -3519,6 +3519,7 @@ Examples:
     # sees collisions inside THIS run; in the collapsing modes an output written
     # by an earlier run can belong to different sources entirely, and
     # overwriting it while deleting the new sources destroys the earlier photo.
+    provenance_failures = []
     if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
         _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
         if _existing:
@@ -3557,6 +3558,11 @@ Examples:
                 _bad = {id(_t) for _t, _ in _blocked}
                 tasks = [t for t in tasks if id(t) not in _bad]
                 _counter["total"] = len(tasks)
+                # A refusal is a FAILURE, not a quiet skip (see the encoder).
+                provenance_failures = [
+                    (str(_t["main_jxl"]),
+                     f"refused: output {_t['final_tiff']} already exists and {_w}")
+                    for _t, _w in _blocked]
 
     # Delete confirmation (after dry-run so simulations never prompt). Charged
     # for EVERY mode: deletion is a separate opt-in from the output layout, so a
@@ -3580,12 +3586,13 @@ Examples:
     logger.info(f"Output groups: {len(groups)}")
 
     # Process
-    ok = err = skipped = overwritten = aborted = 0
+    ok = skipped = overwritten = aborted = 0
+    err = len(provenance_failures)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     # Counts alone don't answer "did something break in the middle?" — the user
     # walks away from a multi-hour manifest and needs the paths on return.
-    failed_files = []
+    failed_files = list(provenance_failures)
 
     # ONE pool for the whole run. Feeding it folder by folder meant a folder
     # with fewer files than --workers could never fill the pool, and every

@@ -428,6 +428,8 @@ class ToolConfig:
     # 'path' or 'content' — how an existing output is matched to the source
     # about to replace it, in the folder-collapsing modes.
     last_provenance: Optional[str] = None
+    # False only when the user explicitly turned the adopt scan off.
+    last_adopt_scan: Optional[bool] = None
     last_advanced_options: Optional[Dict] = None
     last_use_ram: Optional[bool] = None
     last_compression: Optional[str] = None
@@ -2810,19 +2812,24 @@ class InteractiveMenu:
                 f"  path    = compares the recorded LOCATION. Instant. Handles re-exporting "
                 f"a file in place.\n"
                 f"  content = also accepts a matching IMAGE. SLOWER (reads and hashes every "
-                f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.")
+                f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.\n"
+                f"  adopt   = for an archive made BEFORE this check existed, which has no "
+                f"record at all. Each unrecorded output is VERIFIED against its source and "
+                f"then stamped, so this is a ONE-TIME pass: afterwards the strict check "
+                f"applies again.")
             if RICH_AVAILABLE and console:
                 console.print(f"\n[dim]{pv_explain}[/dim]")
                 provenance = Prompt.ask(
                     "[cyan]Match existing outputs by[/cyan]",
-                    choices=["path", "content"], default=pv_default)
+                    choices=["path", "content", "adopt"], default=pv_default)
             else:
                 print(f"\n{pv_explain}")
-                _pi = input(f"Match existing outputs by (path/content) "
+                _pi = input(f"Match existing outputs by (path/content/adopt) "
                             f"[{pv_default}]: ").strip().lower()
-                provenance = _pi if _pi in ("path", "content") else pv_default
+                provenance = _pi if _pi in ("path", "content", "adopt") else pv_default
             workflow['provenance'] = provenance
             self.config.config.last_provenance = provenance
+            self.config.config.last_adopt_scan = None
             if provenance == 'content':
                 _n = ("Content matching reads every source file — expect the run to take "
                       "noticeably longer.")
@@ -2830,6 +2837,32 @@ class InteractiveMenu:
                     console.print(f"[yellow]{_n}[/yellow]")
                 else:
                     print(_n)
+            elif provenance == 'adopt':
+                # The scan is what makes adoption safe rather than a rubber
+                # stamp, so it is ON unless the user turns it off knowingly.
+                _sc = ("Adoption VERIFIES each unrecorded output against its source before "
+                       "trusting it — it decodes every one, so on a large library this is "
+                       "SLOW. Turning it off adopts the existing pairing without proof: only "
+                       "do that if you know this archive was never built with a mode that "
+                       "merges folders (2/4/5/6/7), which is what could have put a different "
+                       "photo under that name.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"\n[dim]{_sc}[/dim]")
+                    _scan = Confirm.ask("[cyan]Verify each one before adopting?[/cyan]",
+                                        default=True)
+                else:
+                    print(f"\n{_sc}")
+                    _si = input("Verify each one before adopting? [Y/n]: ").strip().lower()
+                    _scan = not _si.startswith('n')
+                workflow['adopt_scan'] = bool(_scan)
+                self.config.config.last_adopt_scan = bool(_scan)
+                if not _scan:
+                    _w = ("Adopting WITHOUT verification. Every existing output will be "
+                          "trusted as belonging to the source that shares its name.")
+                    if RICH_AVAILABLE and console:
+                        console.print(f"[yellow]{_w}[/yellow]")
+                    else:
+                        print(_w)
         if del_skipped and not verify and not _provable:
             _w = ("Deleting already-converted originals with no content check: the only "
                   "thing standing between a stale or unrelated output and your original "
@@ -3413,6 +3446,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('adopt_scan') is False:
+                advanced_options['adopt_scan'] = False
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -3511,6 +3546,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('adopt_scan') is False:
+                advanced_options['adopt_scan'] = False
             advanced_options['embed_thumbnail'] = embed_thumb
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
@@ -3651,6 +3688,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('adopt_scan') is False:
+                advanced_options['adopt_scan'] = False
             advanced_options['thumbnail_handling'] = thumbnail_handling
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
             advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
@@ -3690,6 +3729,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('adopt_scan') is False:
+                advanced_options['adopt_scan'] = False
             advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
         workflow['advanced_options'] = advanced_options
@@ -3779,6 +3820,8 @@ class InteractiveMenu:
                 extra_info.append("Also deletes ALREADY-CONVERTED originals (!)")
             if _adv.get('provenance'):
                 extra_info.append(f"Match existing outputs by: {_adv['provenance']}")
+            if _adv.get('adopt_scan') is False:
+                extra_info.append("Adopt scan: OFF (pairing trusted, not verified)")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('dry_run'):
@@ -4778,6 +4821,8 @@ class InteractiveMenu:
                     cmd.append('--delete-skipped')
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
+                    if advanced.get('adopt_scan') is False:
+                        cmd.append('--no-adopt-scan')
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -4815,6 +4860,8 @@ class InteractiveMenu:
                     cmd.append('--delete-skipped')
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
+                    if advanced.get('adopt_scan') is False:
+                        cmd.append('--no-adopt-scan')
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -5183,6 +5230,8 @@ class InteractiveMenu:
                     cmd.append('--delete-skipped')
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
+                    if advanced.get('adopt_scan') is False:
+                        cmd.append('--no-adopt-scan')
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -5254,6 +5303,8 @@ class InteractiveMenu:
                     cmd.append('--delete-skipped')
                 if advanced.get('provenance'):
                     cmd.extend(['--provenance', advanced['provenance']])
+                    if advanced.get('adopt_scan') is False:
+                        cmd.append('--no-adopt-scan')
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -5843,6 +5894,8 @@ class InteractiveMenu:
             workflow['advanced_options']['delete_skipped'] = True
         if session.get('last_provenance'):
             workflow['advanced_options']['provenance'] = session['last_provenance']
+        if session.get('last_adopt_scan') is False:
+            workflow['advanced_options']['adopt_scan'] = False
         workflow['expert_flags'] = session.get('last_expert_flags') or ''
         workflow['auto_mode_used'] = False
         # The manifest executor's overlap gate behaves differently when there

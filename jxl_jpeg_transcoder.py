@@ -2240,10 +2240,14 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     logger.info(f"Output groups: {len(groups)}")
 
-    ok = err = skipped = overwritten = md5_fail = aborted = 0
+    ok = skipped = overwritten = md5_fail = aborted = 0
+    # A refusal is a FAILURE, not a quiet skip: the file was not converted and
+    # needs a human, so it must reach the exit code and the wrapper's recap.
+    err = len(_refused)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
-    failed_files = []
+    failed_files = [(str(_s), f"refused: output {_o} already exists and {_w}")
+                    for _s, _o, _w in _refused]
     # ONE pool for the whole run: feeding it folder by folder meant a folder
     # with fewer files than --workers could never fill it, and every folder
     # boundary drained it. The staging move is still per-folder and still in
@@ -2984,10 +2988,12 @@ def cmd_convert(args, from_jxl: bool = True):
                     logger.info("Deletion not confirmed -- exiting.")
                     return (0, True)
 
-    ok = err = skipped = overwritten = aborted = 0
+    ok = skipped = overwritten = aborted = 0
+    err = len(_refused)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
-    failed_files = []
+    failed_files = [(str(_s), f"refused: output {_o} already exists and {_w}")
+                    for _s, _o, _w in _refused]
     # ONE pool for the whole run (see process_group_convert): the per-folder
     # loop this replaces could never fill the pool from a small folder and
     # drained it at every boundary.

@@ -824,6 +824,14 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # --delete-source that silently destroyed the earlier photo: its source was
 # deleted by the first run and its archive overwritten by the second.
 
+ADOPT_SCAN = True
+# [PROVENANCE_CHECK = "adopt" only] Prove the pairing before adopting an output
+# that carries no marker, by decoding it and comparing with the source. True is
+# what makes "adopt" safe rather than a rubber stamp. Turning it off
+# (--no-adopt-scan) is much faster on a large library and only defensible when
+# you know the archive was never built with a folder-collapsing mode that could
+# have put a different photo under that name.
+
 PROVENANCE_CHECK = "path"
 # How an EXISTING output is matched against the source about to overwrite it,
 # when --delete-source is on and the mode collapses folders. Only then: without
@@ -3699,15 +3707,25 @@ def main():
                              "mode's destination and verified. Works in EVERY mode "
                              "(0-8), not just 8. IRREVERSIBLE.")
     parser.add_argument("--provenance", type=str, default=None,
-                        choices=["path", "content"],
+                        choices=["path", "content", "adopt"],
                         help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
                              "output is matched to the source about to overwrite it. "
                              "path (default) compares the recorded source LOCATION: "
                              "free, and survives re-exporting a file in place. content "
-                             "also accepts a matching IMAGE, so it survives MOVED "
-                             "folders, at the cost of reading and hashing each source. "
-                             "A mismatch always fails closed: not converted, nothing "
-                             "overwritten, nothing deleted.")
+                             "also accepts matching source bytes, so it survives MOVED "
+                             "folders, at the cost of reading each source. adopt is for "
+                             "an archive made BEFORE these markers existed: an output "
+                             "with NO marker is verified against the source (the adopt "
+                             "scan) and then stamped, so the archive heals and later "
+                             "runs are strict again. A MISMATCHING marker always fails "
+                             "closed: not converted, nothing overwritten, nothing "
+                             "deleted.")
+    parser.add_argument("--no-adopt-scan", action="store_true",
+                        help="[with --provenance adopt] Skip the verification and TRUST "
+                             "the existing pairing. Much faster on a large library, and "
+                             "only defensible when you know the archive was never built "
+                             "with a folder-collapsing mode that could have put a "
+                             "different photo under that name.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (the files reported as SKIP), so an archive "
@@ -3780,7 +3798,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
@@ -3835,6 +3853,8 @@ def main():
         DELETE_SKIPPED = True
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
+    if args.no_adopt_scan:
+        ADOPT_SCAN = False
 
     if args.export_subfolder is not None:
         global EXPORT_TIFF_SUBFOLDER
@@ -3947,20 +3967,22 @@ def main():
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
     # be worse than no verification at all — it gates an irreversible delete.
-    if VERIFY_ROUNDTRIP and not args.dry_run:
+    _needs_decode = VERIFY_ROUNDTRIP or (PROVENANCE_CHECK == "adopt" and ADOPT_SCAN)
+    if _needs_decode and not args.dry_run:
         if not DELETE_SOURCE:
             logger.warning("--verify-roundtrip has no effect without --delete-source: "
                            "it is a gate in front of the deletion, not a standalone check. "
                            "Nothing will be verified.")
         else:
             if shutil.which("djxl") is None:
-                logger.error("--verify-roundtrip needs djxl in PATH (it decodes each JXL "
-                             "back to compare it with the source).")
+                logger.error("This run needs djxl in PATH: --verify-roundtrip and the "
+                             "--provenance adopt scan both decode each JXL back to "
+                             "compare it with the source.")
                 sys.exit(1)
             try:
                 import imagecodecs  # noqa: F401
             except ImportError:
-                logger.error("--verify-roundtrip needs imagecodecs (pip install imagecodecs): "
+                logger.error("This run needs imagecodecs (pip install imagecodecs): "
                              "PIL quantises 16-bit RGB PNGs to 8-bit, which would fail every "
                              "lossless comparison for the wrong reason.")
                 sys.exit(1)
@@ -4167,6 +4189,7 @@ def main():
     # already deleted then). Only checked where it can actually bite: deletion
     # armed, a collapsing mode, and an output that already exists.
     provenance_blocked = []
+    provenance_failures = []
     if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
         _existing = sorted({item[1] for item in all_items if item[1].exists()})
         if _existing:
@@ -4174,16 +4197,59 @@ def main():
                         f"(--provenance {PROVENANCE_CHECK})...")
             _marks = _read_source_markers_batch(_existing)
             _bad_sources = {}
+            _adopted, _adopted_blind = [], []
             for t, j, page_idx, *_rest in all_items:
                 if not j.exists():
                     continue
                 info = _marks.get(str(j)) or {"src": None, "srcsum": None}
                 if _provenance_ok(info, t, PROVENANCE_CHECK):
                     continue
-                _why = ("no provenance marker (archived by an older version)"
-                        if not (info.get("src") or info.get("srcsum"))
-                        else "it was made from a different source")
+                _unmarked = not (info.get("src") or info.get("srcsum"))
+                # An archive built before these markers existed carries none.
+                # That is a gap in what we KNOW, not evidence of a conflict, so
+                # `adopt` resolves it by PROVING the pairing rather than
+                # assuming it — and only for that case. A marker that MISMATCHES
+                # is still refused: adopt relaxes "I cannot tell", never "I can
+                # tell it is wrong".
+                if PROVENANCE_CHECK == "adopt" and _unmarked:
+                    if not ADOPT_SCAN:
+                        _adopted_blind.append((t, j))
+                        continue
+                    _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, CJXL_DISTANCE)
+                    if _ok_v:
+                        _adopted.append((t, j))
+                        continue
+                    _bad_sources.setdefault(
+                        str(t), (j, f"the adopt scan says this output is not this "
+                                    f"source ({_detail})"))
+                    continue
+                _why = ("no provenance marker — this archive predates them; re-run with "
+                        "--provenance adopt to verify and stamp it"
+                        if _unmarked else "it was made from a different source")
                 _bad_sources.setdefault(str(t), (j, _why))
+            for _t, _j in _adopted_blind:
+                logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
+            if _adopted or _adopted_blind:
+                # Stamp the marker onto the EXISTING output now, so the archive
+                # heals in one pass. Without this a SKIPPED file is deleted
+                # without anything being rewritten, and the next run would have
+                # to adopt it all over again.
+                _stamped = 0
+                for _t, _j in _adopted + _adopted_blind:
+                    try:
+                        _r = _run_exiftool_argfile(
+                            ["-overwrite_original"] + _provenance_marker_args(_t)
+                            + [str(_j)], timeout=60)
+                        if _r.returncode == 0:
+                            _stamped += 1
+                    except Exception as _e:
+                        logger.debug(f"Could not stamp {_j}: {_e}")
+                logger.info(
+                    f"Provenance: adopted {len(_adopted) + len(_adopted_blind)} existing "
+                    f"output(s)"
+                    + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
+                    + f"; stamped {_stamped} — later runs check them strictly.")
+
             if _bad_sources:
                 provenance_blocked = sorted(_bad_sources)
                 logger.error(
@@ -4205,6 +4271,15 @@ def main():
                      " If you MOVED the sources, re-run with --provenance content."))
                 _blocked = set(provenance_blocked)
                 all_items = [it for it in all_items if str(it[0]) not in _blocked]
+                # A refusal is a FAILURE, not a quiet skip: the file was not
+                # converted and needs a human. Counted into err (exit 1) and
+                # listed in the summary's failures so a scheduled run and the
+                # wrapper's manifest recap both surface it.
+                for _sp in provenance_blocked:
+                    _o, _w = _bad_sources[_sp]
+                    provenance_failures.append(
+                        (_sp, f"refused: output {_o} already exists and {_w}"))
+                failed_files.extend(provenance_failures)
 
     _counter["total"] = len(all_items)
 
@@ -4319,7 +4394,7 @@ def main():
             logger.debug(f"Preflight skipped: {e}")
 
     ok = skipped = overwritten = synced = aborted = 0
-    err = analyze_errors  # count TIFFs that couldn't be analyzed at planning time
+    err = analyze_errors + len(provenance_failures)  # count TIFFs that couldn't be analyzed at planning time
     _reset_abort()  # a fresh run must not inherit a previous one's latch
 
     # ONE pool for the whole run. Feeding it folder by folder meant a folder with

@@ -19,7 +19,7 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ---
 
-## OPEN — Round-28 audit (2026-08-07), not yet fixed
+## Round-28 audit (2026-08-07) — 271/272 fixed, 273-276 still OPEN
 
 Full audit after round 27, weighted towards anything that can destroy
 irreplaceable data. **The codec paths are clean**: four real fixtures (Capture
@@ -33,8 +33,8 @@ are consequences of that work.
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
-| 271 | **A pre-existing archive is refused outright, with no way forward.** Any output written before the markers existed has none, so `_provenance_ok` returns False and every file is refused: `REFUSING 3 file(s) ... no provenance marker (archived by an older version)`. That is EVERY archive anyone already owns. The message offers "rename them, pick a mode that keeps folder structure, or drop --delete-source" — none of which lets an existing library carry on being archived. Fail-closed is right; having no migration path is not | encoder, decoder, transcoder | ❌ OPEN — **blocker** |
-| 272 | **Refused files exit 0.** `provenance_blocked` is dropped from `all_items` and never reaches `err`, so a run that refused every file exits 0. A scheduled job sees a clean run; only the log says otherwise. Verified: 3 files refused, exit code 0 | encoder, decoder, transcoder | ❌ OPEN |
+| 271 | **A pre-existing archive is refused outright, with no way forward.** Any output written before the markers existed has none, so `_provenance_ok` returns False and every file is refused: `REFUSING 3 file(s) ... no provenance marker (archived by an older version)`. That is EVERY archive anyone already owns. The message offers "rename them, pick a mode that keeps folder structure, or drop --delete-source" — none of which lets an existing library carry on being archived. Fail-closed is right; having no migration path is not | encoder, decoder, transcoder | ✅ FIXED (`--provenance adopt`. It resolves ONLY the "I cannot tell" case and PROVES the pairing rather than assuming it: each unmarked output is decoded and compared against its source — the adopt scan, ON by default — and then STAMPED, so the archive heals in a single pass and the strict check applies from the next run on. A MISMATCHING marker is still refused: adopt never relaxes "I can tell it is wrong". `--no-adopt-scan` trades the proof for speed, warning per file. The strict modes' refusal message now names `--provenance adopt` as the way forward)
+| 272 | **Refused files exit 0.** `provenance_blocked` is dropped from `all_items` and never reaches `err`, so a run that refused every file exits 0. A scheduled job sees a clean run; only the log says otherwise. Verified: 3 files refused, exit code 0 | encoder, decoder, transcoder | ✅ FIXED (a refusal is a failure: it lands in `err`, in the summary's `failures` list — so the wrapper's manifest recap shows it — and the run exits 1. Verified: the same refusal that exited 0 now exits 1)
 | 273 | **`--strip` silently disables the provenance record.** `build_metadata_injection_args` returns early under `strip_metadata`, before the marker lines, so a stripped archive carries none — and is then refused by #271's path on the next run. Nothing warns. Verified empirically | encoder | ❌ OPEN |
 | 274 | **The decoder's `--none` mode does the same.** `copy_metadata` is skipped entirely for `strategy == 'none'`, and the marker is written inside it. Verified: normal decode → marker present, `--none` → absent | decoder | ❌ OPEN |
 | 275 | **The transcoder honours `--provenance` but nothing ever passes it.** The wrapper emits the flag only in the encoder and decoder branches, and `[D]` asks the question only when both origin and dest are TIFF/JXL — so every JPEG↔JXL run from the wizard is stuck on the default `path`, with no way to pick `content` after moving folders | wrapper | ❌ OPEN |
