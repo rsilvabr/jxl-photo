@@ -19,7 +19,7 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ---
 
-## Round-28 audit (2026-08-07) — 271/272 fixed, 273-276 still OPEN
+## v1.10.3 — Round-28 audit (2026-08-07)
 
 Full audit after round 27, weighted towards anything that can destroy
 irreplaceable data. **The codec paths are clean**: four real fixtures (Capture
@@ -29,16 +29,17 @@ one) round-trip with every real page pixel-identical, the ICC byte-identical and
 output, including both pages of a multi-page split.
 
 Everything below is in the provenance layer added in round 27 — five of the six
-are consequences of that work.
+are consequences of that work. **All six are fixed.** 23 new regression tests
+(`tests/test_provenance_adopt.py`); full suite 815 → 830.
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
 | 271 | **A pre-existing archive is refused outright, with no way forward.** Any output written before the markers existed has none, so `_provenance_ok` returns False and every file is refused: `REFUSING 3 file(s) ... no provenance marker (archived by an older version)`. That is EVERY archive anyone already owns. The message offers "rename them, pick a mode that keeps folder structure, or drop --delete-source" — none of which lets an existing library carry on being archived. Fail-closed is right; having no migration path is not | encoder, decoder, transcoder | ✅ FIXED (`--provenance adopt`. It resolves ONLY the "I cannot tell" case and PROVES the pairing rather than assuming it: each unmarked output is decoded and compared against its source — the adopt scan, ON by default — and then STAMPED, so the archive heals in a single pass and the strict check applies from the next run on. A MISMATCHING marker is still refused: adopt never relaxes "I can tell it is wrong". `--no-adopt-scan` trades the proof for speed, warning per file. The strict modes' refusal message now names `--provenance adopt` as the way forward)
 | 272 | **Refused files exit 0.** `provenance_blocked` is dropped from `all_items` and never reaches `err`, so a run that refused every file exits 0. A scheduled job sees a clean run; only the log says otherwise. Verified: 3 files refused, exit code 0 | encoder, decoder, transcoder | ✅ FIXED (a refusal is a failure: it lands in `err`, in the summary's `failures` list — so the wrapper's manifest recap shows it — and the run exits 1. Verified: the same refusal that exited 0 now exits 1)
-| 273 | **`--strip` silently disables the provenance record.** `build_metadata_injection_args` returns early under `strip_metadata`, before the marker lines, so a stripped archive carries none — and is then refused by #271's path on the next run. Nothing warns. Verified empirically | encoder | ❌ OPEN |
-| 274 | **The decoder's `--none` mode does the same.** `copy_metadata` is skipped entirely for `strategy == 'none'`, and the marker is written inside it. Verified: normal decode → marker present, `--none` → absent | decoder | ❌ OPEN |
-| 275 | **The transcoder honours `--provenance` but nothing ever passes it.** The wrapper emits the flag only in the encoder and decoder branches, and `[D]` asks the question only when both origin and dest are TIFF/JXL — so every JPEG↔JXL run from the wizard is stuck on the default `path`, with no way to pick `content` after moving folders | wrapper | ❌ OPEN |
-| 276 | The decoder writes the marker in its OWN exiftool call, after the dc:Relation rewrite, so every output costs one extra process spawn (~100 ms). On a 5 000-file library that is minutes of pure overhead, and it folds naturally into the rewrite that already runs | decoder | ❌ OPEN |
+| 273 | **`--strip` silently disables the provenance record.** `build_metadata_injection_args` returns early under `strip_metadata`, before the marker lines, so a stripped archive carries none — and is then refused by #271's path on the next run. Nothing warns. Verified empirically | encoder | ✅ FIXED (warns. `--strip` promises no metadata and the marker IS metadata, so writing it anyway would break the flag's contract — instead the run says plainly that these outputs carry no record and that a later delete run in a collapsing mode will refuse them until `--provenance adopt`. Only fires where it can bite: delete armed, or a collapsing mode)
+| 274 | **The decoder's `--none` mode does the same.** `copy_metadata` is skipped entirely for `strategy == 'none'`, and the marker is written inside it. Verified: normal decode → marker present, `--none` → absent | decoder | ✅ FIXED (same treatment: `--none` keeps the v1.6.0 minimal-metadata contract and the marker is XMP, so the warning names the consequence rather than quietly breaking the contract)
+| 275 | **The transcoder honours `--provenance` but nothing ever passes it.** The wrapper emits the flag only in the encoder and decoder branches, and `[D]` asks the question only when both origin and dest are TIFF/JXL — so every JPEG↔JXL run from the wizard is stuck on the default `path`, with no way to pick `content` after moving folders | wrapper | ✅ FIXED (the wrapper emits `--provenance` in the transcoder branches too, and `[D]` asks the question for EVERY direction whose layout collapses folders, not just the TIFF ones)
+| 276 | The decoder writes the marker in its OWN exiftool call, after the dc:Relation rewrite, so every output costs one extra process spawn (~100 ms). On a 5 000-file library that is minutes of pure overhead, and it folds naturally into the rewrite that already runs | decoder | ✅ FIXED (the clear stays its own invocation — `-XMP-dc:Relation=` and `+=` in one exiftool call do NOT sequence as clear-then-append for a list tag, and the stale internal markers survived; the leak test caught it — but everything ADDED now goes in a single call: two invocations instead of three, one instead of two when there is nothing to clear)
 
 ---
 

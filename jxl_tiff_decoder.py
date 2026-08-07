@@ -1776,28 +1776,33 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                     has_internal = False
             else:
                 has_internal = False
+            # The CLEAR has to be its own invocation: `-XMP-dc:Relation=` and
+            # `-XMP-dc:Relation+=` in the same exiftool call do not sequence as
+            # clear-then-append for a list tag, and the stale internal markers
+            # copied from the JXL survive (caught by
+            # test_decoder_markers_do_not_leak_into_the_tiff).
             if has_internal:
                 _run_exiftool_argfile(
                     ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=60
                 )
-                if kept:
-                    add_lines = ["-overwrite_original"]
-                    add_lines += [f"-XMP-dc:Relation+={_argfile_safe(v)}" for v in kept]
-                    add_lines.append(str(tiff_path))
-                    _run_exiftool_argfile(add_lines, timeout=60)
+            # ...but everything that gets ADDED fits in one call: the user's own
+            # Relation values and the provenance markers together. Two calls
+            # instead of three, and one instead of two when there was nothing to
+            # clear — this runs per output, and on a five-figure library each
+            # process spawn is minutes of pure overhead.
+            add_lines = ["-overwrite_original"]
+            if has_internal:
+                add_lines += [f"-XMP-dc:Relation+={_argfile_safe(v)}" for v in kept]
+            if provenance_sources:
+                # Record WHICH JXLs made this TIFF, so a later run can tell
+                # whether an existing output belongs to the source about to
+                # replace it (see _provenance_ok).
+                add_lines += _provenance_marker_args(list(provenance_sources))
+            if len(add_lines) > 1:
+                add_lines.append(str(tiff_path))
+                _run_exiftool_argfile(add_lines, timeout=60)
         except Exception as e_rel:
-            logger.debug(f"Relation marker cleanup skipped: {e_rel}")
-
-        # Record WHICH JXLs made this TIFF. Written AFTER the cleanup above,
-        # which clears dc:Relation wholesale — doing it earlier would wipe it.
-        if provenance_sources:
-            try:
-                _run_exiftool_argfile(
-                    ["-overwrite_original"]
-                    + _provenance_marker_args(list(provenance_sources))
-                    + [str(tiff_path)], timeout=60)
-            except Exception as e_prov:
-                logger.debug(f"Provenance marker skipped: {e_prov}")
+            logger.debug(f"Relation marker write skipped: {e_rel}")
     except Exception as e:
         logger.warning(f"Metadata copy warning: {e}")
 
@@ -3519,6 +3524,17 @@ Examples:
     # sees collisions inside THIS run; in the collapsing modes an output written
     # by an earlier run can belong to different sources entirely, and
     # overwriting it while deleting the new sources destroys the earlier photo.
+    # None mode writes EXIF only, no XMP — the v1.6.0 minimal-output contract —
+    # and the provenance marker lives in XMP, so copy_metadata (which writes it)
+    # is skipped entirely. Honouring the contract is right; being quiet about
+    # the consequence is not.
+    if FORCE_NONE_MODE and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES):
+        logger.warning(
+            "--none writes NO provenance marker (it keeps the minimal-metadata "
+            "contract, and the marker is XMP): these TIFFs will carry no record of "
+            "which JXLs made them. In modes 2/4/5/6/7 a later run with --delete-source "
+            "will refuse them until you pass --provenance adopt.")
+
     provenance_failures = []
     if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
         _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})

@@ -3950,6 +3950,18 @@ def main():
     if not args.dry_run:
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
 
+    # --strip means "no metadata", and the provenance marker IS metadata, so
+    # build_metadata_injection_args returns before writing it. That is the right
+    # call — it is what the flag promises — but the consequence has to be said
+    # out loud: these outputs carry no record of which source made them, so a
+    # later archive-and-delete run in a folder-collapsing mode will refuse them.
+    if STRIP_METADATA and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES):
+        logger.warning(
+            "--strip writes NO provenance marker: these outputs will carry no record "
+            "of which source made them. In modes 2/4/5/6/7 a later run with "
+            "--delete-source will refuse them (nothing can prove the pairing) until you "
+            "pass --provenance adopt. Drop --strip if you want that protection.")
+
     if DELETE_SKIPPED and not DELETE_SOURCE:
         logger.warning("--delete-skipped has no effect without --delete-source: it only "
                        "widens which sources the deletion covers. Nothing will be deleted.")

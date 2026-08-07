@@ -182,3 +182,40 @@ def test_a_clean_run_still_exits_zero(tmp_path):
     _tiff(tmp_path / "root" / "A" / "foto.tif", 1000)
     r = _run("root", *ARCHIVE, cwd=tmp_path)
     assert r.returncode == 0, r.stdout
+
+
+# ---------------------------------------------------------------------------
+# #273 / #274 — flags that ask for "no metadata" also drop the provenance
+# record. Honouring their contract is right; being quiet about it is not.
+# ---------------------------------------------------------------------------
+
+def test_strip_warns_that_it_leaves_no_provenance(tmp_path):
+    _tiff(tmp_path / "root" / "A" / "foto.tif", 1000)
+    r = _run("root", "--mode", "5", "--distance", "0", "--strip",
+             "--delete-source", "--delete-confirm-off", cwd=tmp_path)
+    assert "--strip writes NO provenance marker" in r.stdout
+    assert "--provenance adopt" in r.stdout, "the way out must be named"
+
+
+def test_strip_stays_quiet_where_it_cannot_bite(tmp_path):
+    """Mode 0 keeps folder structure, so nothing can claim the wrong output."""
+    _tiff(tmp_path / "a.tif", 1000)
+    r = _run("a.tif", "--mode", "0", "--distance", "0", "--strip", cwd=tmp_path)
+    assert "NO provenance marker" not in r.stdout
+
+
+def test_none_mode_warns_that_it_leaves_no_provenance(tmp_path):
+    """The decoder's --none keeps the minimal-metadata contract, and the marker
+    is XMP, so it is not written."""
+    _tiff(tmp_path / "a.tif", 1000)
+    assert _run("a.tif", "--mode", "0", "--distance", "0", cwd=tmp_path).returncode == 0
+    (tmp_path / "a.tif").unlink()
+    (tmp_path / "root" / "A").mkdir(parents=True)
+    (tmp_path / "a.jxl").replace(tmp_path / "root" / "A" / "a.jxl")
+
+    r = subprocess.run(
+        [sys.executable, str(REPO / "jxl_tiff_decoder.py"), "root", "--mode", "5",
+         "--none", "--delete-source", "--delete-confirm-off"],
+        capture_output=True, text=True, timeout=600, cwd=str(tmp_path),
+        stdin=subprocess.DEVNULL)
+    assert "--none writes NO provenance marker" in r.stdout

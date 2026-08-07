@@ -722,9 +722,10 @@ def test_D_can_choose_content_matching(menu, monkeypatch, capsys):
     assert "noticeably longer" in _out(capsys)
 
 
-def test_wrapper_emits_provenance_for_the_tiff_directions(menu, launched, monkeypatch):
-    """Both the encoder and the decoder record provenance markers, so both take
-    the flag. The transcoder does not have it yet."""
+def test_wrapper_emits_provenance_for_every_direction(menu, launched, monkeypatch):
+    """All three scripts record and check provenance now, so all three take the
+    flag — a direction that silently ignored it would be stuck on the default
+    with no way to pick `content` after moving folders."""
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
                         lambda self, workflow: True)
@@ -742,7 +743,23 @@ def test_wrapper_emits_provenance_for_the_tiff_directions(menu, launched, monkey
     menu.execute_workflow(_wf(5, origin_format="jpeg", dest_format="jxl",
                               conversion_type="transcode_lossless",
                               advanced_options=adv), STATUS)
-    assert "--provenance" not in launched[-1]
+    assert "--provenance" in launched[-1]
+
+
+@pytest.mark.parametrize("origin,dest,conv", [
+    ("jpeg", "jxl", "transcode_lossless"),
+    ("jxl", "jpeg", "jxl_to_jpeg_force"),
+])
+def test_D_asks_provenance_for_transcoder_directions_too(menu, monkeypatch, origin,
+                                                         dest, conv):
+    """It was asked only when both ends were TIFF/JXL, so every JPEG run was
+    stuck on the default with no way to say the folders had moved."""
+    answers = ["y", "5", "y", "n"]          # gate1, layout, gate2, delete-skipped
+    if conv in ("jxl_to_jpeg_force",):
+        pass                                # lossy gate only fires when skipped is on
+    answers.append("content")               # provenance
+    ok, wf = _gateway(menu, monkeypatch, answers, origin=origin, dest=dest, conv=conv)
+    assert wf["provenance"] == "content"
 
 
 def test_D_can_arm_delete_skipped(menu, monkeypatch):

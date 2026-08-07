@@ -2801,8 +2801,7 @@ class InteractiveMenu:
         # (2/4/5/6/7), where two sources in different folders resolve to the
         # same output. Modes 0/1/3/8 derive the output from the source's own
         # folder, so there is nothing to confuse and nothing to ask.
-        if (origin in ('tiff', 'jxl') and dest in ('tiff', 'jxl')
-                and mode in _COLLAPSING_MODES):
+        if mode in _COLLAPSING_MODES:
             pv_default = self.config.config.last_provenance or 'path'
             pv_explain = (
                 f"Mode {mode} drops folder structure, so two files with the same name in "
@@ -4928,6 +4927,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -5412,6 +5413,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
+                if advanced.get('provenance'):
+                    cmd.extend(['--provenance', advanced['provenance']])
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
