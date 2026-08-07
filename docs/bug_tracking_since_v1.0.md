@@ -19,6 +19,29 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 
 ---
 
+## OPEN — Round-28 audit (2026-08-07), not yet fixed
+
+Full audit after round 27, weighted towards anything that can destroy
+irreplaceable data. **The codec paths are clean**: four real fixtures (Capture
+One 16-bit, a Z8 export, and two film scans including the 756 MB 3-page RGB+IR
+one) round-trip with every real page pixel-identical, the ICC byte-identical and
+`SubfileType` preserved (0 and 4). Provenance markers are present on every real
+output, including both pages of a multi-page split.
+
+Everything below is in the provenance layer added in round 27 — five of the six
+are consequences of that work.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 271 | **A pre-existing archive is refused outright, with no way forward.** Any output written before the markers existed has none, so `_provenance_ok` returns False and every file is refused: `REFUSING 3 file(s) ... no provenance marker (archived by an older version)`. That is EVERY archive anyone already owns. The message offers "rename them, pick a mode that keeps folder structure, or drop --delete-source" — none of which lets an existing library carry on being archived. Fail-closed is right; having no migration path is not | encoder, decoder, transcoder | ❌ OPEN — **blocker** |
+| 272 | **Refused files exit 0.** `provenance_blocked` is dropped from `all_items` and never reaches `err`, so a run that refused every file exits 0. A scheduled job sees a clean run; only the log says otherwise. Verified: 3 files refused, exit code 0 | encoder, decoder, transcoder | ❌ OPEN |
+| 273 | **`--strip` silently disables the provenance record.** `build_metadata_injection_args` returns early under `strip_metadata`, before the marker lines, so a stripped archive carries none — and is then refused by #271's path on the next run. Nothing warns. Verified empirically | encoder | ❌ OPEN |
+| 274 | **The decoder's `--none` mode does the same.** `copy_metadata` is skipped entirely for `strategy == 'none'`, and the marker is written inside it. Verified: normal decode → marker present, `--none` → absent | decoder | ❌ OPEN |
+| 275 | **The transcoder honours `--provenance` but nothing ever passes it.** The wrapper emits the flag only in the encoder and decoder branches, and `[D]` asks the question only when both origin and dest are TIFF/JXL — so every JPEG↔JXL run from the wizard is stuck on the default `path`, with no way to pick `content` after moving folders | wrapper | ❌ OPEN |
+| 276 | The decoder writes the marker in its OWN exiftool call, after the dc:Relation rewrite, so every output costs one extra process spawn (~100 ms). On a 5 000-file library that is minutes of pure overhead, and it folds naturally into the rewrite that already runs | decoder | ❌ OPEN |
+
+---
+
 ## v1.10.2 — Round-27 audit (2026-08-07)
 
 Full-toolkit audit after the delete/verify work. Recorded BEFORE fixing so a
