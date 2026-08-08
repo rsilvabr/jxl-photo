@@ -367,6 +367,32 @@ _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _run_collapses_structure(mode, output_arg, source_root) -> bool:
+    """Does THIS run drop the source's folder from the output path?
+
+    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
+    when an output folder was given: every file then lands in that one folder,
+    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
+    writes the same names into it, and with --delete-source it overwrites the
+    first archive after that archive's own source is already gone. Mode 0 is
+    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
+    the only defence there is.
+
+    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
+    as one: demanding a marker there would refuse existing archives that can
+    never collide, which is the dead end #271 exists to avoid.
+    """
+    if mode in _COLLAPSING_MODES:
+        return True
+    if mode != 0 or not output_arg:
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(str(output_arg)))
+                != os.path.normcase(os.path.abspath(str(source_root))))
+    except (OSError, ValueError):
+        return True     # cannot tell -> assume it collapses (fail closed)
+
+
 def _supports_provenance_adopt(origin: str, dest: str) -> bool:
     """Does the child script for this direction accept --provenance adopt?
 
@@ -2827,11 +2853,16 @@ class InteractiveMenu:
         self.config.config.last_delete_skipped = bool(del_skipped)
 
         # How an EXISTING output is matched to the source about to replace it.
-        # Only asked where it can bite: the modes that collapse folder structure
-        # (2/4/5/6/7), where two sources in different folders resolve to the
-        # same output. Modes 0/1/3/8 derive the output from the source's own
-        # folder, so there is nothing to confuse and nothing to ask.
-        if mode in _COLLAPSING_MODES:
+        # Only asked where it can bite: the runs that collapse folder structure,
+        # where two sources in different folders resolve to the same output.
+        # Modes 1/3/8 — and mode 0 in place — derive the output from the source's
+        # own folder, so there is nothing to confuse and nothing to ask.
+        # The wizard only offers a Destination for mode 2 today; asking
+        # _run_collapses_structure rather than the mode set keeps this correct if
+        # that ever changes, the way the manifest path already honours it for
+        # mode 0 (see _manifest_needs_collision_scan).
+        if _run_collapses_structure(mode, (workflow.get('mode_config') or {}).get('output_dir'),
+                                    workflow.get('input_dir')):
             # adopt exists only in the encoder (see _supports_provenance_adopt):
             # offering it for the other directions built a command line their
             # script rejects at argparse.

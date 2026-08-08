@@ -713,6 +713,32 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _run_collapses_structure(mode, output_arg, source_root) -> bool:
+    """Does THIS run drop the source's folder from the output path?
+
+    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
+    when an output folder was given: every file then lands in that one folder,
+    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
+    writes the same names into it, and with --delete-source it overwrites the
+    first archive after that archive's own source is already gone. Mode 0 is
+    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
+    the only defence there is.
+
+    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
+    as one: demanding a marker there would refuse existing archives that can
+    never collide, which is the dead end #271 exists to avoid.
+    """
+    if mode in _COLLAPSING_MODES:
+        return True
+    if mode != 0 or not output_arg:
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(str(output_arg)))
+                != os.path.normcase(os.path.abspath(str(source_root))))
+    except (OSError, ValueError):
+        return True     # cannot tell -> assume it collapses (fail closed)
+
+
 def _source_path_id(src_path) -> str:
     """Stable id for a source's LOCATION. Free to compute."""
     norm = os.path.normcase(os.path.abspath(str(src_path)))
@@ -2012,7 +2038,13 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     return results
 
-def _provenance_filter(pairs, mode, decode_lossless=False):
+def _prov_src_root(args):
+    """The folder this run's sources live in (see _run_collapses_structure)."""
+    return args.input.parent if args.input.is_file() else args.input
+
+
+def _provenance_filter(pairs, mode, decode_lossless=False,
+                       output_arg=None, source_root=None):
     """Drop pairs whose output already exists and came from a DIFFERENT source.
 
     Only meaningful in the folder-collapsing modes with DELETE_SOURCE armed:
@@ -2026,7 +2058,7 @@ def _provenance_filter(pairs, mode, decode_lossless=False):
 
     Returns (kept_pairs, refused) — refused is [(src, out, why)].
     """
-    if not (DELETE_SOURCE and mode in _COLLAPSING_MODES):
+    if not (DELETE_SOURCE and _run_collapses_structure(mode, output_arg, source_root)):
         return pairs, []
     existing = sorted({out for _s, out in pairs if out.exists()})
     if not existing:
@@ -2202,7 +2234,9 @@ def cmd_transcode(args, auto_decode: bool = False):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
-    pairs, _refused = _provenance_filter(pairs, args.mode, decode_lossless=decode)
+    pairs, _refused = _provenance_filter(
+        pairs, args.mode, decode_lossless=decode,
+        output_arg=args.output, source_root=_prov_src_root(args))
     if _refused:
         _counter["total"] = len(pairs)
 
@@ -2941,7 +2975,9 @@ def cmd_convert(args, from_jxl: bool = True):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
-    pairs, _refused = _provenance_filter(pairs, args.mode)
+    pairs, _refused = _provenance_filter(
+        pairs, args.mode,
+        output_arg=args.output, source_root=_prov_src_root(args))
     if _refused:
         _counter["total"] = len(pairs)
 
@@ -3382,7 +3418,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         decode_lossless=(use_transcode and all(
-            s.suffix.lower() == '.jxl' for s, _o in pairs)))
+            s.suffix.lower() == '.jxl' for s, _o in pairs)),
+        output_arg=args.output, source_root=_prov_src_root(args))
     if _refused:
         _counter["total"] = max(0, _counter.get("total", 0) - len(_refused))
 

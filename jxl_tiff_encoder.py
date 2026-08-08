@@ -2455,6 +2455,32 @@ _VERIFY_CHUNK_ROWS = 512
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _run_collapses_structure(mode, output_arg, source_root) -> bool:
+    """Does THIS run drop the source's folder from the output path?
+
+    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
+    when an output folder was given: every file then lands in that one folder,
+    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
+    writes the same names into it, and with --delete-source it overwrites the
+    first archive after that archive's own source is already gone. Mode 0 is
+    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
+    the only defence there is.
+
+    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
+    as one: demanding a marker there would refuse existing archives that can
+    never collide, which is the dead end #271 exists to avoid.
+    """
+    if mode in _COLLAPSING_MODES:
+        return True
+    if mode != 0 or not output_arg:
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(str(output_arg)))
+                != os.path.normcase(os.path.abspath(str(source_root))))
+    except (OSError, ValueError):
+        return True     # cannot tell -> assume it collapses (fail closed)
+
+
 def _source_path_id(src_path) -> str:
     """Stable id for a source's LOCATION. Free to compute."""
     norm = os.path.normcase(os.path.abspath(str(src_path)))
@@ -3955,10 +3981,12 @@ def main():
     # call — it is what the flag promises — but the consequence has to be said
     # out loud: these outputs carry no record of which source made them, so a
     # later archive-and-delete run in a folder-collapsing mode will refuse them.
-    if STRIP_METADATA and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES):
+    if STRIP_METADATA and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES
+                           or (args.mode == 0 and args.output is not None)):
         logger.warning(
             "--strip writes NO provenance marker: these outputs will carry no record "
-            "of which source made them. In modes 2/4/5/6/7 a later run with "
+            "of which source made them. In modes 2/4/5/6/7 — and in mode 0 with an "
+            "output folder — a later run with "
             "--delete-source will refuse them (nothing can prove the pairing) until you "
             "pass --provenance adopt. Drop --strip if you want that protection.")
 
@@ -4205,7 +4233,8 @@ def main():
     # Outputs adopt has decided to stamp. Filled here, WRITTEN much later — see
     # the stamping block after the delete confirmation.
     provenance_to_stamp = []
-    if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
+    _src_root = args.input.parent if args.input.is_file() else args.input
+    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
         _existing = sorted({item[1] for item in all_items if item[1].exists()})
         if _existing:
             logger.info(f"Provenance: checking {len(_existing)} existing output(s) "

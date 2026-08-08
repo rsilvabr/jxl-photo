@@ -316,3 +316,79 @@ def test_stamping_happens_after_the_confirmation_in_source_order():
     stamp = src.index("if provenance_to_stamp:")
     dry_gate = src.index("    # Dry run\n    if args.dry_run:")
     assert dry_gate < confirm < stamp, "stamping drifted back before a gate"
+
+
+# ── #280: mode 0 with an output folder collapses just like mode 2 ───────────
+
+DECODER = str(REPO / "jxl_tiff_decoder.py")
+
+
+def _dec(*args, cwd):
+    return subprocess.run([sys.executable, DECODER, *args], capture_output=True,
+                          text=True, timeout=600, cwd=str(cwd),
+                          stdin=subprocess.DEVNULL)
+
+
+def _archive(tmp_path, folder: str, value: int):
+    """One TIFF in `folder`, encoded to a JXL beside it."""
+    _tiff(tmp_path / folder / "foto.tif", value)
+    r = _enc(folder, "--mode", "0", "--distance", "0", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout
+    return tmp_path / folder / "foto.jxl"
+
+
+def test_mode0_with_output_folder_is_collapsing():
+    """resolve_output mode 0 sends every file to the given folder, flat —
+    exactly what mode 2 does."""
+    import jxl_tiff_decoder as dec
+    assert dec._run_collapses_structure(0, "D:/out", "D:/in") is True
+    assert dec._run_collapses_structure(0, None, "D:/in") is False
+    # Same folder spelled differently is still in place, not a collapse.
+    assert dec._run_collapses_structure(0, "D:/in", "D:/in") is False
+    assert dec._run_collapses_structure(0, r"d:\IN" + "\\", "D:/in") is False
+    # The always-collapsing modes are unchanged, with or without an output.
+    for m in (2, 4, 5, 6, 7):
+        assert dec._run_collapses_structure(m, None, "D:/in") is True
+    # ...and the genuinely per-source modes stay out of it.
+    for m in (1, 3, 8):
+        assert dec._run_collapses_structure(m, "D:/out", "D:/in") is False
+
+
+def test_mode0_in_place_is_not_guarded(tmp_path):
+    """Fail-closed must not become 'refuse everything': demanding a marker for
+    an in-place mode 0 would be #271's dead end all over again."""
+    jxl = _archive(tmp_path, "A", 1000)
+    subprocess.run(["exiftool", "-overwrite_original", "-XMP-dc:Relation=", str(jxl)],
+                   capture_output=True, timeout=60)
+    (tmp_path / "A" / "foto.tif").unlink()
+    # Decode it back in place, twice: the second run finds its own output and
+    # must not refuse it for lacking a marker.
+    assert _dec("A", "--mode", "0", cwd=tmp_path).returncode == 0
+    r = _dec("A", "--mode", "0", "--delete-source", "--delete-confirm-off",
+             "--delete-skipped", cwd=tmp_path)
+    assert "REFUSING" not in r.stdout, r.stdout
+
+
+def test_mode0_to_a_shared_output_folder_refuses_the_second_source(tmp_path):
+    """The data-loss case: A is decoded to out/foto.tif and its JXL deleted, so
+    out/foto.tif is the ONLY copy of A. B must not be allowed to overwrite it
+    and delete its own JXL too — that loses A's photo for good."""
+    jxl_a = _archive(tmp_path, "A", 1000)
+    jxl_b = _archive(tmp_path, "B", 60000)
+    (tmp_path / "A" / "foto.tif").unlink()
+    (tmp_path / "B" / "foto.tif").unlink()
+    out = tmp_path / "out"
+
+    r1 = _dec("A", "out", "--mode", "0", "--delete-source", "--delete-confirm-off",
+              cwd=tmp_path)
+    assert r1.returncode == 0, r1.stdout
+    assert not jxl_a.exists(), "run 1 kept its source; the test proves nothing"
+    assert (out / "foto.tif").exists()
+
+    r2 = _dec("B", "out", "--mode", "0", "--delete-source", "--delete-confirm-off",
+              "--overwrite", cwd=tmp_path)
+    assert "REFUSING" in r2.stdout, r2.stdout
+    assert jxl_b.exists(), "B's JXL was deleted anyway"
+    # A's only remaining copy still holds A's pixels.
+    with tifffile.TiffFile(str(out / "foto.tif")) as tif:
+        assert int(tif.pages[0].asarray().flat[0]) == 1000, "A's photo was overwritten"

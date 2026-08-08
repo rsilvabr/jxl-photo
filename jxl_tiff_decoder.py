@@ -460,6 +460,32 @@ def _warn_if_libjxl_too_old(exe: str = "djxl") -> None:
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _run_collapses_structure(mode, output_arg, source_root) -> bool:
+    """Does THIS run drop the source's folder from the output path?
+
+    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
+    when an output folder was given: every file then lands in that one folder,
+    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
+    writes the same names into it, and with --delete-source it overwrites the
+    first archive after that archive's own source is already gone. Mode 0 is
+    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
+    the only defence there is.
+
+    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
+    as one: demanding a marker there would refuse existing archives that can
+    never collide, which is the dead end #271 exists to avoid.
+    """
+    if mode in _COLLAPSING_MODES:
+        return True
+    if mode != 0 or not output_arg:
+        return False
+    try:
+        return (os.path.normcase(os.path.abspath(str(output_arg)))
+                != os.path.normcase(os.path.abspath(str(source_root))))
+    except (OSError, ValueError):
+        return True     # cannot tell -> assume it collapses (fail closed)
+
+
 def _source_path_id(src_path) -> str:
     """Stable id for a source's LOCATION. Free to compute."""
     norm = os.path.normcase(os.path.abspath(str(src_path)))
@@ -3528,18 +3554,21 @@ Examples:
     # and the provenance marker lives in XMP, so copy_metadata (which writes it)
     # is skipped entirely. Honouring the contract is right; being quiet about
     # the consequence is not.
-    if FORCE_NONE_MODE and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES):
+    if FORCE_NONE_MODE and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES
+                            or (args.mode == 0 and args.output is not None)):
         logger.warning(
             "--none writes NO provenance marker (it keeps the minimal-metadata "
             "contract, and the marker is XMP): these TIFFs will carry no record of "
-            "which JXLs made them. In modes 2/4/5/6/7 a later run with --delete-source "
+            "which JXLs made them. In modes 2/4/5/6/7 — and in mode 0 with an output "
+            "folder — a later run with --delete-source "
             "will REFUSE every one of them, and this script has no way to adopt them "
             "after the fact — the encoder's --provenance adopt has no counterpart here. "
             "Drop --none for runs you intend to re-run with --delete-source, or keep "
             "using a mode that preserves folder structure (0/1/3/8) for them.")
 
     provenance_failures = []
-    if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
+    _src_root = args.input.parent if args.input.is_file() else args.input
+    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
         _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
         if _existing:
             logger.info(f"Provenance: checking {len(_existing)} existing output(s) "

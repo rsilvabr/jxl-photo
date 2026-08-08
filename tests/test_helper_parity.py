@@ -38,6 +38,9 @@ SHARED_HELPERS = [
     "_source_path_id",
     "_read_source_markers_batch",
     "_provenance_ok",
+    # Which runs need that check at all. A copy drifting would leave one backend
+    # deleting sources in a layout another one guards.
+    "_run_collapses_structure",
     "_marker_matches",
     "_replace_suffix_token",
     "_is_relative_to",
