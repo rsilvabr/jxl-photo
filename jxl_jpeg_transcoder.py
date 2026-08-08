@@ -254,6 +254,50 @@ def _abort_if_disk_full(write_dir, needed):
     return True
 
 
+def _promote_from_staging(write_path, final_path) -> bool:
+    """Move one finished output out of staging. True when it landed.
+
+    A cross-volume move is copy-then-unlink, so an ENOSPC part way through
+    leaves a TRUNCATED file at the destination — with a fresh mtime. That is
+    the worst possible outcome: smart-sync compares timestamps, sees something
+    newer than the source, and skips the reconversion forever. The good copy is
+    still in staging, so removing whatever landed loses nothing and puts the
+    destination back to a state a later run will fix.
+
+    A destination volume that is simply FULL also has to stop the run rather
+    than produce one MOVE FAILED line per remaining file, which is what the
+    disk-full abort exists for.
+    """
+    pre_existed = final_path.exists()
+    try:
+        size = write_path.stat().st_size
+    except OSError:
+        size = 0
+    try:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(write_path), str(final_path))
+        return True
+    except OSError as e:
+        logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
+                     f"{final_path} | {e}")
+        # Only when the staging copy survived: if it is gone the move actually
+        # completed and something else raised.
+        if write_path.exists() and final_path.exists():
+            try:
+                final_path.unlink()
+                logger.error(
+                    f"    Removed the partial file left at the destination"
+                    + (" (it had OVERWRITTEN an existing output, which was already "
+                       "corrupt by then)" if pre_existed else "")
+                    + " — the complete copy is still in staging.")
+            except OSError as e2:
+                logger.error(f"    Could NOT remove the partial destination file "
+                             f"({e2}). Delete {final_path} by hand before re-running: "
+                             f"a later sync run would treat it as up to date.")
+        _abort_if_disk_full(final_path.parent, size)
+        return False
+
+
 # --- Directory-scan progress ----------------------------------------------
 # Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
 # standalone. Fix bugs in ALL copies.
@@ -1832,15 +1876,11 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 _delete_stats["kept"] += 1
                 logger.warning(f"  KEEP (staging file missing) | {write_out.name}")
                 continue
-            try:
-                final_out.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(write_out), str(final_out))
+            # A locked/readonly destination must not abort the whole batch:
+            # the file stays in staging and is logged for manual recovery.
+            if _promote_from_staging(write_out, final_out):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_out)))
-            except OSError as e:
-                # A locked/readonly destination must not abort the whole batch:
-                # keep the file in staging and log it for manual recovery.
-                logger.error(f"  MOVE FAILED, kept in staging | {write_out.name} -> {final_out} | {e}")
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
 
@@ -2745,15 +2785,11 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         for src, write_out, final_out in dest_tasks:
             status = status_map.get(str(src), "error")
             if status in ("ok", "reconvert", "overwrite") and write_out.exists():
-                try:
-                    final_out.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(write_out), str(final_out))
+                # A locked/readonly destination must not abort the whole batch:
+                # the file stays in staging and is logged for manual recovery.
+                if _promote_from_staging(write_out, final_out):
                     moved += 1
                     moved_finals.add(os.path.normcase(str(final_out)))
-                except OSError as e:
-                    # A locked/readonly destination must not abort the batch:
-                    # keep the file in staging and log it for manual recovery.
-                    logger.error(f"  MOVE FAILED, kept in staging | {write_out.name} -> {final_out} | {e}")
             elif write_out.exists():
                 # Failed conversion: do not promote a partial/corrupt file to the
                 # final destination. Leave it in staging so the user can inspect.

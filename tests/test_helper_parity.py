@@ -53,6 +53,10 @@ SHARED_HELPERS = [
     "_aborted",
     "_signal_abort",
     "_abort_if_disk_full",
+    # Promotion out of staging. It DELETES a partial destination file and can
+    # latch the disk-full abort, so a copy drifting is one backend leaving
+    # truncated outputs behind where another cleans them up.
+    "_promote_from_staging",
     # Directory-scan progress. A copy drifting would leave one backend silent
     # through the exact 25-second pause that looks like a freeze.
     "_scan_state",
