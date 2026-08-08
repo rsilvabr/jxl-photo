@@ -2864,14 +2864,18 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             # — the single-page TIFF written is valid and complete — so this is
             # the only place that can stop the deletion. Fail closed: a page
             # that exists only in the source must keep the source alive.
-            if (os.path.normcase(str(task["main_jxl"])) in _incomplete_groups
-                    and not ALLOW_INCOMPLETE_GROUPS):
+            _why_kind = _incomplete_groups.get(os.path.normcase(str(task["main_jxl"])))
+            if _why_kind and not ALLOW_INCOMPLETE_GROUPS:
                 _delete_stats["kept"] += 1
+                _tail = ("the markers disagree about the size of the split, so nothing "
+                         "here proves this TIFF is complete"
+                         if _why_kind == "inconsistent" else
+                         "re-run against the folder holding every page of the split, or "
+                         "pass --allow-incomplete-groups if the missing page is gone "
+                         "for good")
                 logger.warning(
-                    f" KEEP (incomplete multi-page group; deleting would lose the "
-                    f"missing pages) | {task['main_jxl'].name} | re-run against the "
-                    f"folder holding every page of the split, or pass "
-                    f"--allow-incomplete-groups if the missing page is gone for good")
+                    f" KEEP (incomplete multi-page group) | {task['main_jxl'].name} | "
+                    f"{_tail}")
                 continue
             # Delete only the sources whose pixels actually made it into the
             # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
@@ -3155,7 +3159,10 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 # downstream can tell that the other pages of the original only exist in the
 # JXLs this run is about to remove. Same fail-closed rule as the encoder's
 # _discarded_real_page_sources.
-_incomplete_groups = set()
+# {normcased main JXL: "truncated" | "inconsistent"} — the KIND matters,
+# because the advice differs: a truncated split has a page to go and find,
+# while disagreeing markers may have every page present and nothing to fetch.
+_incomplete_groups = {}
 
 
 def collect_multipage_groups(jxls: list) -> dict:
@@ -3183,7 +3190,10 @@ def collect_multipage_groups(jxls: list) -> dict:
     # so that per-file metadata (inheritance, grayscale, depth) is available.
     marker_map = _read_multipage_markers_batch(jxls)
 
-    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False}
+    # Must carry every key _read_multipage_markers_batch produces: the callers
+    # read the others by index, and a missing one here is a KeyError waiting for
+    # whoever follows that pattern.
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False}
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
@@ -3273,7 +3283,8 @@ def collect_multipage_groups(jxls: list) -> dict:
         entries_sorted = sorted(entries, key=lambda e: e[1])
         _declared = {n for n in by_group_total.get(_marker, set()) if n}
         _why_incomplete = None
-        if len(_declared) > 1:
+        _disagree = len(_declared) > 1
+        if _disagree:
             # The members disagree about how big the split was. Something is
             # wrong here that this code cannot resolve: fail closed.
             _why_incomplete = (f"its pages disagree about the size of the split "
@@ -3298,14 +3309,28 @@ def collect_multipage_groups(jxls: list) -> dict:
             _why_incomplete = (f"only page {entries_sorted[0][1]} of the split is "
                                f"present, and this archive records no page count")
         if _why_incomplete:
+            # The tail depends on WHY. A truncated split has a missing page to
+            # go and find; disagreeing markers may have every page present and
+            # nothing to fetch — telling that user to "point the run at the
+            # folder holding every page" sends them after a file that is
+            # already there.
+            if _disagree:
+                _advice = ("the markers are inconsistent, so this run cannot tell what "
+                           "the split should contain")
+                _kept = (". The sources will be KEPT — nothing here proves the TIFF is "
+                         "complete (--allow-incomplete-groups overrides that)")
+            else:
+                _advice = ("point the run at the folder holding every page to rebuild "
+                           "the original")
+                _kept = (". The sources will be KEPT — deleting them would lose the "
+                         "missing page for good (--allow-incomplete-groups overrides "
+                         "that)")
             logger.warning(
                 f"Multi-page group is INCOMPLETE ({_why_incomplete}) | {main_jxl.name} | "
-                f"group {_marker[1]} | decoding the pages that ARE here; point the run at "
-                f"the folder holding every page to rebuild the original"
-                + ("" if ALLOW_INCOMPLETE_GROUPS else
-                   ". The sources will be KEPT — deleting them would lose the missing "
-                   "page for good (--allow-incomplete-groups overrides that)"))
-            _incomplete_groups.add(os.path.normcase(str(main_jxl)))
+                f"group {_marker[1]} | decoding the pages that ARE here; {_advice}"
+                + ("" if ALLOW_INCOMPLETE_GROUPS else _kept))
+            _incomplete_groups[os.path.normcase(str(main_jxl))] = (
+                "inconsistent" if _disagree else "truncated")
         groups[main_jxl] = entries_sorted
 
     # Standalone files: one single-page group each
@@ -3571,7 +3596,8 @@ Examples:
         logger.warning(
             "--allow-incomplete-groups is ON: a multi-page split with pages MISSING will "
             "have its remaining JXLs DELETED after the short TIFF is written. The missing "
-            "page cannot be recovered afterwards. Each affected group is named above.")
+            "page cannot be recovered afterwards. Each affected group is named in the "
+            "INCOMPLETE warnings below, as the run reaches it.")
 
     if DELETE_SKIPPED and not DELETE_SOURCE:
         logger.warning("--delete-skipped has no effect without --delete-source: it only "
@@ -3751,8 +3777,12 @@ Examples:
     # and the provenance marker lives in XMP, so copy_metadata (which writes it)
     # is skipped entirely. Honouring the contract is right; being quiet about
     # the consequence is not.
-    if FORCE_NONE_MODE and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES
-                            or (args.mode == 0 and args.output is not None)):
+    # _run_collapses_structure, not a hand-written `mode == 0 and output`: mode 0
+    # writing back into the source folder collapses nothing, and the ad-hoc test
+    # warned there anyway.
+    if FORCE_NONE_MODE and (DELETE_SOURCE or _run_collapses_structure(
+            args.mode, args.output,
+            args.input.parent if args.input.is_file() else args.input)):
         logger.warning(
             "--none writes NO provenance marker (it keeps the minimal-metadata "
             "contract, and the marker is XMP): these TIFFs will carry no record of "

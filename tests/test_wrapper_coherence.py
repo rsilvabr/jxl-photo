@@ -38,7 +38,7 @@ def test_manifest_workflow_asks_the_lossy_delete_skipped_question(tmp_path, monk
     menu = _menu()
     asked = []
     monkeypatch.setattr(menu, "_confirm_lossy_delete_skipped",
-                        lambda wf: asked.append(wf) or True)
+                        lambda wf: asked.append(wf))
     # Stop right after the gate: the entry loop is not what this tests.
     monkeypatch.setattr(menu, "_confirm_archive_mode", lambda: False)
 
@@ -61,7 +61,7 @@ def test_the_gate_turns_delete_skipped_off_where_the_builder_can_see_it(monkeypa
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     adv = {"delete_source": True, "delete_skipped": True}
     workflow = {"advanced_options": adv, "conversion_type": "convert_lossy"}
-    assert menu._confirm_lossy_delete_skipped(workflow) is True
+    menu._confirm_lossy_delete_skipped(workflow)
     assert adv["delete_skipped"] is False
 
 

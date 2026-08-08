@@ -2639,7 +2639,7 @@ class InteractiveMenu:
     _LOSSY_CONVERSIONS = ('convert_lossy', 'jxl_to_jpeg_force', 'jxl_to_png',
                           'jxl_to_jpeg_auto')
 
-    def _confirm_lossy_delete_skipped(self, workflow: Dict) -> bool:
+    def _confirm_lossy_delete_skipped(self, workflow: Dict) -> None:
         """Extra gate for `delete_skipped` on a direction that can prove nothing.
 
         Lives here rather than inside the [D] wizard so that REPEATS and PRESETS
@@ -2647,16 +2647,24 @@ class InteractiveMenu:
         never walk through [D]. The wizard marks the workflow once it has asked,
         so the question is never posed twice in one run.
 
-        Returns False only if the user cancels outright; declining the deletion
-        simply turns `delete_skipped` off and lets the run continue.
+        Never cancels the run: declining turns `delete_skipped` off in
+        `advanced_options` — the dict the cmd builder reads — and the run
+        continues without it. (It was annotated `-> bool` and documented as
+        returning False on cancel, which no path ever did, so the
+        `if not ...: return False` at both call sites was dead code stating a
+        contract this function does not have.)
+
+        An unreadable stdin counts as declining, like every other gate here: a
+        closed pipe raised EOFError out of `input()` and took the run down with
+        a traceback instead of quietly keeping the originals.
         """
         adv = workflow.get('advanced_options') or {}
         if not (adv.get('delete_source') and adv.get('delete_skipped')):
-            return True
+            return
         if workflow.get('conversion_type', '') not in self._LOSSY_CONVERSIONS:
-            return True
+            return
         if workflow.get('_lossy_skip_confirmed') or workflow.get('dry_run'):
-            return True
+            return
 
         msg = ("This direction is LOSSY and stores no checksum. For originals that were "
                "already converted, the ONLY check is that the existing output is a "
@@ -2668,8 +2676,12 @@ class InteractiveMenu:
                              default=False)
         else:
             print(f"\n{msg}")
-            go = input("Delete already-converted originals anyway? [y/N]: "
-                       ).strip().lower().startswith('y')
+            try:
+                go = input("Delete already-converted originals anyway? [y/N]: "
+                           ).strip().lower().startswith('y')
+            except (EOFError, KeyboardInterrupt):
+                print()
+                go = False
         if not go:
             adv['delete_skipped'] = False
             note = "Already-converted originals will be KEPT."
@@ -2678,7 +2690,6 @@ class InteractiveMenu:
             else:
                 print(note)
         workflow['_lossy_skip_confirmed'] = True
-        return True
 
     def _count_origin_files(self, workflow: Dict, mode: int) -> int:
         """How many source files this mode would ACTUALLY see, for the delete
@@ -4307,8 +4318,7 @@ class InteractiveMenu:
         # (_lossy_skip_confirmed), so asking here cannot double up.
         # (It turns delete_skipped off in place, in the very dict `advanced`
         # already points at, so the cmd builder below sees the decision.)
-        if not self._confirm_lossy_delete_skipped(workflow):
-            return False
+        self._confirm_lossy_delete_skipped(workflow)
 
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
                             or advanced.get('delete_source')):
@@ -5401,8 +5411,7 @@ class InteractiveMenu:
 
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. Applied here so repeats and presets are gated too, not just [D].
-        if not self._confirm_lossy_delete_skipped(workflow):
-            return False
+        self._confirm_lossy_delete_skipped(workflow)
 
         # Delete gate, at EXECUTION time (was Step 4): the user has already had
         # the chance to pick dry-run, and a simulation never charges the HHMM

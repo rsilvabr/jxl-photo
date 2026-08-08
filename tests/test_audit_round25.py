@@ -465,7 +465,7 @@ def test_258_lone_page0_is_not_flagged(tmp_path, monkeypatch):
     monkeypatch.setattr(dec, "_read_multipage_markers_batch",
                         lambda jxls: {str(solo): _marked(0)})
     dec.collect_multipage_groups([solo])
-    assert dec._incomplete_groups == set()
+    assert dec._incomplete_groups == {}
 
 
 # ---------------------------------------------------------------------------

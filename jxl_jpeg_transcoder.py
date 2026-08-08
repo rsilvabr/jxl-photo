@@ -1999,6 +1999,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             #
             # The md5 is already in each result (index 3), so nothing needs to
             # be parsed back at all.
+            _stranded = 0
             for _r in results:
                 if _r[1] not in ("ok", "reconvert") or len(_r) < 4 or not _r[3]:
                     continue
@@ -2006,15 +2007,27 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # Only for outputs that actually reached their destination: a
                 # checksum must never claim coverage of a file still in staging.
                 if os.path.normcase(str(_final)) not in moved_finals:
+                    _stranded += 1
                     continue
                 _final.parent.mkdir(parents=True, exist_ok=True)
                 store_md5_db(_final, _r[3])
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists():
-                try:
-                    staging_db.unlink()
-                except OSError:
-                    pass
+                if _stranded:
+                    # Something did not leave staging (a failed move). Its md5
+                    # was deliberately NOT filed at the destination — but
+                    # deleting the staging db too threw the only copy of that
+                    # hash away, so a file recovered from staging by hand had
+                    # lost its provenance for good.
+                    logger.warning(
+                        f"  Keeping {staging_db}: {_stranded} output(s) are still in "
+                        f"staging and their checksums live only there. Move the file "
+                        f"and its line to the destination folder, or re-run.")
+                else:
+                    try:
+                        staging_db.unlink()
+                    except OSError:
+                        pass
 
     # Any mode, not just 8: the mode decides where the output lands, deleting
     # the source is a separate opt-in. Every gate below certifies THIS run's
@@ -3885,9 +3898,27 @@ def main():
     # the destination had been honored. Same warning the encoder and decoder
     # have had since v1.9.3; this script never got it.
     if args.mode == 1 and args.output is not None:
-        _folder = RECOVERED_JPEG_FOLDER if auto_decode else CONVERTED_JXL_FOLDER
+        # Naming the folder is the point of the warning, so it must not guess.
+        # `auto_decode` alone was wrong: determine_command returns it False for
+        # the CONVERT command even when converting a JXL ("JXL without jbrd:
+        # convert (lossy decode)"), so a lossy JXL -> JPEG run was told
+        # converted_jxl/ while it writes recovered_jpeg/.
+        #
+        # And for a DIRECTORY input the convert direction is not knowable here
+        # at all: cmd_convert scans first and falls back to from_jxl only when
+        # the folder holds no JPEG/PNG. Say so rather than pick one.
+        if cmd == "transcode":
+            _folder = (RECOVERED_JPEG_FOLDER if auto_decode else CONVERTED_JXL_FOLDER) + "/"
+        elif args.output_name != CONVERT_OUTPUT_FOLDER:
+            _folder = args.output_name + "/"    # --output-name wins in convert 1/3
+        elif args.input.is_file() or args.decode:
+            _dec = args.decode or args.input.suffix.lower() == ".jxl"
+            _folder = (RECOVERED_JPEG_FOLDER if _dec else CONVERTED_JXL_FOLDER) + "/"
+        else:
+            _folder = (f"{CONVERTED_JXL_FOLDER}/ or {RECOVERED_JPEG_FOLDER}/, "
+                       f"whichever this folder's content selects")
         print(f"WARNING: --mode 1 ignores the output folder ({args.output}): outputs go "
-              f"to <source folder>/{_folder}/. Use --mode 2 to write everything into "
+              f"to <source folder>/{_folder}. Use --mode 2 to write everything into "
               f"one folder.")
 
     # Modes 6/7 anchor on an EXPORT folder and scan recursively; over a single

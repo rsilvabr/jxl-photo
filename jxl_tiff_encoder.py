@@ -4117,13 +4117,18 @@ def main():
     # These only gate the DELETION; without it they change nothing at all, and
     # a user who passed them believes an archive is being checked when it is
     # not. Same treatment --delete-skipped already gets.
+    # _run_collapses_structure, not a hand-written `mode == 0 and output`: mode 0
+    # with an output folder EQUAL to the source folder writes in place and
+    # collapses nothing, so the ad-hoc test warned about --strip where there was
+    # nothing to warn about and stayed silent about an inert --provenance.
+    _warn_src_root = args.input.parent if args.input.is_file() else args.input
+    _warn_collapses = _run_collapses_structure(args.mode, args.output, _warn_src_root)
     if args.provenance is not None and not DELETE_SOURCE:
         logger.warning(f"--provenance {args.provenance} has no effect without "
                        f"--delete-source: it only decides whether an EXISTING output "
                        f"may be overwritten and its source deleted. Nothing is checked "
                        f"and nothing is deleted.")
-    elif args.provenance is not None and args.mode not in _COLLAPSING_MODES and not (
-            args.mode == 0 and args.output is not None):
+    elif args.provenance is not None and not _warn_collapses:
         logger.warning(f"--provenance {args.provenance} has no effect in mode "
                        f"{args.mode}: the output path is derived from each source's own "
                        f"folder, so two sources can never land on the same output.")
@@ -4131,8 +4136,7 @@ def main():
         logger.warning("--no-adopt-scan has no effect without --provenance adopt: it "
                        "only turns off the verification adoption performs.")
 
-    if STRIP_METADATA and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES
-                           or (args.mode == 0 and args.output is not None)):
+    if STRIP_METADATA and (DELETE_SOURCE or _warn_collapses):
         logger.warning(
             "--strip writes NO provenance marker: these outputs will carry no record "
             "of which source made them. In modes 2/4/5/6/7 — and in mode 0 with an "

@@ -96,8 +96,9 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     monkeypatch.setattr(dec, "TEMP2_DIR", staging)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: integrity)
+    # A dict now: the KIND of incompleteness decides the advice in the KEEP line.
     monkeypatch.setattr(dec, "_incomplete_groups",
-                        {os.path.normcase(str(src))} if incomplete else set())
+                        {os.path.normcase(str(src)): "truncated"} if incomplete else {})
 
     task = {"type": "multi", "main_jxl": src,
             "entries": [(src, 0, False, False, 0, False, None)],
@@ -290,7 +291,7 @@ def test_wrapper_emits_delete_skipped_for_every_direction(menu, launched, monkey
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode", lambda self: True)
     # The lossy gate is exercised on its own below; here it must not block.
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
-                        lambda self, workflow: True)
+                        lambda self, workflow: None)
     menu.execute_workflow(_wf(origin, dest, conv), STATUS)
     assert "--delete-skipped" in launched[-1]
 
@@ -303,7 +304,7 @@ def test_lossy_gate_fires_on_a_repeat(menu, monkeypatch, capsys):
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     wf = _wf("jxl", "jpeg", "jxl_to_jpeg_force")
-    assert menu._confirm_lossy_delete_skipped(wf) is True
+    menu._confirm_lossy_delete_skipped(wf)
     assert wf["advanced_options"]["delete_skipped"] is False, (
         "declining must turn the option off, not cancel the run")
     assert "nothing ties it to the original" in _out(capsys)
@@ -333,7 +334,9 @@ def test_lossy_gate_stays_quiet_when_it_should(menu, monkeypatch, conv, adv, dry
         raise AssertionError("asked when it should not have")
     monkeypatch.setattr("builtins.input", _boom)
     wf = _wf("jxl", "jpeg", conv, advanced_options=adv, dry_run=dry)
-    assert menu._confirm_lossy_delete_skipped(wf) is True
+    menu._confirm_lossy_delete_skipped(wf)
+    # Untouched: the gate never even asked.
+    assert wf["advanced_options"] == adv
 
 
 def test_lossy_gate_is_not_asked_twice(menu, monkeypatch):
@@ -343,7 +346,8 @@ def test_lossy_gate_is_not_asked_twice(menu, monkeypatch):
         raise AssertionError("asked twice")
     monkeypatch.setattr("builtins.input", _boom)
     wf = _wf("jxl", "jpeg", "jxl_to_jpeg_force", _lossy_skip_confirmed=True)
-    assert menu._confirm_lossy_delete_skipped(wf) is True
+    menu._confirm_lossy_delete_skipped(wf)
+    assert wf["advanced_options"]["delete_skipped"] is True
 
 
 def test_wrapper_omits_it_without_delete_source(menu, launched, monkeypatch):
