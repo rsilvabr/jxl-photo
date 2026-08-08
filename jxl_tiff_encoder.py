@@ -4202,6 +4202,9 @@ def main():
     # armed, a collapsing mode, and an output that already exists.
     provenance_blocked = []
     provenance_failures = []
+    # Outputs adopt has decided to stamp. Filled here, WRITTEN much later — see
+    # the stamping block after the delete confirmation.
+    provenance_to_stamp = []
     if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:
         _existing = sorted({item[1] for item in all_items if item[1].exists()})
         if _existing:
@@ -4209,7 +4212,7 @@ def main():
                         f"(--provenance {PROVENANCE_CHECK})...")
             _marks = _read_source_markers_batch(_existing)
             _bad_sources = {}
-            _adopted, _adopted_blind = [], []
+            _adopted, _adopted_blind, _would_adopt = [], [], []
             for t, j, page_idx, *_rest in all_items:
                 if not j.exists():
                     continue
@@ -4224,6 +4227,13 @@ def main():
                 # is still refused: adopt relaxes "I cannot tell", never "I can
                 # tell it is wrong".
                 if PROVENANCE_CHECK == "adopt" and _unmarked:
+                    # A dry run neither scans nor stamps. The scan decodes every
+                    # unmarked output (hours on a real library) and the stamp
+                    # WRITES to the file — both are things a simulation must not
+                    # do, and reporting the count is what the user came for.
+                    if args.dry_run:
+                        _would_adopt.append((t, j))
+                        continue
                     if not ADOPT_SCAN:
                         _adopted_blind.append((t, j))
                         continue
@@ -4241,26 +4251,26 @@ def main():
                 _bad_sources.setdefault(str(t), (j, _why))
             for _t, _j in _adopted_blind:
                 logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
-            if _adopted or _adopted_blind:
-                # Stamp the marker onto the EXISTING output now, so the archive
-                # heals in one pass. Without this a SKIPPED file is deleted
-                # without anything being rewritten, and the next run would have
-                # to adopt it all over again.
-                _stamped = 0
-                for _t, _j in _adopted + _adopted_blind:
-                    try:
-                        _r = _run_exiftool_argfile(
-                            ["-overwrite_original"] + _provenance_marker_args(_t)
-                            + [str(_j)], timeout=60)
-                        if _r.returncode == 0:
-                            _stamped += 1
-                    except Exception as _e:
-                        logger.debug(f"Could not stamp {_j}: {_e}")
+            if _would_adopt:
                 logger.info(
-                    f"Provenance: adopted {len(_adopted) + len(_adopted_blind)} existing "
-                    f"output(s)"
+                    f"Dry run: {len(_would_adopt)} existing output(s) carry no provenance "
+                    f"record. A real run would decode and compare each one against its "
+                    f"source before adopting and stamping it"
+                    + ("" if ADOPT_SCAN else " — except that --no-adopt-scan is set, so "
+                                              "they would be adopted WITHOUT that proof")
+                    + ". Any that failed the check would be REFUSED, so this count is an "
+                      "upper bound, and nothing has been written or verified yet.")
+            if _adopted or _adopted_blind:
+                # WHAT to stamp is decided here; the stamping itself happens
+                # after the delete confirmation (see provenance_to_stamp). It
+                # rewrites the user's existing archive, so it must not run on a
+                # dry run, and it must not run when the user then answers "no"
+                # to the deletion this whole check exists to gate.
+                provenance_to_stamp = list(_adopted) + list(_adopted_blind)
+                logger.info(
+                    f"Provenance: adopting {len(provenance_to_stamp)} existing output(s)"
                     + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
-                    + f"; stamped {_stamped} — later runs check them strictly.")
+                    + " — they will be stamped once the run is confirmed.")
 
             if _bad_sources:
                 provenance_blocked = sorted(_bad_sources)
@@ -4385,6 +4395,30 @@ def main():
             if not confirm_deletion_tiff(is_lossy):
                 logger.info("Deletion not confirmed -- exiting.")
                 sys.exit(3)
+
+        # Stamp the adopted outputs, so the archive heals in one pass: without
+        # this a SKIPPED file is deleted with nothing rewritten, and the next
+        # run would have to adopt it all over again.
+        #
+        # Deliberately HERE and not where the decision was made. This writes to
+        # files the user already owns, so it must come after BOTH gates that can
+        # still call the run off — --dry-run (which never reaches this line) and
+        # the confirmation above. Stamping first meant a declined confirmation
+        # exited 3 having already modified the archive.
+        if provenance_to_stamp:
+            _stamped = 0
+            for _t, _j in provenance_to_stamp:
+                try:
+                    _r = _run_exiftool_argfile(
+                        ["-overwrite_original"] + _provenance_marker_args(_t)
+                        + [str(_j)], timeout=60)
+                    if _r.returncode == 0:
+                        _stamped += 1
+                except Exception as _e:
+                    logger.debug(f"Could not stamp {_j}: {_e}")
+            logger.info(
+                f"Provenance: stamped {_stamped} of {len(provenance_to_stamp)} adopted "
+                f"output(s) — later runs check them strictly.")
     elif args.mode == 8:
         logger.info("Mode 8 -- in-place recursive | DELETE_SOURCE=False: TIFF and JXL will coexist")
 

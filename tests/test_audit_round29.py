@@ -15,18 +15,27 @@ Every one was reproduced against the shipped code before the fix:
     answer through, so a JXL->TIFF or JPEG<->JXL delete run built a command
     line that died at argparse. The decoder's own --none warning told the user
     to pass a flag the decoder does not have.
+  * #279 — the encoder's provenance block ran BEFORE the dry-run gate, so
+    `--dry-run --provenance adopt` decoded every unmarked output and then wrote
+    jxlphoto-src/srcsum into real JXLs with exiftool -overwrite_original. Same
+    class as #235. It also ran before the delete confirmation, so declining
+    (exit 3) left the archive stamped anyway.
 """
 
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
+import tifffile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jxl_photo as wp
+import jxl_tiff_encoder as enc
 
 REPO = Path(__file__).resolve().parent.parent
+ENCODER = str(REPO / "jxl_tiff_encoder.py")
 
 
 def _menu():
@@ -219,3 +228,91 @@ def test_provenance_is_documented_in_every_backend_readme(readme):
         # Must say plainly that it has no adopt, since the wrapper's menu and
         # the encoder's docs both mention one.
         assert "NO `adopt`" in doc
+
+
+# ── #279: the provenance block must respect dry-run and the delete gate ─────
+
+def _tiff(path: Path, value: int):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(str(path), np.full((48, 48, 3), value, np.uint16),
+                     photometric="rgb")
+
+
+def _enc(*args, cwd):
+    return subprocess.run([sys.executable, ENCODER, *args], capture_output=True,
+                          text=True, timeout=600, cwd=str(cwd),
+                          stdin=subprocess.DEVNULL)
+
+
+def _legacy_archive(tmp_path):
+    """An archive that predates the markers, with its source still in place."""
+    _tiff(tmp_path / "root" / "A" / "foto.tif", 1000)
+    r = _enc("root", "--mode", "5", "--distance", "0", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout
+    for j in (tmp_path / "root" / "JXL_16bits").glob("*.jxl"):
+        subprocess.run(["exiftool", "-overwrite_original", "-XMP-dc:Relation=", str(j)],
+                       capture_output=True, timeout=60)
+    return tmp_path / "root" / "A" / "foto.tif", tmp_path / "root" / "JXL_16bits" / "foto.jxl"
+
+
+def _is_unmarked(jxl: Path) -> bool:
+    m = enc._read_source_markers_batch([jxl])[str(jxl)]
+    return not (m["src"] or m["srcsum"])
+
+
+ARCHIVE = ["--mode", "5", "--distance", "0", "--delete-source",
+           "--delete-skipped", "--provenance", "adopt"]
+
+
+def test_dry_run_with_adopt_does_not_stamp_the_archive(tmp_path):
+    """A simulation that MODIFIES the files it is simulating over is the one
+    thing --dry-run promises never to do."""
+    src, jxl = _legacy_archive(tmp_path)
+    assert _is_unmarked(jxl)
+
+    r = _enc("root", *ARCHIVE, "--delete-confirm-off", "--dry-run", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout
+    assert _is_unmarked(jxl), "the dry run stamped a real JXL"
+    assert src.exists(), "the dry run deleted a source"
+
+
+def test_dry_run_reports_what_adopt_would_do(tmp_path):
+    """Skipping the work is only right if the simulation still says what would
+    happen — and says it is an upper bound, since the scan can refuse."""
+    _legacy_archive(tmp_path)
+    r = _enc("root", *ARCHIVE, "--delete-confirm-off", "--dry-run", cwd=tmp_path)
+    out = r.stdout
+    assert "carry no provenance record" in out
+    assert "upper bound" in out
+    # The real work must NOT have been reported as done.
+    assert "verified by the adopt scan" not in out
+
+
+def test_declining_the_delete_confirmation_leaves_nothing_stamped(tmp_path):
+    """Exit 3 means the run was called off. It used to have already rewritten
+    the user's archive by then."""
+    src, jxl = _legacy_archive(tmp_path)
+    # stdin is /dev/null: the confirmation reads EOF and fails closed.
+    r = _enc("root", *ARCHIVE, cwd=tmp_path)
+    assert r.returncode == 3, r.stdout
+    assert _is_unmarked(jxl), "a declined run stamped the archive anyway"
+    assert src.exists()
+
+
+def test_a_confirmed_run_still_stamps(tmp_path):
+    """The healing pass must survive the reordering."""
+    src, jxl = _legacy_archive(tmp_path)
+    r = _enc("root", *ARCHIVE, "--delete-confirm-off", cwd=tmp_path)
+    assert r.returncode == 0, r.stdout
+    assert not _is_unmarked(jxl), "adoption no longer stamps"
+    assert not src.exists(), "the adopted source was not deleted"
+
+
+def test_stamping_happens_after_the_confirmation_in_source_order():
+    """Cheap guard on the ordering the tests above prove behaviourally: the
+    exiftool write must not drift back above the gate."""
+    src = (REPO / "jxl_tiff_encoder.py").read_text(encoding="utf-8")
+    confirm = src.index("if not confirm_deletion_tiff(is_lossy):")
+    stamp = src.index("if provenance_to_stamp:")
+    dry_gate = src.index("    # Dry run\n    if args.dry_run:")
+    assert dry_gate < confirm < stamp, "stamping drifted back before a gate"
