@@ -3422,6 +3422,17 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         output_arg=args.output, source_root=_prov_src_root(args))
     if _refused:
         _counter["total"] = max(0, _counter.get("total", 0) - len(_refused))
+    # A refusal is a FAILURE, not a quiet skip: the file was not converted and
+    # needs a human, so it must reach the exit code and the wrapper's recap —
+    # exactly as cmd_transcode and cmd_convert already do. cmd_auto only ever
+    # subtracted the refusals from the progress total, so an auto run that
+    # refused EVERY file exited 0 with an empty failure list: a scheduled job
+    # saw a clean run and only the log said otherwise.
+    _refused_tally = {
+        "ok": 0, "err": len(_refused), "skipped": 0, "aborted": 0, "overwritten": 0,
+        "failures": [(str(_s), f"refused: output {_o} already exists and {_w}")
+                     for _s, _o, _w in _refused],
+    }
 
     if args.dry_run:
         for f, out in pairs:
@@ -3430,13 +3441,19 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             logger.warning(
                 f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
                 f"file(s) in this group would be DELETED.")
+        # Zeros, like cmd_transcode's and cmd_convert's dry runs: a simulation
+        # does not fail. _provenance_filter has already logged each refusal, so
+        # they are not invisible. (Whether a dry run should report the refusals
+        # it PREDICTS is a separate question, open for all three commands.)
         return {"ok": 0, "err": 0, "skipped": 0}
 
     if not pairs:
-        return {"ok": 0, "err": 0, "skipped": 0}
+        # Everything in this group was refused. Returning zeros here was the
+        # other half of the same bug.
+        return _refused_tally
 
-    tally = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "overwritten": 0,
-             "failures": []}
+    tally = dict(_refused_tally)
+    tally["failures"] = list(_refused_tally["failures"])
 
     def _accumulate(results):
         for r in results:

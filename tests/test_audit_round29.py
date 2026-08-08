@@ -20,6 +20,14 @@ Every one was reproduced against the shipped code before the fix:
     jxlphoto-src/srcsum into real JXLs with exiftool -overwrite_original. Same
     class as #235. It also ran before the delete confirmation, so declining
     (exit 3) left the archive stamped anyway.
+  * #280 — mode 0 honours the output folder and then writes every file into it
+    flat, exactly like mode 2, but _COLLAPSING_MODES never included it. Mode 0
+    is also flat, so _abort_on_duplicate_outputs cannot see the clash either.
+    Reproduced: A decoded to out/foto.tif with its JXL deleted, then B
+    overwrote it and had its JXL deleted too — A's photo gone.
+  * #281 — cmd_auto subtracted provenance refusals from the progress total and
+    nothing else, so an auto run that refused every file exited 0 with an empty
+    failure list. cmd_transcode and cmd_convert both count them.
 """
 
 import subprocess
@@ -32,6 +40,7 @@ import tifffile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jxl_photo as wp
+import jxl_jpeg_transcoder as tr
 import jxl_tiff_encoder as enc
 
 REPO = Path(__file__).resolve().parent.parent
@@ -392,3 +401,63 @@ def test_mode0_to_a_shared_output_folder_refuses_the_second_source(tmp_path):
     # A's only remaining copy still holds A's pixels.
     with tifffile.TiffFile(str(out / "foto.tif")) as tif:
         assert int(tif.pages[0].asarray().flat[0]) == 1000, "A's photo was overwritten"
+
+
+# ── #281: cmd_auto swallowed provenance refusals ────────────────────────────
+
+TRANSCODER = str(REPO / "jxl_jpeg_transcoder.py")
+
+
+def _tr(*args, cwd):
+    return subprocess.run([sys.executable, TRANSCODER, *args], capture_output=True,
+                          text=True, timeout=600, cwd=str(cwd),
+                          stdin=subprocess.DEVNULL)
+
+
+def _jpeg(path: Path, seed: int):
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    y, x = np.mgrid[0:96, 0:128]
+    a = ((np.sin((x + seed) / 9.0) * .25 + np.cos((y + seed) / 11.0) * .25 + .5) * 255)
+    Image.fromarray(np.stack([a.astype(np.uint8)] * 3, axis=2)).save(str(path), quality=92)
+
+
+AUTO_ARCHIVE = ["--mode", "5", "--delete-source", "--delete-confirm-off"]
+
+
+def _refusing_auto_run(tmp_path):
+    """A collapsing auto run whose only file is refused: B's output already
+    exists and was made by A.
+
+    Each run is pointed at ONE source folder, because mode 5 writes to a
+    sibling of it — scanning the shared parent would make auto mode pick its
+    own JXL output back up and decode it, which is a different story.
+    """
+    _jpeg(tmp_path / "root" / "A" / "foto.jpg", 0)
+    r1 = _tr("root/A", *AUTO_ARCHIVE, cwd=tmp_path)
+    assert r1.returncode == 0, r1.stdout
+    assert not (tmp_path / "root" / "A" / "foto.jpg").exists(), r1.stdout
+
+    _jpeg(tmp_path / "root" / "B" / "foto.jpg", 50)
+    return _tr("root/B", *AUTO_ARCHIVE, "--delete-skipped", "--summary-json",
+               cwd=tmp_path)
+
+
+def test_auto_run_that_refuses_everything_does_not_exit_zero(tmp_path):
+    """A scheduled auto job saw a clean run: exit 0, no failures listed."""
+    r = _refusing_auto_run(tmp_path)
+    assert "REFUSING" in r.stdout, r.stdout
+    assert r.returncode != 0, "an auto run that refused every file exited 0"
+    assert (tmp_path / "root" / "B" / "foto.jpg").exists(), "B was deleted"
+
+
+def test_auto_run_reports_refusals_in_the_summary_failures(tmp_path):
+    """The wrapper's manifest recap reads this list; it was empty."""
+    import json
+    r = _refusing_auto_run(tmp_path)
+    line = next(l for l in r.stdout.splitlines()
+                if l.lstrip().startswith(tr.SUMMARY_PREFIX))
+    summary = json.loads(line.lstrip()[len(tr.SUMMARY_PREFIX):])
+    assert summary["errors"] >= 1, summary
+    assert summary["failures"], "refusals never reached the failure list"
+    assert "refused" in summary["failures"][0]["reason"]
