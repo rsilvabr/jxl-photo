@@ -613,7 +613,7 @@ _exiftool_cmd = None
 def _get_exiftool_cmd():
     global _exiftool_cmd
     if _exiftool_cmd is None:
-        candidates = ["exiftool", "exiftool(-k)", "exiftool-k"]
+        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
         for cmd in candidates:
             if shutil.which(cmd) is not None:
                 _exiftool_cmd = cmd
@@ -641,7 +641,14 @@ def _tool_at_least(exe: str, major: int, minor: int) -> bool:
     return v is not None and v[:2] >= (major, minor)
 
 def _cjxl_buffering_flag():
-    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there)."""
+    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
+
+    Probes the bare "cjxl" while jxl_tiff_encoder.py probes _get_cjxl_cmd():
+    NOT drift. This script invokes the bare "cjxl" everywhere (there is no
+    configurable path here), so it must version-check the binary it actually
+    runs. Pointing this at an accessor that does not exist in this module would
+    be the bug, not the fix — deliberately kept out of SHARED_HELPERS.
+    """
     if CJXL_BUFFERING is not None and _tool_at_least("cjxl", 0, 12):
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
@@ -1925,37 +1932,33 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     if use_staging:
         if not decode:  # Only for encode (decode doesn't create checksums in staging)
+            # Distribute each checksum to the folder its own output landed in,
+            # keyed by the TASK.
+            #
+            # This used to parse the staging checksums.md5 back and match its
+            # lines by output FILENAME. Two sources with the same basename —
+            # a/photo.jpg and b/photo.jpg, both becoming photo.jxl in different
+            # destination folders — collapsed to one key: both lines were filed
+            # under one folder and the other got none. Worse, the "unmatched"
+            # fallback appended lines to the first successful task's folder,
+            # writing a hash for a file that is not there. A later decode of
+            # that folder verifies against a foreign hash and reports MD5-FAIL
+            # on a perfectly good file.
+            #
+            # The md5 is already in each result (index 3), so nothing needs to
+            # be parsed back at all.
+            for _r in results:
+                if _r[1] not in ("ok", "reconvert") or len(_r) < 4 or not _r[3]:
+                    continue
+                _final = Path(_r[2])
+                # Only for outputs that actually reached their destination: a
+                # checksum must never claim coverage of a file still in staging.
+                if os.path.normcase(str(_final)) not in moved_finals:
+                    continue
+                _final.parent.mkdir(parents=True, exist_ok=True)
+                store_md5_db(_final, _r[3])
             staging_db = staging_dir / CHECKSUMS_FILENAME
-            if staging_db.exists() and tasks:
-                # Map each filename in staging checksums to its final destination folder
-                from collections import defaultdict
-                # Build lookup: filename -> final parent folder (only for successful tasks)
-                dest_map = {}
-                for src, write_out, final_out in tasks:
-                    status = status_map.get(str(src), "error")
-                    if status in ("ok", "reconvert"):
-                        dest_map[final_out.name] = final_out.parent
-                db_lines = staging_db.read_text(encoding="utf-8").splitlines(keepends=True)
-                folder_lines = defaultdict(list)
-                for line in db_lines:
-                    parts = line.strip().split("  ", 1)
-                    if len(parts) == 2:
-                        fname = parts[1]
-                        dest_folder = dest_map.get(fname)
-                        if dest_folder:
-                            folder_lines[dest_folder].append(line)
-                        else:
-                            # Fallback: put in first successful task's folder if unmatched
-                            first_success = next((final_out.parent for src, _, final_out in tasks
-                                                  if status_map.get(str(src), "error") in ("ok", "reconvert")), None)
-                            if first_success:
-                                folder_lines[first_success].append(line)
-                for folder, lines in folder_lines.items():
-                    final_db = folder / CHECKSUMS_FILENAME
-                    final_db.parent.mkdir(parents=True, exist_ok=True)
-                    with _md5_db_lock:
-                        with open(final_db, "a", encoding="utf-8") as dst:
-                            dst.writelines(lines)
+            if staging_db.exists():
                 try:
                     staging_db.unlink()
                 except OSError:
@@ -3816,6 +3819,16 @@ def main():
         else:
             args.mode = CONVERT_DEFAULT_MODE     # 0 = in-place
 
+    # Mode 1 always writes to <source folder>/<subfolder>/, so an output
+    # positional is silently discarded. Accepting it without a word looked like
+    # the destination had been honored. Same warning the encoder and decoder
+    # have had since v1.9.3; this script never got it.
+    if args.mode == 1 and args.output is not None:
+        _folder = RECOVERED_JPEG_FOLDER if auto_decode else CONVERTED_JXL_FOLDER
+        print(f"WARNING: --mode 1 ignores the output folder ({args.output}): outputs go "
+              f"to <source folder>/{_folder}/. Use --mode 2 to write everything into "
+              f"one folder.")
+
     # Modes 6/7 anchor on an EXPORT folder and scan recursively; over a single
     # FILE the scan yields nothing and the run exits 0 having done nothing.
     if args.mode in (6, 7) and args.input.is_file():
@@ -3836,10 +3849,16 @@ def main():
             print("  libjxl (cjxl/djxl): https://github.com/libjxl/libjxl/releases")
             print("  exiftool:           https://exiftool.org")
             sys.exit(1)
-        _v = _tool_version("cjxl")
-        if _v is not None and _v[:2] < (0, 11):
-            print(f"WARNING: cjxl {'.'.join(map(str, _v))} is older than the supported "
-                  f"minimum (0.11.2); conversions may fail in confusing ways.")
+        # (0, 11, 2), not (0, 11): the message has always named 0.11.2 as the
+        # minimum, and the encoder and decoder both test the patch level. This
+        # copy tested only major.minor, so 0.11.0 and 0.11.1 passed in silence
+        # HERE and were warned about by the other two.
+        for _exe in ("cjxl", "djxl"):
+            _v = _tool_version(_exe)
+            if _v is not None and _v[:3] < (0, 11, 2):
+                print(f"WARNING: {_exe} {'.'.join(map(str, _v))} is older than the "
+                      f"supported minimum (0.11.2); conversions may fail in "
+                      f"confusing ways. https://github.com/libjxl/libjxl/releases")
 
     # NOTE: --clean-staging runs inside each cmd_* (see _apply_staging_args),
     # not here: it needs the EFFECTIVE staging dir (which may come from the

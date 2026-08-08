@@ -514,7 +514,13 @@ def _tool_at_least(exe: str, major: int, minor: int) -> bool:
     return v is not None and v[:2] >= (major, minor)
 
 def _cjxl_buffering_flag():
-    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there)."""
+    """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
+
+    Probes _get_cjxl_cmd() because THIS script has a configurable cjxl path and
+    must version-check the binary it will actually run. jxl_jpeg_transcoder.py's
+    copy probes the bare "cjxl" for the same reason — that is where its calls
+    go. The two are deliberately not identical and are not in SHARED_HELPERS.
+    """
     if CJXL_BUFFERING is not None and _tool_at_least(_get_cjxl_cmd() or "cjxl", 0, 12):
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
