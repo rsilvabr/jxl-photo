@@ -59,6 +59,13 @@ provenance, delete-in-any-mode, `--delete-skipped` and dry-run.
 | 295 | **`_confirm_lossy_delete_skipped` documents a contract it does not have.** Annotated `-> bool` and documented as returning False on cancel, which no path ever did, so `if not ...: return False` at both call sites was dead code stating a rule that does not exist. Its `input()` had no `EOFError` guard either, so a closed stdin raised out of a DELETE gate instead of declining | wrapper | ✅ FIXED (`-> None`, the docstring states what it really does, the dead guards are gone, and EOF/Ctrl+C count as declining — which turns `delete_skipped` off and keeps the originals, like every other gate here) |
 | 296 | `_DEFAULT_INFO` lost the `pages` key added to the marker dicts in #282. Harmless today only because that one key is read with `.get()` while every other is read by index — a `KeyError` waiting for whoever follows the surrounding pattern | decoder | ✅ FIXED (found while verifying the audit's list, not reported by it) |
 
+**On #290's claim of coverage:** the row above said "each with a regression
+test", and two items did not have one — (j) `_last_child_summary` and (k) the
+resolver-by-direction in the collision guard. Both were verified by reading and
+neither was pinned by a test, which is exactly the gap that lets a fix rot. They
+have tests now; the claim is true as written. Flagged by the same follow-up
+audit that found #291-#295.
+
 **Still open after this round:** the decoder and the transcoder have no
 migration path for an archive written before the markers existed (#271's gap,
 now stated honestly instead of pointing at a flag that does not exist). Porting

@@ -258,3 +258,84 @@ def test_the_preset_menu_survives_it(tmp_path, monkeypatch):
     # _describe_session is what crashed on a non-dict body.
     for name, body in cfg.config.presets.items():
         assert isinstance(menu._describe_session(body), str)
+
+
+# ── 290(j): the child summary is per-run on EVERY path ──────────────────────
+
+def test_stream_child_clears_the_previous_runs_summary():
+    """It was only cleared in _run_subprocess, which the manifest path uses.
+    A single run whose child died before emitting one reported the PREVIOUS
+    run's numbers as its own."""
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    menu._stream_child([sys.executable, "-c",
+                        "print('" + wp.CHILD_SUMMARY_PREFIX +
+                        "{\"ok\": 7, \"errors\": 0}')"])
+    assert menu._last_child_summary is not None
+    # A child that says nothing must not inherit those numbers.
+    menu._stream_child([sys.executable, "-c", "pass"])
+    assert menu._last_child_summary is None
+
+
+def test_a_summary_is_still_parsed_when_the_child_emits_one():
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    menu._stream_child([sys.executable, "-c",
+                        "print('" + wp.CHILD_SUMMARY_PREFIX +
+                        "{\"ok\": 3, \"errors\": 1}')"])
+    assert menu._last_child_summary["ok"] == 3
+
+
+# ── 290(k): the collision guard resolves with the matching resolver ─────────
+
+def test_collision_guard_uses_the_convert_resolver_for_lossy_directions(tmp_path):
+    """The transcoder has two resolvers; the guard used the lossless one for
+    every direction, so it compared paths the run would never write."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    for d in ("a", "b"):
+        (tmp_path / d / "foto.jxl").write_bytes(b"x")
+
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    entries = [(str(tmp_path / "a"), str(tmp_path / "out"), 3),
+               (str(tmp_path / "b"), str(tmp_path / "out"), 3)]
+    seen = []
+    real = tr.resolve_output_convert
+
+    def _spy(*a, **k):
+        seen.append((a, k))
+        return real(*a, **k)
+
+    orig = tr.resolve_output_convert
+    tr.resolve_output_convert = _spy
+    try:
+        menu._manifest_output_collisions(entries, {".jxl"}, origin="jxl", dest="png",
+                                         export_marker="_EXPORT")
+    finally:
+        tr.resolve_output_convert = orig
+    assert seen, "the lossy direction still went through resolve_output_transcode"
+    assert all(k.get("decode") is True for _a, k in seen), seen
+
+
+def test_the_lossless_direction_still_uses_the_transcode_resolver(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "foto.jpg").write_bytes(b"x")
+
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    entries = [(str(tmp_path / "a"), str(tmp_path / "out"), 3)]
+    seen = []
+    orig = tr.resolve_output_transcode
+
+    def _spy(*a, **k):
+        seen.append(a)
+        return orig(*a, **k)
+
+    tr.resolve_output_transcode = _spy
+    try:
+        menu._manifest_output_collisions(entries, {".jpg"}, origin="jpeg", dest="jxl",
+                                         export_marker="_EXPORT")
+    finally:
+        tr.resolve_output_transcode = orig
+    assert seen, "the lossless direction stopped using resolve_output_transcode"
