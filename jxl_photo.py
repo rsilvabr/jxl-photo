@@ -2373,21 +2373,38 @@ class InteractiveMenu:
 
         # A manifest with mode-8 rows promises "DELETE originals", but the
         # children only delete with --delete-source — and nothing on this path
-        # ever asked. Mirror Step 4's mode-8 mark; the HHMM token itself is
-        # charged at execution time, after the user had the chance to dry-run.
+        # ever asked. The HHMM token itself is charged at execution time, after
+        # the user had the chance to dry-run.
+        #
+        # The QUESTION was keyed on mode 8 and the ANSWER was not: there is one
+        # delete_source for the whole workflow and the cmd builder appends
+        # --delete-source to EVERY entry, which the children now honour in every
+        # mode. So a manifest of mode-8 rows plus mode-3 rows asked about the
+        # mode-8 ones and then deleted the mode-3 sources too. Ask about what
+        # actually happens, and name the rows it will happen to.
+        _delete_modes = sorted({m for _, _, m in entries if m is not None})
         if any(m == 8 for _, _, m in entries):
+            _n = len(entries)
+            _other = [m for m in _delete_modes if m != 8]
+            _scope = (f"ALL {_n} entries" if _other else f"all {_n} mode-8 entries")
+            _extra = (f" — including the mode {'/'.join(str(m) for m in _other)} "
+                      f"row(s), whose originals are deleted just the same"
+                      if _other else "")
+            _q = (f"Manifest contains DELETE-mode (8) entries. Deleting is a run-wide "
+                  f"setting, so answering yes deletes the originals of {_scope}{_extra}. "
+                  f"Delete originals after conversion? (IRREVERSIBLE)")
             if RICH_AVAILABLE and console:
-                delete = Confirm.ask(
-                    "[bold red]Manifest contains DELETE-mode (8) entries[/bold red] — "
-                    "delete originals after conversion? (IRREVERSIBLE)", default=False)
+                console.print()
+                console.print(Panel(f"[bold red]{_q}[/bold red]", border_style="red"))
+                delete = Confirm.ask("[bold red]Delete originals?[/bold red]", default=False)
             else:
-                delete = input("Manifest contains DELETE-mode (8) entries — "
-                               "delete originals after conversion? (IRREVERSIBLE) [y/N]: "
-                               ).strip().lower().startswith('y')
+                print(f"\n{_q}")
+                delete = input("Delete originals? [y/N]: ").strip().lower().startswith('y')
             if delete:
                 workflow['delete_source'] = True
             else:
-                console_msg = "Mode-8 entries will run WITHOUT deleting originals (TIFF and JXL will coexist)."
+                console_msg = ("Every entry will run WITHOUT deleting originals "
+                               "(source and output will coexist).")
                 if RICH_AVAILABLE and console:
                     console.print(f"[yellow]{console_msg}[/yellow]")
                 else:
@@ -2665,11 +2682,38 @@ class InteractiveMenu:
                         child.EXPORT_MARKER = _saved
 
             # Transcoder directions: no single finder covers them (JPEG, PNG and
-            # JXL are scanned separately), so fall back to the extension count
-            # with the same flat/recursive split the children use.
+            # JXL are scanned separately), so count by extension with the same
+            # flat/recursive split the children use.
             it = root.rglob('*') if mode in _RECURSIVE_MANIFEST_MODES else root.glob('*')
-            return sum(1 for f in it
-                       if f.suffix.lower() in exts and f.is_file())
+            files = [f for f in it if f.suffix.lower() in exts and f.is_file()]
+
+            # ...and then through the child's OWN output resolver, because the
+            # extension count alone was wrong in exactly the modes this user
+            # runs most. The transcoder has no mode-6/7 finder: it scans
+            # everything and drops files outside the export marker by returning
+            # None from the resolver. Counting them anyway announced "23 file(s)"
+            # for a run that touches 3 — the same over-count fixed for the
+            # encoder and decoder in #269, still live here. The resolver returns
+            # a path for every other mode, so this filter costs nothing there.
+            try:
+                import jxl_jpeg_transcoder as _tr
+            except ImportError:
+                return len(files)
+            marker = (workflow.get('mode_config', {}) or {}).get('export_marker') \
+                or self.config.config.export_marker
+            _saved = _tr.EXPORT_MARKER
+            _was_disabled = _tr.logger.disabled
+            _tr.logger.disabled = True      # the resolver warns; this is a preview
+            try:
+                if marker:
+                    _tr.EXPORT_MARKER = marker
+                _decode = (origin == 'jxl')
+                return sum(1 for f in files
+                           if _tr.resolve_output_transcode(f, mode, root, _decode)
+                           is not None)
+            finally:
+                _tr.logger.disabled = _was_disabled
+                _tr.EXPORT_MARKER = _saved
         except (OSError, KeyError, AttributeError):
             return -1   # unreadable: the preview says so instead of claiming 0
 
@@ -4206,6 +4250,16 @@ class InteractiveMenu:
         # ignored it outside mode 8. Now that they honour it everywhere, a
         # mode-3 manifest with delete_source would have deleted originals with
         # no confirmation anywhere in the chain.
+        # Lossy + delete_skipped: the one combination with no provenance of any
+        # kind. execute_workflow asks this BEFORE dispatching mode 99, so the
+        # manifest path never reached it and the extra confirmation vanished for
+        # exactly the runs that touch the most files. The gate is idempotent
+        # (_lossy_skip_confirmed), so asking here cannot double up.
+        # (It turns delete_skipped off in place, in the very dict `advanced`
+        # already points at, so the cmd builder below sees the decision.)
+        if not self._confirm_lossy_delete_skipped(workflow):
+            return False
+
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
                             or advanced.get('delete_source')):
             if not self._confirm_archive_mode():
