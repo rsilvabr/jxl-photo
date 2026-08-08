@@ -531,9 +531,41 @@ class ConfigManager:
                     valid_fields = {k: v for k, v in data.items()
                                   if k in ToolConfig.__dataclass_fields__}
                     self.config = ToolConfig(**valid_fields)
+                    self._sanitise_presets()
             except Exception as e:
                 print(f"Warning: Corrupted config file: {e}. Using defaults.")
                 self.config = ToolConfig()
+
+    def _sanitise_presets(self) -> None:
+        """Drop presets that are not a name -> settings mapping.
+
+        The config file is a plain JSON the user can (and does) hand-edit, and
+        every consumer of `presets` assumed both levels were dicts: a list, or a
+        single preset saved as a string, took down the preset menu, --list-presets
+        and the main menu's counter with a traceback before anything could be
+        run. Discarding the malformed entries with a warning keeps the good ones
+        usable — and the file is only rewritten when the user saves, so nothing
+        is lost behind their back.
+        """
+        raw = self.config.presets
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            print(f"Warning: 'presets' in the config is a {type(raw).__name__}, not a "
+                  f"mapping of name -> settings. Ignoring it.")
+            self.config.presets = {}
+            return
+        clean, bad = {}, []
+        for name, body in raw.items():
+            if isinstance(name, str) and isinstance(body, dict):
+                clean[name] = body
+            else:
+                bad.append(str(name))
+        if bad:
+            print(f"Warning: ignoring {len(bad)} malformed preset(s) in the config: "
+                  f"{', '.join(sorted(bad)[:5])}"
+                  + (" ..." if len(bad) > 5 else ""))
+        self.config.presets = clean
 
     def save_config(self) -> None:
         try:
@@ -1388,6 +1420,23 @@ def _dest_folder_names(origin: str, dest: str) -> tuple:
         return ('converted_jxl', 'JXL_16bits' if origin == 'tiff' else 'converted_jxl')
     # jpeg / png outputs come from the transcoder's decode path
     return ('recovered_jpeg', 'recovered_jpeg')
+
+
+def _export_folder_name(origin: str, dest: str) -> str:
+    """The folder modes 6/7 create under the export marker, by direction.
+
+    Keep in sync with EXPORT_*_FOLDER in the scripts. The delete gate used to
+    hardcode "16B_JXL" for EVERY direction, so a JXL -> TIFF run about to erase
+    originals was told they would land somewhere they never do (16B_TIFF), and
+    a JPEG run was told the same about JXL_jpeg. The whole point of that gate is
+    that a wrong destination is visible before the user types the token.
+    """
+    if dest == 'tiff':
+        return '16B_TIFF'                       # jxl_tiff_decoder.EXPORT_TIFF_FOLDER
+    if dest == 'jxl':
+        # jxl_tiff_encoder.EXPORT_JXL_FOLDER vs the transcoder's own.
+        return '16B_JXL' if origin == 'tiff' else 'JXL_jpeg'
+    return 'JPEG_recovered'                     # transcoder EXPORT_JPEG_FOLDER
 
 
 class InteractiveMenu:
@@ -2782,8 +2831,9 @@ class InteractiveMenu:
             3: f"a '{m3_name}' subfolder in each source folder",
             4: "a renamed sibling folder (suffix swap)",
             5: "a sibling folder next to each source folder",
-            6: f"<{self.config.config.export_marker}>/16B_JXL/",
-            7: f"<{self.config.config.export_marker}>/16B_JXL/ (one subfolder only)",
+            6: f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest)}/",
+            7: (f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest)}/"
+                f" (one subfolder only)"),
             8: "the same folder as each source file (recursive)",
         }.get(mode, "the mode's destination")
         n = self._count_origin_files(workflow, mode)
@@ -4749,7 +4799,27 @@ class InteractiveMenu:
                     if mode == 1:
                         return src_root / conv_folder / (f.stem + out_ext)
                     if _child.__name__ == 'jxl_jpeg_transcoder':
-                        return _child.resolve_output_transcode(f, mode, src_root, origin == 'jxl')
+                        # The transcoder has TWO resolvers and this used
+                        # resolve_output_transcode for every direction — the
+                        # lossless JPEG<->JXL one. The lossy convert paths
+                        # (PNG, and JXL->JPEG without jbrd) land in different
+                        # folders, so the guard was comparing paths the run
+                        # would never write.
+                        #
+                        # It has not produced a wrong VERDICT, because both
+                        # entries were resolved by the same wrong function and
+                        # the difference is a constant folder name — a
+                        # collision under one mapping is a collision under the
+                        # other. Fixing it anyway: the next person to add a
+                        # per-direction rule to either resolver would inherit a
+                        # guard that silently disagrees with the run.
+                        _dec = origin == 'jxl'
+                        if dest in ('png', 'jpeg', 'jpg') and _dec:
+                            return _child.resolve_output_convert(
+                                f, mode, _child.CONVERT_OUTPUT_FOLDER, "",
+                                (dest if dest != 'jpg' else 'jpeg'),
+                                output_root=src_root, decode=True)
+                        return _child.resolve_output_transcode(f, mode, src_root, _dec)
                     return _child.resolve_output(f, mode, src_root)
 
                 # Which files would the child itself skip on its scan? Mirror
@@ -5218,9 +5288,11 @@ class InteractiveMenu:
         import threading
 
         # Cleared here rather than in _run_subprocess: the single-run path calls
-        # _stream_child directly, and a stale usage error would mislabel the
-        # NEXT run's safety abort.
+        # _stream_child directly, so a stale usage error would mislabel the NEXT
+        # run's safety abort — and a stale summary would report the PREVIOUS
+        # run's numbers for a child that died before emitting its own.
         self._last_child_usage_error = None
+        self._last_child_summary = None
 
         try:
             process = subprocess.Popen(
@@ -5305,9 +5377,7 @@ class InteractiveMenu:
         Exit code contract with the child scripts: 0 = success, 1 = some
         files failed, 2 = aborted, 3 = user declined a confirmation.
         """
-        # Cleared per run so a child that dies before emitting its summary
-        # cannot inherit the previous entry's numbers.
-        self._last_child_summary = None
+        # (_stream_child clears the per-run state, including this one.)
         return self._stream_child(cmd)
 
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:

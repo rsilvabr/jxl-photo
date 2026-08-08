@@ -163,10 +163,18 @@ _abort_reason = None
 
 
 def _reset_abort():
-    """Clear the latch. Called when a run starts (and by the tests)."""
+    """Clear the latch. Called when a run starts (and by the tests).
+
+    Also clears the per-run delete counters: they are run state exactly like the
+    latch, and a second run in the SAME process (the test suite, or anything
+    importing this module) inherited the first one's totals — so the summary
+    reported deletions that this run never made.
+    """
     global _abort_reason
     with _abort_lock:
         _abort_reason = None
+    for _k in _delete_stats:
+        _delete_stats[_k] = 0
 
 
 def _aborted():
@@ -2553,6 +2561,38 @@ def _source_path_id(src_path) -> str:
     return hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+# {(normcased path, size, mtime_ns): sha256 digest} for the run. A multi-page
+# TIFF is converted one PAGE at a time and each page asked for its source's
+# content id, so a 700 MB three-page scan was read 2.1 GB worth of times to
+# produce the same hash three times over.
+#
+# Keyed on size and mtime as well as the path, so a source edited mid-run is
+# never served a stale hash. No lock: two threads racing compute the SAME value
+# and the second store is a no-op.
+_content_id_cache = {}
+
+
+def _file_digest_cached(path) -> bytes:
+    """sha256 of one file's bytes, remembered for this run."""
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(str(path)), st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        hit = _content_id_cache.get(key)
+        if hit is not None:
+            return hit
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    digest = h.digest()
+    if key is not None:
+        _content_id_cache[key] = digest
+    return digest
+
+
 def _file_content_id(paths) -> str:
     """Stable id for a source's BYTES (one path, or a group of them in order).
 
@@ -2564,11 +2604,7 @@ def _file_content_id(paths) -> str:
         paths = [paths]
     outer = hashlib.sha256()
     for p in paths:
-        h = hashlib.sha256()
-        with open(p, "rb") as f:
-            for block in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(block)
-        outer.update(h.digest())
+        outer.update(_file_digest_cached(p))
     return outer.hexdigest()[:16]
 
 
@@ -2580,6 +2616,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
     caller treats as "cannot prove anything": fail closed.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
+    # normcase -> the exact key the caller will look up by.
+    index = {os.path.normcase(str(o)): str(o) for o in outputs}
     if not outputs:
         return markers
     batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
@@ -2618,9 +2656,20 @@ def _read_source_markers_batch(outputs: list) -> dict:
                         info["src"] = token[len(SRC_PREFIX):]
                     elif token.startswith(SRCSUM_PREFIX):
                         info["srcsum"] = token[len(SRCSUM_PREFIX):]
-                key = str(Path(src))
-                if key in markers:
-                    markers[key] = info
+                # normcase, like every other path comparison in the provenance
+                # layer: exiftool can hand back a differently-cased drive letter
+                # or flipped separators, and a lookup miss left the file with
+                # both markers None. That reads downstream as "no marker at
+                # all", so a file whose provenance is perfectly recorded was
+                # refused with "written by an older version" — a reason that
+                # sends the user looking for the wrong problem.
+                key = os.path.normcase(str(Path(src)))
+                if key in index:
+                    markers[index[key]] = info
+                else:
+                    logger.warning(f"Provenance: marker read came back for a path "
+                                   f"this run did not ask about, so it cannot be "
+                                   f"matched | {src}")
         except Exception as e:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
@@ -3928,16 +3977,25 @@ def main():
 
     # Validate the temp dir up front: a bad TEMP_DIR would otherwise crash a
     # worker mid-batch (TemporaryDirectory(dir=TEMP_DIR)).
-    if TEMP_DIR is not None:
+    #
+    # A DRY RUN validates without CREATING: a simulation that leaves two new
+    # folders on disk is not a simulation. It never writes into either one, so
+    # checking an existing path is enough there.
+    def _check_dir(path, label):
+        if path is None:
+            return
+        p = Path(path)
         try:
-            Path(TEMP_DIR).mkdir(parents=True, exist_ok=True)
+            if args.dry_run:
+                if p.exists() and not p.is_dir():
+                    parser.error(f"{label} is not a directory: {path}")
+                return
+            p.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            parser.error(f"TEMP_DIR is not usable: {TEMP_DIR} ({e})")
-    if args.staging is not None:
-        try:
-            Path(args.staging).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            parser.error(f"staging directory is not usable: {args.staging} ({e})")
+            parser.error(f"{label} is not usable: {path} ({e})")
+
+    _check_dir(TEMP_DIR, "TEMP_DIR")
+    _check_dir(args.staging, "staging directory")
 
     if args.sync:
         OVERWRITE = "smart"
@@ -4056,6 +4114,23 @@ def main():
     # call — it is what the flag promises — but the consequence has to be said
     # out loud: these outputs carry no record of which source made them, so a
     # later archive-and-delete run in a folder-collapsing mode will refuse them.
+    # These only gate the DELETION; without it they change nothing at all, and
+    # a user who passed them believes an archive is being checked when it is
+    # not. Same treatment --delete-skipped already gets.
+    if args.provenance is not None and not DELETE_SOURCE:
+        logger.warning(f"--provenance {args.provenance} has no effect without "
+                       f"--delete-source: it only decides whether an EXISTING output "
+                       f"may be overwritten and its source deleted. Nothing is checked "
+                       f"and nothing is deleted.")
+    elif args.provenance is not None and args.mode not in _COLLAPSING_MODES and not (
+            args.mode == 0 and args.output is not None):
+        logger.warning(f"--provenance {args.provenance} has no effect in mode "
+                       f"{args.mode}: the output path is derived from each source's own "
+                       f"folder, so two sources can never land on the same output.")
+    if args.no_adopt_scan and args.provenance != "adopt":
+        logger.warning("--no-adopt-scan has no effect without --provenance adopt: it "
+                       "only turns off the verification adoption performs.")
+
     if STRIP_METADATA and (DELETE_SOURCE or args.mode in _COLLAPSING_MODES
                            or (args.mode == 0 and args.output is not None)):
         logger.warning(
@@ -4466,7 +4541,13 @@ def main():
             args.summary_json,
             ok=len(all_items), overwritten=0,
             skipped=skipped_files + multipage_skipped,
-            errors=analyze_errors,
+            # + the refusals. They are already in `failures`, and reporting
+            # errors:0 next to a non-empty failure list made the wrapper's
+            # recap contradict itself. The refusal is a real prediction: those
+            # files would not be converted. The EXIT CODE is untouched — a
+            # simulation still returns 0, so a scripted dry-run-then-run flow
+            # keeps working.
+            errors=analyze_errors + len(provenance_failures),
             log_file=log_file,
             extras={
                 "Thumbnails excluded": _thumbnails_dropped["pages"],

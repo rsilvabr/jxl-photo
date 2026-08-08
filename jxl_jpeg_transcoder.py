@@ -201,10 +201,18 @@ _abort_reason = None
 
 
 def _reset_abort():
-    """Clear the latch. Called when a run starts (and by the tests)."""
+    """Clear the latch. Called when a run starts (and by the tests).
+
+    Also clears the per-run delete counters: they are run state exactly like the
+    latch, and a second run in the SAME process (the test suite, or anything
+    importing this module) inherited the first one's totals — so the summary
+    reported deletions that this run never made.
+    """
     global _abort_reason
     with _abort_lock:
         _abort_reason = None
+    for _k in _delete_stats:
+        _delete_stats[_k] = 0
 
 
 def _aborted():
@@ -796,6 +804,38 @@ def _source_path_id(src_path) -> str:
     return hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+# {(normcased path, size, mtime_ns): sha256 digest} for the run. A multi-page
+# TIFF is converted one PAGE at a time and each page asked for its source's
+# content id, so a 700 MB three-page scan was read 2.1 GB worth of times to
+# produce the same hash three times over.
+#
+# Keyed on size and mtime as well as the path, so a source edited mid-run is
+# never served a stale hash. No lock: two threads racing compute the SAME value
+# and the second store is a no-op.
+_content_id_cache = {}
+
+
+def _file_digest_cached(path) -> bytes:
+    """sha256 of one file's bytes, remembered for this run."""
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(str(path)), st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        hit = _content_id_cache.get(key)
+        if hit is not None:
+            return hit
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    digest = h.digest()
+    if key is not None:
+        _content_id_cache[key] = digest
+    return digest
+
+
 def _file_content_id(paths) -> str:
     """Stable id for a source's BYTES (one path, or a group of them in order).
 
@@ -807,11 +847,7 @@ def _file_content_id(paths) -> str:
         paths = [paths]
     outer = hashlib.sha256()
     for p in paths:
-        h = hashlib.sha256()
-        with open(p, "rb") as f:
-            for block in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(block)
-        outer.update(h.digest())
+        outer.update(_file_digest_cached(p))
     return outer.hexdigest()[:16]
 
 
@@ -823,6 +859,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
     caller treats as "cannot prove anything": fail closed.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
+    # normcase -> the exact key the caller will look up by.
+    index = {os.path.normcase(str(o)): str(o) for o in outputs}
     if not outputs:
         return markers
     batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
@@ -861,9 +899,20 @@ def _read_source_markers_batch(outputs: list) -> dict:
                         info["src"] = token[len(SRC_PREFIX):]
                     elif token.startswith(SRCSUM_PREFIX):
                         info["srcsum"] = token[len(SRCSUM_PREFIX):]
-                key = str(Path(src))
-                if key in markers:
-                    markers[key] = info
+                # normcase, like every other path comparison in the provenance
+                # layer: exiftool can hand back a differently-cased drive letter
+                # or flipped separators, and a lookup miss left the file with
+                # both markers None. That reads downstream as "no marker at
+                # all", so a file whose provenance is perfectly recorded was
+                # refused with "written by an older version" — a reason that
+                # sends the user looking for the wrong problem.
+                key = os.path.normcase(str(Path(src)))
+                if key in index:
+                    markers[index[key]] = info
+                else:
+                    logger.warning(f"Provenance: marker read came back for a path "
+                                   f"this run did not ask about, so it cannot be "
+                                   f"matched | {src}")
         except Exception as e:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
@@ -1091,7 +1140,10 @@ def setup_logger():
     ch.setFormatter(fmt)
     logger.addHandler(fh)
     logger.addHandler(ch)
-    _log_delete_summary()
+    # (No delete summary here: setup_logger runs BEFORE anything is deleted, so
+    # calling it printed "Sources DELETED: 0 | kept by a gate: 0" at the top of
+    # every archive run — a line that reads like a result and is only ever
+    # zeros. The real one is logged by each cmd_* at the end.)
     logger.info(f"Log: {log_file}")
     return log_file
 
@@ -3742,9 +3794,18 @@ def main():
         print("ERROR: --workers must be >= 1")
         sys.exit(1)
 
+    # A DRY RUN validates without CREATING: a simulation that leaves a new
+    # folder on disk is not a simulation. It never writes into staging, so
+    # checking an existing path is enough there.
     if args.staging is not None:
+        _stg = Path(args.staging)
         try:
-            Path(args.staging).mkdir(parents=True, exist_ok=True)
+            if args.dry_run:
+                if _stg.exists() and not _stg.is_dir():
+                    print(f"ERROR: staging directory is not a directory: {args.staging}")
+                    sys.exit(1)
+            else:
+                _stg.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             print(f"ERROR: staging directory is not usable: {args.staging} ({e})")
             sys.exit(1)

@@ -36,6 +36,8 @@ SHARED_HELPERS = [
     # archive written by one script unverifiable by another, and the delete
     # gates fail closed on that — silently keeping every source forever.
     "_source_path_id",
+    "_file_content_id",
+    "_file_digest_cached",
     "_read_source_markers_batch",
     "_provenance_ok",
     # Which runs need that check at all. A copy drifting would leave one backend
