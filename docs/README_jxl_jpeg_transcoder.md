@@ -331,6 +331,27 @@ Options:
   --no-verify        Skip MD5 verification (decode only)
   --delete-source    Delete source after a verified encode, in any mode
                      (requires confirmation)
+  --provenance path|content
+                     [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
+                     structure, so two sources with the same name in different
+                     folders land on the same output. Before overwriting an output
+                     that already exists -- and deleting the file that made it -- the
+                     run checks it really came from this source, using the markers a
+                     conversion writes (jxlphoto-src = location, jxlphoto-srcsum =
+                     image).
+                     path (default): compares the LOCATION. Free. A MOVED folder
+                     reads as a different file.
+                     content: also accepts matching source BYTES, so it survives
+                     moved folders -- slower, it reads and hashes every source.
+                     The lossless JXL->JPEG path uses checksums.md5 instead: its
+                     output must stay byte-identical and cannot carry a marker.
+                     A mismatch always fails closed: not converted, nothing
+                     overwritten or deleted.
+                     There is NO `adopt` here (the encoder has one): an output
+                     written before these markers existed carries no record, and the
+                     lossy directions have no way to prove after the fact which
+                     source produced it. Such outputs are refused in those modes --
+                     use a structure-preserving mode (0/1/3/8) for them.
   --delete-skipped   [with --delete-source] Also delete sources whose output ALREADY
                      EXISTS (reported as SKIP), so an archive interrupted between
                      the conversion and the unlink can be finished. What backs it up

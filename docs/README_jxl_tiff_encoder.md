@@ -299,7 +299,7 @@ Options:
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after their JXL is written to the mode's
                   destination and verified. Works in EVERY mode. IRREVERSIBLE
-  --provenance path|content
+  --provenance path|content|adopt
                   [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
                   structure, so two files with the same name in different folders
                   land on the same output. Before overwriting an output that already
@@ -311,6 +311,18 @@ Options:
                   content: also accepts a matching IMAGE, so it survives moved
                   folders -- slower, it reads and hashes every source. A mismatch
                   always fails closed: not converted, nothing overwritten or deleted
+                  adopt: for an archive built BEFORE these markers existed, which has
+                  no record at all. Each unmarked output is DECODED and compared
+                  against the source that would overwrite it, then STAMPED -- a
+                  one-time healing pass, after which the strict check applies again.
+                  A MISMATCHING marker is still refused: adopt relaxes "I cannot
+                  tell", never "I can tell it is wrong". This script is the only one
+                  with adopt -- the decoder and the transcoder have no way to prove
+                  the pairing after the fact
+  --no-adopt-scan [with --provenance adopt] Skip the decode-and-compare and TRUST the
+                  existing pairing, warning per file. The scan is what makes adoption
+                  safe rather than a rubber stamp; only defensible when you know the
+                  archive was never built with a mode that merges folders (2/4/5/6/7)
   --delete-skipped
                   [with --delete-source] Also delete sources whose output ALREADY
                   EXISTS -- the files reported as SKIP. Without it an archive

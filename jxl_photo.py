@@ -367,6 +367,23 @@ _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _supports_provenance_adopt(origin: str, dest: str) -> bool:
+    """Does the child script for this direction accept --provenance adopt?
+
+    Only jxl_tiff_encoder.py does. Its adopt scan decodes each unmarked JXL and
+    compares it against the TIFF that would overwrite it — a real proof of the
+    pairing, which is what makes stamping the marker safe rather than a rubber
+    stamp. jxl_tiff_decoder.py and jxl_jpeg_transcoder.py declare
+    `choices=["path", "content"]`, so passing adopt to either is not a weaker
+    check: it is argparse exit 2 before a single file is read, and inside a
+    manifest it takes every remaining entry down with it.
+
+    This gates the OFFER, not just the emission — a menu entry the target
+    cannot accept is worse than no menu entry at all.
+    """
+    return origin == 'tiff' and dest == 'jxl'
+
+
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Child scripts emit one machine-readable summary line per run when given
@@ -2815,7 +2832,14 @@ class InteractiveMenu:
         # same output. Modes 0/1/3/8 derive the output from the source's own
         # folder, so there is nothing to confuse and nothing to ask.
         if mode in _COLLAPSING_MODES:
+            # adopt exists only in the encoder (see _supports_provenance_adopt):
+            # offering it for the other directions built a command line their
+            # script rejects at argparse.
+            _adopt_ok = _supports_provenance_adopt(origin, dest)
+            _pv_choices = ["path", "content"] + (["adopt"] if _adopt_ok else [])
             pv_default = self.config.config.last_provenance or 'path'
+            if pv_default not in _pv_choices:
+                pv_default = 'path'
             pv_explain = (
                 f"Mode {mode} drops folder structure, so two files with the same name in "
                 f"different folders land on the same output. Before overwriting an output "
@@ -2824,21 +2848,24 @@ class InteractiveMenu:
                 f"  path    = compares the recorded LOCATION. Instant. Handles re-exporting "
                 f"a file in place.\n"
                 f"  content = also accepts a matching IMAGE. SLOWER (reads and hashes every "
-                f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.\n"
-                f"  adopt   = for an archive made BEFORE this check existed, which has no "
-                f"record at all. Each unrecorded output is VERIFIED against its source and "
-                f"then stamped, so this is a ONE-TIME pass: afterwards the strict check "
-                f"applies again.")
+                f"source), but NECESSARY IF YOU MOVED FOLDERS since archiving.")
+            if _adopt_ok:
+                pv_explain += (
+                    f"\n  adopt   = for an archive made BEFORE this check existed, which has "
+                    f"no record at all. Each unrecorded output is VERIFIED against its source "
+                    f"and then stamped, so this is a ONE-TIME pass: afterwards the strict "
+                    f"check applies again.")
+            _pv_list = "/".join(_pv_choices)
             if RICH_AVAILABLE and console:
                 console.print(f"\n[dim]{pv_explain}[/dim]")
                 provenance = Prompt.ask(
                     "[cyan]Match existing outputs by[/cyan]",
-                    choices=["path", "content", "adopt"], default=pv_default)
+                    choices=_pv_choices, default=pv_default)
             else:
                 print(f"\n{pv_explain}")
-                _pi = input(f"Match existing outputs by (path/content/adopt) "
+                _pi = input(f"Match existing outputs by ({_pv_list}) "
                             f"[{pv_default}]: ").strip().lower()
-                provenance = _pi if _pi in ("path", "content", "adopt") else pv_default
+                provenance = _pi if _pi in _pv_choices else pv_default
             workflow['provenance'] = provenance
             self.config.config.last_provenance = provenance
             self.config.config.last_adopt_scan = None
@@ -4795,6 +4822,41 @@ class InteractiveMenu:
                         overlaps.append((src_a, src_b))
         return overlaps
 
+    def _append_provenance_flags(self, cmd: List, advanced: Dict,
+                                 origin: str, dest: str) -> None:
+        """Emit --provenance (and --no-adopt-scan) for the child about to run.
+
+        One place instead of six: the six emission sites had already drifted —
+        the decoder's two appended --no-adopt-scan, the transcoder's two did
+        not, and all six passed `adopt` straight through to scripts that only
+        declare path/content.
+
+        A stored `adopt` (saved session, preset, or last_provenance carried over
+        from a TIFF->JXL run) is downgraded to `path` rather than emitted, and
+        the downgrade is announced. Downgrading is the SAFE direction: `path` is
+        the strict check, so the worst case is a refusal that keeps every source
+        — where emitting adopt is argparse exit 2, which converts nothing and,
+        in a manifest, kills every remaining entry.
+        """
+        pv = advanced.get('provenance')
+        if not pv:
+            return
+        if pv == 'adopt' and not _supports_provenance_adopt(origin, dest):
+            msg = (f"--provenance adopt is only available for {('TIFF -> JXL').upper()} "
+                   f"runs (only the encoder can verify the pairing before adopting it). "
+                   f"This {origin.upper()} -> {dest.upper()} run uses the strict 'path' "
+                   f"check instead: outputs with no record are REFUSED, not adopted, and "
+                   f"nothing is deleted for them.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{msg}[/yellow]")
+            else:
+                print(f"WARNING: {msg}")
+            pv = 'path'
+        cmd.extend(['--provenance', pv])
+        # Only the encoder has this flag, and it is inert without adopt.
+        if pv == 'adopt' and advanced.get('adopt_scan') is False:
+            cmd.append('--no-adopt-scan')
+
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
                                    origin: str, dest: str, workers: int,
                                    workflow: Dict, advanced: Dict) -> Optional[List]:
@@ -4853,10 +4915,7 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
-                    if advanced.get('adopt_scan') is False:
-                        cmd.append('--no-adopt-scan')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -4892,10 +4951,7 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
-                    if advanced.get('adopt_scan') is False:
-                        cmd.append('--no-adopt-scan')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if not workflow.get('add_preview', True):
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -4962,8 +5018,7 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -5274,10 +5329,7 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
-                    if advanced.get('adopt_scan') is False:
-                        cmd.append('--no-adopt-scan')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -5347,10 +5399,7 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
-                    if advanced.get('adopt_scan') is False:
-                        cmd.append('--no-adopt-scan')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -5458,8 +5507,7 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                if advanced.get('provenance'):
-                    cmd.extend(['--provenance', advanced['provenance']])
+                self._append_provenance_flags(cmd, advanced, origin, dest)
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 

@@ -10,6 +10,11 @@ Every one was reproduced against the shipped code before the fix:
     hunting for a collision that never existed. The manifest recap made it
     worse by adding "Nothing was deleted" — which is also not something exit 2
     can promise, since the disk-full abort fires part way through a run.
+  * #278 — --provenance adopt exists only in the encoder, but the wizard
+    offered it in every collapsing mode and all six emission sites passed the
+    answer through, so a JXL->TIFF or JPEG<->JXL delete run built a command
+    line that died at argparse. The decoder's own --none warning told the user
+    to pass a flag the decoder does not have.
 """
 
 import subprocess
@@ -108,3 +113,109 @@ def test_manifest_exit2_does_not_promise_nothing_was_deleted():
     assert "Nothing was deleted; fix the cause" not in src, (
         "the manifest abort message still promises nothing was deleted")
     assert "stay deleted" in src
+
+
+# ── #278: adopt is an encoder-only flag ─────────────────────────────────────
+
+CHILD_ADOPT_SUPPORT = [
+    ("jxl_tiff_encoder.py", True),
+    ("jxl_tiff_decoder.py", False),
+    ("jxl_jpeg_transcoder.py", False),
+]
+
+
+@pytest.mark.parametrize("script,supported", CHILD_ADOPT_SUPPORT)
+def test_which_children_actually_accept_adopt(script, supported):
+    """The predicate the wrapper trusts must match the argparse reality."""
+    r = subprocess.run(
+        [sys.executable, str(REPO / script), "in", "--provenance", "adopt"],
+        capture_output=True, text=True)
+    rejected = "invalid choice: 'adopt'" in (r.stderr + r.stdout)
+    assert rejected is not supported, f"{script}: adopt support changed"
+
+
+def test_supports_provenance_adopt_matches_the_children():
+    assert wp._supports_provenance_adopt("tiff", "jxl") is True
+    for origin, dest in (("jxl", "tiff"), ("jpeg", "jxl"), ("jxl", "jpeg"),
+                         ("jxl", "png"), ("png", "jxl")):
+        assert wp._supports_provenance_adopt(origin, dest) is False
+
+
+@pytest.mark.parametrize("origin,dest", [("jxl", "tiff"), ("jpeg", "jxl"),
+                                         ("jxl", "jpeg"), ("jxl", "png")])
+def test_stored_adopt_is_downgraded_not_emitted(origin, dest, capsys):
+    """A saved session or preset carrying adopt from a TIFF->JXL run must not
+    be replayed at a script that has no such choice."""
+    menu = _menu()
+    cmd = []
+    menu._append_provenance_flags(cmd, {"provenance": "adopt", "adopt_scan": False},
+                                  origin, dest)
+    assert "adopt" not in cmd
+    assert "--no-adopt-scan" not in cmd
+    assert cmd == ["--provenance", "path"], cmd
+
+
+def test_adopt_still_emitted_for_the_encoder():
+    menu = _menu()
+    cmd = []
+    menu._append_provenance_flags(cmd, {"provenance": "adopt", "adopt_scan": False},
+                                  "tiff", "jxl")
+    assert cmd == ["--provenance", "adopt", "--no-adopt-scan"]
+
+
+def test_no_adopt_scan_is_never_emitted_without_adopt():
+    """It is an encoder-only flag AND inert without adopt; the decoder's two
+    emission sites used to append it for path/content runs as well."""
+    menu = _menu()
+    for pv in ("path", "content"):
+        cmd = []
+        menu._append_provenance_flags(cmd, {"provenance": pv, "adopt_scan": False},
+                                      "tiff", "jxl")
+        assert cmd == ["--provenance", pv]
+
+
+def test_no_emission_site_passes_provenance_by_hand():
+    """Six sites had already drifted; they must all go through the one helper."""
+    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
+    assert "cmd.extend(['--provenance'" not in src.replace(
+        "cmd.extend(['--provenance', pv])", "")
+
+
+def test_wizard_builds_its_choices_from_the_predicate():
+    """Gating the OFFER, not just the emission: a menu entry the target script
+    cannot accept is worse than no menu entry at all. The wizard used to hand
+    Prompt.ask a hardcoded three-item list for every direction."""
+    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
+    assert '["path", "content", "adopt"]' not in src
+    assert '(path/content/adopt)' not in src
+    assert "_pv_choices = [\"path\", \"content\"] + ([\"adopt\"] if _adopt_ok else [])" in src
+    assert "_adopt_ok = _supports_provenance_adopt(origin, dest)" in src
+
+
+def test_decoder_none_warning_does_not_name_a_flag_it_lacks():
+    """The remedy the message named was impossible to follow."""
+    src = (REPO / "jxl_tiff_decoder.py").read_text(encoding="utf-8")
+    assert "pass --provenance adopt" not in src
+    assert "--provenance adopt has no counterpart here" in src
+
+
+def test_bug_tracker_no_longer_claims_adopt_in_three_scripts():
+    doc = (REPO / "docs" / "bug_tracking_since_v1.0.md").read_text(encoding="utf-8")
+    row = next(l for l in doc.splitlines() if l.startswith("| 271 |"))
+    assert "encoder, decoder, transcoder" not in row
+
+
+@pytest.mark.parametrize("readme", [
+    "README_jxl_tiff_encoder.md", "README_jxl_tiff_decoder.md",
+    "README_jxl_jpeg_transcoder.md",
+])
+def test_provenance_is_documented_in_every_backend_readme(readme):
+    doc = (REPO / "docs" / readme).read_text(encoding="utf-8")
+    assert "--provenance" in doc
+    if readme == "README_jxl_tiff_encoder.md":
+        assert "--no-adopt-scan" in doc
+        assert "path|content|adopt" in doc
+    else:
+        # Must say plainly that it has no adopt, since the wrapper's menu and
+        # the encoder's docs both mention one.
+        assert "NO `adopt`" in doc

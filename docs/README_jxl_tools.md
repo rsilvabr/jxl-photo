@@ -373,6 +373,27 @@ What backs that up depends on the direction, and `[D]` says which one you are in
 > delete — an unrelated file with the same name would pass. `[D]` charges a
 > **separate confirmation** (default **No**) before arming it there.
 
+**Matching an existing output to its source** (asked inside `[D]` for modes
+2/4/5/6/7): those modes drop folder structure, so two files with the same name in
+different folders land on the same output. Before overwriting an output that
+already exists — and deleting the file that made it — the run checks that the
+archive really came from this source:
+
+| Answer | What it compares | Cost | Available for |
+|---|---|---|---|
+| `path` (default) | the recorded **location** of the source | free | every direction |
+| `content` | also accepts matching source **bytes**, so it survives folders you MOVED since archiving | reads and hashes every source | every direction |
+| `adopt` | for an archive built **before this check existed**, which has no record at all: each unmarked output is decoded, compared against its source, and then stamped — a one-time healing pass | a full decode per unmarked output | **TIFF → JXL only** |
+
+A mismatch always fails closed: not converted, nothing overwritten, nothing
+deleted. `adopt` relaxes only "I cannot tell" — an output whose marker names a
+*different* source is still refused.
+
+> `adopt` is offered only for TIFF → JXL because only the encoder can prove the
+> pairing before trusting it. For JXL → TIFF and the JPEG↔JXL directions an
+> archive written before the markers existed has no migration path: use a
+> structure-preserving mode (0/1/3/8) for those folders.
+
 **Round-trip verification** (TIFF → JXL only, offered inside `[D]`): decodes each
 JXL and compares it with the source before deleting. With `--distance 0` the pixels
 must match **exactly**; on a lossy run it is a brightness + PSNR **sanity** check

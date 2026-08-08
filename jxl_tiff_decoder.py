@@ -3533,7 +3533,10 @@ Examples:
             "--none writes NO provenance marker (it keeps the minimal-metadata "
             "contract, and the marker is XMP): these TIFFs will carry no record of "
             "which JXLs made them. In modes 2/4/5/6/7 a later run with --delete-source "
-            "will refuse them until you pass --provenance adopt.")
+            "will REFUSE every one of them, and this script has no way to adopt them "
+            "after the fact — the encoder's --provenance adopt has no counterpart here. "
+            "Drop --none for runs you intend to re-run with --delete-source, or keep "
+            "using a mode that preserves folder structure (0/1/3/8) for them.")
 
     provenance_failures = []
     if DELETE_SOURCE and args.mode in _COLLAPSING_MODES:

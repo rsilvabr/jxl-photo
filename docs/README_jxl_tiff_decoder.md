@@ -404,6 +404,24 @@ Options:
                   no --staging flag. Never runs under --dry-run
   --delete-source    Delete source JXLs after successful decode. Works in EVERY
                      mode, not just 8. IRREVERSIBLE
+  --provenance path|content
+                     [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
+                     structure, so two JXLs with the same name in different folders
+                     land on the same TIFF. Before overwriting a TIFF that already
+                     exists -- and deleting the JXL that made it -- the run checks
+                     that TIFF really came from this source, using the markers a
+                     decode writes (jxlphoto-src = location, jxlphoto-srcsum = image).
+                     path (default): compares the LOCATION. Free. A MOVED folder
+                     reads as a different file.
+                     content: also accepts matching source BYTES, so it survives
+                     moved folders -- slower, it reads and hashes every source.
+                     A mismatch always fails closed: not decoded, nothing
+                     overwritten or deleted.
+                     There is NO `adopt` here (the encoder has one): a TIFF written
+                     before these markers existed, or written with --none, carries no
+                     record and this script cannot verify one after the fact. Such
+                     outputs are refused in those modes -- use a structure-preserving
+                     mode (0/1/3/8) for them, or re-decode without --none.
   --delete-skipped   [with --delete-source] Also delete sources whose TIFF ALREADY
                      EXISTS (reported as SKIP), so a decode interrupted between the
                      write and the unlink can be finished without redoing the whole
