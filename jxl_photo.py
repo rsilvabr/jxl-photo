@@ -374,6 +374,16 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # and never prints it. Must match SUMMARY_PREFIX in the child scripts.
 CHILD_SUMMARY_PREFIX = "##JXLSUM## "
 
+# argparse exits 2 on a bad command line, and the child scripts exit 2 on a
+# safety abort — the same code for "the wrapper built a command this script
+# cannot accept" and "the run stopped to protect your files". Reporting the
+# first as the second sent the user hunting for a collision that never existed
+# (a wrapper that emitted a flag the child does not have looked, from the
+# outside, exactly like a duplicate-output abort). argparse's error line is the
+# one thing that tells them apart: "<prog>: error: <what>", written to stderr,
+# which _stream_child merges into the output it already reads.
+_CHILD_USAGE_ERROR_RE = re.compile(r"^\s*(\S+\.py): error: (.+)$")
+
 # Where the wrapper writes its own combined log for a manifest run. Each entry
 # is a separate child with its own log file, so before this there was no single
 # place holding the totals or the full failure list.
@@ -1345,6 +1355,9 @@ class InteractiveMenu:
         # Summary parsed from the last child's ##JXLSUM## line, or None when it
         # produced none (crash, cancellation, older script).
         self._last_child_summary: Optional[Dict] = None
+        # argparse's own error line from the last child, or None. See
+        # _CHILD_USAGE_ERROR_RE: exit 2 means two very different things.
+        self._last_child_usage_error: Optional[str] = None
 
     def display_status(self, status: Dict[str, bool]) -> None:
         """Display status in single line at top (v3 style)"""
@@ -4196,6 +4209,7 @@ class InteractiveMenu:
             # Execute
             rc = self._run_subprocess(cmd)
             aborted = False
+            usage_err = None
             if rc == 0:
                 ok_count += 1
                 state = "ok"
@@ -4214,8 +4228,15 @@ class InteractiveMenu:
                 # of exit 2: the children already refuse to grind on, and the
                 # manifest loop relaunching them entry after entry put that
                 # behavior straight back.
+                #
+                # argparse also exits 2, and that case is NOT the same: the
+                # child never started, so no file was touched by this entry —
+                # and every remaining entry carries the same flags, so it would
+                # die identically. Stopping is still right; calling it a safety
+                # abort is not (see _CHILD_USAGE_ERROR_RE).
                 error_count += 1
-                state = "aborted"
+                usage_err = self._last_child_usage_error
+                state = "rejected" if usage_err else "aborted"
                 aborted = True
             else:
                 error_count += 1
@@ -4228,9 +4249,23 @@ class InteractiveMenu:
 
             if aborted:
                 not_started = total_entries - i
-                msg = ("Entry aborted (exit 2): stopping the manifest. "
-                       "Nothing was deleted; fix the cause and re-run — sync "
-                       "mode resumes where this stopped.")
+                if usage_err:
+                    msg = (f"Entry REJECTED by {Path(script).name}: {usage_err}. "
+                           f"This entry never started, and every remaining entry "
+                           f"carries the same flags, so the manifest stops here. "
+                           f"This is a WRAPPER bug — it built a command the script "
+                           f"does not accept — not a problem with your files.")
+                else:
+                    # "Nothing was deleted" was a promise the wrapper could not
+                    # keep: exit 2 is also the disk-full abort, which fires part
+                    # way through a run, and entries that already finished did
+                    # their own deleting. Only what came AFTER the abort is
+                    # certain.
+                    msg = ("Entry aborted (exit 2): stopping the manifest. "
+                           "Nothing was deleted after the abort — but sources "
+                           "deleted by the groups and entries that already "
+                           "completed stay deleted. Fix the cause and re-run — "
+                           "sync mode resumes where this stopped.")
                 if not_started:
                     msg += f" {not_started} remaining entry(ies) were NOT started."
                 self._print_error(msg)
@@ -5042,6 +5077,11 @@ class InteractiveMenu:
         import queue
         import threading
 
+        # Cleared here rather than in _run_subprocess: the single-run path calls
+        # _stream_child directly, and a stale usage error would mislabel the
+        # NEXT run's safety abort.
+        self._last_child_usage_error = None
+
         try:
             process = subprocess.Popen(
                 cmd,
@@ -5098,6 +5138,11 @@ class InteractiveMenu:
                 if line.lstrip().startswith(CHILD_SUMMARY_PREFIX):
                     self._last_child_summary = self._parse_child_summary(line)
                     continue
+                # Kept AND printed: the user should see argparse's own words,
+                # and the exit-2 reporting below needs to know it was argparse.
+                _usage = _CHILD_USAGE_ERROR_RE.match(line.rstrip())
+                if _usage:
+                    self._last_child_usage_error = _usage.group(2)
                 self._print_child_line(line)
         except KeyboardInterrupt:
             # Ctrl+C must also take the child down, not leave it running.
@@ -5451,7 +5496,16 @@ class InteractiveMenu:
             self._print_error("\n✗ Conversion cancelled (confirmation declined)")
             return False
         elif returncode == 2:
-            self._print_error("\n✗ Aborted by a safety check (see log above — e.g. duplicate output destinations or output/input collisions)")
+            if self._last_child_usage_error:
+                self._print_error(
+                    f"\n✗ The command line was rejected by {Path(script).name}: "
+                    f"{self._last_child_usage_error}")
+                self._print_error(
+                    "  Nothing ran and nothing was touched. This is a WRAPPER bug — it "
+                    "built a command this script does not accept — not a problem with "
+                    "your files. Please report it with the 'Executing:' line above.")
+            else:
+                self._print_error("\n✗ Aborted by a safety check (see log above — e.g. duplicate output destinations or output/input collisions)")
             return False
         else:
             self._print_error(f"\n✗ Conversion failed (code {returncode})")
