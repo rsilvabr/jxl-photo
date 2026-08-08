@@ -722,6 +722,18 @@ PAGE_PREFIX = "jxlphoto-page:"
 # split page so reconstruction does not depend on the filename (which breaks
 # for sources named *_page<N> or *_thumbnail).
 
+PAGES_PREFIX = "jxlphoto-pages:"
+# Must match the encoder's PAGES_XMP_PREFIX. Carries how many JXLs the split
+# produced, which is the only way to tell a COMPLETE group from a truncated
+# one: pages {0,1} of a three-page scan look exactly like a two-page scan.
+# Note it does not collide with PAGE_PREFIX under startswith() — the colon
+# ends "jxlphoto-page:" before the "s".
+#
+# Archives written before this marker existed carry none. "No count" means
+# "cannot tell", not "incomplete": refusing every multi-page archive anyone
+# already owns is bug #271's dead end, and the contiguity check below still
+# catches the missing-page cases that need no count at all.
+
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX. They record WHICH
@@ -764,6 +776,23 @@ PROVENANCE_CHECK = "path"
 # "content" -> also accepts matching source BYTES, so it survives moved
 #              folders, at the cost of reading each source. A superset of
 #              "path" on purpose (see _provenance_ok).
+
+ALLOW_INCOMPLETE_GROUPS = False
+# [DELETE_SOURCE only] Delete the JXLs of a multi-page split even when pages of
+# it are MISSING (see PAGES_PREFIX).
+#
+# The default refuses, because the refusal is the only thing standing between a
+# partial split and permanent loss: the TIFF written from the pages that DID
+# arrive is perfectly valid, so no integrity check, round-trip or checksum can
+# tell it is short, and once the JXLs are gone the missing page has nowhere left
+# to come from.
+#
+# The override exists because "a page is missing" is sometimes just true and
+# already known: the JXL was lost, and the user wants the TIFF built from what
+# survives rather than a folder that can never be archived. Turning it on never
+# changes what gets DECODED — an incomplete group is decoded either way, and the
+# warning naming the missing pages is printed either way. It only stops the
+# delete gate from keeping the sources.
 
 DELETE_SKIPPED = False
 # [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
@@ -1785,6 +1814,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             or t.startswith(SUBFILETYPE_PREFIX)
                             or t.startswith(DEPTH_FLAG)
                             or t.startswith(PAGE_PREFIX)
+                            or t.startswith(PAGES_PREFIX)
                             # Provenance markers the ENCODER writes so a later
                             # run can tell which source made an output. They
                             # describe the JXL, not the picture, and must not
@@ -2745,12 +2775,14 @@ def process_group(group_tasks, workers, mode, target_icc=None):
             # — the single-page TIFF written is valid and complete — so this is
             # the only place that can stop the deletion. Fail closed: a page
             # that exists only in the source must keep the source alive.
-            if os.path.normcase(str(task["main_jxl"])) in _incomplete_groups:
+            if (os.path.normcase(str(task["main_jxl"])) in _incomplete_groups
+                    and not ALLOW_INCOMPLETE_GROUPS):
                 _delete_stats["kept"] += 1
                 logger.warning(
                     f" KEEP (incomplete multi-page group; deleting would lose the "
                     f"missing pages) | {task['main_jxl'].name} | re-run against the "
-                    f"folder holding every page of the split")
+                    f"folder holding every page of the split, or pass "
+                    f"--allow-incomplete-groups if the missing page is gone for good")
                 continue
             # Delete only the sources whose pixels actually made it into the
             # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
@@ -2924,7 +2956,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False} for j in jxls}
     if not jxls:
         return markers
 
@@ -2979,7 +3011,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     values = rel
                 else:
                     values = str(rel).replace(";", ",").split(",")
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'thumb': False}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False}
                 for token in values:
                     token = str(token).strip()
                     if token.startswith(MULTIPAGE_MARKER_PREFIX):
@@ -2996,6 +3028,11 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     elif token.startswith(DEPTH_FLAG):
                         try:
                             info['depth'] = int(token[len(DEPTH_FLAG):])
+                        except ValueError:
+                            pass
+                    elif token.startswith(PAGES_PREFIX):
+                        try:
+                            info['pages'] = int(token[len(PAGES_PREFIX):])
                         except ValueError:
                             pass
                     elif token.startswith(PAGE_PREFIX):
@@ -3069,6 +3106,8 @@ def collect_multipage_groups(jxls: list) -> dict:
         return groups
 
     by_group: dict = {}
+    # {group key: {declared page counts}} — see PAGES_PREFIX.
+    by_group_total: dict = {}
     standalone: list = []
 
     for j in jxls:
@@ -3092,7 +3131,12 @@ def collect_multipage_groups(jxls: list) -> dict:
             # one TIFF with duplicated pages — and mode 8 would then delete
             # every copy after validating a single output. Pages of a genuine
             # split are always written to the same folder by the encoder.
-            by_group.setdefault((str(j.parent), info['group']), []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+            _gkey = (str(j.parent), info['group'])
+            by_group.setdefault(_gkey, []).append((j, page_idx, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth']))
+            # Kept beside the entries rather than inside them: every
+            # unpack site of an entry tuple would otherwise have to widen.
+            if info.get('pages'):
+                by_group_total.setdefault(_gkey, set()).add(info['pages'])
         else:
             # Standalone (no group marker): never treat as thumbnail based on
             # the filename alone — grouping is marker-based, and so is the
@@ -3132,19 +3176,46 @@ def collect_multipage_groups(jxls: list) -> dict:
             else:
                 main_entry = min(entries, key=lambda e: e[1])
         main_jxl = main_entry[0]
-        # A marked group with a SINGLE member that is not page 0 means the rest
-        # of the split is not in this run's file list (a single-file input, or a
-        # folder holding only part of the split). The decode still produces a
-        # valid TIFF — of one page — so nothing downstream can notice, and with
-        # --mode 8 --delete-source the JXL would be deleted for it. Say so, and
-        # mark the group so the delete gate can refuse (see process_group).
+        # Is every page of this split actually here? The decode of a partial
+        # group still produces a VALID TIFF — of fewer pages — so no downstream
+        # check can notice, and --delete-source would then destroy the JXLs that
+        # DID arrive, leaving the missing page nowhere at all. Say so, and mark
+        # the group so the delete gate can refuse (see process_group).
         entries_sorted = sorted(entries, key=lambda e: e[1])
-        if len(entries_sorted) == 1 and entries_sorted[0][1] != 0:
+        _declared = {n for n in by_group_total.get(_marker, set()) if n}
+        _why_incomplete = None
+        if len(_declared) > 1:
+            # The members disagree about how big the split was. Something is
+            # wrong here that this code cannot resolve: fail closed.
+            _why_incomplete = (f"its pages disagree about the size of the split "
+                               f"({sorted(_declared)})")
+        elif _declared:
+            _n = next(iter(_declared))
+            if len(entries_sorted) != _n:
+                _pages = ", ".join(str(e[1]) for e in entries_sorted)
+                _why_incomplete = (f"the split recorded {_n} page(s), and "
+                                   f"{len(entries_sorted)} are here (page {_pages})")
+        elif len(entries_sorted) == 1 and entries_sorted[0][1] != 0:
+            # No recorded count: an archive written before jxlphoto-pages
+            # existed. A single member that is not page 0 is still provably a
+            # fragment, and saying so needs no count.
+            #
+            # NOTHING MORE can be inferred without one. In particular a GAP in
+            # the page numbers is NOT evidence of a missing page:
+            # --thumbnail-mode exclude drops the thumbnail and leaves the real
+            # pages on their ORIGINAL indices, so a scan of [real, thumb, real]
+            # archives completely and correctly as pages {0, 2}. Reading that as
+            # incomplete would refuse the most common film-scan shape there is.
+            _why_incomplete = (f"only page {entries_sorted[0][1]} of the split is "
+                               f"present, and this archive records no page count")
+        if _why_incomplete:
             logger.warning(
-                f"Multi-page group is INCOMPLETE: only page {entries_sorted[0][1]} of "
-                f"group {_marker[1]} is present | {main_jxl.name} | decoding it as a "
-                f"single-page TIFF; point the run at the folder holding every page "
-                f"to rebuild the original")
+                f"Multi-page group is INCOMPLETE ({_why_incomplete}) | {main_jxl.name} | "
+                f"group {_marker[1]} | decoding the pages that ARE here; point the run at "
+                f"the folder holding every page to rebuild the original"
+                + ("" if ALLOW_INCOMPLETE_GROUPS else
+                   ". The sources will be KEPT — deleting them would lose the missing "
+                   "page for good (--allow-incomplete-groups overrides that)"))
             _incomplete_groups.add(os.path.normcase(str(main_jxl)))
         groups[main_jxl] = entries_sorted
 
@@ -3243,6 +3314,16 @@ Examples:
                              "between the write and the unlink can be finished without "
                              "re-decoding everything. Never acts on the timestamp alone: "
                              "the output must exist and pass the integrity check.")
+    parser.add_argument("--allow-incomplete-groups", action="store_true",
+                        help="[with --delete-source] Delete the JXLs of a multi-page "
+                             "split even when pages of it are MISSING. By default those "
+                             "sources are KEPT: the TIFF built from the pages that did "
+                             "arrive is a VALID file, so nothing downstream can tell it "
+                             "is short, and once the JXLs are gone the missing page has "
+                             "nowhere to come from. Use this when the missing page is "
+                             "already lost for good and you want the archive finished "
+                             "anyway. It never changes what is DECODED — an incomplete "
+                             "group is decoded, and named in a warning, either way.")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user.")
@@ -3301,7 +3382,7 @@ Examples:
 
     # Apply globals
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS
 
     if args.sync:
         OVERWRITE = "smart"
@@ -3312,6 +3393,8 @@ Examples:
         DELETE_SOURCE = True
     if args.delete_skipped:
         DELETE_SKIPPED = True
+    if args.allow_incomplete_groups:
+        ALLOW_INCOMPLETE_GROUPS = True
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
     if args.delete_confirm_off:
@@ -3377,6 +3460,16 @@ Examples:
     # Required tools first: a missing djxl/exiftool must be one clear message,
     # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
     # to standalone pages).
+    if ALLOW_INCOMPLETE_GROUPS and not DELETE_SOURCE:
+        logger.warning("--allow-incomplete-groups has no effect without --delete-source: "
+                       "it only lifts a gate in front of the deletion. Incomplete groups "
+                       "are decoded either way.")
+    elif ALLOW_INCOMPLETE_GROUPS:
+        logger.warning(
+            "--allow-incomplete-groups is ON: a multi-page split with pages MISSING will "
+            "have its remaining JXLs DELETED after the short TIFF is written. The missing "
+            "page cannot be recovered afterwards. Each affected group is named above.")
+
     if DELETE_SKIPPED and not DELETE_SOURCE:
         logger.warning("--delete-skipped has no effect without --delete-source: it only "
                        "widens which sources the deletion covers. Nothing will be deleted.")
@@ -3520,7 +3613,8 @@ Examples:
             for task in tasks:
                 if not _would_skip_group(task["entries"], task["final_tiff"]):
                     continue
-                if os.path.normcase(str(task["main_jxl"])) in _incomplete_groups:
+                if (os.path.normcase(str(task["main_jxl"])) in _incomplete_groups
+                        and not ALLOW_INCOMPLETE_GROUPS):
                     _would_keep.append((task["main_jxl"], "incomplete multi-page group"))
                 elif _verify_tiff_integrity(task["final_tiff"]):
                     _would_delete.append(task)

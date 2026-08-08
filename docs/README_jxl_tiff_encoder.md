@@ -836,6 +836,8 @@ Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so 
 
 Since v1.8.1, split pages also carry `jxlphoto-page:<N>` (the TIFF page index) and `jxlphoto-thumb` (thumbnail role) in `dc:Relation`. The decoder treats these as **authoritative** — the filename is only a fallback for JXLs encoded before v1.8.1. This makes reconstruction safe even when the source TIFF itself is named like a page (`scan_page3.tif`, `holiday_thumbnail.tif`).
 
+Since v1.10.4, every page also carries `jxlphoto-pages:<N>` — **how many JXLs the split produced**. It is what lets the decoder tell a complete split from a truncated one: pages `{0,1}` of a three-page scan otherwise look exactly like a two-page scan, and a decode of that writes a valid short TIFF whose sources `--delete-source` would then destroy. The count is the number of JXLs **written**, not the pages the source TIFF had — a thumbnail dropped by `--thumbnail-mode exclude` is not part of the group, so the decoder must not go looking for it. See "Incomplete splits" in the decoder README.
+
 ### Per-Page ICC Preservation (v1.7.0)
 
 When splitting, each page is encoded with its own effective ICC profile (read from the page's own ICC tag 34675; if absent, page N > 0 inherits IFD0's profile for color interpretation). Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`, so the decoder can reconstruct them without an ICC tag when the original page also had none.

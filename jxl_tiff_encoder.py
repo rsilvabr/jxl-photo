@@ -807,6 +807,21 @@ PAGE_XMP_PREFIX = "jxlphoto-page:"
 # it the decoder infers the page index from the FILENAME, which breaks when the
 # source TIFF itself is named *_page<N> or *_thumbnail.
 
+PAGES_XMP_PREFIX = "jxlphoto-pages:"
+# How many JXLs this split produced, written on every page of the group. The
+# page index alone cannot tell a COMPLETE group from a truncated one: pages
+# {0,1} of a three-page scan look exactly like a two-page scan, and the decoder
+# would write a valid two-page TIFF and let --delete-source destroy the JXLs it
+# did find — the third page then exists nowhere. The count is the only thing
+# that closes that hole.
+#
+# It counts the JXLs WRITTEN, not the pages the source TIFF had: a thumbnail
+# dropped by --thumbnail-mode exclude is not part of the group, so the decoder
+# must not go looking for it. Archives written before this marker existed carry
+# none, and the decoder treats "no count" as "cannot tell" rather than
+# "incomplete" — see _run_collapses_structure's comment for why refusing what
+# you cannot verify is the wrong default when the archive is already out there.
+
 THUMB_XMP_FLAG = "jxlphoto-thumb"
 # Marker appended to dc:Relation on thumbnail pages of a split (instead of
 # relying on the _thumbnail filename suffix).
@@ -1825,6 +1840,7 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-subfiletype:",
     "jxlphoto-depth:",
     "jxlphoto-page:",
+    "jxlphoto-pages:",
     "jxlphoto-icc:inherited",
     "jxlphoto-grayscale",
     "jxlphoto-thumb",
@@ -2706,7 +2722,8 @@ def _would_skip(tiff_path: Path, final_path: Path) -> bool:
 
 
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
-                is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3, multipage_group: str = None):
+                is_thumbnail: bool = False, subfiletype: int = 0, samples: int = 3,
+                multipage_group: str = None, multipage_total: int = None):
     """
     Converts a single TIFF page to JXL with proper XMP preservation.
     write_path: where the JXL is initially written (staging or final destination)
@@ -2719,6 +2736,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                      value is a stable group id written into XMP so the decoder
                      can reconstruct ONLY genuinely-split files and never merge
                      independently-named files that happen to look like pages.
+    multipage_total: how many JXLs the split produced. Written alongside the
+                     group id so the decoder can tell a complete group from a
+                     truncated one (see PAGES_XMP_PREFIX).
     """
     # The pool submits every task up front, so a run that has given up cannot
     # stop scheduling — it stops HERE instead. Queued files return untouched
@@ -3064,6 +3084,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         # reconstruction order/naming.
                         "-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx),
                     ]
+                    if multipage_total:
+                        relation_args.append(
+                            "-XMP-dc:Relation+=" + PAGES_XMP_PREFIX + str(multipage_total))
                     if is_thumbnail:
                         relation_args.append("-XMP-dc:Relation+=" + THUMB_XMP_FLAG)
                     if icc_inherited and page_idx > 0:
@@ -3356,15 +3379,20 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         else:
             write_jxl = final_jxl
         tiff_key = str(tiff.resolve())
-        group_id = _make_group_id(tiff) if outputs_per_tiff.get(tiff_key, 0) > 1 else None
-        tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype, samples, group_id))
+        _n_out = outputs_per_tiff.get(tiff_key, 0)
+        group_id = _make_group_id(tiff) if _n_out > 1 else None
+        # Every page of a TIFF resolves to the SAME output folder, and this
+        # group holds one folder, so _n_out is the whole split — not a slice.
+        group_total = _n_out if group_id else None
+        tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype,
+                      samples, group_id, group_total))
 
     moved_finals = set()
 
     def _move_dest_from_staging(dest_tasks: list, status_map: Dict):
         """Bulk-move one destination folder's outputs out of staging."""
         moved = 0
-        for tiff, write_jxl, final_jxl, page_idx, _, _, _, _ in dest_tasks:
+        for tiff, write_jxl, final_jxl, page_idx, _, _, _, _, _ in dest_tasks:
             status = status_map.get((str(tiff), page_idx), "error")
             if status not in ("ok", "overwrite"):
                 # "aborted" is as silent as "skipped": nothing was written, so
@@ -3405,8 +3433,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     results = []
     status_map: Dict = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g): (t, w, f, p, th, sft, spl, g)
-                   for t, w, f, p, th, sft, spl, g in tasks}
+        futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g, gt):
+                   (t, w, f, p, th, sft, spl, g, gt)
+                   for t, w, f, p, th, sft, spl, g, gt in tasks}
         for fut in as_completed(futures):
             task = futures[fut]
             try:
@@ -3453,7 +3482,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         # Index tasks by final path ONCE (the old nested loop was O(n^2)
         # and rebuilt the result set for every source TIFF).
         by_final = {}
-        for _, _, final_jxl, _, _, _, _, _ in tasks:
+        for _, _, final_jxl, _, _, _, _, _, _ in tasks:
             by_final[str(final_jxl)] = final_jxl
 
         for tiff_key, tiff_results in results_by_tiff.items():

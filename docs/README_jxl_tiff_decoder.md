@@ -422,6 +422,15 @@ Options:
                      record and this script cannot verify one after the fact. Such
                      outputs are refused in those modes -- use a structure-preserving
                      mode (0/1/3/8) for them, or re-decode without --none.
+  --allow-incomplete-groups
+                     [with --delete-source] Delete the JXLs of a multi-page split
+                     even when pages of it are MISSING. By default those sources
+                     are KEPT: the TIFF built from the pages that did arrive is a
+                     VALID file, so nothing downstream can tell it is short, and
+                     once the JXLs are gone the missing page has nowhere to come
+                     from. Use this when that page is already lost for good.
+                     It never changes what is DECODED -- an incomplete group is
+                     decoded, and named in a warning, either way.
   --delete-skipped   [with --delete-source] Also delete sources whose TIFF ALREADY
                      EXISTS (reported as SKIP), so a decode interrupted between the
                      write and the unlink can be finished without redoing the whole
@@ -680,6 +689,41 @@ Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thum
 - `--no-reconstruct-multipage` — disable multi-page reconstruction entirely
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
+
+### Incomplete splits (v1.10.4)
+
+A split that arrives with **pages missing** — a JXL lost, moved, or a run pointed
+at a folder holding only part of it — still decodes to a perfectly **valid**
+TIFF, just a shorter one. Nothing downstream can tell: it passes the integrity
+check, and there is no checksum for "how many pages should there be". With
+`--delete-source` the JXLs that *did* arrive were then deleted, and the missing
+page had nowhere left to come from.
+
+Every page of a split now records how many the split produced
+(`jxlphoto-pages:<N>` in `dc:Relation`), and a group whose members do not add up
+is reported and its sources **kept**:
+
+```
+Multi-page group is INCOMPLETE (the split recorded 3 page(s), and 2 are here
+(page 0, 1)) | scan.jxl | decoding the pages that ARE here ...
+KEEP (incomplete multi-page group; deleting would lose the missing pages)
+```
+
+The TIFF is still written either way — the refusal is about **deleting**, never
+about decoding.
+
+- **A gap in the page numbers is not, by itself, incomplete.**
+  `--thumbnail-mode exclude` drops the thumbnail page and leaves the real pages
+  on their original indices, so an ordinary film scan of `[real, thumb, real]`
+  archives completely and correctly as pages `{0, 2}`. Only the recorded count
+  decides.
+- **Archives written before v1.10.4 carry no count.** "No count" means "cannot
+  tell", not "incomplete", so they are not refused — a group of exactly one page
+  that is not page 0 is still caught, since that needs no count.
+- `--allow-incomplete-groups` deletes the remaining JXLs anyway. For when the
+  missing page is genuinely gone and you want the archive finished rather than a
+  folder that can never be cleared. The warning naming the missing pages is
+  printed either way.
 
 ### Per-Page ICC Preservation (v1.7.0)
 
