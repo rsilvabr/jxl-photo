@@ -152,6 +152,11 @@ py jxl_photo.py --run-preset nightly-sync --dry-run
 py jxl_photo.py --run-preset nightly-sync --overwrite
 ```
 
+The only other command-line flag is `--recheck`, which re-runs the dependency
+detection (cjxl/djxl/exiftool/ImageMagick) and refreshes what the status line at
+the top of the menu reports — use it after installing or moving a tool, instead
+of wondering why the menu still shows it as missing.
+
 `--run-preset` runs once and exits — safe to point a scheduled task at, since it
 never waits on stdin.
 

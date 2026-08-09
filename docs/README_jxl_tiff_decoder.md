@@ -295,6 +295,14 @@ EXPORT_JXL_SUBFOLDER = ""
 
 ### Safety confirmation (DELETE_SOURCE)
 
+> **Changed in v2.0.0 — read this if you have a saved command.** `--delete-source`
+> used to be honoured **in mode 8 only**: outside it the flag was accepted and
+> silently ignored. It now works in **every** mode, so a stored command or
+> scheduled task using it with any other mode deleted nothing before and deletes
+> the originals now. Deleting is a separate opt-in from the output layout, which
+> is what makes "convert into a separate tree and drop the masters" possible at
+> all — but it means the flag has to be read as written.
+
 When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`, the script asks for confirmation 
 before deleting any source file. This happens once at startup, before any conversion begins.
 
@@ -446,6 +454,21 @@ Options:
                      [Mode 7] Only process JXLs inside this subfolder of the
                      export marker (default: script setting, empty = all)
   --dry-run          Preview operations without converting
+  --summary-json     Emit ONE machine-readable line per run:
+                     `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`
+                     on stdout, in addition to the normal log. jxl_photo.py
+                     passes this to every manifest child and consumes the line
+                     to total a multi-entry run; it is never printed to the
+                     user. Safe to use in your own scripts -- the prefix is
+                     stable and the payload is JSON.
+  --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
+                     setting in the script). Matched case-insensitively on
+                     folder names that START or END with it.
+  --thumbnail-suffix S
+                     Filename suffix that marks a thumbnail JXL (default: the
+                     THUMBNAIL_SUFFIX setting, `_thumbnail`). Only a FALLBACK:
+                     the encoder's `jxlphoto-thumb` marker wins when present, so
+                     a third-party `holiday_thumbnail.jxl` is treated as a photo
 ```
 
 ### Exit codes
@@ -690,7 +713,7 @@ Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thum
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
-### Incomplete splits (v1.10.4)
+### Incomplete splits (v2.0.0)
 
 A split that arrives with **pages missing** — a JXL lost, moved, or a run pointed
 at a folder holding only part of it — still decodes to a perfectly **valid**
@@ -717,7 +740,7 @@ about decoding.
   on their original indices, so an ordinary film scan of `[real, thumb, real]`
   archives completely and correctly as pages `{0, 2}`. Only the recorded count
   decides.
-- **Archives written before v1.10.4 carry no count.** "No count" means "cannot
+- **Archives written before v2.0.0 carry no count.** "No count" means "cannot
   tell", not "incomplete", so they are not refused — a group of exactly one page
   that is not page 0 is still caught, since that needs no count.
 - `--allow-incomplete-groups` deletes the remaining JXLs anyway. For when the

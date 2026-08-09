@@ -26,11 +26,17 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## Current version
 
-**v1.9.1** (2026-08-02) — stable, recommended for everyone. A run now measures how much space it needs before it starts, stops cleanly instead of grinding when a disk fills, shows progress during a slow folder scan, reports what it left in staging, and manifest runs no longer stall silently before starting.
+**v2.0.0** (2026-08-09) — the archive-and-delete release. Converting into a separate tree and dropping the originals is now a supported workflow instead of something you assembled by hand, and everything around that is built to fail closed: a source is deleted only after its output is written, verified at its final path, and proven to have come from *that* source.
 
-[Release notes](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1) · [What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.4)
+[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1)
 
-> **If you script the tools:** since v1.9.0 a run that fills its output volume **aborts and exits 2** instead of failing every remaining file and exiting 1 — the retryable case. Details in the [changelog](#changelog).
+> ### ⚠️ v2.0.0 is a major version because two things changed under existing command lines
+>
+> **1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
+>
+> **2. An archive made before this release can be refused.** Runs that delete sources in a folder-collapsing mode (2/4/5/6/7, and mode 0 with an output folder) now check that the existing output really came from the source about to replace it. Outputs written before v2.0.0 carry no such record, so they are refused rather than overwritten. For TIFF → JXL, `--provenance adopt` verifies and stamps them in a single pass; the decoder and the transcoder have no equivalent yet — use a structure-preserving mode (0/1/3/8) for those folders.
+>
+> Read [Upgrading from v1.9.1](#upgrading-from-v191) before running anything destructive. Nothing about ordinary conversion changed: same pixels, same ICC, same metadata.
 
 ---
 
@@ -57,6 +63,27 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - Parallel processing (tested up to 32 workers)
 - Sync mode (reconvert only changed files)
 - Staging SSD support for large collections
+- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`)
+
+### 5. **Archive and replace** *(v2.0.0)*
+- `--delete-source` in **every** mode — convert into a separate tree and drop the originals
+- The source is removed only after its output is written to its **final** path, passes an integrity check there, and (with `--verify-roundtrip`) decodes back to the source pixels
+- `--delete-skipped` finishes an archive interrupted between the conversion and the unlink
+- Three confirmations before anything is deleted, the last one a time token that cannot be answered by reflex
+
+### 6. **Provenance: which source made this output** *(v2.0.0)*
+- The folder-collapsing modes let two files with the same name land on the same output. Every conversion records **which source it came from** (`jxlphoto-src` / `jxlphoto-srcsum` in XMP), so a later delete run refuses to overwrite one archive with an unrelated photo
+- `--provenance path` (default, free) · `content` (survives folders you moved) · `adopt` (TIFF → JXL only: verifies and stamps an archive built before this existed, one time)
+- A mismatch always fails closed: not converted, nothing overwritten, nothing deleted
+
+### 7. **Multi-page and film scans**
+- Split each page of a multi-page TIFF into its own JXL and reconstruct the original later — per-page ICC, bit depth, grayscale and `SubfileType` all restored (the IR page of a scan keeps its role)
+- A split that arrives with **pages missing** is detected and its sources kept: the short TIFF it would produce is a perfectly valid file, so nothing downstream could tell
+
+### 8. **Built for unattended runs**
+- Exit codes: `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation
+- `--summary-json` emits one machine-readable line per run; the wrapper consumes it to total a multi-entry manifest
+- A full output volume stops the run instead of failing every remaining file one by one
 
 ---
 
@@ -570,21 +597,68 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-### Unreleased — post-v1.9.1 audit fixes
+### What's new — v2.0.0 (current stable)
 
-Ten fixes from a four-script audit, validated against real Capture One exports and the 738 MB RGB+IR film scans. The conversion core came out clean (lossless round trips are pixel-identical for RGB, grayscale, gray+alpha, RGBA and 8-bit; lossy `d=0.1` shows no colour bias even with the 217 KB SilverFast profile); everything below is about which runs get refused, what a dry run may touch, and what reaches the log.
+**Released 2026-08-09.** Everything below landed after v1.9.1, across seven internal audit rounds. Ordinary conversion is unchanged — same pixels, same ICC, same metadata, validated again on real Capture One exports and the 756 MB RGB+IR film scans. What changed is everything around the moment a file is **deleted**.
 
-- **The manifest collision guard was skipping the modes that actually collide.** v1.9.1 skipped the scan for modes 0/1/3/6/7/8 on the premise that each entry writes inside its own Source tree. That is wrong for mode 0, which honours the Destination column, and for modes 6/7, which write to `<marker>/16B_JXL` — a **sibling** of the Source, shared by every entry under the same marker. Two sibling sources under one `_EXPORT` produced a single output, with the second entry reporting `SKIP (sync: up to date)` and the run exiting 0. Modes 1/3/8 still skip the scan, and so do 6/7 when each entry has its own marker — the ordinary one-entry-per-export-folder manifest still starts immediately.
-- **`--clean-staging` no longer deletes anything during `--dry-run`** (all three scripts). It used to sweep at argument-parsing time, before the dry-run gate.
-- **A manifest now stops when a child aborts (exit 2)** instead of launching every remaining entry against the same full disk.
-- **Scanner IR pages keep their role.** `SubfileType=4` (MASK) was being downgraded to 2 on decode, so a film scan's IR page came back as an ordinary extra page.
-- **The transcoder's `TEMP2_DIR` setting works again** — it was being overwritten with `None` on every run, so editing it in the script did nothing despite being documented.
-- **Messages that used to vanish now reach the log** — the `--distance` clamp warning and the whole `--clean-staging` sweep report were emitted before the logger was configured.
-- Smaller: a vanished file mid-run no longer surfaces as a bare "error" in the transcoder; the space estimate no longer skips a destination folder that does not exist yet (i.e. the first run); mode 1 says so when it ignores an output folder you passed.
+#### Upgrading from v1.9.1
 
-### What's new — v1.9.1 (current stable)
+Two behaviour changes can affect a command line you already have. Both are in the destructive path; nothing else needs attention.
 
-**Released 2026-08-02, recommended for everyone.** This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
+**1. `--delete-source` is honoured in every mode.** v1.9.1 had `if DELETE_SOURCE and mode == 8` in all three scripts — outside mode 8 the flag was accepted and ignored. If you have a saved command, preset, manifest or scheduled task using `--delete-source` with any other mode, it deleted nothing before and deletes the originals now.
+
+*What to do:* re-read any stored command that carries `--delete-source`. If the intent was "keep both", drop the flag. If the intent was archival, it now works as written — try it on one folder with `--dry-run` first, which reports exactly which sources would go.
+
+**2. Outputs written before v2.0.0 can be refused.** In the folder-collapsing modes — 2, 4, 5, 6, 7, and now mode 0 when given an output folder — two sources in different folders can resolve to the same output. A run that overwrites an existing output *and* deletes the source that produced it would destroy the earlier photo, whose own original is already gone. So every conversion now records which source made it, and a delete run refuses an output it cannot tie to the source in front of it. An archive built before this release carries no such record.
+
+*What to do, by direction:*
+
+| Direction | Migration |
+|---|---|
+| TIFF → JXL | `--provenance adopt` once. Each unrecorded output is decoded, compared against its source, and stamped — a one-time healing pass, after which the strict check applies again. `--no-adopt-scan` skips the verification if you would rather trust the pairing. |
+| JXL → TIFF, JPEG ↔ JXL | No adopt yet. Use a structure-preserving mode (0/1/3/8) for those folders, where nothing can collide and nothing is refused. |
+
+**Also worth knowing if you script the tools:** a provenance refusal is a failure — it counts into the error total and exits `1`, where a refused run used to exit `0`. And outputs now carry `jxlphoto-*` markers in `XMP-dc:Relation`; they are stripped from anything this toolkit reconstructs, so a round trip is unaffected.
+
+#### Archive and replace
+
+- **`--delete-source` works in every mode (0–8)**, in all three scripts. Convert into a separate tree and drop the originals — the workflow that was previously impossible without doing the move yourself.
+- A source is deleted only when: every page of it converted **this run**; no page was dropped by the multi-page policy; the output exists at its **final** path (and if staging was used, the move there actually succeeded — a stale file already sitting there does not count); it passes the integrity check **there**; and, with `--verify-roundtrip`, it decodes back to the source pixels.
+- **`--verify-roundtrip`** *(TIFF → JXL)* — the only gate that looks at pixels rather than at file structure. At `--distance 0` the decode must be identical; on a lossy run it is a brightness + PSNR sanity check that catches a black or scrambled encode. Opt-in: it costs one full decode per output.
+- **`--delete-skipped`** — also delete sources whose output already exists, so an archive interrupted between the conversion and the unlink can be finished without re-encoding the library. Never acts on the timestamp: the output must exist and pass its checks.
+- **Three gates before anything goes**, each more specific than the last: a plain y/N, then the concrete consequence (how many files, from which folder, to where), then a time token that cannot be answered by reflex. A dry run never charges the token.
+
+#### Provenance
+
+- Every conversion records **which source produced it** — `jxlphoto-src` (the location) and `jxlphoto-srcsum` (the bytes), in the XMP `dc:Relation` bag.
+- `--provenance path` (default, free) compares the recorded location · `content` also accepts matching source bytes, so it survives folders you moved · `adopt` (**TIFF → JXL only**) verifies and stamps an archive built before the markers existed.
+- A mismatch always fails closed: not converted, nothing overwritten, nothing deleted. `adopt` relaxes "I cannot tell", never "I can tell it is wrong".
+- The check also covers **mode 0 with an output folder**, which flattens every source into that folder exactly like mode 2.
+
+#### Multi-page and film scans
+
+- A split now records **how many JXLs it produced** (`jxlphoto-pages`). A group that arrives with pages missing is reported and its sources kept — the short TIFF it produces is a perfectly valid file, so no integrity check, round trip or checksum downstream could tell it was incomplete.
+- `--allow-incomplete-groups` deletes anyway, for a page that is genuinely lost.
+- A gap in the page numbers is **not** treated as a missing page: `--thumbnail-mode exclude` drops the thumbnail and leaves the real pages on their original indices, so the ordinary `[real, thumb, real]` scan archives completely as pages `{0, 2}`.
+- Scanner IR pages keep their role — `SubfileType=4` was being downgraded to 2 on decode.
+
+#### Robustness
+
+- **A failed move out of staging no longer leaves a truncated file** at the destination with a fresh timestamp, which smart-sync would then skip forever. A destination volume that is full stops the run instead of producing one failure line per remaining file.
+- **`--dry-run` touches nothing.** It no longer creates the staging or temp folders while validating them, and no longer stamped provenance markers into real files.
+- **Refusals reach the exit code and the summary** in all three scripts and all their commands — an auto-mode run that refused every file used to exit 0 with an empty failure list.
+- **A rejected command line says so**: the wrapper tells a usage error apart from a safety abort instead of reporting both as "aborted by a safety check".
+- A manifest stops when a child aborts, `--clean-staging` never sweeps during a dry run, and messages emitted before the logger was configured now reach the log.
+- Flags that do nothing in the given combination say so instead of looking effective.
+
+#### Under the hood
+
+- 121 new regression tests (830 → 973), every one verified failing against the code before its fix.
+- A parity test pins the helpers the four scripts deliberately duplicate, so a fix applied to one copy cannot silently miss the others.
+
+### v1.9.1 — previous stable
+
+**Released 2026-08-02, superseded by v2.0.0 and kept here for reference.** This is the release where the tool stops flying blind: a run now measures how much space it will need before it starts, stops cleanly instead of grinding when a disk fills, says something during a slow folder scan instead of looking frozen, and reports what it left behind in staging.
 
 v1.9.1 itself is a small fix on top of v1.9.0: **manifest runs no longer stall silently before starting.** The cross-entry collision guard skips its full recursive scan for the per-source output modes (0/1/3/6/7/8), where every entry writes inside its own Source tree and a cross-entry collision is impossible — mode 6/7 manifests over large libraries now start immediately. When the scan does run (modes 2/4/5, where entries can share an output folder), each entry prints `Collision check: scanning <folder> ...` so the wait is visible. No changes to conversion logic; safe update for everyone.
 
@@ -605,7 +679,7 @@ Full release notes: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 ### v1.8.4 — previous stable
 
-**Released 2026-07-28, superseded by v1.9.1 and kept here for reference.** Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
+**Released 2026-07-28, superseded by v2.0.0 and kept here for reference.** Adds `--run-preset NAME`, which runs a saved preset without the menu and exits, so a recurring sync can live in Task Scheduler or cron. Sync is the default (`--overwrite` to redo everything) and `--dry-run` is never inherited from the stored run; presets that delete sources are refused unattended. `--list-presets` shows what is saved. Everything below came with v1.8.3 and is unchanged.
 
 > **Breaking change (inherited from v1.8.0):** in `jxl_jpeg_transcoder.py`, modes **4 and 5 were swapped** — **4 = folder rename**, **5 = sibling folder**. Swap them in saved commands and manifests.
 
@@ -629,7 +703,8 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v1.9.1** | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
+| **v2.0.0** | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
+| v1.9.1 | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
 | v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
 | v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
 | v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |

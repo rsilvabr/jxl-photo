@@ -210,13 +210,21 @@ DELETE_SOURCE = False
 # back to the source pixels.
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
-# — Safety (mode 8 + DELETE_SOURCE only) —
+# — Safety (DELETE_SOURCE, any mode) —
 DELETE_CONFIRM = True
 # True  → require interactive confirmation before deleting source files
 # False → skip confirmation (for automation only)
 ```
 
-#### Safety confirmation (mode 8 + DELETE_SOURCE)
+#### Safety confirmation (DELETE_SOURCE)
+
+> **Changed in v2.0.0 — read this if you have a saved command.** `--delete-source`
+> used to be honoured **in mode 8 only**: outside it the flag was accepted and
+> silently ignored. It now works in **every** mode, so a stored command or
+> scheduled task using it with any other mode deleted nothing before and deletes
+> the originals now. Deleting is a separate opt-in from the output layout, which
+> is what makes "convert into a separate tree and drop the masters" possible at
+> all — but it means the flag has to be read as written.
 ```
 When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 - **Lossless:** type `yes` to confirm
@@ -355,6 +363,23 @@ Options:
                     faithful multipage/grayscale reconstruction is not possible)
   --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
   --dry-run         Preview operations without converting
+  --summary-json  Emit ONE machine-readable line per run:
+                  `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`
+                  on stdout, in addition to the normal log. jxl_photo.py
+                  passes this to every manifest child and consumes the line
+                  to total a multi-entry run; it is never printed to the
+                  user. Safe to use in your own scripts -- the prefix is
+                  stable and the payload is JSON.
+  --export-marker M
+                  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
+                  setting in the script). Matched case-insensitively on
+                  folder names that START or END with it.
+  --icc-cache-dir D  Where the ICC round-trip test caches its verdicts (default:
+                  the ICC_CACHE_DIR_OVERRIDE setting, else a folder beside the
+                  script). One entry per profile; see "ICC strategy" below
+  --clear-icc-cache  Delete those cached verdicts and exit. Use it after
+                  replacing a profile that the cautious strategy has already
+                  judged
   --no-preflight  Skip the pre-run space estimate. The estimate encodes three
                   small crops of your own files to measure this batch's real
                   compression, then projects it against the free space on the
@@ -836,7 +861,7 @@ Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so 
 
 Since v1.8.1, split pages also carry `jxlphoto-page:<N>` (the TIFF page index) and `jxlphoto-thumb` (thumbnail role) in `dc:Relation`. The decoder treats these as **authoritative** — the filename is only a fallback for JXLs encoded before v1.8.1. This makes reconstruction safe even when the source TIFF itself is named like a page (`scan_page3.tif`, `holiday_thumbnail.tif`).
 
-Since v1.10.4, every page also carries `jxlphoto-pages:<N>` — **how many JXLs the split produced**. It is what lets the decoder tell a complete split from a truncated one: pages `{0,1}` of a three-page scan otherwise look exactly like a two-page scan, and a decode of that writes a valid short TIFF whose sources `--delete-source` would then destroy. The count is the number of JXLs **written**, not the pages the source TIFF had — a thumbnail dropped by `--thumbnail-mode exclude` is not part of the group, so the decoder must not go looking for it. See "Incomplete splits" in the decoder README.
+Since v2.0.0, every page also carries `jxlphoto-pages:<N>` — **how many JXLs the split produced**. It is what lets the decoder tell a complete split from a truncated one: pages `{0,1}` of a three-page scan otherwise look exactly like a two-page scan, and a decode of that writes a valid short TIFF whose sources `--delete-source` would then destroy. The count is the number of JXLs **written**, not the pages the source TIFF had — a thumbnail dropped by `--thumbnail-mode exclude` is not part of the group, so the decoder must not go looking for it. See "Incomplete splits" in the decoder README.
 
 ### Per-Page ICC Preservation (v1.7.0)
 

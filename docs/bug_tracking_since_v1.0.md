@@ -10,10 +10,13 @@ v1.5.3 / 2026-07-04: Critical fixes for 16-bit roundtrip, Matrix/Basic mode, cmd
 v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore and thumbnail handling
 v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
-v1.9.2 / 2026-08-05: Post-v1.9.1 audit — 10 bugs fixed (2 data-safety), validated against the real 738 MB scanner files (see top section)
-v1.9.3 / 2026-08-06: Round-24 audit — 10 bugs fixed (3 data-safety/blocking), all in the wrapper's manifest layer and the summary contract (see top section)
-v1.10.1 / 2026-08-07: Round-26 audit — 6 bugs fixed in the new delete/verify layer, 5 of them introduced by round 25's own feature work (see top section)
-v1.9.4 / 2026-08-06: Round-25 audit — 8 bugs fixed (1 crash, 1 silent page drop, 1 delete gate), plus the decoder/transcoder worker-pool parity the encoder got in v1.9.0 (see top section)
+v2.0.0 / 2026-08-09: Rounds 23-29, all shipped together — the archive-and-delete release. `--delete-source` in every mode, provenance markers, incomplete-split detection, and the hardening around them.
+
+**The round headings below are NOT releases.** v1.9.1 was the last published
+version before v2.0.0, and the version numbers these rounds carried while in
+progress (v1.9.2, v1.9.3, v1.9.4, v1.10.1, v1.10.2, v1.10.3) were never tagged
+and never shipped. They are kept as audit rounds, in order, because the bug
+numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
 
@@ -76,7 +79,7 @@ proof too (jbrd/MD5), but its lossy convert directions have none, so what
 
 ---
 
-## v1.10.3 — Round-28 audit (2026-08-07)
+## Round-28 audit (2026-08-07)
 
 Full audit after round 27, weighted towards anything that can destroy
 irreplaceable data. **The codec paths are clean**: four real fixtures (Capture
@@ -100,7 +103,7 @@ are consequences of that work. **All six are fixed.** 23 new regression tests
 
 ---
 
-## v1.10.2 — Round-27 audit (2026-08-07)
+## Round-27 audit (2026-08-07)
 
 Full-toolkit audit after the delete/verify work. Recorded BEFORE fixing so a
 later regression check has something to compare against.
@@ -119,7 +122,7 @@ All five are fixed. 38 new regression tests across
 
 ---
 
-## v1.10.1 — Round-26 audit (2026-08-07)
+## Round-26 audit (2026-08-07)
 
 An audit of what the delete/verify work itself changed, rather than of the
 toolkit at large. **Five of the six findings were introduced by that work**, and
@@ -151,7 +154,7 @@ not cover.
 
 ---
 
-## v1.9.4 — Round-25 audit (2026-08-06)
+## Round-25 audit (2026-08-06)
 
 Four-script audit, wrapper last. 24 new regression tests
 (`tests/test_audit_round25.py`); full suite went 627 → 651. Every fix was
@@ -210,7 +213,7 @@ files.
 
 ---
 
-## v1.9.3 — Round-24 audit (2026-08-06)
+## Round-24 audit (2026-08-06)
 
 Four-script audit, wrapper last. 40 new regression tests
 (`tests/test_audit_round24.py`); full suite went 587 → 627. Every fix was
@@ -262,7 +265,7 @@ and the child→wrapper summary contract.
 
 ---
 
-## v1.9.2 — Post-v1.9.1 audit (2026-08-05)
+## Round-23 audit — post-v1.9.1 (2026-08-05)
 
 Four-script audit with the codec paths exercised against the real fixtures
 (Capture One 16-bit exports, and the 738 MB RGB+IR film scans whose IR page is a
