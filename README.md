@@ -26,11 +26,11 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## Current version
 
-**v2.0.0** (2026-08-09) — the archive-and-delete release. Converting into a separate tree and dropping the originals is now a supported workflow instead of something you assembled by hand, and everything around that is built to fail closed: a source is deleted only after its output is written, verified at its final path, and proven to have come from *that* source.
+**v2.0.1** (2026-08-13) — maintenance. The v2.0.0 archive-and-delete machinery was audited against the real fixtures rather than reasoned about: 16-bit Capture One exports and the 756 MB RGB+IR film scans. Six defects, **none in the conversion path** — every lossless round trip came back pixel-identical. The one worth reading about made the delete confirmation announce the wrong file count in mode 7.
 
-[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v1.9.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.1)
+[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.0)
 
-> ### ⚠️ v2.0.0 is a major version because two things changed under existing command lines
+> ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
 >
 > **1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
 >
@@ -597,9 +597,30 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-### What's new — v2.0.0 (current stable)
+### What's new — v2.0.1 (current stable)
 
-**Released 2026-08-09.** Everything below landed after v1.9.1, across seven internal audit rounds. Ordinary conversion is unchanged — same pixels, same ICC, same metadata, validated again on real Capture One exports and the 756 MB RGB+IR film scans. What changed is everything around the moment a file is **deleted**.
+**Released 2026-08-13.** A maintenance release on top of v2.0.0. Nothing here changes a command line or a file format: v2.0.0 commands keep working exactly as written.
+
+v2.0.0 shipped a lot of new machinery around the moment a file is deleted, so this round audited it the way the [AGENTS notes](AGENTS.md) ask for — against real photos rather than the synthetic test suite. The fixtures were 16-bit Capture One exports, a 260 MB Z8 export, and the 756 MB RGB+IR film scans (RGB page + embedded preview + IR `MASK` page, carrying a 217 KB scanner ICC).
+
+**The conversion path came out clean, end to end.** Every lossless round trip was pixel-identical with the ICC, `SubfileType` and page structure intact — the IR `MASK` page included. JPEG ↔ JXL recovered byte-identical with MD5 PASS. Alpha, pure grayscale, 8-bit and CJK/accented paths all survived. The v2.0.0 gates held under real files too: the cross-run provenance refusal, the incomplete-split KEEP, staging + delete, and the scanner-ICC lossy workaround each did what the READMEs promise.
+
+The six defects are all *around* that core:
+
+- **The delete confirmation counted the wrong files in mode 7.** The wizard's "About to delete originals" panel applied the export marker but not the `--export-subfolder`, so it counted every subfolder under the marker for a run that converts one of them. With `_EXPORT` holding `16B_TIFF`/`AdobeRGB`/`sRGB` it announced 2 files (TIFF → JXL) or 3 (JXL → TIFF) for a run that touches 1 — and a *disjoint* set, not a superset. That count is the documented way a wrong folder is caught before the HHMM token is charged, in the mode the READMEs call the most common Capture One workflow. The run itself always converted the right files; only the preview lied.
+- **A manifest run leaked its export marker into the rest of the menu session**, which made the count above depend on what had been run earlier. Both sites now share one helper so they cannot drift apart again.
+- **`--multipage-mode split_all` reported `Thumbnail: exclude`** in the opening banner while encoding every thumbnail, two lines above its own log of a written `*_thumbnail.jxl`.
+- **The decoder README still documented the `SubfileType=4` (MASK) downgrade** that v2.0.0 had already fixed — so someone reading it about their own film scans was told the IR page is demoted when it is not.
+- **The dependency status bar was unreadable in a redirected log**: `✓` and `✗` both became `?`, so a scheduled-task log could not say which tool was missing.
+- One comment in the integrity gate understated its cost by a whole page.
+
+**994 tests**, up from 981. Ten of the thirteen new ones were verified failing against the pre-fix code; the other three are controls that must pass on both sides. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (round 30).
+
+---
+
+### v2.0.0 — previous stable
+
+**Released 2026-08-09, superseded by v2.0.1 and kept here for reference.** Everything below landed after v1.9.1, across seven internal audit rounds. Ordinary conversion is unchanged — same pixels, same ICC, same metadata, validated again on real Capture One exports and the 756 MB RGB+IR film scans. What changed is everything around the moment a file is **deleted**.
 
 #### Upgrading from v1.9.1
 
@@ -703,7 +724,8 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.0.0** | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
+| **v2.0.1** | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
+| v2.0.0 | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
 | v1.9.1 | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
 | v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
 | v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
