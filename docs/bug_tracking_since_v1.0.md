@@ -11,6 +11,7 @@ v1.7 / 2026-07-06: Multi-page TIFF support with configurable split/skip/ignore a
 v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (see top section)
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 v2.0.0 / 2026-08-09: Rounds 23-29, all shipped together — the archive-and-delete release. `--delete-source` in every mode, provenance markers, incomplete-split detection, and the hardening around them.
+Round 30 / 2026-08-13: Post-v2.0.0 audit against the real fixtures — 6 bugs, none in the conversion core (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -19,6 +20,37 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-30 audit (2026-08-13)
+
+Full-repo audit of HEAD after v2.0.0, run against the real fixtures rather than
+reasoned about: 16-bit Capture One exports, a 260 MB Z8 export, and the 756 MB
+RGB+IR film scans (3 pages — RGB, thumbnail, IR `MASK`, 217 KB scanner ICC).
+
+**The conversion core came out clean once more, and this time end to end.** Every
+lossless round trip was pixel-identical with ICC, `SubfileType` and page
+structure preserved, including the IR `MASK` page; JPEG↔JXL recovered
+byte-identical with MD5 PASS; alpha, pure grayscale, 8-bit and CJK/accented
+paths all survived. The v2.0.0 machinery held under real files too — the
+cross-run provenance refusal, the incomplete-split KEEP, staging+delete, and the
+scanner-ICC lossy workaround each did what the READMEs promise. All six findings
+are around that core, and none of them deletes or corrupts a file.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 297 | **The delete confirmation counts the wrong FILES in mode 7.** `_count_origin_files` applied the export MARKER to the imported child module but never the SUBFOLDER, so `find_tiffs_mode7`/`find_jxls_mode7` ran with the script default (`""` = every subfolder). **Reproduced**: an `_EXPORT` holding `16B_TIFF`/`AdobeRGB`/`sRGB` with `--export-subfolder 16B_TIFF` announced 2 files (encoder) and 3 (decoder) for a run that converts 1 — and not a subset, a *disjoint* set, since `16B_TIFF` is itself a decoder-output name the unfiltered finder skips. This is the count printed in the "About to delete originals" panel, the second of the three gates, whose visible number is the documented way a wrong folder is caught before the HHMM token. Mode 7 is the Capture One workflow the READMEs call the most common. `_manifest_output_collisions` already applied both — the two sites disagreed | wrapper | ✅ FIXED (new `_with_child_marker(child, marker, subfolder)` context manager, used by BOTH sites so they cannot drift again. All three directions covered, including the transcoder branch, which filters inside `resolve_output_transcode` rather than in a finder) |
+| 298 | **The manifest collision scan leaks the child's globals for the rest of the session.** It assigned `EXPORT_MARKER` and all three `EXPORT_*_SUBFOLDER` on the imported child modules and restored none of them — only `logger.disabled` was put back. The wrapper is a long-lived interactive process, so a manifest run with a custom marker left every later in-process use of that child reading the leaked value, which made #297's count depend on what had been run earlier in the same menu | wrapper | ✅ FIXED (the same `_with_child_marker`, entered on an `ExitStack` closed in the existing `finally`, so a resolver that raises cannot leave the module rewritten either) |
+| 299 | **The opening banner announces the opposite of what the run does.** `--multipage-mode split_all` ignores `THUMBNAIL_MODE` by design and encodes every page, but the banner printed the raw setting — so a `split_all` run reported `Thumbnail: exclude` two lines above its own log of a written `*_thumbnail.jxl`. The README documents that line as showing the settings that are ACTIVE | encoder | ✅ FIXED (the label is derived from the effective policy: `include (forced by split_all)`. Every other mode still reports `THUMBNAIL_MODE` unchanged) |
+| 300 | **The decoder README still documented the `MASK` demotion that was already fixed.** The film-scan section promised `SubfileType=4` (MASK) "is mapped to `PAGE` (`2`)". `_page_subfiletype_kwargs` has written the raw TIFF tag 254 for values `tifffile`'s enum rejects since that was corrected, so a scanner's IR page keeps its role — verified on the real scan, `4 → 4`. Missed by "docs: bring the READMEs up to v2.0.0" | docs | ✅ FIXED (the section states the real behaviour and marks the change, so someone reading it about their own film scans is not told their IR page is downgraded when it is not. `RELEASE_v1.7.0.md` is left alone: it correctly records what v1.7.0 did) |
+| 301 | **The integrity gate's comment understates it by a whole page.** `_verify_tiff_integrity` says "Only the last strip/tile is decoded" while `tif.pages[-1].asarray()` decodes the entire page — measured at 187 MB and a full decode for a 93 MP scan page. Comment only; the behaviour is right and deliberate | decoder | ✅ FIXED (the comment says what it costs and why that is accepted: the gate runs once per output, serially, after the pool, and truncation lands on the last page, which is the one read) |
+| 302 | **Redirected output makes every dependency icon identical.** The wrapper reconfigured its streams with `errors="replace"` and no `encoding`, so a REDIRECTED stdout fell back to the ANSI codepage where `✓`, `✗` and `⚠` are all unencodable — and all three became the same `?`. The status bar in a scheduled-task log therefore said nothing at all, which is the one place its only job is to be read. The three backend scripts already passed `encoding="utf-8"`; the wrapper's own comment claimed it did the same | wrapper | ✅ FIXED (`encoding="utf-8", errors="replace"`, matching the backends. The `errors` fallback still protects against anything else unencodable) |
+
+Regression tests: `tests/test_audit_round30.py` (13). Ten of them fail against
+the pre-fix HEAD; the other three are controls that must pass on both sides
+(no-subfolder counting, the banner outside `split_all`, and the `MASK` tag
+behaviour, which #300 only mis-documented).
 
 ---
 

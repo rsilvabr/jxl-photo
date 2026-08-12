@@ -728,9 +728,16 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
         with tifffile.TiffFile(str(tiff_path)) as tif:
             if len(tif.pages) == 0:
                 return False
-            # Force a REAL read of the last page's last pixel — tifffile is
-            # lazy, so a truncated TIFF can pass a header-only open while its
-            # pixel data is missing. Only the last strip/tile is decoded.
+            # Force a REAL read — tifffile is lazy, so a truncated TIFF can pass
+            # a header-only open while its pixel data is missing, and this gate
+            # stands in front of an irreversible delete.
+            #
+            # asarray() decodes the WHOLE last page, not just its final strip
+            # (the comment here used to claim otherwise): budget ~187 MB and a
+            # full decode for a 93 MP scan page. That cost is accepted on
+            # purpose — the check runs once per output, serially, after the
+            # worker pool is done, and truncation always lands on the LAST page,
+            # which is the one being read.
             last = tif.pages[-1].asarray()
             _ = last.flat[-1]
 

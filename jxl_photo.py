@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,11 +33,19 @@ if not logger.handlers:
 # The wrapper prints unicode icons (✓/✗/⚠); on legacy Windows consoles or
 # redirected stdout (cp1252) they would crash with UnicodeEncodeError.
 # Reconfigure stdout to tolerate them (the backend scripts do the same).
+#
+# encoding AND errors, not errors alone: a real console already hands Python
+# UTF-8, but a REDIRECTED stdout falls back to the ANSI codepage, where every
+# one of those icons is unencodable. errors="replace" then turned ✓ and ✗ into
+# the SAME "?" — so the dependency bar in a scheduled-task log said nothing at
+# all, which is the one place its whole job is to be read. The backend scripts
+# already pass encoding here; this comment claimed as much while the wrapper
+# did not.
 try:
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
@@ -408,6 +417,54 @@ def _supports_provenance_adopt(origin: str, dest: str) -> bool:
     cannot accept is worse than no menu entry at all.
     """
     return origin == 'tiff' and dest == 'jxl'
+
+
+# The subfolder global each child filters modes 6/7 by. Named per direction, so
+# every site that borrows a child's resolver has to set the right one — which is
+# exactly what the two sites below used to disagree about.
+_CHILD_SUBFOLDER_GLOBALS = ('EXPORT_TIFF_SUBFOLDER', 'EXPORT_JXL_SUBFOLDER',
+                            'EXPORT_JPEG_SUBFOLDER')
+
+
+@contextmanager
+def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = None):
+    """Run a child's own finder/resolver under THIS run's marker and subfolder.
+
+    The children read `EXPORT_MARKER` and `EXPORT_*_SUBFOLDER` as module
+    globals, set from CLI flags. The wrapper imports those modules in-process to
+    reuse their path logic, so it has to mirror the flags by assignment — and
+    then put them back, because this process outlives the call.
+
+    One context manager instead of two hand-written blocks, because the two had
+    already drifted in both directions:
+
+      * `_count_origin_files` applied the marker but NOT the subfolder, so the
+        delete confirmation counted every subfolder under the marker while the
+        run converts one — a different FILE SET, under the panel whose visible
+        count is what catches a wrong folder before the HHMM token;
+      * `_manifest_output_collisions` applied both and restored NEITHER, leaking
+        them into every later use in the same menu session.
+
+    Restores through `finally`, so a resolver that raises cannot leave the
+    module rewritten either.
+    """
+    saved = {}
+    try:
+        if marker and hasattr(child, 'EXPORT_MARKER'):
+            saved['EXPORT_MARKER'] = child.EXPORT_MARKER
+            child.EXPORT_MARKER = marker
+        if subfolder:
+            for name in _CHILD_SUBFOLDER_GLOBALS:
+                if hasattr(child, name):
+                    saved[name] = getattr(child, name)
+                    setattr(child, name, subfolder)
+        yield child
+    finally:
+        for name, value in saved.items():
+            try:
+                setattr(child, name, value)
+            except Exception:
+                pass
 
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -2725,21 +2782,25 @@ class InteractiveMenu:
             except ImportError:
                 child = None
 
+            _mc = workflow.get('mode_config', {}) or {}
+            marker = _mc.get('export_marker') or self.config.config.export_marker
+            # The subfolder matters as much as the marker: mode 7 filters on it,
+            # and leaving it at the script default made this count report every
+            # subfolder under the marker for a run that converts exactly one of
+            # them — not merely a bigger number, a DIFFERENT set of files, under
+            # the panel whose visible count is the thing that catches a wrong
+            # folder. The cmd builder passes it as --export-subfolder; mirror it.
+            subfolder = _mc.get('export_subfolder')
+
             if child is not None:
-                marker = (workflow.get('mode_config', {}) or {}).get('export_marker') \
-                    or self.config.config.export_marker
-                _saved = getattr(child, 'EXPORT_MARKER', None)
                 _was_disabled = child.logger.disabled
                 child.logger.disabled = True        # its finders log; this is a preview
                 try:
-                    if marker:
-                        child.EXPORT_MARKER = marker
-                    fn = getattr(child, finders.get(mode, recursive))
-                    return len(fn(root))
+                    with _with_child_marker(child, marker, subfolder):
+                        fn = getattr(child, finders.get(mode, recursive))
+                        return len(fn(root))
                 finally:
                     child.logger.disabled = _was_disabled
-                    if _saved is not None:
-                        child.EXPORT_MARKER = _saved
 
             # Transcoder directions: no single finder covers them (JPEG, PNG and
             # JXL are scanned separately), so count by extension with the same
@@ -2759,21 +2820,19 @@ class InteractiveMenu:
                 import jxl_jpeg_transcoder as _tr
             except ImportError:
                 return len(files)
-            marker = (workflow.get('mode_config', {}) or {}).get('export_marker') \
-                or self.config.config.export_marker
-            _saved = _tr.EXPORT_MARKER
             _was_disabled = _tr.logger.disabled
             _tr.logger.disabled = True      # the resolver warns; this is a preview
             try:
-                if marker:
-                    _tr.EXPORT_MARKER = marker
-                _decode = (origin == 'jxl')
-                return sum(1 for f in files
-                           if _tr.resolve_output_transcode(f, mode, root, _decode)
-                           is not None)
+                # Same marker AND subfolder the encoder/decoder branch uses: the
+                # transcoder filters modes 6/7 inside its resolver rather than in
+                # a finder, but it reads the same globals.
+                with _with_child_marker(_tr, marker, subfolder):
+                    _decode = (origin == 'jxl')
+                    return sum(1 for f in files
+                               if _tr.resolve_output_transcode(f, mode, root, _decode)
+                               is not None)
             finally:
                 _tr.logger.disabled = _was_disabled
-                _tr.EXPORT_MARKER = _saved
         except (OSError, KeyError, AttributeError):
             return -1   # unreadable: the preview says so instead of claiming 0
 
@@ -4782,16 +4841,6 @@ class InteractiveMenu:
             except ImportError:
                 _child = None
             if _child is not None:
-                # The cmd builder passes these as CLI flags, which the children
-                # apply to the same module globals — mirror that here.
-                if export_marker:
-                    _child.EXPORT_MARKER = export_marker
-                if export_subfolder:
-                    for _g in ('EXPORT_TIFF_SUBFOLDER', 'EXPORT_JXL_SUBFOLDER',
-                               'EXPORT_JPEG_SUBFOLDER'):
-                        if hasattr(_child, _g):
-                            setattr(_child, _g, export_subfolder)
-
                 def resolver(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
                     # Mode 0 HONORS the Destination column: the cmd builder
                     # always passes it as the child's output positional, and
@@ -4871,9 +4920,18 @@ class InteractiveMenu:
         # suffix token). The real run emits those lines itself — duplicated
         # here, one per scanned file, they are pure noise.
         _child_logger_was_disabled = None
+        # The cmd builder passes marker/subfolder as CLI flags, which the children
+        # apply to these same module globals — mirror that, and PUT THEM BACK.
+        # They used to be assigned and never restored, so a manifest run leaked
+        # its marker and subfolder into every later in-process use of that child
+        # for the rest of the menu session (the delete preview's count among
+        # them, which made it depend on what had been run before it).
+        _marker_stack = ExitStack()
         if _child is not None:
             _child_logger_was_disabled = _child.logger.disabled
             _child.logger.disabled = True
+            _marker_stack.enter_context(
+                _with_child_marker(_child, export_marker, export_subfolder))
         try:
             for source, dest_path, mode in manifest_entries:
                 if not dest_path:
@@ -4944,6 +5002,7 @@ class InteractiveMenu:
                     elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
                         collisions.append((prev, f, out_folder))
         finally:
+            _marker_stack.close()
             if _child is not None:
                 _child.logger.disabled = _child_logger_was_disabled
         return collisions

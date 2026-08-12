@@ -754,7 +754,9 @@ Each reconstructed page gets its own ICC profile restored when the source page h
 
 ### Grayscale and SubfileType Preservation (v1.7.0)
 
-Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that inherited ICC from IFD0 are reconstructed without an ICC tag. Non-zero `SubfileType` values from the original TIFF are restored; `SubfileType=4` (MASK) is mapped to `PAGE` (`2`) because tifffile does not accept `MASK` on normal image pages, but the "additional page" semantics are preserved.
+Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that inherited ICC from IFD0 are reconstructed without an ICC tag. Non-zero `SubfileType` values from the original TIFF are restored **exactly**, including `SubfileType=4` (MASK).
+
+> **Changed since v1.7.0.** MASK used to be rewritten as `PAGE` (`2`), because `tifffile` validates its own `subfiletype=` parameter against an enum that accepts only `0`/`1`/`2` and rejects `4`. Values outside that set are now written as the raw TIFF tag (254) instead, so a film scanner's IR/transparency page keeps the role it had. A lossless round trip of an RGB+IR scan returns `SubfileType` `4 → 4`, not `4 → 2`.
 
 > **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
 

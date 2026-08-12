@@ -4192,12 +4192,19 @@ def main():
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"
     _overwrite_str = "sync" if args.sync else ("yes" if args.overwrite else ("smart" if OVERWRITE == "smart" else "no"))
     _tag_label     = ENCODE_TAG_MODE  # xmp, software, or off
+    # split_all encodes every page there is, thumbnails included, and ignores
+    # THUMBNAIL_MODE entirely (see convert_multipage). Printing the raw setting
+    # made this line say "Thumbnail: exclude" for a run whose very next lines
+    # write *_thumbnail.jxl — and this banner is documented as showing the
+    # settings that are ACTIVE.
+    _thumb_label = ("include (forced by split_all)"
+                    if MULTIPAGE_TIFF_MODE == "split_all" else THUMBNAIL_MODE)
     logger.info(
         f"Mode: {args.mode} | Effort: {CJXL_EFFORT} | "
         f"Distance: {CJXL_DISTANCE} ({'lossless' if CJXL_DISTANCE == 0 else f'lossy/{_modular_label}'}) | "
         f"RAM PNG: {USE_RAM_FOR_PNG} | Staging: {TEMP2_DIR or 'disabled'} | "
         f"Overwrite: {_overwrite_str} | Tag: {_tag_label} | D50 patch: {D50_PATCH_MODE} | {_delete_label} | "
-        f"Multi-page: {MULTIPAGE_TIFF_MODE} | Thumbnail: {THUMBNAIL_MODE} | Workers: {args.workers}"
+        f"Multi-page: {MULTIPAGE_TIFF_MODE} | Thumbnail: {_thumb_label} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
 
