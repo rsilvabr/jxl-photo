@@ -599,41 +599,35 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ### What's new — v2.0.2 (current stable)
 
-**Released 2026-08-19.** A maintenance release. No command line and no file format changes: v2.0.1 commands keep working exactly as written, and JXLs written by earlier versions are still read the same way — better, in the one case described below.
+**Released 2026-08-19.** Bug fixes only. No command line and no file format changes, and JXLs from earlier versions are read the same way.
 
-This round read all four scripts end to end, then went at them with the real fixtures plus a 12-file matrix of synthetic TIFFs built for the shapes the mocked suite cannot reach: RGB 16- and 8-bit, grayscale, RGBA, gray+alpha, a three-page scan with an IR `MASK` page, a thumbnail sitting at page 0, sources *named* `*_page3` and `*_thumbnail`, and mixed per-page depths.
+Converting a file has been clean in every audit round. This one looked at converting it a **second** time, and that was not.
 
-**Converting a file came out clean once again.** Every lossless round trip was pixel-identical with ICC, photometric and `SubfileType` preserved; JPEG ↔ JXL recovered byte-identical; and each delete gate refused when it should — the cross-run provenance check, the incomplete-split KEEP, an un-promoted staging file, discarded pages, and an impostor archive caught by `--verify-roundtrip`.
+#### Re-archiving a scan merged a page from the previous round
 
-**What was not clean is the second archive cycle**, and it lands squarely on film scans.
+A film scan is `[image, thumbnail, IR]`, and `--thumbnail-mode exclude` leaves the real pages on their original indices — so the archive is pages `{0, 2}`: `scan.jxl` and `scan_page2.jxl`. Decode that and the TIFF has two pages, `[image, IR]`. Encode it again in the same folder and the IR page is index 1, so you get `scan.jxl` and `scan_page1.jxl` while `scan_page2.jxl` from the first round stays where it was.
 
-#### The re-archive defect
+The multi-page group id was a hash of the source *path*, identical both times, so all three files claimed the same group and the decoder wrote them into one TIFF with the IR page twice — a structurally valid file, reported as `0 errors`.
 
-A scan is `[image, thumbnail, IR]`. With the default `--thumbnail-mode exclude` the encoder writes pages `{0, 2}` — excluding a thumbnail does **not** renumber the real pages. Decoding that gives a two-page TIFF, `[image, IR]`, so re-encoding it in the same folder writes pages `{0, 1}` and leaves `scan_page2.jxl` behind from the first round.
+Nothing was destroyed: the group was flagged as incomplete and `--delete-source` kept the sources. But the TIFF was wrong and the run called itself a success. Three changes close it — the group id now covers the pages a split produces, so a leftover cannot join a later one; the decoder refuses to merge a group holding more members than the split recorded, telling them apart by the source-bytes id each output carries and failing closed when it cannot; and the encoder names leftovers it finds in the destination. The second of those also repairs folders **already** in this state, where every member shares one id.
 
-The group id was a hash of the **source path** alone, which is identical across both runs. All three files therefore claimed one group, and the decoder merged them into a TIFF holding the IR page **twice** — a structurally valid file, so nothing downstream could notice. The run reported `0 errors` and exited 0.
+#### The rest
 
-Two existing defences did fire, which is why nothing was ever destroyed: the group was reported as incomplete, and `--delete-source` kept the sources. But the TIFF that was written was wrong, and the run called itself a success.
+- A manifest that deletes now asks the same three questions as the `[D]` menu: verify each output against its source, whether to cover originals already converted, and how an existing output is matched to the source replacing it. A manifest does not go through that menu, so it reached the deletion with the structural check alone.
+- "Incomplete group" gave one message and one piece of advice for two opposite problems — pages missing and pages extra.
+- Mode-6 manifests no longer walk every library before starting. Entries writing inside their own Source cannot collide when the Sources are disjoint, so `G:\2024` / `G:\2025` / `G:\2026` begins converting immediately. Sources are now checked for overlap rather than assumed disjoint.
+- `Added JPEG preview ... with ICC` was logged with no ICC attached — every film-scan IR page, where the profile is inherited and deliberately not written.
+- `CreatorTool` went into an exiftool argfile unsanitised in the transcoder, which had no `_argfile_safe` at all.
+- One of two readers split a single-value `dc:Relation` on commas, enough to tear `Smith, John` in half.
+- A JXL → JPEG preset showed a `d=` it never uses, left over from an earlier TIFF run.
+- The cautious ICC test held its lock across the probe, stopping every worker the first time a profile appeared.
+- The `output` positional was documented "mode 0 only"; mode 2 takes it too.
 
-Three changes close it:
+**1017 tests**, up from 994 — eighteen of the twenty new ones verified failing against the pre-fix code. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (round 31).
 
-- **The group id now identifies the split**, not just its source: it covers the set of pages the split produces. Re-encoding a file whose page structure did not change keeps the same id and the outputs simply overwrite each other, which is what a sync run is for — while a run writing a *different* set of names gets a new id, so a leftover can never join it.
-- **The decoder refuses to merge a group carrying more members than the split recorded.** It first tries to resolve it: every output records the id of its source *bytes*, which differs between two encodes, so when exactly one set of members adds up to the recorded count, that set is the split and the rest are named as leftovers and decoded on their own. When nothing distinguishes them it fails closed — each file decodes separately, no TIFF is written under the group's name, and the run reports a real error. **This is also what repairs archives already in that state**, where every member shares one group id; verified against a folder built with the pre-fix code.
-- **The encoder names leftovers of a previous split** when it finds them in the destination, before the folder is ever decoded. Nothing is deleted for you: a `<name>_page1.jxl` can legitimately be a file of its own.
+#### Since the tag
 
-#### The other nine
-
-- **A manifest that deletes now offers the same gates as the `[D]` menu** — round-trip verification, whether to cover already-converted originals, and how an existing output is matched to its source. Those questions live in the `[D]` gateway, which the manifest path does not go through, so the largest run the wrapper starts reached the deletion with the structural check alone.
-- **"Incomplete group" covered two opposite problems with one message**: pages *missing* and pages *extra* produced the same wording and the same advice, which is wrong for the second.
-- **Mode-6 manifests no longer pay a full recursive scan before starting.** Entries that write inside their own Source tree cannot collide when the Sources are disjoint, so the common `G:\2024` / `G:\2025` / `G:\2026` manifest begins converting immediately instead of walking all three libraries first. That family is now *checked* for overlap rather than assumed disjoint, which is stricter than before.
-- **`Added JPEG preview ... with ICC`** was logged even when no ICC was attached — which is every film-scan IR page, where the profile is inherited and deliberately not written.
-- **The transcoder wrote `CreatorTool` into an exiftool argfile unsanitised.** It had no `_argfile_safe` at all; a multi-line value copied from another program would split one argument into several.
-- **The `output` positional was documented as "mode 0 only"** in the encoder's help and README, while mode 2 honours it too.
-- **A JXL → JPEG preset advertised a distance it never uses**, inherited from whatever TIFF run came before it.
-- **Two readers of `dc:Relation` disagreed on a single-value tag**, one splitting it on commas — enough to tear a caption like `Smith, John` in two.
-- **The cautious ICC test held its lock across the probe** (two `cjxl` runs and two `djxl` runs), stopping every worker the first time each profile appeared.
-
-**1017 tests**, up from 994. Eighteen of the twenty new ones were verified failing against the pre-fix code; the other two are controls that must pass on both sides. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (round 31).
+A second sweep the same day covered what round 31 had not run: the decoder's alternative colour paths, the transcoder's convert direction, encoder modes 1/3/4/5, non-ASCII and bracketed paths, and `--provenance adopt`. One defect, fixed in `main` and not in the v2.0.2 tag: `--to-srgb` and `--icc-profile` attached an **RGB** ICC to **grayscale** output, which PNG rejects as a mismatched `iCCP` and which is equally wrong on a 1-component JPEG. It hit every film-scan IR page. Grayscale images now keep their pixels and skip the profile. See [bug tracking](docs/bug_tracking_since_v1.0.md) (round 32).
 
 ---
 
