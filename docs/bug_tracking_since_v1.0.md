@@ -12,6 +12,7 @@ v1.8.1 / 2026-07: The audit release — ~120 bugs fixed across 12 audit rounds (
 v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-safety), 2 suspected bugs proven false positives with real files (see top section)
 v2.0.0 / 2026-08-09: Rounds 23-29, all shipped together — the archive-and-delete release. `--delete-source` in every mode, provenance markers, incomplete-split detection, and the hardening around them.
 Round 30 / 2026-08-13: Post-v2.0.0 audit against the real fixtures — 6 bugs, none in the conversion core (see top section)
+Round 31 / 2026-08-19: Full-repo audit — 10 bugs. The first one that loses image structure since v2.0.0: a SECOND archive cycle of a multi-page scan merged a leftover page into the new group (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -20,6 +21,51 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-31 audit (2026-08-19)
+
+Full-repo audit of HEAD after round 30: all four scripts read end to end, then
+exercised against the real fixtures and a 12-file matrix of synthetic TIFFs
+built to cover the shapes the mocked suite cannot (RGB 16/8, grayscale, RGBA,
+gray+alpha, a 3-page scan with an IR `MASK` page, a thumbnail at page 0, sources
+named `*_page3` / `*_thumbnail`, mixed per-page depths).
+
+**Single-file conversion came out clean again**: every lossless round trip was
+pixel-identical with ICC, photometric and `SubfileType` preserved, JPEG↔JXL
+recovered byte-identical, and each delete gate refused when it should
+(cross-run provenance, incomplete split, discarded pages, un-promoted staging,
+an impostor archive caught by `--verify-roundtrip`).
+
+**What was not clean is the SECOND cycle.** #303 is the first structural loss
+since v2.0.0 and it lands exactly on the film-scan shape: a scan is
+`[real, thumbnail, IR]`, `--thumbnail-mode exclude` archives it as pages
+`{0, 2}` (excluded thumbnails do not renumber real pages), and the decoded TIFF
+is `[real, IR]` — so re-encoding it in place writes `{0, 1}` and strands
+`_page2.jxl`. The group id was a hash of the SOURCE PATH alone, identical across
+both runs, so the decoder pulled all three into one group and wrote a TIFF with
+the IR page twice, reporting `0 errors` and exiting 0.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 303 | **A second archive cycle of a multi-page scan merges a leftover page.** `_make_group_id` hashed only the resolved source path, so two DIFFERENT splits of the same file claimed one group. **Reproduced end to end on a real `raw_scan_2` crop**: encode → decode → re-encode in place leaves `scan.jxl` + `scan_page1.jxl` + a stale `scan_page2.jxl`, and the decode of that folder produced `[real, IR, IR]` — a valid TIFF, so no integrity check, round-trip or checksum downstream can notice. Two existing defences did fire (the INCOMPLETE warning, and `--delete-source` keeping the sources), which is why nothing was destroyed, but the written TIFF was wrong and the run reported success | encoder + decoder | ✅ FIXED (three parts. (a) the group id now hashes the set of pages the split actually produces, so two runs whose output NAMES differ get different ids while a re-encode of an unchanged structure stays stable; (b) the decoder refuses to merge a group carrying more members than the split recorded — resolving it through `jxlphoto-srcsum`, which differs between encodes, and failing closed to standalone decodes + a real error when it cannot tell. That second half is what repairs archives ALREADY written by the old encoder, verified against one built with the pre-fix code; (c) the encoder names leftovers of a previous split at archive time, before the folder is ever decoded. Nothing is deleted automatically) |
+| 304 | **"Incomplete group" covered two opposite cases with one message.** The check was `len(entries) != declared`, so *missing* pages and *extra* pages both became `truncated` with the same wording and the same advice — "point the run at the folder holding every page", which is the wrong instruction when the problem is a file that should not be there | decoder | ✅ FIXED (`< declared` stays `truncated`; `> declared` is its own path, handled by #303. The message for a resolved leftover names the file and says where it came from) |
+| 305 | **A manifest that deletes never offered `--verify-roundtrip` or `--provenance`.** The `[D]` gateway is where those are asked, and `_wizard_run_from_manifest` does not go through it — it asks "delete originals?" for mode-8 rows and turns `delete_source` on for every entry. So the largest run the wrapper starts reached the unlink with the structural check alone. Step 7 disclosed `Verify round-trip: off`, which is honest but not the same as being able to turn it on | wrapper | ✅ FIXED (the block is now `_ask_delete_options(workflow, collapses, scope_label)`, shared by both paths. For a manifest the provenance question fires as soon as ONE entry collapses folder structure, and a legacy entry with no Mode cell counts as collapsing) |
+| 306 | **Mode-6 manifests always paid a full recursive scan.** `_manifest_needs_collision_scan` returned `True` whenever the export marker sat BELOW the Source, which is the shape of the auto-generated "sync the whole library" manifest (`G:\2024`, `G:\2025`, `G:\2026`). Every run walked all three trees and resolved an output per TIFF before converting anything — to look for a collision that disjoint trees cannot produce, since those entries write inside their own Source | wrapper | ✅ FIXED (6/7 with the marker below the Source join the "writes inside its own Source" family, and that family is now checked for overlap rather than assumed disjoint — which is also strictly safer than before for modes 1/3/8, whose Sources were only WARNED about upstream) |
+| 307 | **`Added JPEG preview ... with ICC` was printed unconditionally.** A page whose ICC was inherited is passed `None` on purpose, so the original's missing ICC tag is not invented — and the line claimed an ICC on every film-scan IR page | decoder | ✅ FIXED (the suffix follows `icc_data`) |
+| 308 | **The transcoder wrote `CreatorTool` into an argfile unsanitised.** The encoder and decoder both wrap it in `_argfile_safe`; the transcoder had no such helper at all, so a multi-line `CreatorTool` copied from another program would split one argfile line into several bogus arguments | transcoder | ✅ FIXED (`_argfile_safe` added and applied. Also added to `SHARED_HELPERS` so the parity test keeps the three copies together) |
+| 309 | **The `output` positional was documented as "mode 0 only".** Mode 2 honours it too — the README's own mode table shows it, and the wrapper's manifest warning says "only modes 0/2" | docs | ✅ FIXED (argparse help and README line corrected, and both now say what the other modes do instead) |
+| 310 | **A decode preset advertised a distance it never uses.** `save_last_session` only overwrites `last_distance` when a run supplies one, so a JXL→JPEG preset carries the distance of whatever TIFF run came before it — and `_describe_session` tested `distance is not None` before quality, printing `d=0.05` for a decode | wrapper | ✅ FIXED (the choice follows the DIRECTION: distance for TIFF sources and `convert_lossy`, quality otherwise) |
+| 311 | **Two readers of `dc:Relation` disagreed on a scalar value.** `_read_multipage_markers_batch` did `str(rel).replace(";", ",").split(",")` while `_read_source_markers_batch` — reading the same tag in all four scripts — used the whole string. A single user Relation like `Smith, John` was torn in two on the way in | decoder | ✅ FIXED (aligned on `[str(rel)]`) |
+| 312 | **The cautious ICC test held its lock across the probe.** `_icc_test_lock` covered the cache read, two `cjxl` runs, two `djxl` runs (120 s timeout each) and the cache write, so every worker stopped dead the first time each profile appeared | encoder | ✅ FIXED (the lock covers only the cache's read-modify-write; the probe runs outside it, with a re-read before the store. Two threads racing on one unseen profile reach the same verdict — the benign race `_content_id_cache` already accepts) |
+
+Regression tests: `tests/test_audit_round31.py` (20). Eighteen fail against the
+pre-fix HEAD; the other two are controls that must pass on both sides (a group
+id staying stable when the split shape does not change, and a TIFF preset still
+showing its distance). `tests/test_audit_round23.py` was updated for #306: the
+test that pinned "marker below the Source always needs the scan" now pins the
+narrower rule, plus the nested-Sources case that still does.
 
 ---
 

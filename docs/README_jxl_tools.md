@@ -252,7 +252,25 @@ Each row runs as a **separate child process**, so a failure in one folder does n
 kill the rest. Before anything runs, the wrapper checks for files from *different*
 rows that would land on the same output file and refuses the whole manifest if it
 finds any — a child process can only see its own entry, so that check has to live
-here.
+here. That scan walks every Source, so it is **skipped when a collision is
+impossible**: rows that write inside their own Source tree (modes 1/3/8, mode 0
+in place, and 6/7 whose export marker sits below the Source) cannot reach each
+other as long as their Sources do not overlap. The common
+`G:\2024` / `G:\2025` / `G:\2026` manifest in mode 6 therefore starts converting
+immediately instead of walking all three libraries first.
+
+**Deleting originals from a manifest.** A manifest containing **mode-8** rows is
+asked once whether to delete the originals, and the answer applies to *every*
+row — deleting is a run-wide setting, not a per-row one, and the question says
+so. Answering yes then asks the same gates the `[D]` menu asks for a single run:
+
+- **round-trip verification** before each delete (TIFF→JXL only);
+- whether to delete originals that were **already converted** (`SKIP`);
+- how an **existing output** is matched to the source about to replace it, when
+  at least one row uses a mode that drops folder structure (2/4/5/6/7).
+
+The `HHMM` token is still charged once, at execution time, and a dry run never
+asks for it.
 
 ### Reading the result
 

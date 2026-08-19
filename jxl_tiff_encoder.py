@@ -1736,41 +1736,56 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
 
 
 def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
-    """Test an ICC profile with a small round-trip before trusting it."""
+    """Test an ICC profile with a small round-trip before trusting it.
+
+    The lock covers the cache's read-modify-write, NOT the probe. The probe is
+    two cjxl runs and two djxl runs with a 120 s timeout each, and holding the
+    lock across them stopped every other worker dead the first time each
+    profile was seen. Two threads racing on the same unseen profile now both
+    probe it and reach the SAME verdict — the same benign race
+    _content_id_cache already accepts — and the loser's store is a no-op.
+    """
+    key = hashlib.sha256(icc_bytes).hexdigest()
+    # Include the cjxl version in the key: an encoder upgrade can change
+    # how a profile behaves, so stale verdicts from older cjxl builds
+    # must not be trusted.
+    cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
+    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}"
+
+    def _cached_verdict():
+        cached = _load_icc_cache().get(versioned_key)
+        if cached is None:
+            return None
+        return bool(cached.get("embed")) if isinstance(cached, dict) else bool(cached)
+
     with _icc_test_lock:
+        embed = _cached_verdict()
+    if embed is not None:
+        logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
+        return embed
+
+    if not _get_cjxl_cmd() or not shutil.which("djxl"):
+        logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
+        return _should_embed_icc_heuristic(icc_bytes)
+
+    safe = True
+    for depth in (8, 16):
+        if not _cautious_test_icc_depth(icc_bytes, depth):
+            safe = False
+            break
+
+    with _icc_test_lock:
+        # Re-read inside the lock: another thread may have finished the same
+        # probe while this one ran, and the cache file is shared with other
+        # PROCESSES too, so the copy read before the probe is already stale.
         cache = _load_icc_cache()
-        key = hashlib.sha256(icc_bytes).hexdigest()
-        # Include the cjxl version in the key: an encoder upgrade can change
-        # how a profile behaves, so stale verdicts from older cjxl builds
-        # must not be trusted.
-        cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
-        versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}"
-        cached = cache.get(versioned_key)
-        if cached is not None:
-            if isinstance(cached, dict):
-                embed = bool(cached.get("embed"))
-            else:
-                embed = bool(cached)
-            logger.debug(f"Cautious ICC: cache hit for {tiff_path.name} -> {'embed' if embed else 'skip'}")
-            return embed
-
-        if not _get_cjxl_cmd() or not shutil.which("djxl"):
-            logger.warning("cautious ICC strategy requires cjxl and djxl; falling back to heuristic")
-            return _should_embed_icc_heuristic(icc_bytes)
-
-        safe = True
-        for depth in (8, 16):
-            if not _cautious_test_icc_depth(icc_bytes, depth):
-                safe = False
-                break
-
         cache[versioned_key] = {"embed": safe, "ts": datetime.now().isoformat()}
         _save_icc_cache(cache)
-        logger.info(
-            f"Cautious ICC: {'embed' if safe else 'skip'} for {tiff_path.name} "
-            f"({len(icc_bytes)} bytes, profile class {_get_icc_profile_class(icc_bytes) or b'?'})"
-        )
-        return safe
+    logger.info(
+        f"Cautious ICC: {'embed' if safe else 'skip'} for {tiff_path.name} "
+        f"({len(icc_bytes)} bytes, profile class {_get_icc_profile_class(icc_bytes) or b'?'})"
+    )
+    return safe
 
 
 # ─────────────────────────────────────────────
@@ -3434,6 +3449,86 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
 
     return results
 
+# Per-file lines are capped like the discard warnings: a library re-archived
+# after a structure change could otherwise print one line per photo.
+STALE_WARN_LIMIT = 20
+
+
+def _warn_stale_split_outputs(tasks: list) -> list:
+    """Name outputs of an EARLIER split still sitting in this run's destination.
+
+    A split's output names come from the page indices of the source, so a
+    source whose page structure changed — the usual cause being a decode that
+    dropped an excluded thumbnail — writes a DIFFERENT set of names, and the
+    previous set stays on disk. Those leftovers are what the decoder has to
+    disentangle later (see _split_group_by_srcsum there), and until v2.0.2
+    could not.
+
+    Nothing is deleted here: removing an output is a different kind of decision
+    from writing one, and a `<stem>_page1.jxl` can legitimately belong to a
+    source of its own. Saying so at archive time is what lets the user act
+    before the folder is ever decoded.
+
+    Returns the leftovers found, so tests can assert on them.
+    """
+    # Only sources this run SPLITS can leave a page trail behind.
+    planned_by_dir: Dict[Path, set] = {}
+    stems_by_dir: Dict[Path, set] = {}
+    for tiff, _w, final_jxl, _p, _th, _sf, _sp, group_id, _gt in tasks:
+        d = final_jxl.parent
+        planned_by_dir.setdefault(d, set()).add(os.path.normcase(final_jxl.name))
+        if group_id:
+            stems_by_dir.setdefault(d, set()).add(tiff.stem)
+
+    stale = []
+    for d, stems in stems_by_dir.items():
+        planned = planned_by_dir.get(d, set())
+        try:
+            present = {os.path.normcase(f.name): f for f in d.iterdir()
+                       if f.suffix.lower() == ".jxl"}
+        except OSError:
+            continue        # destination not readable/created yet: nothing to say
+        for name_lc, f in sorted(present.items()):
+            if name_lc in planned:
+                continue
+            stem, page_idx, is_thumb = _parse_output_page_suffix(f.stem)
+            if stem not in stems or (page_idx == 0 and not is_thumb):
+                continue    # not a page of a stem this run splits
+            stale.append(f)
+
+    if not stale:
+        return stale
+    logger.warning(
+        f"{len(stale)} JXL(s) in the destination look like pages of a PREVIOUS split "
+        f"of the same source and are not part of this run's output. Nothing was "
+        f"deleted — check them and remove them, or the decoder will have to tell "
+        f"them apart from the real split:")
+    for f in stale[:STALE_WARN_LIMIT]:
+        logger.warning(f"    {f}")
+    if len(stale) > STALE_WARN_LIMIT:
+        logger.warning(f"    ... and {len(stale) - STALE_WARN_LIMIT} more")
+    return stale
+
+
+def _parse_output_page_suffix(stem: str):
+    """(source stem, page index, is_thumbnail) for a name this encoder writes.
+
+    Mirrors _page_output_name. The decoder has its own copy
+    (_parse_jxl_page_suffix) reading the same convention from the other side;
+    they are deliberately separate so neither script has to import the other.
+    """
+    is_thumb = False
+    if THUMBNAIL_SUFFIX and stem.endswith(THUMBNAIL_SUFFIX):
+        is_thumb = True
+        stem = stem[:-len(THUMBNAIL_SUFFIX)]
+    page_idx = 0
+    m = re.search(r'_page(\d+)$', stem)
+    if m:
+        page_idx = int(m.group(1))
+        stem = stem[:m.start()]
+    return stem, page_idx, is_thumb
+
+
 def process_group(group_items: list, workers: int, mode: int = 0):
     """
     Converts (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples) items
@@ -3463,12 +3558,35 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     # The group id is a hash of the absolute path to avoid leaking folder
     # structure / user names into distributed JXL files.
     outputs_per_tiff: Dict[str, int] = {}
+    pages_per_tiff: Dict[str, set] = {}
     for tiff, _final_jxl, _page_idx, _is_thumbnail, _subfiletype, _samples in group_items:
-        outputs_per_tiff[str(tiff.resolve())] = outputs_per_tiff.get(str(tiff.resolve()), 0) + 1
+        _k = str(tiff.resolve())
+        outputs_per_tiff[_k] = outputs_per_tiff.get(_k, 0) + 1
+        pages_per_tiff.setdefault(_k, set()).add((_page_idx, bool(_is_thumbnail)))
 
     def _make_group_id(tiff_path: Path) -> str:
-        key = str(tiff_path.resolve()).encode("utf-8")
-        return hashlib.sha256(key).hexdigest()[:16]
+        """Identify THIS split, not just its source.
+
+        The path alone made the id survive a re-encode, and that is what let
+        outputs of two different splits share one group. A scan of
+        [real, thumbnail, IR] archives as pages {0, 2} under
+        --thumbnail-mode exclude; decode it and the reconstructed TIFF is
+        [real, IR], so re-encoding the same file in the same folder writes
+        pages {0, 1} and leaves `_page2.jxl` behind carrying the SAME id. The
+        decoder then pulled all three into one group and wrote a TIFF with a
+        duplicated page (bug #303).
+
+        Hashing the set of pages the split actually produces fixes that at the
+        source: two runs whose output NAMES differ get different ids, so a
+        leftover can never join the new group, while re-encoding a file whose
+        structure did not change keeps the id stable (the outputs simply
+        overwrite each other, which is what a sync run should do). It costs no
+        I/O — the page list is already in hand.
+        """
+        key = str(tiff_path.resolve())
+        pages = sorted(pages_per_tiff.get(key, ()))
+        blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
     tasks = []
     for tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples in group_items:
@@ -3485,6 +3603,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         group_total = _n_out if group_id else None
         tasks.append((tiff, write_jxl, final_jxl, page_idx, is_thumbnail, subfiletype,
                       samples, group_id, group_total))
+
+    _warn_stale_split_outputs(tasks)
 
     moved_finals = set()
 
@@ -3833,7 +3953,9 @@ def find_tiffs_mode7(input_path: Path):
 def main():
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
     parser.add_argument("input",             type=Path, nargs="?", help="Input root folder")
-    parser.add_argument("output", nargs="?", type=Path, help="Output folder (mode 0 only)")
+    parser.add_argument("output", nargs="?", type=Path,
+                        help="Output folder (modes 0 and 2; ignored by the others, "
+                             "which derive the destination from each source's folder)")
     parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
     parser.add_argument("--workers",         type=int, default=min(os.cpu_count() or 4, 16))
     parser.add_argument("--overwrite",       action="store_true",

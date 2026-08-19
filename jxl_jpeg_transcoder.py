@@ -720,6 +720,15 @@ def _abort_on_duplicate_outputs(pairs):
                      "in sibling recipe folders both collapse onto the same .jxl name.")
         sys.exit(2)
 
+def _argfile_safe(value) -> str:
+    """Sanitize a value for inclusion in an exiftool argfile (-@).
+
+    Argfiles are parsed one argument per line, so embedded newlines in XMP
+    text would split one argument into several bogus ones.
+    """
+    return re.sub(r"[\r\n]+", " ", str(value))
+
+
 # Charset directives for exiftool argfiles:
 # - FileName=UTF8: file paths in the argfile are UTF-8.
 # - UTF8: tag VALUES read/written are UTF-8 (non-ASCII metadata round-trips
@@ -999,7 +1008,12 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                     clean = "jxl_jpeg_transcoder"
                 _run_exiftool_argfile(
                     ["-overwrite_original",
-                     f"-XMP-xmp:CreatorTool={clean}", str(dst_path)], timeout=60
+                     # _argfile_safe like every other CreatorTool write in the
+                     # toolkit: an argfile is one argument per LINE, so a
+                     # multi-line CreatorTool copied from another program would
+                     # split into several bogus arguments here.
+                     f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(dst_path)],
+                    timeout=60
                 )
         except Exception:
             pass

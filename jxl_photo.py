@@ -2508,6 +2508,24 @@ class InteractiveMenu:
                 delete = input("Delete originals? [y/N]: ").strip().lower().startswith('y')
             if delete:
                 workflow['delete_source'] = True
+                # The same gates the [D] gateway charges for a single run. A
+                # manifest converts more files than anything else here, and it
+                # used to reach the unlink with none of them offered.
+                # "Collapses" is per ENTRY, so the question is worth asking as
+                # soon as ONE entry drops folder structure.
+                # A legacy manifest carries no Mode cell (None): the mode is
+                # detected per folder later and can come back 6 or 7, both of
+                # which collapse. Unknown counts as collapsing — the cost of
+                # asking one extra question is nothing next to skipping it.
+                _collapsing = sorted({m for s, d, m in entries
+                                      if m is None or _run_collapses_structure(m, d, s)},
+                                     key=lambda m: (m is None, m))
+                _shown = "/".join("?" if m is None else str(m) for m in _collapsing)
+                self._ask_delete_options(
+                    workflow,
+                    collapses=bool(_collapsing),
+                    scope_label=(f"Mode {_shown} entries in this manifest "
+                                 f"drop folder structure"))
             else:
                 console_msg = ("Every entry will run WITHOUT deleting originals "
                                "(source and output will coexist).")
@@ -2935,6 +2953,50 @@ class InteractiveMenu:
         workflow['mode'] = mode
         workflow['delete_source'] = True
 
+        # The gates in front of the unlink. Shared with the manifest path (see
+        # _ask_delete_options): a manifest is the LARGEST run this wrapper
+        # starts, and it used to reach the deletion without ever being offered
+        # round-trip verification or a provenance choice.
+        #
+        # The wizard only offers a Destination for mode 2 today; asking
+        # _run_collapses_structure rather than the mode set keeps this correct
+        # if that ever changes, the way the manifest path already honours it
+        # for mode 0 (see _manifest_needs_collision_scan).
+        self._ask_delete_options(
+            workflow,
+            collapses=_run_collapses_structure(
+                mode, (workflow.get('mode_config') or {}).get('output_dir'),
+                workflow.get('input_dir')),
+            scope_label=f"Mode {mode} drops folder structure")
+
+        msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
+               f"time (HHMM) once more before anything runs — a dry run never asks.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{msg}[/yellow]")
+        else:
+            print(msg)
+        return True
+
+    def _ask_delete_options(self, workflow: Dict, collapses: bool,
+                            scope_label: str) -> None:
+        """The three questions that stand between a conversion and the unlink.
+
+        Extracted from the [D] gateway so the MANIFEST path gets them too. A
+        manifest run converts more files than anything else the wrapper starts,
+        and it reached --delete-source with none of these offered: no
+        round-trip verification, no choice of how an existing output is matched
+        to its source. The Step-7 summary disclosed "Verify round-trip: off",
+        which is honest but not the same as being able to turn it on.
+
+        `collapses` decides whether the provenance question is worth asking —
+        in the modes that keep folder structure there is nothing to confuse.
+        `scope_label` opens that question, because "Mode 5 drops folder
+        structure" is the wrong sentence for a manifest whose entries each
+        carry their own mode.
+        """
+        origin = workflow['origin_format']
+        dest = workflow['dest_format']
+
         # Round-trip verification. Offered only here, because it is a gate in
         # front of the deletion and nowhere else, and only for TIFF -> JXL,
         # which is the direction where the source is the master.
@@ -3021,12 +3083,7 @@ class InteractiveMenu:
         # where two sources in different folders resolve to the same output.
         # Modes 1/3/8 — and mode 0 in place — derive the output from the source's
         # own folder, so there is nothing to confuse and nothing to ask.
-        # The wizard only offers a Destination for mode 2 today; asking
-        # _run_collapses_structure rather than the mode set keeps this correct if
-        # that ever changes, the way the manifest path already honours it for
-        # mode 0 (see _manifest_needs_collision_scan).
-        if _run_collapses_structure(mode, (workflow.get('mode_config') or {}).get('output_dir'),
-                                    workflow.get('input_dir')):
+        if collapses:
             # adopt exists only in the encoder (see _supports_provenance_adopt):
             # offering it for the other directions built a command line their
             # script rejects at argparse.
@@ -3036,7 +3093,7 @@ class InteractiveMenu:
             if pv_default not in _pv_choices:
                 pv_default = 'path'
             pv_explain = (
-                f"Mode {mode} drops folder structure, so two files with the same name in "
+                f"{scope_label}, so two files with the same name in "
                 f"different folders land on the same output. Before overwriting an output "
                 f"that already exists — and deleting the file that made it — the run "
                 f"checks the archive really came from this source.\n"
@@ -3105,14 +3162,6 @@ class InteractiveMenu:
                 console.print(f"[yellow]{_w}[/yellow]")
             else:
                 print(_w)
-
-        msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
-               f"time (HHMM) once more before anything runs — a dry run never asks.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{msg}[/yellow]")
-        else:
-            print(msg)
-        return True
 
     def _wizard_select_mode_manual(self, workflow: Dict) -> bool:
         """Manual mode selection (called after declining auto recommendation)."""
@@ -4757,10 +4806,24 @@ class InteractiveMenu:
             Source, shared by every entry under the same marker.
 
         Modes 1/3/8 do derive their output from the Source itself (subfolder or
-        in-place), and overlapping/nested Sources were already refused above, so
-        those genuinely cannot collide across entries. Modes 2/4/5 always can.
+        in-place). Modes 2/4/5 always can collide.
+
+        6/7 whose marker sits BELOW the Source belong to the first family too:
+        every marker folder they anchor on is inside that Source, so every
+        output is as well. That case used to force a scan unconditionally, and
+        it is the common one — a manifest of `G:\\2024`, `G:\\2025`, `G:\\2026`
+        in mode 6 walked all three libraries before converting a single file,
+        to look for a collision that disjoint trees cannot produce.
+
+        What makes the "writes inside its own Source" family safe is that their
+        Sources do not overlap, so that is checked here rather than assumed:
+        overlaps are only WARNED about upstream (attended runs may continue),
+        which is weaker than this function had been relying on.
         """
         marker_dirs: Dict[str, str] = {}
+        # Sources whose outputs stay inside their own tree. Disjoint ones can
+        # never share an output folder; overlapping ones can.
+        within_source: List[str] = []
         for source, dest_path, mode in manifest_entries:
             # Legacy manifest (no Mode cell): the mode is detected per folder
             # downstream, so nothing can be ruled out here.
@@ -4774,17 +4837,29 @@ class InteractiveMenu:
                     == os.path.normcase(str(Path(source))))
                 if not same:
                     return True
+                within_source.append(source)
             elif mode in (6, 7):
                 marker = self._entry_marker_dir(source, export_marker)
                 if marker is None:
-                    # The marker is BELOW the Source, so this entry's files can
-                    # anchor on any number of markers — too little information
-                    # to rule a collision out. Fail towards scanning.
-                    return True
+                    # The marker is below the Source: outputs land under marker
+                    # folders inside this tree.
+                    within_source.append(source)
+                    continue
+                # The marker is an ANCESTOR of the Source, so the output folder
+                # is a sibling of it — shared by every entry under that marker.
                 key = os.path.normcase(marker)
                 if key in marker_dirs:
                     return True
                 marker_dirs[key] = source
+            else:
+                # 1, 3, 8: a subfolder of the Source, or in place.
+                within_source.append(source)
+
+        norm = [os.path.normcase(os.path.abspath(s)) for s in within_source]
+        for i, a in enumerate(norm):
+            for b in norm[i + 1:]:
+                if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                    return True
         return False
 
     def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set,
@@ -5801,10 +5876,18 @@ class InteractiveMenu:
             if session.get('last_input_dir'):
                 bits.append(str(session['last_input_dir']))
         bits.append(f"workers {_session_int(session, 'last_workers', 4)}")
+        # Which number this workflow is actually steered by, decided by the
+        # DIRECTION — not by which field happens to be set. save_last_session
+        # only overwrites last_distance when a run supplies one, so a JXL->JPEG
+        # preset carries the distance of whatever TIFF run came before it and
+        # used to advertise "d=0.05" for a decode that never reads it.
+        conv = session.get('last_conversion_type') or ''
+        distance_driven = (session.get('last_origin_format') == 'tiff'
+                           or conv == 'convert_lossy')
         distance = session.get('last_distance')
-        if distance is not None:
+        if distance_driven and distance is not None:
             bits.append(f"d={_sane_distance(distance):g}")
-        elif session.get('last_quality') is not None:
+        elif not distance_driven and session.get('last_quality') is not None:
             bits.append(f"q={session['last_quality']}")
         return " | ".join(bits)
 

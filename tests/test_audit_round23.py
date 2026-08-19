@@ -84,10 +84,33 @@ def test_mode6_same_marker_needs_the_scan(menu, tmp_path):
     assert menu._manifest_needs_collision_scan(entries, "_EXPORT")
 
 
-def test_mode7_marker_below_the_source_needs_the_scan(menu, tmp_path):
-    """Source above the markers: the entry's files can anchor on any of them,
-    so the cheap check must fail towards scanning."""
+def test_marker_below_a_lone_source_skips_the_scan(menu, tmp_path):
+    """Source above the markers: every marker it anchors on lies INSIDE that
+    Source, so every output does too. One entry cannot collide with itself
+    across processes — two files of the SAME entry landing on one output is
+    the child's own _abort_on_duplicate_outputs, which sees the whole entry.
+
+    This is the shape of the auto-generated 'sync the whole library' manifest
+    (G:\\2024, G:\\2025, ... in mode 6), which used to walk every tree before
+    converting a single file.
+    """
     entries = [(str(tmp_path / "Fotos"), str(tmp_path / "Fotos"), 7)]
+    assert not menu._manifest_needs_collision_scan(entries, "_EXPORT")
+
+
+def test_markers_below_disjoint_sources_skip_the_scan(menu, tmp_path):
+    entries = [(str(tmp_path / "2024"), str(tmp_path / "2024"), 6),
+               (str(tmp_path / "2025"), str(tmp_path / "2025"), 6),
+               (str(tmp_path / "2026"), str(tmp_path / "2026"), 6)]
+    assert not menu._manifest_needs_collision_scan(entries, "_EXPORT")
+
+
+def test_markers_below_nested_sources_need_the_scan(menu, tmp_path):
+    """Nested Sources can reach the same marker folder from two entries. The
+    overlap guard only WARNS on this for an attended run, so the cheap check
+    must not treat 'no overlap' as given."""
+    entries = [(str(tmp_path / "Fotos"), str(tmp_path / "Fotos"), 6),
+               (str(tmp_path / "Fotos" / "2024"), str(tmp_path / "Fotos" / "2024"), 6)]
     assert menu._manifest_needs_collision_scan(entries, "_EXPORT")
 
 

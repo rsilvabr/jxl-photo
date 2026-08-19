@@ -289,7 +289,8 @@ py jxl_tiff_encoder.py <input> [output] [options]
 
 Arguments:
   input           Input root folder or file
-  output          Output folder (mode 0 only)
+  output          Output folder (modes 0 and 2; the other modes derive the
+                  destination from each source's own folder and ignore it)
 
 Options:
   --mode 0-8      Output folder mode (default: 0)
@@ -858,6 +859,29 @@ per file — a library where every export carries a preview page would otherwise
 bury the real errors. Pass `--warn-thumbnail-discard` when you want the file names.
 
 Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so `jxl_tiff_decoder.py` can reconstruct the original multi-page TIFF only from genuinely split files. Independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged.
+
+Since v2.0.2 that id identifies **this split**, not just its source: it covers
+the set of pages the split produces. Re-encoding a file whose page structure did
+not change keeps the same id (the outputs simply overwrite each other, which is
+what a sync run is for), while a run that writes a *different* set of names gets
+a new one. That matters after a decode-and-re-archive cycle — excluding a
+thumbnail does not renumber the real pages, so a `[real, thumb, IR]` scan
+archives as `{0, 2}`, and the reconstructed `[real, IR]` re-archives as
+`{0, 1}`, leaving `scan_page2.jxl` behind. With a source-only id those leftovers
+joined the new group and the next decode rebuilt a TIFF with a duplicated page.
+
+The encoder also names such leftovers when it finds them in the destination:
+
+```
+WARNING | 1 JXL(s) in the destination look like pages of a PREVIOUS split of the
+          same source and are not part of this run's output. Nothing was
+          deleted — check them and remove them ...
+WARNING |     E:\archive\scan_page2.jxl
+```
+
+Nothing is removed automatically: `<name>_page1.jxl` can legitimately be an
+independent file. See "Groups with MORE pages than the split recorded" in the
+decoder README for what happens if they are left in place.
 
 Since v1.8.1, split pages also carry `jxlphoto-page:<N>` (the TIFF page index) and `jxlphoto-thumb` (thumbnail role) in `dc:Relation`. The decoder treats these as **authoritative** — the filename is only a fallback for JXLs encoded before v1.8.1. This makes reconstruction safe even when the source TIFF itself is named like a page (`scan_page3.tif`, `holiday_thumbnail.tif`).
 

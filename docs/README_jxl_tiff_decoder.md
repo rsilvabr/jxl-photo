@@ -748,6 +748,55 @@ about decoding.
   folder that can never be cleared. The warning naming the missing pages is
   printed either way.
 
+### Groups with MORE pages than the split recorded (v2.0.2)
+
+The opposite problem, and a worse one: files that do **not** belong to the group
+being pulled into it.
+
+It happens after a second archive cycle. A film scan is
+`[real, thumbnail, IR]`; `--thumbnail-mode exclude` archives it as pages
+`{0, 2}`, because excluding a thumbnail does not renumber the real pages. The
+reconstructed TIFF is `[real, IR]`, so re-encoding it **in the same folder**
+writes pages `{0, 1}` and leaves `scan_page2.jxl` behind from the first round.
+Until v2.0.2 the group id was derived from the source path alone, so all three
+files claimed one group and the decode produced a TIFF with the IR page twice —
+a structurally valid file, reported as `0 errors`.
+
+Two things changed:
+
+- **The encoder's group id now identifies the split**, not just its source, so a
+  leftover written by a later version can never join a different split. It also
+  names such leftovers at archive time (`look like pages of a PREVIOUS split`).
+  Nothing is deleted for you — a `<name>_page1.jxl` can legitimately be a file
+  of its own.
+- **The decoder refuses to merge an oversized group.** It first tries to
+  resolve it: every output records `jxlphoto-srcsum` (the id of the source
+  *bytes*), which differs between two encodes, so when exactly one set of
+  members adds up to the recorded count that set is the split and the rest are
+  reported as leftovers and decoded on their own:
+
+```
+Multi-page group has 3 member(s) but the split recorded 2 | group 4721b88f... |
+scan_page2.jxl came from a different encode of the same source (leftovers of an
+earlier split) and will be decoded on their own. Delete them once you have
+checked them.
+```
+
+  When nothing distinguishes them — every member sharing one `srcsum`, or an
+  archive with no `srcsum` at all — it **fails closed**: each file is decoded on
+  its own, no TIFF is written under the group's name, and the run reports a real
+  error (exit `1`).
+
+```
+REFUSING to merge multi-page group ... | scan.jxl, scan_page1.jxl,
+scan_page2.jxl | each one is decoded on its own instead, so no TIFF is written
+with a page that may not belong to it.
+```
+
+  Nothing is lost either way: every JXL still decodes. This is also what repairs
+  archives **already written** by an older encoder, where all the members share
+  one group id.
+
 ### Per-Page ICC Preservation (v1.7.0)
 
 Each reconstructed page gets its own ICC profile restored when the source page had one. Pages that inherited ICC from IFD0 (flagged `jxlphoto-icc:inherited` in `dc:Relation`) are reconstructed without an ICC tag, matching the original TIFF structure while preserving the effective color interpretation.

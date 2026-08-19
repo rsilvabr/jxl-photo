@@ -2205,7 +2205,11 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
         if temp_tiff.exists():
             logger.debug(f" >Temp file created: {temp_tiff.stat().st_size} bytes")
             shutil.move(str(temp_tiff), str(tiff_path))
-            logger.info(f" >Added JPEG preview ({new_w}x{new_h}) with ICC")
+            # "with ICC" only when one was actually attached: a page whose ICC
+            # was INHERITED gets None on purpose (the original carried no tag),
+            # and the line claimed otherwise on every film-scan IR page.
+            logger.info(f" >Added JPEG preview ({new_w}x{new_h})"
+                        + (" with ICC" if icc_data else " (no ICC on this page)"))
         else:
             logger.warning(f" >Temp file not created!")
 
@@ -3056,7 +3060,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None} for j in jxls}
     if not jxls:
         return markers
 
@@ -3106,15 +3110,21 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
-                # Relation may be a string or a list depending on cardinality
-                if isinstance(rel, list):
-                    values = rel
-                else:
-                    values = str(rel).replace(";", ",").split(",")
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False}
+                # Relation may be a string or a list depending on cardinality.
+                # A SCALAR is one value, not a comma-separated list: splitting it
+                # would tear a legitimate user value ("Smith, John") into two —
+                # and _read_source_markers_batch, which reads the same tag, has
+                # always used the whole string. The two must agree.
+                values = rel if isinstance(rel, list) else [str(rel)]
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None}
                 for token in values:
                     token = str(token).strip()
-                    if token.startswith(MULTIPAGE_MARKER_PREFIX):
+                    if token.startswith(SRCSUM_PREFIX):
+                        # Which SOURCE BYTES made this output. Used only to tell
+                        # the members of one split from leftovers of an earlier
+                        # one — see _split_group_by_srcsum.
+                        info['srcsum'] = token[len(SRCSUM_PREFIX):]
+                    elif token.startswith(MULTIPAGE_MARKER_PREFIX):
                         info['group'] = token[len(MULTIPAGE_MARKER_PREFIX):]
                     elif token == ICC_INHERITED_FLAG:
                         info['inherited'] = True
@@ -3166,10 +3176,58 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 # downstream can tell that the other pages of the original only exist in the
 # JXLs this run is about to remove. Same fail-closed rule as the encoder's
 # _discarded_real_page_sources.
-# {normcased main JXL: "truncated" | "inconsistent"} — the KIND matters,
-# because the advice differs: a truncated split has a page to go and find,
-# while disagreeing markers may have every page present and nothing to fetch.
+# {normcased main JXL: "truncated" | "inconsistent" | "extra"} — the KIND
+# matters, because the advice differs: a truncated split has a page to go and
+# find, disagreeing markers may have every page present and nothing to fetch,
+# and an "extra" group holds files that do not belong to it at all.
 _incomplete_groups = {}
+
+# Groups this run REFUSED to merge: they carry MORE members than the split
+# recorded and nothing could tell which ones belong (see _split_group_by_srcsum).
+# Every member is decoded standalone instead, and main() counts these as errors —
+# writing a TIFF that silently contains a page from a different encode is worse
+# than failing. [(main_jxl_path_str, reason)]
+_group_conflicts = []
+
+
+def _split_group_by_srcsum(entries: list, declared: int, srcsum_by_path: dict):
+    """Tell one split's members from leftovers of an EARLIER split.
+
+    The group id is derived from the SOURCE, so before v2.0.2 it survived a
+    re-encode: encode a 3-page scan (real, thumbnail, IR) with
+    --thumbnail-mode exclude and you get pages {0, 2}; decode that, re-encode
+    the 2-page result in the same folder and you get pages {0, 1} — while
+    `_page2.jxl` from the first round stays on disk carrying the same group id.
+    Merging all three writes a TIFF with a duplicated page and reports no error.
+
+    Every output also records jxlphoto-srcsum, the id of the source BYTES, so
+    the members of ONE encode share a srcsum and leftovers of another do not.
+    When exactly one srcsum bucket holds `declared` members, that bucket is the
+    split and the rest are orphans.
+
+    Returns (kept, orphans), or (None, None) when the evidence does not single
+    out one bucket — "cannot tell" must never guess.
+    """
+    if declared <= 0:
+        return None, None
+    buckets: dict = {}
+    for e in entries:
+        s = srcsum_by_path.get(str(e[0]))
+        if not s:
+            return None, None       # a member with no srcsum: no evidence at all
+        buckets.setdefault(s, []).append(e)
+    complete = [b for b in buckets.values() if len(b) == declared]
+    if len(complete) != 1:
+        return None, None
+    kept = complete[0]
+    # A bucket that is "complete" only because a page index repeats is not a
+    # split. Duplicate (page, thumb) keys are demoted before this runs, so this
+    # is belt-and-braces rather than a live case.
+    if len({(e[1], e[2]) for e in kept}) != len(kept):
+        return None, None
+    kept_paths = {str(e[0]) for e in kept}
+    orphans = [e for e in entries if str(e[0]) not in kept_paths]
+    return kept, orphans
 
 
 def collect_multipage_groups(jxls: list) -> dict:
@@ -3192,6 +3250,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     # One run per process normally, but the wrapper's tests (and a second call
     # in the same interpreter) must not inherit a previous run's verdicts.
     _incomplete_groups.clear()
+    _group_conflicts.clear()
 
     # Read markers first; they are needed even when reconstruction is disabled
     # so that per-file metadata (inheritance, grayscale, depth) is available.
@@ -3200,7 +3259,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     # Must carry every key _read_multipage_markers_batch produces: the callers
     # read the others by index, and a missing one here is a KeyError waiting for
     # whoever follows that pattern.
-    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False}
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None}
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
@@ -3214,10 +3273,14 @@ def collect_multipage_groups(jxls: list) -> dict:
     by_group: dict = {}
     # {group key: {declared page counts}} — see PAGES_PREFIX.
     by_group_total: dict = {}
+    # {str(path): srcsum} — kept beside the entries for the same reason
+    # by_group_total is: widening the entry tuple would touch every unpack site.
+    srcsum_by_path: dict = {}
     standalone: list = []
 
     for j in jxls:
         info = marker_map.get(str(j), _DEFAULT_INFO)
+        srcsum_by_path[str(j)] = info.get('srcsum')
         _stem, parsed_page, parsed_thumb = _parse_jxl_page_suffix(j.stem)
         if info['group']:
             # Page index and thumbnail role come from the MARKERS when present
@@ -3270,6 +3333,41 @@ def collect_multipage_groups(jxls: list) -> dict:
         if not unique_entries:
             continue
         entries = unique_entries
+
+        # MORE members than the split recorded. Not a truncated group — the
+        # opposite: files that do not belong here are being pulled in. Merging
+        # them writes a TIFF carrying a page from a different encode, and every
+        # downstream check passes because that TIFF is structurally valid.
+        # Resolve it if the evidence allows, and refuse to merge if it does not.
+        _declared_now = {n for n in by_group_total.get(_marker, set()) if n}
+        if len(_declared_now) == 1:
+            _dn = next(iter(_declared_now))
+            if len(entries) > _dn:
+                _kept, _orphans = _split_group_by_srcsum(entries, _dn, srcsum_by_path)
+                if _kept is not None:
+                    logger.warning(
+                        f"Multi-page group has {len(entries)} member(s) but the split "
+                        f"recorded {_dn} | group {_marker[1]} | "
+                        f"{', '.join(sorted(e[0].name for e in _orphans))} "
+                        f"came from a different encode of the same source (leftovers of "
+                        f"an earlier split) and will be decoded on their own. Delete "
+                        f"them once you have checked them.")
+                    entries = _kept
+                    standalone.extend(_orphans)
+                else:
+                    _names = ", ".join(sorted(e[0].name for e in entries))
+                    _reason = (f"the split recorded {_dn} page(s) but {len(entries)} "
+                               f"carry its group id, and nothing distinguishes the "
+                               f"members from leftovers of an earlier split")
+                    logger.error(
+                        f"REFUSING to merge multi-page group {_marker[1]} ({_reason}) | "
+                        f"{_names} | each one is decoded on its own instead, so no TIFF "
+                        f"is written with a page that may not belong to it. Move the "
+                        f"leftovers out of the folder and run again.")
+                    _group_conflicts.append((str(entries[0][0]), _reason))
+                    standalone.extend(entries)
+                    continue
+
         # Prefer a real page 0 as the main/anchor; fall back to lowest real page,
         # then lowest page overall. Thumbnails are never chosen as main.
         real_page0 = [e for e in entries if e[1] == 0 and not e[2]]
@@ -3298,9 +3396,12 @@ def collect_multipage_groups(jxls: list) -> dict:
                                f"({sorted(_declared)})")
         elif _declared:
             _n = next(iter(_declared))
-            if len(entries_sorted) != _n:
+            # Only "fewer than recorded" can still reach here: a group with MORE
+            # members than the split declared was either resolved down to
+            # exactly _n above, or refused outright and never became a group.
+            if len(entries_sorted) < _n:
                 _pages = ", ".join(str(e[1]) for e in entries_sorted)
-                _why_incomplete = (f"the split recorded {_n} page(s), and "
+                _why_incomplete = (f"the split recorded {_n} page(s), and only "
                                    f"{len(entries_sorted)} are here (page {_pages})")
         elif len(entries_sorted) == 1 and entries_sorted[0][1] != 0:
             # No recorded count: an archive written before jxlphoto-pages
@@ -3695,6 +3796,12 @@ Examples:
     # Group JXLs into multi-page TIFF sets
     mp_groups = collect_multipage_groups(jxls)
 
+    # Groups this run refused to merge (more members than the split recorded,
+    # and nothing to tell them apart). The files are still decoded — one TIFF
+    # each — but the run must not report success: a folder in that state needs
+    # a human, and a scheduled job reading the exit code has to hear about it.
+    group_conflicts = list(_group_conflicts)
+
     # Build tasks: each task represents one output TIFF
     tasks = []
     for main_jxl, entries in mp_groups.items():
@@ -3771,7 +3878,14 @@ Examples:
                     logger.info(f"  would KEEP ({_why}) | {_j}")
         emit_summary_json(
             args.summary_json,
-            ok=len(tasks), overwritten=0, skipped=0, errors=0,
+            ok=len(tasks), overwritten=0, skipped=0,
+            # A refused merge is a real prediction: those groups will not be
+            # rebuilt. Reporting errors:0 next to a non-empty failure list made
+            # the wrapper's recap contradict itself (same rule as the encoder).
+            # The EXIT CODE is untouched — a simulation still returns 0.
+            errors=len(group_conflicts),
+            failures=[(p, f"refused to merge the multi-page group: {r}")
+                      for p, r in group_conflicts],
             log_file=log_file, dry_run=True,
         )
         return
@@ -3869,12 +3983,13 @@ Examples:
 
     # Process
     ok = skipped = overwritten = aborted = 0
-    err = len(provenance_failures)
+    err = len(provenance_failures) + len(group_conflicts)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     # Counts alone don't answer "did something break in the middle?" — the user
     # walks away from a multi-hour manifest and needs the paths on return.
-    failed_files = list(provenance_failures)
+    failed_files = list(provenance_failures) + [
+        (p, f"refused to merge the multi-page group: {r}") for p, r in group_conflicts]
 
     # ONE pool for the whole run. Feeding it folder by folder meant a folder
     # with fewer files than --workers could never fill the pool, and every
