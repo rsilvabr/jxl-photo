@@ -26,9 +26,9 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## Current version
 
-**v2.0.1** (2026-08-13) — maintenance. The v2.0.0 archive-and-delete machinery was audited against the real fixtures rather than reasoned about: 16-bit Capture One exports and the 756 MB RGB+IR film scans. Six defects, **none in the conversion path** — every lossless round trip came back pixel-identical. The one worth reading about made the delete confirmation announce the wrong file count in mode 7.
+**v2.0.2** (2026-08-19) — maintenance, with one fix that matters if you archive film scans more than once. Converting a file has come out clean in every audit; the **second** archive cycle had not been looked at. A scan is `[image, thumbnail, IR]`, and excluding the thumbnail does not renumber the real pages — so a decode-and-re-archive round left a page of the previous split behind, and the next decode merged it back in, writing a TIFF with a page repeated. Ten fixes in all; the other nine sit around the core, as usual.
 
-[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.0)
+[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.1)
 
 > ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
 >
@@ -597,9 +597,49 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-### What's new — v2.0.1 (current stable)
+### What's new — v2.0.2 (current stable)
 
-**Released 2026-08-13.** A maintenance release on top of v2.0.0. Nothing here changes a command line or a file format: v2.0.0 commands keep working exactly as written.
+**Released 2026-08-19.** A maintenance release. No command line and no file format changes: v2.0.1 commands keep working exactly as written, and JXLs written by earlier versions are still read the same way — better, in the one case described below.
+
+This round read all four scripts end to end, then went at them with the real fixtures plus a 12-file matrix of synthetic TIFFs built for the shapes the mocked suite cannot reach: RGB 16- and 8-bit, grayscale, RGBA, gray+alpha, a three-page scan with an IR `MASK` page, a thumbnail sitting at page 0, sources *named* `*_page3` and `*_thumbnail`, and mixed per-page depths.
+
+**Converting a file came out clean once again.** Every lossless round trip was pixel-identical with ICC, photometric and `SubfileType` preserved; JPEG ↔ JXL recovered byte-identical; and each delete gate refused when it should — the cross-run provenance check, the incomplete-split KEEP, an un-promoted staging file, discarded pages, and an impostor archive caught by `--verify-roundtrip`.
+
+**What was not clean is the second archive cycle**, and it lands squarely on film scans.
+
+#### The re-archive defect
+
+A scan is `[image, thumbnail, IR]`. With the default `--thumbnail-mode exclude` the encoder writes pages `{0, 2}` — excluding a thumbnail does **not** renumber the real pages. Decoding that gives a two-page TIFF, `[image, IR]`, so re-encoding it in the same folder writes pages `{0, 1}` and leaves `scan_page2.jxl` behind from the first round.
+
+The group id was a hash of the **source path** alone, which is identical across both runs. All three files therefore claimed one group, and the decoder merged them into a TIFF holding the IR page **twice** — a structurally valid file, so nothing downstream could notice. The run reported `0 errors` and exited 0.
+
+Two existing defences did fire, which is why nothing was ever destroyed: the group was reported as incomplete, and `--delete-source` kept the sources. But the TIFF that was written was wrong, and the run called itself a success.
+
+Three changes close it:
+
+- **The group id now identifies the split**, not just its source: it covers the set of pages the split produces. Re-encoding a file whose page structure did not change keeps the same id and the outputs simply overwrite each other, which is what a sync run is for — while a run writing a *different* set of names gets a new id, so a leftover can never join it.
+- **The decoder refuses to merge a group carrying more members than the split recorded.** It first tries to resolve it: every output records the id of its source *bytes*, which differs between two encodes, so when exactly one set of members adds up to the recorded count, that set is the split and the rest are named as leftovers and decoded on their own. When nothing distinguishes them it fails closed — each file decodes separately, no TIFF is written under the group's name, and the run reports a real error. **This is also what repairs archives already in that state**, where every member shares one group id; verified against a folder built with the pre-fix code.
+- **The encoder names leftovers of a previous split** when it finds them in the destination, before the folder is ever decoded. Nothing is deleted for you: a `<name>_page1.jxl` can legitimately be a file of its own.
+
+#### The other nine
+
+- **A manifest that deletes now offers the same gates as the `[D]` menu** — round-trip verification, whether to cover already-converted originals, and how an existing output is matched to its source. Those questions live in the `[D]` gateway, which the manifest path does not go through, so the largest run the wrapper starts reached the deletion with the structural check alone.
+- **"Incomplete group" covered two opposite problems with one message**: pages *missing* and pages *extra* produced the same wording and the same advice, which is wrong for the second.
+- **Mode-6 manifests no longer pay a full recursive scan before starting.** Entries that write inside their own Source tree cannot collide when the Sources are disjoint, so the common `G:\2024` / `G:\2025` / `G:\2026` manifest begins converting immediately instead of walking all three libraries first. That family is now *checked* for overlap rather than assumed disjoint, which is stricter than before.
+- **`Added JPEG preview ... with ICC`** was logged even when no ICC was attached — which is every film-scan IR page, where the profile is inherited and deliberately not written.
+- **The transcoder wrote `CreatorTool` into an exiftool argfile unsanitised.** It had no `_argfile_safe` at all; a multi-line value copied from another program would split one argument into several.
+- **The `output` positional was documented as "mode 0 only"** in the encoder's help and README, while mode 2 honours it too.
+- **A JXL → JPEG preset advertised a distance it never uses**, inherited from whatever TIFF run came before it.
+- **Two readers of `dc:Relation` disagreed on a single-value tag**, one splitting it on commas — enough to tear a caption like `Smith, John` in two.
+- **The cautious ICC test held its lock across the probe** (two `cjxl` runs and two `djxl` runs), stopping every worker the first time each profile appeared.
+
+**1017 tests**, up from 994. Eighteen of the twenty new ones were verified failing against the pre-fix code; the other two are controls that must pass on both sides. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (round 31).
+
+---
+
+### v2.0.1 — previous stable
+
+**Released 2026-08-13, superseded by v2.0.2 and kept here for reference.** A maintenance release on top of v2.0.0. Nothing here changes a command line or a file format: v2.0.0 commands keep working exactly as written.
 
 v2.0.0 shipped a lot of new machinery around the moment a file is deleted, so this round audited it the way the [AGENTS notes](AGENTS.md) ask for — against real photos rather than the synthetic test suite. The fixtures were 16-bit Capture One exports, a 260 MB Z8 export, and the 756 MB RGB+IR film scans (RGB page + embedded preview + IR `MASK` page, carrying a 217 KB scanner ICC).
 
@@ -724,7 +764,8 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.0.1** | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
+| **v2.0.2** | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
+| v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
 | v2.0.0 | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
 | v1.9.1 | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
 | v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
