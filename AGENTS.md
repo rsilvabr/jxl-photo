@@ -10,6 +10,11 @@
   untracked at the repo root (gitignored). They still match on a repo-wide
   grep, so treat any hit there as noise: the duplicated-helper rule below means
   a fix applied to `claude/jxl_*.py` by mistake would look right and do nothing.
+- `PIP/` — a PyPI packaging attempt (gitignored) whose `src/jxl_photo/` holds a
+  fourth copy of all four scripts, frozen at v1.8.1 and roughly 2 000 lines
+  behind each. Same rule as `claude/`: grep hits there are noise. If that
+  package is ever published, the copies have to be refreshed first — the
+  `pyproject.toml` version is not what the code in it is.
 
 ## Active scripts
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)

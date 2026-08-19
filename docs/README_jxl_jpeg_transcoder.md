@@ -327,7 +327,11 @@ Options:
 
   --icc-profile PATH Path to ICC profile for color conversion.
                      Can be a file path (e.g., "C:\icc\AdobeRGB.icc") or the
-                     built-in name: "sRGB"
+                     built-in name: "sRGB".
+                     GRAYSCALE images are left alone: a single-channel file has
+                     no gamut to map, and an RGB profile on one is invalid (PNG
+                     rejects a mismatched iCCP, and a 1-component JPEG carrying
+                     sRGB is wrong the same way). Each one is named in the log.
   --to-srgb          Shortcut: convert to sRGB using ImageMagick built-in
                      (shorthand for --icc-profile sRGB)
 

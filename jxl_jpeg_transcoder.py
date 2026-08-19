@@ -2706,6 +2706,45 @@ def _magick_icc_args(output_icc: str, extra: list, tmp_dir: Path = None) -> list
     return ["-profile", output_icc] + extra
 
 
+def _png_is_grayscale(png_path: Path) -> bool:
+    """True when the PNG djxl just wrote is single-channel (colour type 0 or 4).
+
+    Only the 26-byte signature + IHDR is read: this runs per file, and the
+    decoded intermediate of a 93 MP scan is hundreds of MB.
+    """
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    return head[25] in (0, 4)          # 0 = grey, 4 = grey + alpha
+
+
+def _icc_args_for(png_path: Path, output_icc: str, extra: list) -> list:
+    """Colour args for one decoded intermediate, skipping the profile on grey.
+
+    An RGB ICC on a single-channel image is malformed: PNG requires the iCCP
+    profile's data colour space to match the colour type, so libpng warns
+    ("RGB color space not permitted on grayscale PNG") on every read, and a
+    1-component JPEG carrying an sRGB profile is wrong in the same way.
+    ImageMagick attaches it without converting the image, so the caller has to
+    decide.
+
+    Nothing is converted to RGB to make the profile fit: a grey image has no
+    gamut to map, and widening it would triple every film-scan IR page. The
+    encoder learned this first — it does not apply an inherited RGB ICC to a
+    grayscale page either.
+    """
+    if _png_is_grayscale(png_path):
+        logger.info(f"  >Grayscale image: skipping the ICC conversion "
+                    f"({png_path.name} has no colour to map, and an RGB profile "
+                    f"on a single-channel file is invalid)")
+        return list(extra)
+    return _magick_icc_args(output_icc, extra)
+
+
 def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     quality: int, fmt: str, bit_depth: int,
                     output_icc: str, use_ram: bool, reconvert_val: bool, smart: bool) -> tuple:
@@ -2759,8 +2798,6 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             if output_icc and MAGICK_AVAILABLE:
                 # Color conversion: real ICC profile via -profile when possible
                 # (proper ICC transform, not a color-model reinterpretation).
-                magick_output = _magick_icc_args(output_icc, ["-depth", str(bit_depth)])
-                logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                 # djxl does not support --output_format; write a temporary PNG (format by
                 # extension) and then convert with ImageMagick. Same as the --no-ram path.
                 # capture_output keeps worker logs clean and preserves stderr for errors.
@@ -2768,6 +2805,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
                         subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        # Decided AFTER the decode: only the intermediate says
+                        # whether this image is single-channel (see
+                        # _icc_args_for).
+                        magick_output = _icc_args_for(tmp_png, output_icc, ["-depth", str(bit_depth)])
+                        logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                         subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
@@ -2782,14 +2824,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             if output_icc and MAGICK_AVAILABLE:
                 # Color conversion: real ICC profile via -profile when possible
                 # (proper ICC transform, not a color-model reinterpretation).
-                magick_output = _magick_icc_args(output_icc, ["-quality", str(quality)])
-                logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                 # djxl does not support --output_format; decode to a temporary PNG (format by
                 # extension) and let ImageMagick convert to the final JPEG.
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
                         subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        # Decided AFTER the decode: a 1-component JPEG carrying
+                        # an sRGB profile is as wrong as the PNG case above.
+                        magick_output = _icc_args_for(tmp_png, output_icc, ["-quality", str(quality)])
+                        logger.debug(f"Using ICC conversion: {magick_output[:2]}")
                         subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]

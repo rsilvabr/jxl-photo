@@ -13,6 +13,7 @@ v1.9.0_beta2 / 2026-08-01: Full-repo audit — 21 bugs fixed (2 critical/data-sa
 v2.0.0 / 2026-08-09: Rounds 23-29, all shipped together — the archive-and-delete release. `--delete-source` in every mode, provenance markers, incomplete-split detection, and the hardening around them.
 Round 30 / 2026-08-13: Post-v2.0.0 audit against the real fixtures — 6 bugs, none in the conversion core (see top section)
 Round 31 / 2026-08-19: Full-repo audit — 10 bugs. The first one that loses image structure since v2.0.0: a SECOND archive cycle of a multi-page scan merged a leftover page into the new group (see top section)
+Round 32 / 2026-08-19: Second sweep the same day over the paths round 31 did not run (matrix/basic/none, PNG and --to-srgb output, adopt, modes 1/3/4/5, CJK paths) — 1 bug: an RGB ICC attached to grayscale output
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -21,6 +22,39 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-32 audit (2026-08-19)
+
+Second sweep the same day, aimed at what round 31 did NOT exercise: the decoder's
+alternative colour paths (`--matrix`, `--basic`, `--none`, `--target-icc`), the
+transcoder's convert direction (PNG output, `--to-srgb`, `--icc-profile`, auto
+mode on a mixed folder), encoder modes 1/3/4/5, non-ASCII and bracketed paths,
+`--provenance adopt`, and a re-review of everything round 31 had just changed.
+
+**Almost all of it held.** Matrix/basic/none behave as documented (alpha dropped
+on the PPM path, 8-bit precision in the LittleCMS transform, no ICC under
+`--none`); `--provenance adopt` verified, stamped, and correctly REFUSED an
+archive that did not come from its source; the v1.8.2 ignored-thumbnail delete
+guard still keeps those sources; a CJK + `[bracket]` + accented path round-tripped
+pixel-identical with markers intact; and every `--flag` the wrapper can emit was
+checked mechanically against the three child parsers — no orphans.
+
+One real defect, in the one direction round 31 never ran.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 313 | **An RGB ICC was attached to single-channel outputs.** `--to-srgb` and `--icc-profile` hand every decoded image to `magick -profile <sRGB.icc>`, which attaches the profile without converting the image — so a grayscale source came out as a grayscale file carrying an RGB profile. PNG requires the iCCP profile's data colour space to match the colour type, so libpng warns on every read (`iCCP: profile 'icc': 'RGB ': RGB color space not permitted on grayscale PNG`), and a 1-component JPEG with an sRGB profile is wrong the same way. **Reproduced** on a grayscale TIFF and on a film scan's IR page, in both output formats: `b_gray16.png` / `f_scan_page2.png` grayscale with `iCCP data-space='RGB '`, and the matching JPEGs with `ColorComponents=1` + `ColorSpaceData=RGB`. Without the flag the same files correctly carry no profile at all. The encoder learned this first and its README says so — "Inherited RGB ICC is not applied to grayscale pages, which prevents libpng iCCP errors on scanner IR/mask pages" — but the transcoder's convert path never did | transcoder | ✅ FIXED (`_png_is_grayscale` reads the 26-byte IHDR of the decoded intermediate — colour type 0 or 4 — and `_icc_args_for` drops the profile argument for those, keeping it for RGB/RGBA. Decided AFTER the decode, since only the intermediate knows the channel count. Deliberately does NOT widen grey to RGB to make the profile fit: there is no gamut to map, and it would triple every IR page) |
+
+Also noted, not a code defect: `PIP/` holds a fourth copy of all four scripts,
+frozen at v1.8.1 and ~2 000 lines behind. It is gitignored, so it cannot drift
+into a release by accident, but it was not listed in `AGENTS.md` next to
+`claude/` and a repo-wide grep hits it. Added there.
+
+Regression tests: `tests/test_audit_round32.py` (10). Nine fail against the
+pre-fix code; the tenth is a control that pins the shape of the defect (an RGB
+profile inside a colour-type-0 PNG) and passes on both sides.
 
 ---
 
