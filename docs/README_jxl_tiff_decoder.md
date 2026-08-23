@@ -625,6 +625,12 @@ exiftool -tagsfromfile source.jxl -exif:all -xmp:all -iptc:all destination.tif
 
 **Result**: EXIF is now correctly preserved in all cases, visible in IrfanView and other applications.
 
+A failed metadata copy is not silent: exiftool's exit code is checked, a failure
+(a corrupt tag, a failed write) is logged as `METADATA COPY FAILED` and counts
+as a per-file error. The TIFF itself stays — its pixels are fine — but with
+`--delete-source` the source JXL is **kept**, since it may hold the only copy of
+that metadata. The delete gate fails closed here, like everywhere else.
+
 ---
 
 ## Appendix: How to verify output

@@ -136,3 +136,67 @@ def test_a_locked_file_on_a_healthy_volume_does_not_abort(mod, tmp_path, monkeyp
     monkeypatch.setattr(mod.shutil, "move", _fake_move)
     assert mod._promote_from_staging(src, dst) is False
     assert not mod._aborted(), "one locked file stopped the whole run"
+
+
+# Bug M4 — "the move raised" was treated as "the destination is partial", so
+# the cleanup deleted files the move never damaged. shutil.move is
+# rename → copy2 → unlink(staging), and each step can fail on its own.
+
+
+@pytest.mark.parametrize("mod", MODULES, ids=IDS)
+def test_an_untouched_preexisting_output_survives_a_failed_move(mod, tmp_path, monkeypatch):
+    """Read-only/locked pre-existing destination: the move failed BEFORE
+    writing a single byte. That file is a valid archive — the old cleanup
+    unlinked it."""
+    src = _staged(tmp_path)
+    dst = tmp_path / "final" / "out.bin"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes(b"original archive, still valid")
+
+    def _fake_move(a, b):
+        raise PermissionError(13, "Permission denied", b)
+
+    monkeypatch.setattr(mod.shutil, "move", _fake_move)
+    assert mod._promote_from_staging(src, dst) is False
+    assert dst.read_bytes() == b"original archive, still valid", \
+        "a destination the move never touched was deleted"
+    assert src.exists(), "the complete copy must stay in staging"
+
+
+@pytest.mark.parametrize("mod", MODULES, ids=IDS)
+def test_a_complete_copy_with_failed_unlink_survives(mod, tmp_path, monkeypatch):
+    """copy2 succeeded and only the staging unlink failed: the destination
+    holds the COMPLETE new output. The old cleanup deleted it and logged it
+    as 'the partial file'."""
+    src = _staged(tmp_path)
+    dst = tmp_path / "final" / "out.bin"
+    dst.parent.mkdir(parents=True)
+
+    def _fake_move(a, b):
+        shutil.copyfile(a, b)
+        raise PermissionError(13, "Permission denied", a)  # unlink(src) failed
+
+    monkeypatch.setattr(mod.shutil, "move", _fake_move)
+    assert mod._promote_from_staging(src, dst) is False
+    assert dst.read_bytes() == b"x" * 4096, "a COMPLETE destination was deleted"
+    assert src.exists()
+
+
+@pytest.mark.parametrize("mod", MODULES, ids=IDS)
+def test_a_genuinely_partial_overwrite_is_still_removed(mod, tmp_path, monkeypatch):
+    """The one case where deletion is right: the destination's identity
+    changed mid-move (a pre-existing file was truncated by the failed copy)
+    and what landed is incomplete."""
+    src = _staged(tmp_path)
+    dst = tmp_path / "final" / "out.bin"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes(b"older complete output, now corrupt")
+
+    def _fake_move(a, b):
+        Path(b).write_bytes(b"PAR")  # truncated mid-copy
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mod.shutil, "move", _fake_move)
+    assert mod._promote_from_staging(src, dst) is False
+    assert not dst.exists(), "the truncated file was left at the destination"
+    assert src.exists(), "the complete copy must stay in staging"

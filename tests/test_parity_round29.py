@@ -70,8 +70,14 @@ def test_same_named_outputs_each_get_their_own_checksum(tmp_path):
 
     for sub in ("a", "b"):
         out_dir = next(p.parent for p in (tmp_path / "root" / sub).rglob("photo.jxl"))
-        assert _db_names(out_dir) == ["photo.jxl"], (
-            f"{sub}: checksums.md5 holds {_db_names(out_dir)}")
+        names = _db_names(out_dir)
+        # The ".jxl-md5" companion line (the JXL's own hash, content-binding
+        # for the decode-side delete gates) is expected alongside the output's
+        # own checksum — but no FOREIGN output's line may appear here (#287).
+        plain = [n for n in names if not n.endswith(tr.JXL_SELF_HASH_SUFFIX)]
+        companions = [n for n in names if n.endswith(tr.JXL_SELF_HASH_SUFFIX)]
+        assert plain == ["photo.jxl"] and companions == [f"photo.jxl{tr.JXL_SELF_HASH_SUFFIX}"], (
+            f"{sub}: checksums.md5 holds {names}")
 
 
 def test_no_checksum_is_filed_for_a_file_that_is_not_there(tmp_path):
@@ -87,12 +93,17 @@ def test_no_checksum_is_filed_for_a_file_that_is_not_there(tmp_path):
     for db in (tmp_path / "root").rglob(tr.CHECKSUMS_FILENAME):
         names = _db_names(db.parent)
         for name in names:
-            assert (db.parent / name).exists(), (
+            # A ".jxl-md5" companion line vouches for the JXL it is SUFFIXED
+            # after — the file it claims coverage of is the un-suffixed name.
+            target = (name[:-len(tr.JXL_SELF_HASH_SUFFIX)]
+                      if name.endswith(tr.JXL_SELF_HASH_SUFFIX) else name)
+            assert (db.parent / target).exists(), (
                 f"{db} claims a checksum for {name}, which is not in that folder")
-        # One line per output, not two: the collapsed key used to file BOTH
-        # sources' hashes here, and read_md5_db returns the last one — a
+        # One plain line per output, not two: the collapsed key used to file
+        # BOTH sources' hashes here, and read_md5_db returns the last one — a
         # foreign hash for this folder's file.
-        assert len(names) == len(set(names)) == len(list(db.parent.glob("*.jxl"))), (
+        plain = [n for n in names if not n.endswith(tr.JXL_SELF_HASH_SUFFIX)]
+        assert len(plain) == len(set(plain)) == len(list(db.parent.glob("*.jxl"))), (
             f"{db} holds {names}")
 
 

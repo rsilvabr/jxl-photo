@@ -392,7 +392,10 @@ Options:
   --output-suffix SFX Suffix for converted files (default: none — flat output)
   --rename-from PAT  Literal substring to replace in filenames (not regex)
   --rename-to REP    Replacement string for renamed files
-  --dry-run          Preview operations without converting
+  --dry-run          Preview operations without converting. With --delete-source
+                     armed, every entry point (transcode, convert, auto) says so:
+                     `Dry run: --delete-source is ARMED. Up to N source(s) would
+                     be deleted`, with the gates that stand in front of it
   --summary-json     Emit ONE machine-readable line per run:
                      `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`
                      on stdout, in addition to the normal log. jxl_photo.py
@@ -431,7 +434,7 @@ entirely on the direction, and the difference is large**:
 | Direction | Flags | What backs the delete |
 |---|---|---|
 | JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected |
-| JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it |
+| JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN, bound to the JXL's content.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it — **and** the JXL itself must be the file that was archived: its own MD5 is stored beside the original's (a `<name>.jxl-md5` line), and databases written before that fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12). A same-named JXL that was never archived fails both, and when no proof can run the source is KEPT |
 | JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Structural check only** |
 | JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Structural check only** |
 
@@ -523,12 +526,24 @@ For lossless transcoding (JPEG → JXL → JPEG), the script maintains a `checks
 
 ```
 53b75f86f7c1042a38776eda47654fce  _DSC4550.jxl
+7f3a91c2e58b40d6a12c9f04b6e28d51  _DSC4550.jxl.jxl-md5
 a3f1c2d8e9b047f6123456789abcdef0  _DSC4551.jxl
 ```
 
-**During encode:** MD5 of source JPEG is appended to database.
+**During encode:** MD5 of source JPEG is appended to database, keyed by the
+output's name — and, on the second line, the JXL's **own** MD5 under the
+`<name>.jxl-md5` companion key. The companion line is backward-compatible:
+plain-name lookups match names exactly, so it never shadows them, and
+databases written before it existed simply have no self-hash line.
 
 **During decode:** Recovered JPEG MD5 is compared against stored hash.
+
+**During a delete run (decode direction):** the gates also prove the JXL on
+disk is the file that was archived, not a same-named replacement. The
+self-hash line is compared directly when present; legacy databases fall back
+to `djxl --reconstruct_jpeg` into a temp file (djxl ≥ 0.12), compared against
+the archived JPEG. A mismatch — or the proof being unavailable — fails
+**closed**: the source JXL is kept.
 
 Log output:
 

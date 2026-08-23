@@ -121,6 +121,13 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `7` | Presets | Save the last workflow under a name and re-run it later. See below |
 | `0` | Exit | Quit |
 
+The stored workflow is validated before a repeat or a preset replays it: the
+config is plain JSON you can hand-edit, so not just the numbers (mode, workers,
+distance, ...) but also the enumerated values (bit depth, provenance,
+multi-page policy, compression, depth policy, conversion type, ICC profile)
+are checked. A corrupt value is **refused with the reason**, not defaulted and
+not passed to a child as a command line nobody typed.
+
 ### Presets (option 7)
 
 `Repeat last workflow` only ever remembers **one** run. Presets let several
@@ -151,6 +158,9 @@ py jxl_photo.py --run-preset nightly-sync         # runs it, no menu, no prompts
 py jxl_photo.py --run-preset nightly-sync --dry-run
 py jxl_photo.py --run-preset nightly-sync --overwrite
 ```
+
+`--list-presets` is read-only and works even with no codecs installed — useful
+for checking what a config carries before copying it to another machine.
 
 The only other command-line flag is `--recheck`, which re-runs the dependency
 detection (cjxl/djxl/exiftool/ImageMagick) and refreshes what the status line at
@@ -235,7 +245,7 @@ G:\2026,,3,tiff2jxl
 |--------|---------|
 | `Source` | Input folder. Rows starting with `#` are comments. |
 | `Destination` | Only used by modes 0 and 2. Leave **empty** for every other mode — they compute their own output location, and a value there is ignored (the wrapper warns). |
-| `Mode` | 0–8, per row. Different folders can use different modes. |
+| `Mode` | 0–8, per row. Different folders can use different modes. Mode **7** in a hand-written manifest means "only `<marker>/<subfolder>`", so write the Source as that path — the wrapper derives the subfolder from it and passes it to the children as `--export-subfolder`. A mode-7 row whose Source sits **above** the marker cannot derive one, and the child would then process every subfolder (i.e. run as mode 6): attended runs warn and can be declined, unattended presets are refused. Use mode 6 if every subfolder is intended. |
 | `Direction` | `tiff2jxl`, `jpeg2jxl`, `jxl2tiff`, ... Must match the workflow you start, so a TIFF→JXL manifest can never be replayed by a JXL→TIFF session. |
 
 Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
@@ -318,6 +328,11 @@ per-entry logs to find out which photo broke.
 An entry whose child crashed, was killed, or was cancelled shows
 `(no summary - failed)` instead of zeros, so a dead child is never mistaken for a
 clean folder.
+
+Ctrl+C cancels cleanly: the running child is killed, the summary block above is
+still rendered (the interrupted entry marked `cancelled`, the rest
+`not started`), and the wrapper exits `130` — the accounting of what *did*
+complete survives the interruption.
 
 **`Logs/jxl_photo/<timestamp>.log`** holds the same block plus the untruncated
 folder paths (the table shortens them to fit the terminal) and the complete

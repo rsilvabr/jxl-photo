@@ -262,6 +262,13 @@ session/_EXPORT/16B_TIFF/photo.tif → session/_EXPORT/16B_JXL/photo.jxl  ✓
 session/_EXPORT/AdobeRGB/photo.tif → ignored
 ```
 
+Both modes also skip TIFFs sitting in a **decoder output folder** (`16B_TIFF`,
+`TIFF_16bits`, `converted_tiff`) below the marker — re-encoding a decoded TIFF
+at `d>0` is generational loss. Mode 7 exempts the one subfolder explicitly
+requested via `EXPORT_TIFF_SUBFOLDER`; mode 6 has no requested subfolder, so it
+skips **all** of them — a leftover `EXPORT_TIFF_SUBFOLDER` value does not
+exempt one there.
+
 ---
 
 ## Output modes
@@ -556,7 +563,10 @@ WARNING |   -> G:\2026\260512_Recife\_EXPORT\scan_099.tif
 ```
 
 The test is that the page analyzer found neither a real page nor a thumbnail — a
-healthy TIFF always has at least one page, so there is no guessing involved.
+healthy TIFF always has at least one page, so there is no guessing involved. The
+classification is the same in **every** multipage mode: a header that opens but
+yields no pages is `corrupt` under `split`/`split_all`/`skip`/`ignore` alike
+(not a per-file error), so the exit code keeps its meaning everywhere.
 
 **Corrupt files do not change the exit code.** A damaged input is not a failed
 run: exit `1` still means the conversion failed on a file, so automation reading
@@ -850,7 +860,7 @@ Multi-page TIFFs are handled explicitly instead of silently discarding extra pag
   Equivalent to `--multipage-mode split --thumbnail-mode include`; `--thumbnail-mode`
   is ignored in this mode.
 
-Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`).
+Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`). The suffix must be a plain filename suffix — an empty value, a path separator, or `..` is rejected at startup (a thumbnail name must never point outside the destination).
 
 **Thumbnail exclusion is not warned per file.** `--thumbnail-mode exclude` is an
 explicit request, so it produces a single summary line
@@ -869,6 +879,15 @@ thumbnail does not renumber the real pages, so a `[real, thumb, IR]` scan
 archives as `{0, 2}`, and the reconstructed `[real, IR]` re-archives as
 `{0, 1}`, leaving `scan_page2.jxl` behind. With a source-only id those leftovers
 joined the new group and the next decode rebuilt a TIFF with a duplicated page.
+
+One exception keeps pre-v2.0.2 archives healable: those carry the *old* id (the
+source path alone). If a page of such an archive is lost and re-encoded while
+its siblings are skipped by sync/no-overwrite, stamping it with the new id
+would split the archive into two groups the decoder cannot merge. So when every
+existing sibling page in the destination unanimously carries this source's
+legacy id, the new pages are stamped with that same id (logged as an INFO
+line), and the archive heals into one group. Mixed or missing sibling markers
+keep the new formula — the id is adopted from proof, never guessed.
 
 The encoder also names such leftovers when it finds them in the destination:
 

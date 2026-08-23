@@ -234,11 +234,25 @@ def _promote_from_staging(write_path, final_path) -> bool:
     still in staging, so removing whatever landed loses nothing and puts the
     destination back to a state a later run will fix.
 
+    But "the move raised" does not mean "the destination is partial". The move
+    can fail BEFORE touching the destination (a read-only or locked
+    pre-existing file — that file is a perfectly good archive), and the copy
+    can SUCCEED with only the staging unlink failing (the destination then
+    holds the COMPLETE new output). Deleting either one destroys good data, so
+    the cleanup compares against an identity snapshot taken before the move
+    and removes the destination only when the move provably wrote to it AND
+    what it wrote is incomplete. When in doubt, the file is kept.
+
     A destination volume that is simply FULL also has to stop the run rather
     than produce one MOVE FAILED line per remaining file, which is what the
     disk-full abort exists for.
     """
-    pre_existed = final_path.exists()
+    pre_identity = None
+    try:
+        _st = final_path.stat()
+        pre_identity = (_st.st_mtime_ns, _st.st_size)
+    except OSError:
+        pass
     try:
         size = write_path.stat().st_size
     except OSError:
@@ -254,16 +268,32 @@ def _promote_from_staging(write_path, final_path) -> bool:
         # completed and something else raised.
         if write_path.exists() and final_path.exists():
             try:
-                final_path.unlink()
+                _st = final_path.stat()
+                written = (pre_identity is None
+                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
+                complete = size > 0 and _st.st_size == size
+            except OSError:
+                written, complete = False, False  # cannot tell → keep the file
+            if written and not complete:
+                try:
+                    final_path.unlink()
+                    logger.error(
+                        f"    Removed the partial file left at the destination"
+                        + (" (it had OVERWRITTEN an existing output, which was already "
+                           "corrupt by then)" if pre_identity is not None else "")
+                        + " — the complete copy is still in staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial destination file "
+                                 f"({e2}). Delete {final_path} by hand before re-running: "
+                                 f"a later sync run would treat it as up to date.")
+            elif written:
                 logger.error(
-                    f"    Removed the partial file left at the destination"
-                    + (" (it had OVERWRITTEN an existing output, which was already "
-                       "corrupt by then)" if pre_existed else "")
-                    + " — the complete copy is still in staging.")
-            except OSError as e2:
-                logger.error(f"    Could NOT remove the partial destination file "
-                             f"({e2}). Delete {final_path} by hand before re-running: "
-                             f"a later sync run would treat it as up to date.")
+                    "    The destination holds a COMPLETE copy (the copy itself "
+                    "finished; only the staging cleanup failed) — keeping it.")
+            else:
+                logger.error(
+                    "    The destination was never touched by the move "
+                    "(pre-existing file) — keeping it.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -1333,7 +1363,15 @@ def resolve_output(tiff_path: Path, mode: int, input_root: Path) -> Path:
         # Modes 4/5 can land OUTSIDE the selected input tree for files at its
         # root — surface that once per file instead of surprising the user
         # later.
-        if result is not None and not _is_relative_to(result, input_root):
+        # Modes 3/4/5 accept a single FILE as input_root. Testing the output
+        # against the file itself can never pass (a path is never "under" a
+        # file), and testing against the file's parent still flags EVERY
+        # legitimate single-file mode-4/5 run: those modes write a SIBLING of
+        # the file's folder by design. The tree such a run must stay inside is
+        # the folder holding that sibling pair — so anchor at the file's
+        # parent folder's parent.
+        anchor = input_root.parent.parent if input_root.is_file() else input_root
+        if result is not None and not _is_relative_to(result, anchor):
             logger.warning(f"Output outside input tree: {tiff_path.name} -> {result}")
         return result
 
@@ -2402,7 +2440,17 @@ def _measure_batch_ratio(tiffs, distance: float, effort: int):
     than none. Samples are picked across the size distribution so one unusual
     file cannot define the run.
     """
-    uniq = sorted({Path(t) for t in tiffs}, key=lambda p: p.stat().st_size)
+    def _size_or_zero(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except OSError:
+            # Vanished between the scan and this preflight (TOCTOU): sort it as
+            # empty instead of letting one missing file kill the WHOLE estimate
+            # — the OSError was caught by main's catch-all at debug level and
+            # the projection silently vanished.
+            return 0
+
+    uniq = sorted({Path(t) for t in tiffs}, key=_size_or_zero)
     if not uniq:
         return None, []
     if len(uniq) <= _SAMPLE_COUNT:
@@ -3342,12 +3390,21 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         extra_pages = 0
         try:
             with tifffile.TiffFile(str(tiff_path)) as tif:
+                if len(tif.pages) == 0:
+                    # A header that opens but yields no pages is a broken file,
+                    # not an RGB one: classify it exactly as split/split_all do
+                    # below (corrupt; does not change the exit code) instead of
+                    # falling through with samples=3 and dying in convert_one on
+                    # "Page index 0 out of range" — a per-file ERROR, exit 1.
+                    raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
                 samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
                 # Counting the IFD chain only follows offsets (no pixel decode),
                 # and this is the ONLY place that can tell the user pages are
                 # being dropped: "ignore" encodes page 0 and discards the rest,
                 # which used to happen without a single line of output.
                 extra_pages = max(0, len(tif.pages) - 1)
+        except UnreadableTiff:
+            raise
         except Exception:
             # If we cannot read the page, let convert_one report the error later
             # and fall back to RGB to avoid a planning-time crash.
@@ -3371,6 +3428,13 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     pages_to_encode = []
 
     if mp_mode == "skip":
+        if not real_pages and not thumb_pages:
+            # Same classification as split below: a TIFF with no pages at all
+            # is a broken file, not a policy decision. Falling through to
+            # idx=0 errored later in convert_one ("Page index 0 out of range")
+            # — a per-file ERROR, exit 1 — for a file that is merely corrupt
+            # (split documents this as not changing the exit code).
+            raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
         if len(real_pages) > 1:
             logger.warning(f"SKIP multi-page TIFF ({len(real_pages)} real pages) | {tiff_path.name}")
             return []
@@ -3478,7 +3542,10 @@ def _warn_stale_split_outputs(tasks: list) -> list:
         d = final_jxl.parent
         planned_by_dir.setdefault(d, set()).add(os.path.normcase(final_jxl.name))
         if group_id:
-            stems_by_dir.setdefault(d, set()).add(tiff.stem)
+            # Normcased: the comparison below runs against normcased directory
+            # names, so a leftover scan_page2.jxl next to a re-split Scan.tif
+            # would otherwise never match on Windows.
+            stems_by_dir.setdefault(d, set()).add(os.path.normcase(tiff.stem))
 
     stale = []
     for d, stems in stems_by_dir.items():
@@ -3492,7 +3559,7 @@ def _warn_stale_split_outputs(tasks: list) -> list:
             if name_lc in planned:
                 continue
             stem, page_idx, is_thumb = _parse_output_page_suffix(f.stem)
-            if stem not in stems or (page_idx == 0 and not is_thumb):
+            if os.path.normcase(stem) not in stems or (page_idx == 0 and not is_thumb):
                 continue    # not a page of a stem this run splits
             stale.append(f)
 
@@ -3527,6 +3594,132 @@ def _parse_output_page_suffix(stem: str):
         page_idx = int(m.group(1))
         stem = stem[:m.start()]
     return stem, page_idx, is_thumb
+
+
+def _legacy_group_id(tiff_path: Path) -> str:
+    """The pre-v2.0.2 group id: a hash of the source PATH alone.
+
+    Bug #303 replaced this with a hash of path + produced page set. Archives
+    split by v2.0.0/v2.0.1 still carry this id on every page, which is what
+    _adopt_legacy_group_ids looks for. Must hash EXACTLY what the old code
+    hashed or no existing archive will ever match.
+    """
+    return hashlib.sha256(str(tiff_path.resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+def _read_group_markers_batch(outputs: list) -> dict:
+    """{output path: group id|None} in as few exiftool calls as possible.
+
+    Mirrors _read_source_markers_batch but extracts only the multi-page marker;
+    kept separate because that reader's result shape is part of the provenance
+    layer's contract. A file whose marker cannot be read comes back None, which
+    the caller treats as "cannot prove anything": the new id formula stands.
+    """
+    markers = {str(o): None for o in outputs}
+    index = {os.path.normcase(str(o)): str(o) for o in outputs}
+    if not outputs:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(outputs), BATCH):
+        chunk = outputs[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                continue
+            for entry in json.loads(r.stdout):
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                values = rel if isinstance(rel, list) else [str(rel)]
+                gid = None
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(MULTIPAGE_XMP_MARKER):
+                        gid = token[len(MULTIPAGE_XMP_MARKER):]
+                key = os.path.normcase(str(Path(src)))
+                if key in index:
+                    markers[index[key]] = gid
+        except Exception as e:
+            # Never fail an archive run over an optimization: unreadable
+            # markers simply mean the new formula is used.
+            logger.debug(f"Legacy group-id check: marker batch failed ({e})")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
+def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
+                            dir_per_tiff: Dict[str, Path],
+                            pages_per_tiff: Dict[str, set]) -> Dict[str, str]:
+    """{resolved tiff key: legacy group id to stamp} for splits that should heal.
+
+    Bug #303 changed the group id formula from the path alone to path + page
+    set, unconditionally. So when one page output of a v2.0.0/v2.0.1 archive is
+    lost and re-encoded — the surviving pages skipped by sync/no-overwrite but
+    still planned — the re-encoded page would get the NEW id while its siblings
+    keep the legacy one, and the decoder sees two truncated groups where every
+    page is in fact present.
+
+    The fix is to look before writing: if the destination already holds sibling
+    pages of this source (same stem/page naming) that UNANIMOUSLY carry this
+    source's legacy id, stamp this run's pages with that same id so the archive
+    heals back into one group. Unanimity plus an exact match against the legacy
+    formula is what makes this safe — mixed ids, missing markers or same-stem
+    files of a DIFFERENT source (its own name ends in _page<N>) all fail the
+    check and keep the new formula. Costs one batched exiftool call per run,
+    only when a split's destination holds candidate siblings.
+    """
+    adopted: Dict[str, str] = {}
+    candidates: Dict[str, list] = {}
+    for key, tiff in split_tiffs.items():
+        d = dir_per_tiff[key]
+        try:
+            present = [f for f in d.iterdir() if f.suffix.lower() == ".jxl"]
+        except OSError:
+            continue        # destination not readable/created yet: nothing to adopt
+        sibs = [f for f in present
+                if _parse_output_page_suffix(f.stem)[0] == tiff.stem]
+        if sibs:
+            candidates[key] = sibs
+    if not candidates:
+        return adopted
+    marks = _read_group_markers_batch(
+        [f for sibs in candidates.values() for f in sibs])
+    for key, sibs in candidates.items():
+        legacy = _legacy_group_id(split_tiffs[key])
+        if {marks.get(str(f)) for f in sibs} != {legacy}:
+            continue
+        # Only heal when every on-disk page is part of THIS run's page set. A
+        # page the run no longer produces is a leftover of a changed structure
+        # (bug #303's own shape), and adopting the legacy id there would invite
+        # it back into the group.
+        planned = pages_per_tiff.get(key, set())
+        if not all(_parse_output_page_suffix(f.stem)[1:] in
+                   {(p, t) for p, t in planned} for f in sibs):
+            continue
+        adopted[key] = legacy
+        logger.info(
+            f"Multi-page archive predates the v2.0.2 group-id change: the "
+            f"{len(sibs)} existing page(s) of {split_tiffs[key].name} all carry "
+            f"its legacy group id, so this run's page(s) are stamped with the "
+            f"SAME id and the archive heals into one group.")
+    return adopted
 
 
 def process_group(group_items: list, workers: int, mode: int = 0):
@@ -3588,6 +3781,20 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
+    # The formula above is unconditional, which strands archives split by
+    # v2.0.0/v2.0.1: they carry the LEGACY id, and re-encoding one lost page of
+    # such an archive would stamp it with the new id while its skipped siblings
+    # keep the old one — two truncated groups, every page present. Adopt the
+    # legacy id where the existing siblings provably carry it.
+    split_tiffs: Dict[str, Path] = {}
+    dir_per_tiff: Dict[str, Path] = {}
+    for tiff, final_jxl, _page_idx, _is_thumbnail, _subfiletype, _samples in group_items:
+        _k = str(tiff.resolve())
+        if outputs_per_tiff.get(_k, 0) > 1:
+            split_tiffs[_k] = tiff
+            dir_per_tiff[_k] = final_jxl.parent
+    legacy_ids = _adopt_legacy_group_ids(split_tiffs, dir_per_tiff, pages_per_tiff)
+
     tasks = []
     for tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples in group_items:
         if use_staging:
@@ -3597,7 +3804,9 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             write_jxl = final_jxl
         tiff_key = str(tiff.resolve())
         _n_out = outputs_per_tiff.get(tiff_key, 0)
-        group_id = _make_group_id(tiff) if _n_out > 1 else None
+        group_id = None
+        if _n_out > 1:
+            group_id = legacy_ids.get(tiff_key) or _make_group_id(tiff)
         # Every page of a TIFF resolves to the SAME output folder, and this
         # group holds one folder, so _n_out is the whole split — not a slice.
         group_total = _n_out if group_id else None
@@ -3888,11 +4097,18 @@ def find_tiffs_recursive(input_path: Path):
 _DECODER_OUTPUT_FOLDERS = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
 
 
-def _skip_decoder_output(parts_below_marker) -> bool:
+def _skip_decoder_output(parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
     """True if any part below the export marker is a decoder output folder —
     EXCEPT the one explicitly requested via EXPORT_TIFF_SUBFOLDER: an
-    explicit user request always wins over this heuristic."""
-    requested = EXPORT_TIFF_SUBFOLDER.lower()
+    explicit user request always wins over this heuristic.
+
+    That exemption is mode-7 semantics. Mode 6 promises ALL TIFFs under the
+    marker and has no requested subfolder, so a leftover EXPORT_TIFF_SUBFOLDER
+    value must not exempt a decoder folder there (a decoded TIFF re-encoded at
+    d>0 is generational loss). Mode 6 callers pass
+    honor_requested_subfolder=False.
+    """
+    requested = EXPORT_TIFF_SUBFOLDER.lower() if honor_requested_subfolder else ""
     return any(b in _DECODER_OUTPUT_FOLDERS and b != requested
                for b in parts_below_marker)
 
@@ -3910,9 +4126,11 @@ def find_tiffs_mode6(input_path: Path):
         export_idx = next((i for i, p in enumerate(parts_str)
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
-            # Skip decoder output folders (16B_TIFF etc.) below the marker
+            # Skip decoder output folders (16B_TIFF etc.) below the marker —
+            # unconditionally: mode 6 has no requested subfolder, so the
+            # EXPORT_TIFF_SUBFOLDER exemption must not apply here.
             below = [p.lower() for p in parts_str[export_idx + 1:]]
-            if _skip_decoder_output(below):
+            if _skip_decoder_output(below, honor_requested_subfolder=False):
                 skipped_decoder_out += 1
                 continue
             filtered.append(t)
@@ -4118,6 +4336,14 @@ def main():
 
     _check_dir(TEMP_DIR, "TEMP_DIR")
     _check_dir(args.staging, "staging directory")
+    # The script-set staging path (the TEMP2_DIR constant at the top of this
+    # file) never goes through --staging's validation: an invalid or
+    # unwritable value used to crash mid-run at staging_dir.mkdir with a raw
+    # traceback. Empty/None means staging is disabled — nothing to check.
+    # (args.staging, validated just above, replaces TEMP2_DIR below, so this
+    # only ever sees the script-set value.)
+    if TEMP2_DIR:
+        _check_dir(TEMP2_DIR, "TEMP2_DIR (staging)")
 
     if args.sync:
         OVERWRITE = "smart"
@@ -4184,6 +4410,15 @@ def main():
     if args.thumbnail_suffix is not None:
         if not args.thumbnail_suffix.strip():
             parser.error("--thumbnail-suffix must not be empty (thumbnail names would collide with page 0)")
+        # The suffix is glued straight into the output filename
+        # (_page_output_name): a path separator or '..' would write thumbnails
+        # OUTSIDE the destination folder. Same parser.error treatment as the
+        # other path-affecting inputs above.
+        if ("/" in args.thumbnail_suffix or "\\" in args.thumbnail_suffix
+                or ".." in args.thumbnail_suffix):
+            parser.error("--thumbnail-suffix must be a plain filename suffix "
+                         "(no path separators, no '..'): thumbnails would be "
+                         "written outside the destination folder")
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
     if args.warn_thumbnail_discard:
         WARN_DISCARDED_THUMBNAILS = True
@@ -4553,9 +4788,18 @@ def main():
                     if _ok_v:
                         _adopted.append((t, j))
                         continue
+                    # The scan verifies against the CURRENT --distance, so the
+                    # likeliest mass refusal is not a foreign archive at all:
+                    # an archive written at d=0.1 can never survive THIS run's
+                    # d=0 pixel comparison. Name that cause and its remedies —
+                    # mirror of the delete-gate hint in _delete_sources.
                     _bad_sources.setdefault(
                         str(t), (j, f"the adopt scan says this output is not this "
-                                    f"source ({_detail})"))
+                                    f"source ({_detail}) — if the archive was written "
+                                    f"at a different --distance than this run "
+                                    f"(d={CJXL_DISTANCE}), re-run with the archive's "
+                                    f"distance, or pass --no-adopt-scan to adopt "
+                                    f"without the scan"))
                     continue
                 _why = ("no provenance marker — this archive predates them; re-run with "
                         "--provenance adopt to verify and stamp it"
@@ -4788,8 +5032,13 @@ def main():
             # result[0] is (path, page_idx); result[2] is the exception text.
             failed_files.append((str(result[0][0]), str(result[2])))
 
-    # Account for files intentionally skipped by the multipage policy
-    skipped += multipage_skipped
+    # Account for files intentionally skipped by the multipage policy AND for
+    # mode 6/7 files that fell outside the export marker. The DRY-RUN summary
+    # already counts both (skipped_files + multipage_skipped), and the wrapper
+    # aggregates the ##JXLSUM## lines across dry and real runs — so the real
+    # run must report the same total or the two summaries contradict each
+    # other.
+    skipped += skipped_files + multipage_skipped
 
     logger.info(f"\n{'-'*50}")
     if args.sync:

@@ -103,7 +103,7 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     task = {"type": "multi", "main_jxl": src,
             "entries": [(src, 0, False, False, 0, False, None)],
             "ignored_thumbs": [], "final_tiff": final}
-    dec.process_group([task], 1, 3)
+    dec.process_group([task], 1)
     return src
 
 

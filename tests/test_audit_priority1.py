@@ -292,7 +292,7 @@ def test_decoder_mode8_failed_staging_move_keeps_source(tmp_path, monkeypatch):
         "ignored_thumbs": [],
         "final_tiff": final,
     }
-    dec.process_group([task], 1, 8)
+    dec.process_group([task], 1)
     assert main.exists(), "source deleted although the fresh TIFF never left staging"
 
 

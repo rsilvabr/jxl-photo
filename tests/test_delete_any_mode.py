@@ -98,8 +98,9 @@ def test_encoder_deletes_in_every_mode(tmp_path, monkeypatch, mode):
     assert not src.exists(), f"mode {mode} did not delete the source"
 
 
-@pytest.mark.parametrize("mode", [0, 3, 8])
-def test_decoder_deletes_in_every_mode(tmp_path, monkeypatch, mode):
+def test_decoder_deletes_source(tmp_path, monkeypatch):
+    """The delete gate is mode-independent, so process_group no longer takes a
+    mode at all (it was dead: only the per-file status feeds the gate)."""
     src = tmp_path / "photo.jxl"
     _jxl_stub(src)
     final = tmp_path / "out" / "photo.tif"
@@ -116,8 +117,8 @@ def test_decoder_deletes_in_every_mode(tmp_path, monkeypatch, mode):
     task = {"type": "multi", "main_jxl": src,
             "entries": [(src, 0, False, False, 0, False, None)],
             "ignored_thumbs": [], "final_tiff": final}
-    dec.process_group([task], 1, mode)
-    assert not src.exists(), f"mode {mode} did not delete the source"
+    dec.process_group([task], 1)
+    assert not src.exists(), "the source was not deleted"
 
 
 @pytest.mark.parametrize("mode", [0, 3, 8])

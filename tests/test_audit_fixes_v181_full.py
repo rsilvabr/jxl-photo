@@ -969,7 +969,7 @@ def test_staging_move_failure_does_not_abort(monkeypatch, tmp_path):
     dec.TEMP2_DIR = str(tmp_path / "staging")
     results = dec.process_group(
         [{"type": "multi", "main_jxl": src, "entries": entries,
-          "final_tiff": tmp_path / "out" / "a.tif"}], 1, 0)
+          "final_tiff": tmp_path / "out" / "a.tif"}], 1)
     assert results[0][1] == "ok"  # returned normally, no propagation
 
 
@@ -1563,7 +1563,7 @@ def test_thumbnail_ignore_sources_kept_in_mode8(tmp_path, monkeypatch):
     results = [(str(main), "ok", str(final))]
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda *a, **k: results[0])
-    dec.process_group([task], 1, 8)
+    dec.process_group([task], 1)
     assert not main.exists(), "the page that IS in the TIFF is still deleted"
     assert thumb.exists(), "an ignored thumbnail must never be deleted"
 

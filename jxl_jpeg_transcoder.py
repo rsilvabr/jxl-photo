@@ -272,11 +272,25 @@ def _promote_from_staging(write_path, final_path) -> bool:
     still in staging, so removing whatever landed loses nothing and puts the
     destination back to a state a later run will fix.
 
+    But "the move raised" does not mean "the destination is partial". The move
+    can fail BEFORE touching the destination (a read-only or locked
+    pre-existing file — that file is a perfectly good archive), and the copy
+    can SUCCEED with only the staging unlink failing (the destination then
+    holds the COMPLETE new output). Deleting either one destroys good data, so
+    the cleanup compares against an identity snapshot taken before the move
+    and removes the destination only when the move provably wrote to it AND
+    what it wrote is incomplete. When in doubt, the file is kept.
+
     A destination volume that is simply FULL also has to stop the run rather
     than produce one MOVE FAILED line per remaining file, which is what the
     disk-full abort exists for.
     """
-    pre_existed = final_path.exists()
+    pre_identity = None
+    try:
+        _st = final_path.stat()
+        pre_identity = (_st.st_mtime_ns, _st.st_size)
+    except OSError:
+        pass
     try:
         size = write_path.stat().st_size
     except OSError:
@@ -292,16 +306,32 @@ def _promote_from_staging(write_path, final_path) -> bool:
         # completed and something else raised.
         if write_path.exists() and final_path.exists():
             try:
-                final_path.unlink()
+                _st = final_path.stat()
+                written = (pre_identity is None
+                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
+                complete = size > 0 and _st.st_size == size
+            except OSError:
+                written, complete = False, False  # cannot tell → keep the file
+            if written and not complete:
+                try:
+                    final_path.unlink()
+                    logger.error(
+                        f"    Removed the partial file left at the destination"
+                        + (" (it had OVERWRITTEN an existing output, which was already "
+                           "corrupt by then)" if pre_identity is not None else "")
+                        + " — the complete copy is still in staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial destination file "
+                                 f"({e2}). Delete {final_path} by hand before re-running: "
+                                 f"a later sync run would treat it as up to date.")
+            elif written:
                 logger.error(
-                    f"    Removed the partial file left at the destination"
-                    + (" (it had OVERWRITTEN an existing output, which was already "
-                       "corrupt by then)" if pre_existed else "")
-                    + " — the complete copy is still in staging.")
-            except OSError as e2:
-                logger.error(f"    Could NOT remove the partial destination file "
-                             f"({e2}). Delete {final_path} by hand before re-running: "
-                             f"a later sync run would treat it as up to date.")
+                    "    The destination holds a COMPLETE copy (the copy itself "
+                    "finished; only the staging cleanup failed) — keeping it.")
+            else:
+                logger.error(
+                    "    The destination was never touched by the move "
+                    "(pre-existing file) — keeping it.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -1225,6 +1255,41 @@ def read_md5_db(jxl_path: Path) -> Optional[str]:
                 return stored_hash
     return None
 
+# The JXL's OWN md5 is stored under the plain output name plus this suffix
+# (e.g. "photo.jxl.jxl-md5"), alongside the "<source md5>  photo.jxl" line.
+# read_md5_db matches names EXACTLY, so the suffixed key can never shadow or
+# be returned by a plain-name lookup: databases written before this key
+# existed (no self-hash line) and databases read by older versions (which
+# never ask for the suffixed key) both keep working unchanged.
+JXL_SELF_HASH_SUFFIX = ".jxl-md5"
+
+def store_jxl_self_hash_db(jxl_path: Path, md5: str):
+    db_path = jxl_path.parent / CHECKSUMS_FILENAME
+    entry = f"{md5}  {jxl_path.name}{JXL_SELF_HASH_SUFFIX}\n"
+    with _md5_db_lock:
+        with open(db_path, "a", encoding="utf-8") as f:
+            f.write(entry)
+
+def read_jxl_self_hash_db(jxl_path: Path) -> Optional[str]:
+    db_path = jxl_path.parent / CHECKSUMS_FILENAME
+    if not db_path.exists():
+        return None
+    target = jxl_path.name + JXL_SELF_HASH_SUFFIX
+    with open(db_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    # Read from bottom to top to get the most recent entry
+    for line in reversed(lines):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            stored_hash, stored_name = parts
+            stored_name = stored_name.lstrip("*").strip()
+            if stored_name == target:
+                return stored_hash
+    return None
+
 # --------------------------------------------─
 # JXL DETECTION UTILITIES
 # --------------------------------------------─
@@ -1367,7 +1432,16 @@ def reorder_jxl_boxes(jxl_path: Path):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
             real_size = 8 + len(p)
-            h = real_size.to_bytes(4, "big") + h[4:8]
+            try:
+                h = real_size.to_bytes(4, "big") + h[4:8]
+            except OverflowError:
+                # A file just under 4 GiB whose trailing size-0 box spans most
+                # of it computes a real_size that no longer fits the 32-bit
+                # field — report it like the truncation guards above, not as
+                # an uncaught traceback.
+                raise RuntimeError(
+                    f"Cannot re-header size-0 box {name!r}: real size {real_size} "
+                    f"exceeds the 32-bit box size field") from None
         out += h + p
     jxl_path.write_bytes(out)
 
@@ -1687,6 +1761,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     # codec itself) so the except handler always has them (same pattern as
     # the decode functions).
     output_dirty = False
+    jxl_md5 = None
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -1741,11 +1816,22 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             # This ensures checksums.md5 has correct filenames even with staging
             checksum_path = write_path.parent / final_path.name
             store_md5_db(checksum_path, src_md5)
+            # Also record the JXL's OWN md5 under the suffixed key. The plain
+            # entry binds the db to the SOURCE's bytes; this one binds it to
+            # the OUTPUT's — the decode-side gates can then prove the JXL on
+            # disk is the very file this run wrote, not a swapped same-named
+            # replacement. Hashed AFTER reorder_jxl_boxes + the integrity
+            # check, so it is the exact bytes that reached the destination.
+            jxl_md5 = md5_of_file(write_path)
+            store_jxl_self_hash_db(checksum_path, jxl_md5)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
-        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), src_md5)
+        # result[4] carries the JXL self-hash so the staging redistribution
+        # below can file it next to the source hash at the destination.
+        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
+                src_md5, jxl_md5)
     except Exception as e:
         # Remove any partial output produced by THIS run (identity-checked) so
         # the next run does not mistake it for a completed conversion — but
@@ -1906,6 +1992,60 @@ def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity)
         pass
 
 
+def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
+                                stored_jpeg_md5: Optional[str]) -> bool:
+    """Prove the JXL on disk is the file the archived JPEG came from.
+
+    The plain provenance check (stored JPEG md5 == md5 of the JPEG on disk)
+    is NAME-keyed: the stored hash was filed under the JXL's name, so if
+    photo.jxl is REPLACED by a different same-named JXL, the old JPEG still
+    matches the stored hash and the replacement sails through both decode
+    gates — and --delete-source then destroys a JXL that was never archived.
+
+    This check binds the gate to the JXL's CONTENT instead, two ways:
+
+      1. Self-hash (databases written by this version or later): the encoder
+         stores the JXL's own md5 under "<name>.jxl-md5". Comparing it against
+         the current file is an exact identity proof, no decode needed.
+      2. Legacy databases (no self-hash line): fall back to
+         djxl --reconstruct_jpeg into a temp file and compare the
+         reconstruction against the archived JPEG (and the stored hash when
+         one exists). A match proves THIS JXL really reconstructs to the
+         archived JPEG.
+
+    Either check failing — or being UNAVAILABLE (djxl<0.12 has no
+    --reconstruct_jpeg, the tool errored, the reconstruction is empty) —
+    returns False: this guards an irreversible delete, so it fails CLOSED.
+    """
+    self_hash = read_jxl_self_hash_db(jxl_path)
+    if self_hash is not None:
+        return md5_of_file(jxl_path) == self_hash
+    if not _tool_at_least("djxl", 0, 12):
+        logger.debug(f" content-binding unavailable (legacy db, djxl<0.12) | {jxl_path.name}")
+        return False
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlbind_")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        r = subprocess.run(
+            ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
+            capture_output=True, timeout=CODEC_TIMEOUT)
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            return False
+        rec_md5 = md5_of_file(tmp)
+        if stored_jpeg_md5 is not None and rec_md5 != stored_jpeg_md5:
+            return False
+        return rec_md5 == md5_of_file(archived_jpeg)
+    except Exception:
+        # A proof that could not run is not a proof.
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                             verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
     """Transcode every pair in parallel.
@@ -2025,6 +2165,11 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     continue
                 _final.parent.mkdir(parents=True, exist_ok=True)
                 store_md5_db(_final, _r[3])
+                # The JXL's own md5 rode out of the worker at result[4]; file
+                # it next to the source hash so the destination db is complete
+                # (the staging copy of this line dies with the staging db).
+                if len(_r) > 4 and _r[4]:
+                    store_jxl_self_hash_db(_final, _r[4])
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists():
                 if _stranded:
@@ -2061,6 +2206,13 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 continue
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None or not final_file.exists():
+                # Every other refusal in this gate logs KEEP(reason) and counts;
+                # a bare continue made an unverifiable output vanish from the
+                # report entirely — a silent bypass of the fail-closed rule.
+                _delete_stats["kept"] += 1
+                logger.warning(
+                    f" KEEP (final output missing) | "
+                    f"{src_path.name if src_path is not None else result[0]}")
                 continue
             # A staged output whose move FAILED leaves a stale pre-existing
             # file at the final path: it passes exists()+integrity below, but
@@ -2101,6 +2253,18 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                         logger.warning(
                             f" KEEP (already-archived output does NOT match this source: "
                             f"checksum mismatch) | {src_path.name}")
+                        continue
+                    if decode and not _jxl_binds_to_archived_jpeg(src_path, final_file, stored):
+                        # The JPEG on disk matches the stored hash — but that
+                        # hash was filed under this JXL's NAME. Only the
+                        # content-binding check sees the JXL's own bytes, and
+                        # it just failed: photo.jxl was swapped for a different
+                        # same-named file that was never archived. Fail closed.
+                        _delete_stats["kept"] += 1
+                        logger.warning(
+                            f" KEEP (archived JPEG matches, but this JXL is NOT the "
+                            f"file it was recovered from — swapped or replaced "
+                            f"same-named JXL) | {src_path.name}")
                         continue
                     logger.debug(f" provenance OK (MD5) | {src_path.name}")
             elif STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
@@ -2196,10 +2360,17 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
         if decode_lossless:
             stored = read_md5_db(src)
             if stored is not None and stored == md5_of_file(out):
-                kept.append((src, out))
-                continue
-            why = ("no checksum to prove it" if stored is None
-                   else "the existing JPEG is not the one this JXL holds")
+                # The JPEG matches the stored hash — but that hash is keyed by
+                # the JXL's NAME. A swapped same-named JXL passes that check,
+                # so bind it to the JXL's CONTENT before trusting the pair.
+                if _jxl_binds_to_archived_jpeg(src, out, stored):
+                    kept.append((src, out))
+                    continue
+                why = ("this JXL is not the file the existing JPEG was "
+                       "recovered from (swapped or replaced same-named JXL)")
+            else:
+                why = ("no checksum to prove it" if stored is None
+                       else "the existing JPEG is not the one this JXL holds")
         else:
             info = marks.get(str(out)) or {"src": None, "srcsum": None}
             if _provenance_ok(info, src, PROVENANCE_CHECK):
@@ -2366,6 +2537,14 @@ def cmd_transcode(args, auto_decode: bool = False):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be processed.")
+        # A dry run of a DELETE run must say so: the flag that destroys
+        # originals was the one thing the simulation never mentioned (bug #267
+        # — the preview below only existed in _process_file_group, i.e. cmd_auto).
+        if DELETE_SOURCE:
+            logger.warning(
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
+                f"file(s) would be DELETED, each only after its output is "
+                f"written and passes the integrity check.")
         # Returning without this left emit_summary_json printing the UNTOUCHED
         # default (dry_run=false, ok=0, log=""), so the wrapper's recap showed a
         # simulation as a finished real run with zeros and never printed its
@@ -2804,7 +2983,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        # Decode at the REQUESTED bit depth, exactly like the
+                        # direct path below: without --bits_per_sample djxl
+                        # picks its own default and a 16-bit request relied on
+                        # `magick -depth 16` upscaling an 8-bit intermediate.
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={bit_depth}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                         # Decided AFTER the decode: only the intermediate says
                         # whether this image is single-channel (see
                         # _icc_args_for).
@@ -2829,7 +3012,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                     tmp_png = Path(tmp) / "tmp.png"
                     try:
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        # Decode at the REQUESTED bit depth, exactly like the
+                        # direct path below: without --bits_per_sample djxl
+                        # picks its own default and a 16-bit request relied on
+                        # `magick -depth 16` upscaling an 8-bit intermediate.
+                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={bit_depth}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                         # Decided AFTER the decode: a 1-component JPEG carrying
                         # an sRGB profile is as wrong as the PNG case above.
                         magick_output = _icc_args_for(tmp_png, output_icc, ["-quality", str(quality)])
@@ -2910,7 +3097,14 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         moved = 0
         for src, write_out, final_out in dest_tasks:
             status = status_map.get(str(src), "error")
-            if status in ("ok", "reconvert", "overwrite") and write_out.exists():
+            if status in ("ok", "reconvert", "overwrite"):
+                if not write_out.exists():
+                    # A "successful" worker whose staged output is gone must be
+                    # reported, not dropped — same KEEP (staging file missing)
+                    # the transcode mover logs and counts.
+                    _delete_stats["kept"] += 1
+                    logger.warning(f"  KEEP (staging file missing) | {write_out.name}")
+                    continue
                 # A locked/readonly destination must not abort the whole batch:
                 # the file stays in staging and is logged for manual recovery.
                 if _promote_from_staging(write_out, final_out):
@@ -3147,6 +3341,14 @@ def cmd_convert(args, from_jxl: bool = True):
         for f, out in pairs:
             logger.info(f" DRY | {f.name} -> {out}")
         logger.info(f"Dry run: {len(pairs)} files would be converted.")
+        # Same bug #267 as cmd_transcode: the ARMED preview only existed in
+        # _process_file_group (cmd_auto), so a delete-armed convert dry run
+        # never mentioned that sources would be destroyed.
+        if DELETE_SOURCE:
+            logger.warning(
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
+                f"file(s) would be DELETED, each only after its output is "
+                f"written and passes the integrity check.")
         # Same rule as cmd_transcode: without this the wrapper reads the
         # untouched default and reports the simulation as a real run.
         record_summary(ok=len(pairs), overwritten=0, skipped=0, errors=0,
@@ -3445,7 +3647,10 @@ def cmd_auto(args):
     if DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
         # Lossiness from the PLANNED pairs (post mode-6/7 filter), not the raw
         # lists — otherwise a fully filtered-out group still asks for the token.
-        has_lossy = bool(planned["JXL-lossy"]) or bool(planned["PNG"])
+        # PNG -> JXL is lossy only at distance > 0 (distance 0 is lossless
+        # modular) — cmd_convert's rule; charging the strict HHMM token for a
+        # lossless plan trained users to hand it out for nothing.
+        has_lossy = bool(planned["JXL-lossy"]) or (bool(planned["PNG"]) and args.distance > 0)
         has_lossless = bool(planned["JPEG"]) or bool(planned["JXL-jbrd"])
         if has_lossy:
             if not confirm_deletion_lossy():

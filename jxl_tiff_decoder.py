@@ -166,11 +166,25 @@ def _promote_from_staging(write_path, final_path) -> bool:
     still in staging, so removing whatever landed loses nothing and puts the
     destination back to a state a later run will fix.
 
+    But "the move raised" does not mean "the destination is partial". The move
+    can fail BEFORE touching the destination (a read-only or locked
+    pre-existing file — that file is a perfectly good archive), and the copy
+    can SUCCEED with only the staging unlink failing (the destination then
+    holds the COMPLETE new output). Deleting either one destroys good data, so
+    the cleanup compares against an identity snapshot taken before the move
+    and removes the destination only when the move provably wrote to it AND
+    what it wrote is incomplete. When in doubt, the file is kept.
+
     A destination volume that is simply FULL also has to stop the run rather
     than produce one MOVE FAILED line per remaining file, which is what the
     disk-full abort exists for.
     """
-    pre_existed = final_path.exists()
+    pre_identity = None
+    try:
+        _st = final_path.stat()
+        pre_identity = (_st.st_mtime_ns, _st.st_size)
+    except OSError:
+        pass
     try:
         size = write_path.stat().st_size
     except OSError:
@@ -186,16 +200,32 @@ def _promote_from_staging(write_path, final_path) -> bool:
         # completed and something else raised.
         if write_path.exists() and final_path.exists():
             try:
-                final_path.unlink()
+                _st = final_path.stat()
+                written = (pre_identity is None
+                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
+                complete = size > 0 and _st.st_size == size
+            except OSError:
+                written, complete = False, False  # cannot tell → keep the file
+            if written and not complete:
+                try:
+                    final_path.unlink()
+                    logger.error(
+                        f"    Removed the partial file left at the destination"
+                        + (" (it had OVERWRITTEN an existing output, which was already "
+                           "corrupt by then)" if pre_identity is not None else "")
+                        + " — the complete copy is still in staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial destination file "
+                                 f"({e2}). Delete {final_path} by hand before re-running: "
+                                 f"a later sync run would treat it as up to date.")
+            elif written:
                 logger.error(
-                    f"    Removed the partial file left at the destination"
-                    + (" (it had OVERWRITTEN an existing output, which was already "
-                       "corrupt by then)" if pre_existed else "")
-                    + " — the complete copy is still in staging.")
-            except OSError as e2:
-                logger.error(f"    Could NOT remove the partial destination file "
-                             f"({e2}). Delete {final_path} by hand before re-running: "
-                             f"a later sync run would treat it as up to date.")
+                    "    The destination holds a COMPLETE copy (the copy itself "
+                    "finished; only the staging cleanup failed) — keeping it.")
+            else:
+                logger.error(
+                    "    The destination was never touched by the move "
+                    "(pre-existing file) — keeping it.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -1837,19 +1867,33 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
     provenance_sources: every JXL of the group, in page order. Recorded on
     the output so a LATER run can tell whether an existing TIFF came from
     these files — see _provenance_ok.
+
+    Returns False when the metadata COPY failed. exiftool answers a corrupt
+    tag or a failed write with a non-zero exit code, not an exception, so
+    unchecked calls used to drop the metadata silently: the TIFF passed the
+    pixel integrity gate anyway, and --delete-source then removed the JXL
+    holding the only copy of that metadata. The caller must treat False as a
+    per-file failure (the pixels are fine — the TIFF stays — but the delete
+    gate fails closed on it).
     """
     try:
         # Copy all metadata from JXL. Writes on large TIFFs can take a while
         # on slow disks — use generous timeouts (was 10s, which silently
         # dropped metadata on big files).
-        _run_exiftool_argfile(
+        r_exif = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-exif:all", str(tiff_path)], timeout=180
         )
-        _run_exiftool_argfile(
+        r_xmp = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-xmp:all", "-iptc:all", str(tiff_path)], timeout=180
         )
+        copied = True
+        for r in (r_exif, r_xmp):
+            if r.returncode != 0:
+                copied = False
+                logger.error(f"  METADATA COPY FAILED (exiftool rc={r.returncode}) | "
+                             f"{tiff_path.name} | {(r.stderr or '').strip()}")
         # Fix Software and ImageDescription tags that tifffile may have written
         # on IFD0 or IFD1. For single-page TIFFs with a JPEG preview, only the
         # preview page (IFD1) needs these defaults cleared; the main image keeps
@@ -1959,8 +2003,12 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 _run_exiftool_argfile(add_lines, timeout=60)
         except Exception as e_rel:
             logger.debug(f"Relation marker write skipped: {e_rel}")
+        return copied
     except Exception as e:
-        logger.warning(f"Metadata copy warning: {e}")
+        # A raised failure mid-copy means the metadata is partial at best —
+        # the same fail-closed verdict as a non-zero exiftool exit.
+        logger.error(f"Metadata copy FAILED: {e}")
+        return False
 
 def cleanup_xmp_icc(tiff_path):
     """Remove ICC:base64 marker from XMP CreatorTool"""
@@ -2524,6 +2572,15 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 if not is_thumb and page_icc is None:
                     page_icc = icc_data
                     strategy = page_strategy
+                elif strategy == "unknown":
+                    # A group of ONLY thumbnail pages has no anchor page to
+                    # adopt the strategy from, so it stayed "unknown" — and
+                    # "unknown" != 'none', so under --none a thumb-only output
+                    # got the full XMP/IPTC copy, provenance markers and a JPEG
+                    # preview that None mode explicitly forbids. Fall back to
+                    # the first page seen; a later real page still overrides it
+                    # via the branch above.
+                    strategy = page_strategy
 
             if not page_arrays:
                 raise RuntimeError("No pages to write")
@@ -2608,10 +2665,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             elif ADD_JPEG_PREVIEW and is_multipage:
                 logger.info(f" >Skipping JPEG preview for multi-page TIFF ({len(page_arrays)} pages)")
 
+            meta_ok = True
             if strategy != 'none':
                 # Full metadata copy (order: preview already added above)
-                copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage,
-                              provenance_sources=[e[0] for e in page_entries])
+                if copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage,
+                                 provenance_sources=[e[0] for e in page_entries]) is False:
+                    meta_ok = False
                 cleanup_xmp_icc(write_path)
             else:
                 # Minimal metadata for None mode: EXIF only, no XMP/IPTC. Clear
@@ -2646,6 +2705,18 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # (The except handler deletes it.)
             if not _verify_tiff_integrity(write_path):
                 raise RuntimeError("output TIFF failed the integrity check")
+
+            if not meta_ok:
+                # The pixels are fine and the TIFF stays on disk, but the JXL
+                # holds metadata that did NOT make it across. Report a real
+                # error — the status feeds the delete gate, which fails closed
+                # on anything but ok/overwrite, so the source holding the only
+                # copy of that metadata is NOT deleted.
+                n, total = next_count()
+                logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | "
+                             f"metadata copy failed (see above)")
+                return str(main_jxl), "error", ("metadata copy failed — the TIFF is "
+                                                "kept and the source was NOT deleted")
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -2706,7 +2777,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
             return str(main_jxl), "error", str(e)
 
-def process_group(group_tasks, workers, mode, target_icc=None):
+def process_group(group_tasks, workers, target_icc=None):
     """Process a group of tasks in parallel.
 
     Each task is a dict with keys:
@@ -3061,6 +3132,8 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     """
     import json as _json
     markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None} for j in jxls}
+    # normcase -> the exact key the caller will look up by.
+    index = {os.path.normcase(str(j)): str(j) for j in jxls}
     if not jxls:
         return markers
 
@@ -3152,16 +3225,20 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                             pass
                     elif token == THUMB_FLAG:
                         info['thumb'] = True
-                # Match back to our path key (exiftool may normalize separators)
-                key = str(Path(src))
-                if key in markers:
-                    markers[key] = info
+                # normcase, like _read_source_markers_batch: exiftool can hand
+                # back a differently-cased drive letter or flipped separators,
+                # and an exact-case miss wrote the info under a key no caller
+                # ever looks up — the file kept the standalone defaults, so a
+                # marked multi-page group decoded as loose single pages (and
+                # mode 8 deleted the sources page by page).
+                key = os.path.normcase(str(Path(src)))
+                if key in index:
+                    markers[index[key]] = info
                 else:
-                    # Normalization mismatch (drive-letter case, \\?\ prefix):
-                    # the file falls back to standalone — make it visible
-                    # instead of silent.
+                    # A path this run did not ask about: there is no caller
+                    # key to file it under, so log it instead of stashing it
+                    # in the dict where it would be silently ignored.
                     logger.warning(f"Marker read: path mismatch, treated as standalone | {src}")
-                    markers[src] = info
         except Exception as e:
             # On any batch failure, leave those files as standalone (safe default)
             logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) treated as standalone")
@@ -3230,6 +3307,81 @@ def _split_group_by_srcsum(entries: list, declared: int, srcsum_by_path: dict):
     return kept, orphans
 
 
+def _emit_incomplete_warnings(pending: list, srcsum_by_path: dict):
+    """Log the incomplete-group warnings deferred from collect_multipage_groups.
+
+    Deferred because the right advice for a TRUNCATED group depends on the other
+    groups in the same folder. An archive split by v2.0.0/v2.0.1 carries the
+    legacy group id (a hash of the source path alone); a page re-encoded by
+    v2.0.2+ carries the new id (path + page set). One split then lands in TWO
+    groups, both looking truncated, while every page is in fact present — and
+    "point the run at the folder holding every page" sends the user hunting for
+    a page that isn't missing.
+
+    The decoder cannot recompute either hash (the source path is not in the
+    markers), so the mixture is detected structurally: several truncated groups
+    in one folder, one source stem, one source checksum throughout, disjoint
+    pages, and together exactly the split size every group recorded. Nothing
+    short of that is called mixed-version — a genuinely missing page keeps the
+    old advice.
+    """
+    mixed: set = set()      # indices into pending that form such a fragment
+    clusters: dict = {}
+    for i, rec in enumerate(pending):
+        # Only count-truncated groups with a recorded split size can be checked
+        # this way; disagreeing markers and count-less legacy archives keep
+        # their own advice.
+        if rec['disagree'] or rec['declared'] is None:
+            continue
+        stems = {_parse_jxl_page_suffix(e[0].stem)[0] for e in rec['entries']}
+        if len(stems) != 1:
+            continue
+        clusters.setdefault((str(rec['main'].parent), stems.pop()), []).append(i)
+    for (_folder, _stem), idxs in clusters.items():
+        if len(idxs) < 2:
+            continue
+        entries = [e for i in idxs for e in pending[i]['entries']]
+        srcsums = {srcsum_by_path.get(str(e[0])) for e in entries}
+        declared = {pending[i]['declared'] for i in idxs}
+        page_keys = [(e[1], e[2]) for e in entries]
+        if (len(declared) != 1 or len(srcsums) != 1 or None in srcsums
+                or len(set(page_keys)) != len(page_keys)
+                or len(page_keys) != next(iter(declared))):
+            continue
+        mixed.update(idxs)
+
+    for i, rec in enumerate(pending):
+        # The tail depends on WHY. A truncated split has a missing page to go
+        # and find; disagreeing markers — and mixed-version fragments — may
+        # have every page present and nothing to fetch.
+        if rec['disagree']:
+            _advice = ("the markers are inconsistent, so this run cannot tell what "
+                       "the split should contain")
+            _kept = (". The sources will be KEPT — nothing here proves the TIFF is "
+                     "complete (--allow-incomplete-groups overrides that)")
+        elif i in mixed:
+            _advice = ("every page appears to be here — the pages carry one source "
+                       "checksum but two different group ids, which is what a "
+                       "MIXED-VERSION archive looks like (the group-id formula "
+                       "changed in v2.0.2, so a page re-encoded later does not join "
+                       "its older siblings). Re-encode the split completely (e.g. "
+                       "with --overwrite) to unify the ids: the current encoder "
+                       "adopts the legacy id from the existing pages")
+            _kept = (". The sources will be KEPT — the pages cannot be merged while "
+                     "their group ids disagree (--allow-incomplete-groups overrides "
+                     "that)")
+        else:
+            _advice = ("point the run at the folder holding every page to rebuild "
+                       "the original")
+            _kept = (". The sources will be KEPT — deleting them would lose the "
+                     "missing page for good (--allow-incomplete-groups overrides "
+                     "that)")
+        logger.warning(
+            f"Multi-page group is INCOMPLETE ({rec['why']}) | {rec['main'].name} | "
+            f"group {rec['marker']} | decoding the pages that ARE here; {_advice}"
+            + ("" if ALLOW_INCOMPLETE_GROUPS else _kept))
+
+
 def collect_multipage_groups(jxls: list) -> dict:
     """Group JXLs that belong to the same multi-page TIFF.
 
@@ -3251,6 +3403,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     # in the same interpreter) must not inherit a previous run's verdicts.
     _incomplete_groups.clear()
     _group_conflicts.clear()
+    _pending_incomplete: list = []
 
     # Read markers first; they are needed even when reconstruction is disabled
     # so that per-file metadata (inheritance, grayscale, depth) is available.
@@ -3326,6 +3479,15 @@ def collect_multipage_groups(jxls: list) -> dict:
             k = (e[1], e[2])
             if k in seen_keys:
                 logger.warning(f"Duplicate page marker in group; decoding as standalone | {e[0].name}")
+                if e[2]:
+                    # A demoted THUMBNAIL becomes the only page of its own
+                    # output TIFF. Keeping is_thumb would tag that primary
+                    # image subfiletype=1 (reduced-resolution), which some
+                    # readers then hide — decode it as a full page, and drop
+                    # the subfiletype=1 that only ever described the
+                    # reduced-resolution role.
+                    e = (e[0], e[1], False, e[3],
+                         0 if e[4] == 1 else e[4], e[5], e[6])
                 standalone.append(e)
                 continue
             seen_keys.add(k)
@@ -3417,29 +3579,20 @@ def collect_multipage_groups(jxls: list) -> dict:
             _why_incomplete = (f"only page {entries_sorted[0][1]} of the split is "
                                f"present, and this archive records no page count")
         if _why_incomplete:
-            # The tail depends on WHY. A truncated split has a missing page to
-            # go and find; disagreeing markers may have every page present and
-            # nothing to fetch — telling that user to "point the run at the
-            # folder holding every page" sends them after a file that is
-            # already there.
-            if _disagree:
-                _advice = ("the markers are inconsistent, so this run cannot tell what "
-                           "the split should contain")
-                _kept = (". The sources will be KEPT — nothing here proves the TIFF is "
-                         "complete (--allow-incomplete-groups overrides that)")
-            else:
-                _advice = ("point the run at the folder holding every page to rebuild "
-                           "the original")
-                _kept = (". The sources will be KEPT — deleting them would lose the "
-                         "missing page for good (--allow-incomplete-groups overrides "
-                         "that)")
-            logger.warning(
-                f"Multi-page group is INCOMPLETE ({_why_incomplete}) | {main_jxl.name} | "
-                f"group {_marker[1]} | decoding the pages that ARE here; {_advice}"
-                + ("" if ALLOW_INCOMPLETE_GROUPS else _kept))
             _incomplete_groups[os.path.normcase(str(main_jxl))] = (
                 "inconsistent" if _disagree else "truncated")
+            # Logging is deferred to _emit_incomplete_warnings: the right
+            # advice for a TRUNCATED group depends on what the OTHER groups in
+            # the folder look like (mixed-version archives fragment one split
+            # into several groups that each look truncated on their own).
+            _pending_incomplete.append({
+                'main': main_jxl, 'why': _why_incomplete, 'disagree': _disagree,
+                'marker': _marker[1], 'entries': entries_sorted,
+                'declared': next(iter(_declared)) if len(_declared) == 1 else None,
+            })
         groups[main_jxl] = entries_sorted
+
+    _emit_incomplete_warnings(_pending_incomplete, srcsum_by_path)
 
     # Standalone files: one single-page group each
     for entry in standalone:
@@ -3656,6 +3809,12 @@ Examples:
         TIFF_COMPRESSION = args.compression
     if args.staging:
         TEMP2_DIR = args.staging
+    elif TEMP2_DIR is not None:
+        # The script-set TEMP2_DIR was never validated — only --staging was,
+        # above — so a bad path in the setting crashed mid-run at
+        # staging_dir.mkdir with a raw traceback instead of the clean
+        # parser.error every other directory gets.
+        _check_dir(TEMP2_DIR, "TEMP2_DIR")
     # NOTE: --clean-staging is applied after setup_logger() below (it must be
     # auditable, and it must not run on a dry run).
     if args.export_marker:
@@ -3830,6 +3989,12 @@ Examples:
         })
 
     logger.info(f"TIFF outputs planned: {len(tasks)} (from {len(jxls)} JXLs, {len(mp_groups)} group(s))")
+    # A second run in the SAME process (the test suite, or anything importing
+    # this module) inherited the first run's `done` — every counter line of
+    # the new run then started at [N+1/total]. Reset it wherever total is
+    # (re)initialised. This lives here and not in _reset_abort: that helper is
+    # duplicated across the scripts and parity-checked.
+    _counter["done"] = 0
     _counter["total"] = len(tasks)
 
     _abort_on_duplicate_outputs([(task["main_jxl"], task["final_tiff"]) for task in tasks])
@@ -3953,6 +4118,9 @@ Examples:
                      " If you MOVED the sources, re-run with --provenance content."))
                 _bad = {id(_t) for _t, _ in _blocked}
                 tasks = [t for t in tasks if id(t) not in _bad]
+                # total is re-initialised for the reduced task list; done must
+                # restart with it (same in-process re-run rule as above).
+                _counter["done"] = 0
                 _counter["total"] = len(tasks)
                 # A refusal is a FAILURE, not a quiet skip (see the encoder).
                 provenance_failures = [
@@ -3997,7 +4165,7 @@ Examples:
     # shoot, so a big library ran at a fraction of the requested concurrency.
     # The staging move is still per-folder and still in bulk; it now fires when
     # that folder's last task lands (see process_group).
-    results = process_group(tasks, args.workers, args.mode,
+    results = process_group(tasks, args.workers,
                             target_icc=args.target_icc)
 
     for result in results:

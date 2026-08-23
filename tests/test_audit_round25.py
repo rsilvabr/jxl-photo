@@ -286,7 +286,7 @@ def test_256_decoder_uses_one_pool_for_every_folder(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_process_group(tasks, workers, mode, target_icc=None):
+    def fake_process_group(tasks, workers, target_icc=None):
         calls.append(list(tasks))
         return [(str(t["main_jxl"]), "ok", str(t["final_tiff"])) for t in tasks]
 
@@ -426,7 +426,7 @@ def test_258_incomplete_group_blocks_mode8_delete(tmp_path, monkeypatch):
             "ignored_thumbs": [], "final_tiff": final}
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda *a, **k: (str(lone), "ok", str(final)))
-    dec.process_group([task], 1, 8)
+    dec.process_group([task], 1)
 
     assert lone.exists(), "an incomplete group must never have its source deleted"
 
@@ -453,7 +453,7 @@ def test_258_complete_group_still_deletes(tmp_path, monkeypatch):
             "ignored_thumbs": [], "final_tiff": final}
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda *a, **k: (str(p0), "ok", str(final)))
-    dec.process_group([task], 1, 8)
+    dec.process_group([task], 1)
 
     assert not p0.exists() and not p2.exists()
 

@@ -133,7 +133,14 @@ def _flags_request_delete(flags: Optional[str]) -> bool:
     # the caller can refuse before asking for the token.
     skipped_spellings = ('--delete-skipped', '--delete_skipped')
     for t in _split_expert_flags(flags or ''):
-        tok = t.split('=', 1)[0]
+        # `--delete-source=1` is NOT a delete request: the children declare
+        # these flags store_true, so argparse rejects an explicit argument
+        # (exit 2) and nothing runs. _flags_ambiguous_delete reports the token
+        # so the caller refuses up front instead of charging the HHMM token
+        # for a doomed run.
+        if '=' in t:
+            continue
+        tok = t
         if not tok.startswith('--'):
             continue
         if any(c.startswith(tok) for c in confirm_spellings):
@@ -150,18 +157,28 @@ def _flags_request_delete(flags: Optional[str]) -> bool:
 
 
 def _flags_ambiguous_delete(flags: Optional[str]) -> Optional[str]:
-    """The first expert-flag token that is an AMBIGUOUS delete abbreviation.
+    """The first expert-flag token the child's argparse would reject, or None.
 
     `--delete-s` matches both --delete-source and --delete-skipped, so argparse
-    exits with "ambiguous option" and the child never runs. Caught up front, the
-    user is told to spell it out instead of typing a token for a doomed run.
+    exits with "ambiguous option" and the child never runs. `--delete-source=1`
+    is rejected just as hard: the delete flags are store_true and take no
+    explicit argument. Caught up front, the user is told to spell it out
+    instead of typing a token for a doomed run.
     """
     families = ('--delete-source', '--delete_source',
                 '--delete-skipped', '--delete_skipped',
                 '--delete-confirm-off', '--delete_confirm_off')
     for t in _split_expert_flags(flags or ''):
         tok = t.split('=', 1)[0]
-        if not tok.startswith('--') or tok in families:
+        if not tok.startswith('--'):
+            continue
+        if '=' in t:
+            # An explicit argument on a store_true flag: exit 2 whether the
+            # base spelling is exact or an unambiguous abbreviation.
+            if any(f.startswith(tok) for f in families):
+                return t
+            continue
+        if tok in families:
             continue
         if sum(1 for f in families if f.startswith(tok)) > 1:
             return tok
@@ -205,6 +222,27 @@ _SESSION_NUMBERS = (
 # Modes 0-8, plus 99 for a manifest run.
 _SESSION_MODES = frozenset(range(0, 9)) | {99}
 
+# The hand-editable session fields that are replayed VERBATIM into the child's
+# argv (or pick its code path), each with the values the wizard can produce.
+# Anything else is a hand-edit typo that would otherwise reach the CHILD's
+# argparse as a command line the user never typed.
+_SESSION_CHOICES = {
+    "last_provenance": ("path", "content", "adopt"),
+    "last_multipage_mode": ("ignore", "skip", "split", "split_all"),
+    "last_compression": ("zip", "lzw", "none"),
+    "last_depth_policy": ("force16", "preserve_thumbnails", "preserve_original"),
+    "last_conversion_type": (
+        "transcode_lossless", "convert_lossy",
+        "jxl_tiff_encoder", "jxl_tiff_encoder_lossless", "jxl_tiff_decoder",
+        "jxl_to_jpeg_auto", "jxl_to_jpeg_lossless", "jxl_to_jpeg_force",
+        "jxl_to_png",
+    ),
+    # The wizard's only ICC choice is the sRGB conversion.
+    "last_icc_profile": ("srgb",),
+}
+# --depth / --bit-depth are argparse choices=[8, 16] in every child.
+_SESSION_BIT_DEPTHS = (8, 16)
+
 
 def _as_exact_int(raw: Any) -> int:
     """int() that also accepts 7.0 and "7", but refuses "7.5", NaN and "sete"."""
@@ -217,7 +255,7 @@ def _as_exact_int(raw: Any) -> int:
 
 
 def _session_number_error(session: Dict) -> Optional[str]:
-    """Describe the first corrupt number in a stored workflow, or None if sane.
+    """Describe the first corrupt value in a stored workflow, or None if sane.
 
     The config is plain JSON the user can hand-edit and _load_config does no
     type checking, so a saved workflow can come back with a mode of "sete".
@@ -248,6 +286,26 @@ def _session_number_error(session: Dict) -> Optional[str]:
             return f"{label} is not a number: {raw!r}"
         if not low <= value <= high:
             return f"{label} is out of range ({low}-{high}): {value}"
+
+    # Same refuse-corrupt rule for the enumerated fields: they go straight onto
+    # the child's command line, where a typo surfaces as an argparse rejection
+    # of a command the user never typed.
+    raw_depth = session.get("last_bit_depth")
+    if raw_depth not in (None, ""):
+        try:
+            depth = _as_exact_int(raw_depth)
+        except (TypeError, ValueError):
+            return f"bit depth is not a number: {raw_depth!r}"
+        if depth not in _SESSION_BIT_DEPTHS:
+            return f"bit depth is not a valid value: {depth} (valid: 8/16)"
+
+    for field, allowed in _SESSION_CHOICES.items():
+        raw = session.get(field)
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, str) or raw.lower() not in allowed:
+            return (f"{field[len('last_'):]} is not a known value: {raw!r} "
+                    f"(valid: {'/'.join(allowed)})")
     return None
 
 
@@ -1537,7 +1595,19 @@ class InteractiveMenu:
             # there — the repeat re-reads the file. Offering an entry whose CSV
             # was deleted or moved would only dead-end at the confirmation, so
             # it is disabled with the reason spelled out instead.
-            if self.config.config.last_output_mode == "99":
+            # Hand-edited JSON can store the NUMBER 99 (or "99.0" from Excel);
+            # a string-only == sent those down the non-manifest branch, where
+            # the repeat of a manifest run was offered as a plain mode-99
+            # workflow. Coerce exactly like _session_int does.
+            _raw_last_mode = self.config.config.last_output_mode
+            try:
+                _last_is_manifest = (_raw_last_mode not in (None, "")
+                                     and _as_exact_int(_raw_last_mode) == 99)
+            except (TypeError, ValueError):
+                # A corrupt mode is refused at run time by _session_number_error;
+                # here it only means "not a manifest" for labelling purposes.
+                _last_is_manifest = False
+            if _last_is_manifest:
                 saved_manifest = self.config.config.last_manifest_path
                 if saved_manifest and Path(saved_manifest).exists():
                     options.append(("2", f"Repeat last workflow (manifest: {Path(saved_manifest).name})", True))
@@ -2996,6 +3066,11 @@ class InteractiveMenu:
         """
         origin = workflow['origin_format']
         dest = workflow['dest_format']
+        # Answers are STAGED here and committed by main() only when the wizard
+        # confirms: writing them straight into the config left a cancelled
+        # wizard's choices in memory, persisted by the next unrelated
+        # save_config() — the same invariant mode_config already keeps.
+        _staged: Dict = {}
 
         # Round-trip verification. Offered only here, because it is a gate in
         # front of the deletion and nowhere else, and only for TIFF -> JXL,
@@ -3016,7 +3091,7 @@ class InteractiveMenu:
                             f"[{'Y/n' if vr_default else 'y/N'}]: ").strip().lower()
                 verify = (not _vi.startswith('n')) if vr_default else _vi.startswith('y')
             workflow['verify_roundtrip'] = bool(verify)
-            self.config.config.last_verify_roundtrip = bool(verify)
+            _staged['last_verify_roundtrip'] = bool(verify)
         else:
             verify = False
 
@@ -3076,7 +3151,7 @@ class InteractiveMenu:
             workflow['_lossy_skip_confirmed'] = True
 
         workflow['delete_skipped'] = bool(del_skipped)
-        self.config.config.last_delete_skipped = bool(del_skipped)
+        _staged['last_delete_skipped'] = bool(del_skipped)
 
         # How an EXISTING output is matched to the source about to replace it.
         # Only asked where it can bite: the runs that collapse folder structure,
@@ -3119,8 +3194,8 @@ class InteractiveMenu:
                             f"[{pv_default}]: ").strip().lower()
                 provenance = _pi if _pi in _pv_choices else pv_default
             workflow['provenance'] = provenance
-            self.config.config.last_provenance = provenance
-            self.config.config.last_adopt_scan = None
+            _staged['last_provenance'] = provenance
+            _staged['last_adopt_scan'] = None
             if provenance == 'content':
                 _n = ("Content matching reads every source file — expect the run to take "
                       "noticeably longer.")
@@ -3146,7 +3221,7 @@ class InteractiveMenu:
                     _si = input("Verify each one before adopting? [Y/n]: ").strip().lower()
                     _scan = not _si.startswith('n')
                 workflow['adopt_scan'] = bool(_scan)
-                self.config.config.last_adopt_scan = bool(_scan)
+                _staged['last_adopt_scan'] = bool(_scan)
                 if not _scan:
                     _w = ("Adopting WITHOUT verification. Every existing output will be "
                           "trusted as belonging to the source that shares its name.")
@@ -3162,6 +3237,12 @@ class InteractiveMenu:
                 console.print(f"[yellow]{_w}[/yellow]")
             else:
                 print(_w)
+
+        # Hand the staged answers to the wizard result; main() commits them to
+        # the config next to save_last_session, so a cancelled wizard leaves
+        # saved state untouched (see the top of this function).
+        if _staged:
+            workflow.setdefault('_pending_session_fields', {}).update(_staged)
 
     def _wizard_select_mode_manual(self, workflow: Dict) -> bool:
         """Manual mode selection (called after declining auto recommendation)."""
@@ -4344,6 +4425,68 @@ class InteractiveMenu:
             for source, dest_path, entry_mode in manifest_entries
         ]
 
+        # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
+        # reaches the children as --export-subfolder — which comes from
+        # mode_config, always empty on a mode-99 run. Auto-generated manifests
+        # bake the subfolder into the Source itself (<marker>/<sub>), so it can
+        # be derived back — and SHOULD be passed explicitly, because a child
+        # whose EXPORT_*_SUBFOLDER constant was edited would otherwise filter
+        # the entry by the wrong name. Entries naming DIFFERENT subfolders need
+        # no flag at all: each Source already scopes its own child process.
+        # The one dangerous shape is a HAND-WRITTEN entry with Mode=7 and a
+        # Source ABOVE the marker: with an empty subfolder its child converts
+        # EVERY subfolder of the marker — mode 6 wearing a mode-7 label.
+        if (any(m == 7 for _, _, m in resolved_entries)
+                and not (workflow.get('mode_config') or {}).get('export_subfolder')):
+            derived = set()
+            underivable = []
+            for _s, _d, _m in resolved_entries:
+                if _m != 7:
+                    continue
+                _parts = Path(_s).parts
+                _idx = next((i for i, p in enumerate(_parts)
+                             if _marker_matches(p.lower(), _marker.lower())), None)
+                if _idx is not None and _idx + 1 < len(_parts):
+                    derived.add(_parts[_idx + 1])
+                else:
+                    underivable.append(_s)
+            if underivable:
+                _sub_warn = (
+                    "This manifest has mode-7 entries whose subfolder cannot be "
+                    "determined (the Source is not <marker>/<subfolder>). The "
+                    "children will use their script's EXPORT_*_SUBFOLDER default "
+                    "— and when that is empty, they process EVERY subfolder of "
+                    "the export marker: they will run as mode 6.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_sub_warn}[/yellow]")
+                else:
+                    print(f"WARNING: {_sub_warn}")
+                for _s in underivable[:5]:
+                    print(f"  mode 7, no subfolder in Source: {_s}")
+                if workflow.get('unattended'):
+                    # Fail closed, like the overlap guard: nobody is there to
+                    # notice the run is converting more than the manifest says.
+                    self._print_error(
+                        "Refusing to run unattended: write the mode-7 Sources as "
+                        "<marker>/<subfolder>, or use mode 6 if every subfolder "
+                        "is intended.")
+                    return False
+                if RICH_AVAILABLE and console:
+                    ok_sub = Confirm.ask("Run anyway?", default=False)
+                else:
+                    ok_sub = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+                if not ok_sub:
+                    return False
+            elif len(derived) == 1:
+                _sub = derived.pop()
+                workflow.setdefault('mode_config', {})['export_subfolder'] = _sub
+                _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
+                            f"(derived from the manifest's Source paths).")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[dim]{_sub_msg}[/dim]")
+                else:
+                    print(_sub_msg)
+
         # Overlapping source trees: one entry's Source inside another's means
         # the same files are processed twice by SEPARATE child processes. Some
         # users do this on purpose (e.g. E:\Fotos in mode 6 + E:\Fotos\2024_EXPORT
@@ -4487,7 +4630,28 @@ class InteractiveMenu:
                 continue
 
             # Execute
-            rc = self._run_subprocess(cmd)
+            try:
+                rc = self._run_subprocess(cmd)
+            except KeyboardInterrupt:
+                # Ctrl+C: _stream_child has already killed the child. Record
+                # the entry, mark the rest not started and fall through to the
+                # summary — a manifest runs for hours, and the accounting of
+                # what DID complete must survive the interruption. main() then
+                # reports the cancellation and exits 130.
+                error_count += 1
+                entry_reports.append({
+                    "index": i, "mode": detected_mode, "source": source,
+                    "state": "cancelled", "summary": self._last_child_summary,
+                })
+                for j, (src_rest, _dst_rest, m_rest) in enumerate(
+                        resolved_entries[i:], i + 1):
+                    entry_reports.append({
+                        "index": j, "mode": m_rest, "source": src_rest,
+                        "state": "not started", "summary": None,
+                    })
+                self._render_manifest_summary(entry_reports, ok_count,
+                                              skip_count, error_count)
+                raise
             aborted = False
             usage_err = None
             if rc == 0:
@@ -4860,6 +5024,32 @@ class InteractiveMenu:
             for b in norm[i + 1:]:
                 if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
                     return True
+
+        # Cross-family check — the bug this guards: the two families were only
+        # ever compared WITHIN themselves, so a marker-anchored entry and a
+        # within_source entry writing the SAME folder went unseen. Example: a
+        # mode-6 entry anchored on G:\_EXPORT (its outputs land in
+        # G:\_EXPORT\16B_JXL) next to a mode-0 in-place entry whose Source IS
+        # G:\_EXPORT\16B_JXL — disjoint Sources in both families, one shared
+        # output folder written by two child processes.
+        #
+        # The marker family's output folder is a constant subfolder of the
+        # marker dir (EXPORT_JXL_FOLDER "16B_JXL" for the encoder,
+        # EXPORT_TIFF_FOLDER for the decoder, per-direction folders for the
+        # transcoder). This function does not know the run's direction, so it
+        # cannot cheaply name that subfolder — and must fail SAFE: because the
+        # output folder sits strictly INSIDE the marker dir, any containment
+        # between a within_source Source and a marker dir (either way) can put
+        # outputs on it, and that is enough to force the scan. The cost is a
+        # false-positive scan for harmless mixes like mode 0 on
+        # <marker>\TIFF16 next to mode 7 on <marker>\16bit — rare, and cheaper
+        # than the collision it replaces.
+        if marker_dirs and norm:
+            for key in marker_dirs:
+                m = os.path.normcase(os.path.abspath(key))
+                for s in norm:
+                    if s == m or s.startswith(m + os.sep) or m.startswith(s + os.sep):
+                        return True
         return False
 
     def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set,
@@ -5527,21 +5717,42 @@ class InteractiveMenu:
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
 
-        # An ambiguous --delete-* abbreviation cannot run: argparse exits with
-        # "ambiguous option" before the child does anything. Caught here, ahead
-        # of every gate, so the user is not charged an HHMM token for a doomed
-        # run (and is told what to type instead).
+        # A delete flag the child's argparse rejects cannot run: it exits 2
+        # ("ambiguous option", or an explicit argument on a store_true flag)
+        # before the child does anything. Caught here, ahead of every gate, so
+        # the user is not charged an HHMM token for a doomed run (and is told
+        # what to type instead).
         _amb = _flags_ambiguous_delete(workflow.get('expert_flags'))
         if _amb:
             self._print_error(
-                f"Expert flag {_amb!r} is an ambiguous abbreviation: it matches more than "
-                f"one of --delete-source / --delete-skipped / --delete-confirm-off, and the "
-                f"child scripts reject it. Spell the flag out in full.")
+                f"Expert flag {_amb!r} cannot run: the child scripts reject it (it is "
+                f"an ambiguous abbreviation of --delete-source / --delete-skipped / "
+                f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
+                f"Spell the flag out in full, with no value.")
             return False
 
-        # Handle manifest mode (mode 99)
+        # Handle manifest mode (mode 99) — it resolves and checks its own script.
         if workflow.get('mode') == 99:
             return self._execute_manifest_workflow(workflow, status)
+
+        origin = workflow['origin_format']
+        dest = workflow['dest_format']
+
+        # Resolve the child script UP FRONT, before any gate is charged: the
+        # HHMM token below is a "you are about to delete" proof of presence,
+        # and asking for it — or pre-creating a mode-2 output folder — on
+        # behalf of a script that is not even installed is work done for a run
+        # that can never start (the manifest path already checks first).
+        if origin == 'tiff' and dest == 'jxl':
+            script = str(SCRIPT_DIR / 'jxl_tiff_encoder.py')
+        elif origin == 'jxl' and dest == 'tiff':
+            script = str(SCRIPT_DIR / 'jxl_tiff_decoder.py')
+        else:
+            script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')
+        if not Path(script).exists():
+            self._print_error(f"Script not found: {script}")
+            self._print_error("Ensure scripts are in the same folder as jxl_photo_v2.py")
+            return False
 
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. Applied here so repeats and presets are gated too, not just [D].
@@ -5563,16 +5774,14 @@ class InteractiveMenu:
             if not self._confirm_archive_mode():
                 return False
 
-        origin = workflow['origin_format']
-        dest = workflow['dest_format']
         mode = workflow['mode']
         input_dir = workflow['input_dir']
         workers = workflow['workers']
         advanced = workflow.get('advanced_options', {})
         expert_flags = workflow.get('expert_flags', '')
 
+        # `script`, `origin` and `dest` were resolved up front, before the gates.
         if origin == 'tiff' and dest == 'jxl':
-            script = str(SCRIPT_DIR / 'jxl_tiff_encoder.py')
             cmd = [
                 sys.executable, script,
                 input_dir,
@@ -5594,7 +5803,11 @@ class InteractiveMenu:
                     # The child creates the dir itself; only pre-create for real
                     # runs so a dry-run leaves no trace on disk.
                     if not workflow.get('dry_run'):
-                        Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        try:
+                            Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        except OSError as e:
+                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
+                            return False
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -5644,7 +5857,6 @@ class InteractiveMenu:
                 cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
 
         elif origin == 'jxl' and dest == 'tiff':
-            script = str(SCRIPT_DIR / 'jxl_tiff_decoder.py')
             cmd = [
                 sys.executable, script,
                 input_dir,
@@ -5666,7 +5878,11 @@ class InteractiveMenu:
                     # The child creates the dir itself; only pre-create for real
                     # runs so a dry-run leaves no trace on disk.
                     if not workflow.get('dry_run'):
-                        Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        try:
+                            Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        except OSError as e:
+                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
+                            return False
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -5714,8 +5930,6 @@ class InteractiveMenu:
                 cmd.extend(['--depth-policy', advanced['depth_policy']])
 
         else:
-            script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')
-            
             conv_type = workflow.get('conversion_type', '')
             
             cmd = [
@@ -5739,7 +5953,11 @@ class InteractiveMenu:
                     # The child creates the dir itself; only pre-create for real
                     # runs so a dry-run leaves no trace on disk.
                     if not workflow.get('dry_run'):
-                        Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        try:
+                            Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        except OSError as e:
+                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
+                            return False
                     # Insert right after the input positional: appending the output
                     # positional after flags breaks argparse on Python < 3.12.7
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
@@ -5822,11 +6040,6 @@ class InteractiveMenu:
 
         _append_expert_flags(cmd, expert_flags)
 
-        if not Path(script).exists():
-            self._print_error(f"Script not found: {script}")
-            self._print_error("Ensure scripts are in the same folder as jxl_photo_v2.py")
-            return False
-
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing:[/bold cyan]")
             console.print(f"[dim]{' '.join(_display_cmd(cmd))}[/dim]\n")
@@ -5884,10 +6097,17 @@ class InteractiveMenu:
         conv = session.get('last_conversion_type') or ''
         distance_driven = (session.get('last_origin_format') == 'tiff'
                            or conv == 'convert_lossy')
+        # ...and quality only where the child actually receives --quality.
+        # Without the direction test, a JXL->TIFF preset advertised the q= of
+        # whatever JPEG run came before it (save_last_session only overwrites
+        # last_quality when a run supplies one) — a knob the decoder never reads.
+        quality_driven = (session.get('last_origin_format') == 'jpeg'
+                          or (session.get('last_origin_format') == 'jxl'
+                              and session.get('last_dest_format') in ('jpeg', 'png')))
         distance = session.get('last_distance')
         if distance_driven and distance is not None:
             bits.append(f"d={_sane_distance(distance):g}")
-        elif not distance_driven and session.get('last_quality') is not None:
+        elif not distance_driven and quality_driven and session.get('last_quality') is not None:
             bits.append(f"q={session['last_quality']}")
         return " | ".join(bits)
 
@@ -6353,6 +6573,17 @@ class InteractiveMenu:
 
 
 def main():
+    try:
+        _main()
+    except KeyboardInterrupt:
+        # Ctrl+C anywhere — at a menu prompt, or in a child (which _stream_child
+        # has already killed, and a manifest run has already summarized). Say so
+        # instead of dumping a traceback; 130 is the conventional 128+SIGINT.
+        print("\nCancelled (Ctrl+C).")
+        sys.exit(130)
+
+
+def _main():
     parser = argparse.ArgumentParser(description="JXL Tools v2 - JPEG XL Processing with Auto Mode")
     parser.add_argument("--recheck", action="store_true", help="Force dependency recheck")
     parser.add_argument("--run-preset", metavar="NAME",
@@ -6382,17 +6613,20 @@ def main():
 
     menu.display_status(status)
 
-    if not status.get('cjxl') and not status.get('djxl'):
-        print("\nERROR: cjxl/djxl not found!")
-        sys.exit(1)
-
     if args.list_presets:
+        # Read-only: listing what is saved must work even on a machine with no
+        # codecs installed (e.g. checking what a config carries before copying
+        # it), so this runs BEFORE the cjxl/djxl gate below.
         presets = config.config.presets or {}
         if not presets:
             print("No presets saved. Run a workflow, then save it from menu option 7.")
         for name in sorted(presets):
             print(f"{name}\n    {menu._describe_session(presets[name])}")
         sys.exit(0)
+
+    if not status.get('cjxl') and not status.get('djxl'):
+        print("\nERROR: cjxl/djxl not found!")
+        sys.exit(1)
 
     if args.run_preset:
         presets = config.config.presets or {}
@@ -6427,9 +6661,22 @@ def main():
                     saved_quality = workflow.get('quality') if workflow.get('quality') is not None else 95
                     # Lossy JXL encode also uses distance; preserve it for repeat
                     saved_distance = workflow.get('distance')
+                elif workflow['conversion_type'] == 'jxl_tiff_decoder':
+                    # The decoder is never passed --quality, so storing one only
+                    # makes the preset list advertise a knob the run ignores.
+                    saved_quality = None
+                    saved_distance = None
                 else:
                     saved_quality = config.config.default_quality
                     saved_distance = None
+
+                # The delete-gate answers (round-trip verify, provenance, ...)
+                # were staged on the workflow by _ask_delete_options, NOT written
+                # to the config — a cancelled wizard must leave saved state
+                # untouched. The wizard has confirmed, so commit them here;
+                # save_last_session's save_config() persists them.
+                for _field, _value in (workflow.pop('_pending_session_fields', None) or {}).items():
+                    setattr(config.config, _field, _value)
 
                 # Manifest runs (mode 99) are saved like any other: the repeat
                 # re-reads the CSV, which is what makes a recurring "sync the
