@@ -26,9 +26,9 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## Current version
 
-**v2.0.2** (2026-08-19) — maintenance, with one fix that matters if you archive film scans more than once. Converting a file has come out clean in every audit; the **second** archive cycle had not been looked at. A scan is `[image, thumbnail, IR]`, and excluding the thumbnail does not renumber the real pages — so a decode-and-re-archive round left a page of the previous split behind, and the next decode merged it back in, writing a TIFF with a page repeated. Ten fixes in all; the other nine sit around the core, as usual.
+**v2.0.3** (2026-08-23) — maintenance, with one fix that matters if you archive JPEGs as JXL and delete the originals: the lossless JXL → JPEG delete gates trusted the JXL's **name**, so a same-named JXL that was never archived could be deleted while the real one sat elsewhere. The gates now bind the file's **content**. Also here: an RGB ICC was being attached to grayscale output (every film-scan IR page) on the `--to-srgb` / `--icc-profile` paths, a failed move out of staging could delete a good pre-existing archive, and re-encoding a lost page of a pre-v2.0.2 multi-page archive split the group in two. 32 fixes in all across three audit rounds — the conversion path itself came out clean again, re-verified pixel-identical on the real fixtures.
 
-[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.1)
+[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.2)
 
 > ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
 >
@@ -75,6 +75,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - The folder-collapsing modes let two files with the same name land on the same output. Every conversion records **which source it came from** (`jxlphoto-src` / `jxlphoto-srcsum` in XMP), so a later delete run refuses to overwrite one archive with an unrelated photo
 - `--provenance path` (default, free) · `content` (survives folders you moved) · `adopt` (TIFF → JXL only: verifies and stamps an archive built before this existed, one time)
 - A mismatch always fails closed: not converted, nothing overwritten, nothing deleted
+- Lossless JXL → JPEG is bound to the JXL's **content**, not its name: `checksums.md5` now also stores the JXL's own MD5 (a `<name>.jxl-md5` companion line), and a delete run compares it — older databases fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12), and when no proof can run the source is kept
 
 ### 7. **Multi-page and film scans**
 - Split each page of a multi-page TIFF into its own JXL and reconstruct the original later — per-page ICC, bit depth, grayscale and `SubfileType` all restored (the IR page of a scan keeps its role)
@@ -597,9 +598,37 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
-### What's new — v2.0.2 (current stable)
+### What's new — v2.0.3 (current stable)
 
-**Released 2026-08-19.** Bug fixes only. No command line and no file format changes, and JXLs from earlier versions are read the same way.
+**Released 2026-08-23.** Bug fixes only. No command line and no file format changes: v2.0.2 commands keep working exactly as written. Three audit rounds (32–34) across all four scripts, verified against the real fixtures — the 16-bit Capture One exports and the RGB+IR film scans — not just the mocked suite.
+
+#### The JXL → JPEG delete gates trusted the JXL's name
+
+`checksums.md5` holds the original JPEG's hash keyed by the JXL's **filename**. A delete-skipped run compared that stored hash against the recovered JPEG on disk — and the JXL being deleted never entered the comparison. Replace `photo.jxl` with a different, same-named JXL (a re-export, a restore mix-up) and the old archive still matched, so the replacement was deleted having never been archived. This was documented as "provenance PROVEN"; it was proven for the name, not the bytes.
+
+The gates now bind the file's **content**. The encoder stores the JXL's own MD5 beside the original's (a `<name>.jxl-md5` companion line; old databases keep working), and a delete run compares it against the JXL in front of it. Archives written before this release fall back to a real `djxl --reconstruct_jpeg` comparison. When neither proof can run, the source is kept. Verified end to end with the real tools: a swapped JXL is kept with a message saying exactly why, on both the new and the legacy path.
+
+#### An RGB ICC was attached to grayscale output
+
+On the `--to-srgb` / `--icc-profile` paths (transcoder and decoder), grayscale output received the **RGB** profile — which PNG rejects as a mismatched `iCCP` and which is equally wrong on a 1-component JPEG. Every film-scan IR page took this path. Grayscale images now keep their pixels and skip the profile. *(Round 32.)*
+
+#### The rest
+
+- **The wrapper's manifest collision scan compares its two entry families against each other again.** A round-31 performance change bucketed entries into two families and only compared within each — a mode-6 entry and an in-place entry aimed at the marker's output folder could race on the same outputs from two child processes. Cross-family containment now forces the full scan; disjoint libraries keep the fast path.
+- **A failed move out of staging no longer deletes a good pre-existing destination.** The cleanup assumed "staging copy survived ⇒ destination is partial", which is wrong when the move failed before writing (a locked or read-only destination) or after the copy but before the unlink (a complete copy). The destination's identity is snapshotted before the move; only a provably-written, provably-incomplete result is removed. All three backends, kept identical by the parity test.
+- **Re-encoding a lost page of a pre-v2.0.2 multi-page archive heals it again.** v2.0.2's group-id change made the id cover the page set, so the re-encoded page landed in a different group than its surviving siblings — the decoder saw two truncated groups and sent the user hunting for a page that is not missing. The encoder now adopts the siblings' legacy id when they prove it (unanimous, matching the old formula, all within the planned page set), and the decoder recognizes the mixed-version shape and advises a full re-encode instead.
+- **The decoder treats a failed metadata copy as an error that blocks the delete.** exiftool's exit code was never checked: a failed copy silently dropped the metadata, the pixel-valid TIFF passed the integrity gate, and `--delete-source` removed the JXL — the only remaining copy of that metadata.
+- **The decoder's multi-page marker reader normalizes path case**, like its sibling already did; an exiftool reply with a differently-cased drive letter silently dropped the group markers, and a delete run then peeled a split apart page by page.
+- **The `--delete-source is ARMED` dry-run notice now prints in all three transcoder entry points** — v2.0.1's changelog claimed it did; only one of the three had it.
+- Plus a per-script batch of lows: the wrapper charges the delete token only after checking the child script exists, `--list-presets` works without codecs, Ctrl+C cancels cleanly (exit 130, summary still printed), hand-written mode-7 manifests get their `--export-subfolder`, corrupt session files are refused field by field; the encoder counts skipped files in the real-run summary, validates `TEMP2_DIR`, classifies zero-page TIFFs as corrupt in every multipage mode, and no longer lets mode 6 honor the mode-7 subfolder exemption; the transcoder asks for the requested bit depth on the ICC paths and stops charging the lossy token for PNG → JXL at `--distance 0`.
+
+**1129 tests**, up from 1027 — every fix-targeted test verified failing against the pre-fix code. Round trips re-verified on the real fixtures: TIFF → JXL → TIFF pixel-identical (16-bit ProPhoto exports; the RGB+IR scan, thumbnail excluded, IR page grayscale), JPEG ↔ JXL MD5-exact, and the swapped-JXL scenario above run end to end. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (rounds 32–34).
+
+---
+
+### v2.0.2 — previous stable
+
+**Released 2026-08-19, superseded by v2.0.3 and kept here for reference.** Bug fixes only. No command line and no file format changes, and JXLs from earlier versions are read the same way.
 
 Converting a file has been clean in every audit round. This one looked at converting it a **second** time, and that was not.
 
@@ -624,10 +653,6 @@ Nothing was destroyed: the group was flagged as incomplete and `--delete-source`
 - The `output` positional was documented "mode 0 only"; mode 2 takes it too.
 
 **1017 tests**, up from 994 — eighteen of the twenty new ones verified failing against the pre-fix code. Full detail in [bug tracking](docs/bug_tracking_since_v1.0.md) (round 31).
-
-#### Since the tag
-
-A second sweep the same day covered what round 31 had not run: the decoder's alternative colour paths, the transcoder's convert direction, encoder modes 1/3/4/5, non-ASCII and bracketed paths, and `--provenance adopt`. One defect, fixed in `main` and not in the v2.0.2 tag: `--to-srgb` and `--icc-profile` attached an **RGB** ICC to **grayscale** output, which PNG rejects as a mismatched `iCCP` and which is equally wrong on a 1-component JPEG. It hit every film-scan IR page. Grayscale images now keep their pixels and skip the profile. See [bug tracking](docs/bug_tracking_since_v1.0.md) (round 32).
 
 ---
 
@@ -758,7 +783,8 @@ Full release notes: [v1.8.4](https://github.com/rsilvabr/jxl-photo/releases/tag/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.0.2** | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
+| **v2.0.3** | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
+| v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
 | v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
 | v2.0.0 | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
 | v1.9.1 | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
