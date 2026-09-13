@@ -195,7 +195,7 @@ conversion for someone who asked for a simulation.
 Choose what type of files to convert:
 - **JPEG** — lossless transcoding to JXL
 - **TIFF** — encoding to JXL with ICC preservation
-- **JXL** — decoding to JPEG, PNG, or TIFF
+- **JXL** — decoding to JPEG, PNG, or TIFF, or recompressing to a smaller JXL
 
 Unavailable formats (missing dependencies) are shown with `✗` and cannot be selected.
 
@@ -219,6 +219,12 @@ Choose the output format based on the source:
 - JPEG Lossy — Force lossy conversion with quality/ICC control
 - PNG — With transparency support
 - TIFF — Lossless master with optional JPEG preview
+- **JXL (smaller)** — Recompress the archive to a new distance/effort
+  (`jxl_recompressor.py`): ICC, metadata and provenance markers carried over.
+  Requests that cannot gain anything (same or lower distance than the source's
+  recorded `cjxl d=/e=`) fall back to a verbatim copy or are skipped, and a
+  re-encode that comes out *larger* keeps the original bytes. JPEG-recoverable
+  JXLs (jbrd) are copied verbatim by default.
 
 ### Step 3 — Source Directory
 Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).
@@ -479,6 +485,10 @@ _EXPORT/
 Basic parameters always shown:
 - **Workers** — parallel threads (default: 4)
 - **Quality / Distance / Effort** — context-aware based on conversion type
+- **Downgrade policy** — JXL→JXL only: what to do when the request cannot gain
+  anything (same or lower distance than the file already is): ask / copy / skip /
+  convert. The wizard decides it up front and passes `--on-downgrade` to the
+  child, which never prompts on an invisible stdin
 - **Staging directory** — SSD staging for HDD collections
 - **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
 - **TIFF compression** — zip / lzw / none
@@ -561,6 +571,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Skip MD5 verification | 6A | JPEG↔JXL |
 | Skip validation | 6A | JPEG↔JXL (risky) |
 | Output suffix | 6A | JPEG↔JXL |
+| Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
 | Expert flags | 6B | Custom CLI args |
 
 ### ⚙️ Available in option 4 (Edit default settings)
@@ -626,6 +637,22 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy encode |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for lossy pixel encodes (setting only, no CLI flag); `None` = use cjxl default (fast); `0` = best compression, slower |
 
+#### jxl_recompressor.py
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `CJXL_DISTANCE` | `1.0` | Target distance for the new files |
+| `CONVERTED_JXL_FOLDER` | `"recompressed_jxl"` | Mode 1/2 default output folder |
+| `JXL_FOLDER_NAME` | `"JXL_recompressed"` | Mode 3/5 sibling folder |
+| `JXL_SUFFIX_TO_REPLACE` / `JXL_SUFFIX_REPLACE` | `"JXL"` / `"JXL_small"` | Mode 4 token replace |
+| `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
+| `EXPORT_JXL_FOLDER` | `"16B_JXL_small"` | Mode 6/7 output folder |
+| `ON_DOWNGRADE` | `"ask"` | Policy when the request cannot gain (also wizard/CLI) |
+| `ON_UNKNOWN` | `"convert"` | Policy for files with no `cjxl d=/e=` record |
+| `JBRD_POLICY` | `"copy"` | Policy for JPEG-recoverable JXLs (jbrd box) |
+| `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
+| `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
+| `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
+
 * * *
 
 ## Relationship with other scripts
@@ -637,6 +664,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `jxl_tiff_encoder.py` | TIFF → JXL | Source = TIFF |
 | `jxl_tiff_decoder.py` | JXL → TIFF | Source = JXL, Dest = TIFF |
 | `jxl_jpeg_transcoder.py` | JPEG ↔ JXL / JXL → JPEG/PNG | Source = JPEG, or Source = JXL + Dest = JPEG/PNG |
+| `jxl_recompressor.py` | JXL → JXL (smaller) | Source = JXL, Dest = JXL (smaller) |
 
 You can also run any of those scripts directly — `jxl_photo.py` is optional convenience.
 

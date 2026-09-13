@@ -23,6 +23,7 @@ PAIRS = [
     ("jxl_tiff_encoder.py", "docs/README_jxl_tiff_encoder.md"),
     ("jxl_tiff_decoder.py", "docs/README_jxl_tiff_decoder.md"),
     ("jxl_jpeg_transcoder.py", "docs/README_jxl_jpeg_transcoder.md"),
+    ("jxl_recompressor.py", "docs/README_jxl_recompressor.md"),
     ("jxl_photo.py", "docs/README_jxl_tools.md"),
 ]
 

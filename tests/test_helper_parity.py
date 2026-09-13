@@ -27,6 +27,7 @@ SCRIPTS = [
     "jxl_tiff_encoder.py",
     "jxl_tiff_decoder.py",
     "jxl_jpeg_transcoder.py",
+    "jxl_recompressor.py",
 ]
 
 # Helpers duplicated on purpose. Not every script defines every one — the test
@@ -76,6 +77,23 @@ SHARED_HELPERS = [
     "_staging_leftovers",
     "_report_staging_leftovers",
     "_clean_staging",
+    # JXL structural integrity — the delete gate itself. A copy drifting is one
+    # backend deleting a source whose output another would have rejected.
+    "_verify_jxl_integrity",
+    # jbrd detection and file hashing, born in the transcoder. The recompressor
+    # keys its JPEG-recovery preservation policy off the first and its
+    # copy-then-delete MD5 proof off the second.
+    "has_jbrd_box",
+    "md5_of_file",
+    # The distance dead-zone warning: the user must hear the SAME sentence from
+    # every script that takes --distance.
+    "_warn_distance_clamp",
+    # Skip decision and pixel-verification helpers, born in the encoder. The
+    # recompressor verifies source-vs-output decodes with the same statistics.
+    "_would_skip",
+    "_decode_jxl_for_verify",
+    "_canon_for_compare",
+    "_compare_stats",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally
@@ -93,6 +111,7 @@ PINNED_VARIANTS: dict[str, dict[str, str]] = {
         "jxl_tiff_encoder.py": "a80bdc7535cacaad",
         "jxl_tiff_decoder.py": "a80bdc7535cacaad",
         "jxl_jpeg_transcoder.py": "2125e8023e27b0bf",
+        "jxl_recompressor.py": "a80bdc7535cacaad",
     },
 }
 
@@ -271,7 +290,8 @@ def test_every_listed_helper_is_actually_duplicated() -> None:
 # Neither is visible in the function; both live at the call site.
 # ---------------------------------------------------------------------------
 
-BACKENDS = ["jxl_tiff_encoder.py", "jxl_tiff_decoder.py", "jxl_jpeg_transcoder.py"]
+BACKENDS = ["jxl_tiff_encoder.py", "jxl_tiff_decoder.py", "jxl_jpeg_transcoder.py",
+            "jxl_recompressor.py"]
 
 
 def _parent_map(tree: ast.AST) -> dict:

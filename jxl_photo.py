@@ -235,7 +235,7 @@ _SESSION_CHOICES = {
         "transcode_lossless", "convert_lossy",
         "jxl_tiff_encoder", "jxl_tiff_encoder_lossless", "jxl_tiff_decoder",
         "jxl_to_jpeg_auto", "jxl_to_jpeg_lossless", "jxl_to_jpeg_force",
-        "jxl_to_png",
+        "jxl_to_png", "jxl_recompress",
     ),
     # The wizard's only ICC choice is the sRGB conversion.
     "last_icc_profile": ("srgb",),
@@ -1549,8 +1549,13 @@ def _export_folder_name(origin: str, dest: str) -> str:
     if dest == 'tiff':
         return '16B_TIFF'                       # jxl_tiff_decoder.EXPORT_TIFF_FOLDER
     if dest == 'jxl':
-        # jxl_tiff_encoder.EXPORT_JXL_FOLDER vs the transcoder's own.
-        return '16B_JXL' if origin == 'tiff' else 'JXL_jpeg'
+        # jxl_tiff_encoder.EXPORT_JXL_FOLDER vs jxl_recompressor's vs the
+        # transcoder's own.
+        if origin == 'tiff':
+            return '16B_JXL'
+        if origin == 'jxl':
+            return '16B_JXL_small'              # jxl_recompressor.EXPORT_JXL_FOLDER
+        return 'JXL_jpeg'
     return 'JPEG_recovered'                     # transcoder EXPORT_JPEG_FOLDER
 
 
@@ -1901,6 +1906,8 @@ class InteractiveMenu:
             options.append(("2", "JPEG Lossless   ", "Force lossless transcoding (requires jbrd)", "jxl_to_jpeg_lossless"))
             options.append(("3", "JPEG Lossy      ", "Force lossy conversion with quality/ICC control", "jxl_to_jpeg_force"))
             options.append(("4", "PNG             ", "PNG with transparency", "jxl_to_png"))
+            if status.get('cjxl'):
+                options.append(("6", "JXL (smaller)   ", "Recompress JXL to a smaller JXL, metadata kept", "jxl_recompress"))
             if status.get('tifffile'):
                 options.append(("5", "TIFF            ", "Lossless master", "jxl_tiff_decoder"))
 
@@ -1986,6 +1993,9 @@ class InteractiveMenu:
                 workflow['dest_format'] = 'png'
             elif choice == "5":
                 workflow['dest_format'] = 'tiff'
+            elif choice == "6":
+                # JXL -> JXL recompression (jxl_recompressor.py)
+                workflow['dest_format'] = 'jxl'
             else:
                 workflow['dest_format'] = 'jpeg'
         return True
@@ -2867,6 +2877,11 @@ class InteractiveMenu:
                     finders = {6: 'find_jxls_mode6', 7: 'find_jxls_mode7',
                                0: 'find_jxls_flat', 1: 'find_jxls_flat'}
                     recursive = 'find_jxls_recursive'
+                elif origin == 'jxl' and dest == 'jxl':
+                    import jxl_recompressor as child
+                    finders = {6: 'find_jxls_mode6', 7: 'find_jxls_mode7',
+                               0: 'find_files_mode0', 1: 'find_files_mode0'}
+                    recursive = 'find_jxls_recursive'
             except ImportError:
                 child = None
 
@@ -3073,9 +3088,9 @@ class InteractiveMenu:
         _staged: Dict = {}
 
         # Round-trip verification. Offered only here, because it is a gate in
-        # front of the deletion and nowhere else, and only for TIFF -> JXL,
-        # which is the direction where the source is the master.
-        if origin == 'tiff' and dest == 'jxl':
+        # front of the deletion and nowhere else, and only for TIFF -> JXL and
+        # JXL -> JXL — the directions where the source is the master.
+        if (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
             vr_default = bool(self.config.config.last_verify_roundtrip)
             explain = ("Decode each JXL and compare it with the source before deleting. "
                        "Lossless: the pixels must match exactly. Lossy: a brightness and "
@@ -3574,6 +3589,23 @@ class InteractiveMenu:
             elif origin == 'jxl' and dest == 'tiff':
                 # No effort parameter for JXL decoding - djxl doesn't use it
                 pass
+            elif conv_type == 'jxl_recompress':
+                # JXL -> JXL: distance-driven like the TIFF encoder
+                try:
+                    distance = float(Prompt.ask("Target distance (0=lossless, 1=visually lossless, 2=smaller)", default=str(workflow.get('distance', 1.0))))
+                    workflow['distance'] = max(0.0, min(distance, 15.0))
+                except ValueError:
+                    workflow['distance'] = workflow.get('distance', 1.0)
+                    console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
+                effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
+                workflow['effort'] = max(1, min(effort, 10))
+                # The child cannot prompt through the wrapper's pipe, so the
+                # downgrade policy is decided HERE and passed as a flag.
+                console.print("[dim]If a file's recorded settings are already as good as or better "
+                              "than this target (re-encoding cannot gain anything):[/dim]")
+                dg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
+                                choices=["copy", "skip", "convert"], default="copy")
+                workflow.setdefault('advanced_options', {})['on_downgrade'] = dg
             elif 'lossy' in conv_type:
                 # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
                 # (convert_lossy is the only conversion type containing 'lossy')
@@ -3675,6 +3707,20 @@ class InteractiveMenu:
             elif origin == 'jxl' and dest == 'tiff':
                 # No effort parameter for JXL decoding - djxl doesn't use it
                 pass
+            elif conv_type == 'jxl_recompress':
+                distance = input(f"Target distance (0=lossless, 1=visually lossless) [{workflow.get('distance', 1.0)}]: ").strip()
+                try:
+                    workflow['distance'] = max(0.0, min(float(distance) if distance else workflow.get('distance', 1.0), 15.0))
+                except ValueError:
+                    workflow['distance'] = workflow.get('distance', 1.0)
+                effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
+                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
+                # The child cannot prompt through the wrapper's pipe, so the
+                # downgrade policy is decided HERE and passed as a flag.
+                print("If the recorded settings are already as good as or better than the target")
+                dg_input = input("(re-encoding cannot gain anything): copy/skip/convert [copy]: ").strip().lower()
+                workflow.setdefault('advanced_options', {})['on_downgrade'] = (
+                    dg_input if dg_input in ("copy", "skip", "convert") else "copy")
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -4293,6 +4339,12 @@ class InteractiveMenu:
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get('add_preview', True) else "No"
                 table.add_row("JPEG Preview:", preview_status)
+            elif workflow.get('conversion_type') == 'jxl_recompress':
+                # JXL->JXL: the target distance and the downgrade policy are
+                # what the user must see before typing YES
+                table.add_row("Distance:", str(workflow.get('distance', 1.0)))
+                _dg = workflow.get('advanced_options', {}).get('on_downgrade')
+                table.add_row("If no gain possible:", _dg or "copy (child default: ask)")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 table.add_row("Effort:", str(workflow['effort']))
@@ -4347,6 +4399,12 @@ class InteractiveMenu:
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get('add_preview', True) else "No"
                 print(f"JPEG Preview: {preview_status}")
+            elif workflow.get('conversion_type') == 'jxl_recompress':
+                # JXL->JXL: the target distance and the downgrade policy are
+                # what the user must see before typing YES
+                print(f"Distance: {workflow.get('distance', 1.0)}")
+                _dg = workflow.get('advanced_options', {}).get('on_downgrade')
+                print(f"If no gain possible: {_dg or 'copy (child default: ask)'}")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 print(f"Effort: {workflow['effort']}")
@@ -4395,6 +4453,8 @@ class InteractiveMenu:
             script = 'jxl_tiff_encoder.py'
         elif origin == 'jxl' and dest == 'tiff':
             script = 'jxl_tiff_decoder.py'
+        elif origin == 'jxl' and dest == 'jxl':
+            script = 'jxl_recompressor.py'
         else:
             script = 'jxl_jpeg_transcoder.py'
 
@@ -5098,6 +5158,9 @@ class InteractiveMenu:
                 elif origin == 'jxl' and dest == 'tiff':
                     import jxl_tiff_decoder as _child
                     out_ext, conv_folder = '.tif', _child.CONVERTED_TIFF_FOLDER
+                elif origin == 'jxl' and dest == 'jxl':
+                    import jxl_recompressor as _child
+                    out_ext, conv_folder = '.jxl', _child.CONVERTED_JXL_FOLDER
                 elif origin in ('jpeg', 'jxl'):
                     import jxl_jpeg_transcoder as _child
                     out_ext = '.jpg' if origin == 'jxl' else '.jxl'
@@ -5178,6 +5241,19 @@ class InteractiveMenu:
                         if mode < 2:
                             return False
                         return _child._is_tool_output_path(f, root)
+                elif _child.__name__ == 'jxl_recompressor':
+                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
+                        # Its recursive finders (modes 2-8) skip this tool's OWN
+                        # output folder names BELOW the input root (pointing a
+                        # run AT such a folder is legitimate); the flat finders
+                        # are unfiltered.
+                        if mode < 2:
+                            return False
+                        try:
+                            below = [p.lower() for p in f.relative_to(root).parts[:-1]]
+                        except ValueError:
+                            below = [p.lower() for p in f.parts[:-1]]
+                        return _child._is_own_output_path(below)
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
@@ -5451,6 +5527,37 @@ class InteractiveMenu:
                 cmd.append('--no-reconstruct-multipage')
             if advanced.get('depth_policy'):
                 cmd.extend(['--depth-policy', advanced['depth_policy']])
+
+        elif origin == 'jxl' and dest == 'jxl':
+            # JXL -> JXL recompressor
+            cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+
+            if advanced.get('on_downgrade'):
+                cmd.extend(['--on-downgrade', advanced['on_downgrade']])
+            if advanced.get('jbrd_policy'):
+                cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
+            if advanced.get('no_keep_smaller'):
+                cmd.append('--no-keep-smaller')
+            if workflow.get('staging'):
+                cmd.extend(['--staging', workflow['staging']])
+            if advanced.get('overwrite'):
+                cmd.append('--overwrite')
+            if advanced.get('sync'):
+                cmd.append('--sync')
+            if advanced.get('delete_source'):
+                cmd.append('--delete-source')
+                # Wrapper already confirmed deletion (HHMM in step 4); without
+                # this the child would ask again on an invisible stdin prompt
+                # and the run would appear to hang.
+                cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source (it is the gate in
+                # front of the unlink), so it is emitted inside this branch.
+                if advanced.get('verify_roundtrip'):
+                    cmd.append('--verify-roundtrip')
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
 
         else:
             # JPEG/JXL/PNG transcoder
@@ -5747,6 +5854,8 @@ class InteractiveMenu:
             script = str(SCRIPT_DIR / 'jxl_tiff_encoder.py')
         elif origin == 'jxl' and dest == 'tiff':
             script = str(SCRIPT_DIR / 'jxl_tiff_decoder.py')
+        elif origin == 'jxl' and dest == 'jxl':
+            script = str(SCRIPT_DIR / 'jxl_recompressor.py')
         else:
             script = str(SCRIPT_DIR / 'jxl_jpeg_transcoder.py')
         if not Path(script).exists():
@@ -5929,6 +6038,68 @@ class InteractiveMenu:
             if advanced.get('depth_policy'):
                 cmd.extend(['--depth-policy', advanced['depth_policy']])
 
+        elif origin == 'jxl' and dest == 'jxl':
+            # JXL -> JXL recompressor
+            cmd = [
+                sys.executable, script,
+                input_dir,
+                '--mode', str(mode),
+                '--workers', str(workers)
+            ]
+
+            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
+            if export_marker and export_marker != "_EXPORT":
+                cmd.extend(['--export-marker', export_marker])
+            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
+            if export_subfolder:
+                cmd.extend(['--export-subfolder', export_subfolder])
+
+            # Mode 2: flat output folder
+            if mode == 2:
+                output_dir = workflow.get('mode_config', {}).get('output_dir')
+                if output_dir:
+                    # The child creates the dir itself; only pre-create for real
+                    # runs so a dry-run leaves no trace on disk.
+                    if not workflow.get('dry_run'):
+                        try:
+                            Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        except OSError as e:
+                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
+                            return False
+                    # Insert right after the input positional: appending the output
+                    # positional after flags breaks argparse on Python < 3.12.7
+                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
+                    cmd.insert(3, output_dir)
+
+            cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+
+            if advanced.get('on_downgrade'):
+                cmd.extend(['--on-downgrade', advanced['on_downgrade']])
+            if advanced.get('jbrd_policy'):
+                cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
+            if advanced.get('no_keep_smaller'):
+                cmd.append('--no-keep-smaller')
+            if workflow.get('staging'):
+                cmd.extend(['--staging', workflow['staging']])
+            if advanced.get('overwrite'):
+                cmd.append('--overwrite')
+            if advanced.get('sync'):
+                cmd.append('--sync')
+            if advanced.get('delete_source'):
+                cmd.append('--delete-source')
+                # Wrapper already confirmed deletion (HHMM above); without
+                # this the child would ask again on an invisible stdin prompt
+                # and the run would appear to hang.
+                cmd.append('--delete-confirm-off')
+                # Only meaningful alongside --delete-source: it widens which
+                # sources the deletion covers, it does not enable one.
+                if advanced.get('verify_roundtrip'):
+                    cmd.append('--verify-roundtrip')
+                if advanced.get('delete_skipped'):
+                    cmd.append('--delete-skipped')
+                self._append_provenance_flags(cmd, advanced, origin, dest)
+
         else:
             conv_type = workflow.get('conversion_type', '')
             
@@ -6096,7 +6267,7 @@ class InteractiveMenu:
         # used to advertise "d=0.05" for a decode that never reads it.
         conv = session.get('last_conversion_type') or ''
         distance_driven = (session.get('last_origin_format') == 'tiff'
-                           or conv == 'convert_lossy')
+                           or conv in ('convert_lossy', 'jxl_recompress'))
         # ...and quality only where the child actually receives --quality.
         # Without the direction test, a JXL->TIFF preset advertised the q= of
         # whatever JPEG run came before it (save_last_session only overwrites
@@ -6549,6 +6720,8 @@ class InteractiveMenu:
             workflow['conversion_type'] = 'jxl_to_jpeg_auto'
         elif origin == 'jxl' and last_dest == 'png':
             workflow['conversion_type'] = 'jxl_to_png'
+        elif origin == 'jxl' and last_dest == 'jxl':
+            workflow['conversion_type'] = 'jxl_recompress'
         else:
             workflow['conversion_type'] = 'jxl_to_jpeg_force'
 
@@ -6661,6 +6834,10 @@ def _main():
                     saved_quality = workflow.get('quality') if workflow.get('quality') is not None else 95
                     # Lossy JXL encode also uses distance; preserve it for repeat
                     saved_distance = workflow.get('distance')
+                elif workflow['conversion_type'] == 'jxl_recompress':
+                    # JXL -> JXL is distance-driven; no quality knob involved.
+                    saved_distance = workflow.get('distance') if workflow.get('distance') is not None else 1.0
+                    saved_quality = None
                 elif workflow['conversion_type'] == 'jxl_tiff_decoder':
                     # The decoder is never passed --quality, so storing one only
                     # makes the preset list advertise a knob the run ignores.

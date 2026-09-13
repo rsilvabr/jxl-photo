@@ -20,24 +20,37 @@
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)
 - `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`)
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy
-- `jxl_photo.py` — interactive wrapper that invokes the 3 scripts via subprocess
+- `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
+  `cjxl d=/e=`, refuses counterproductive re-encodes (copy/skip/ask), copies
+  jbrd JXLs verbatim by default, keep-smaller net; same delete gates
+- `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
   to live in the wrapper. Two v1.8.1 bugs came from exactly this blind spot.
-- **Mode 8 is the only mode that deletes sources.** Every delete path is gated
+- **`--delete-source` works in every mode** (since v2.0.0). Every delete path is gated
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
   same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
   block deletion, never be waved through.
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
-- Helper functions are deliberately duplicated across the four scripts
+- Helper functions are deliberately duplicated across the scripts
   (`_marker_matches`, `_replace_suffix_token`, `_is_relative_to`,
-  `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`) so
-  each stays standalone. Fix bugs in ALL copies.
+  `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`,
+  plus the verify/integrity family shared by the backends:
+  `_verify_jxl_integrity`/`_verify_file_integrity`, `has_jbrd_box`,
+  `md5_of_file`, `_warn_distance_clamp`, `_would_skip`, `_decode_jxl_for_verify`,
+  `_canon_for_compare`, `_compare_stats`) so each stays standalone. Fix bugs in
+  ALL copies — `tests/test_helper_parity.py` pins the variants and fails the
+  moment one copy drifts.
+- The recompressor's recursive finders skip its OWN output folder names
+  (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — but
+  only BELOW the input root: pointing a run AT such a folder to compress it
+  again is legitimate. The wrapper's `_manifest_output_collisions` mirror must
+  match this exactly (it takes the root into account too).
 
 ## Verification
 - After editing any script, run `python -m py_compile` on the changed files.
@@ -57,7 +70,9 @@
 ## Docs map
 - `README.md` — current release, install, quick start
 - `docs/README_jxl_tiff_encoder.md`, `docs/README_jxl_tiff_decoder.md`,
-  `docs/README_jxl_jpeg_transcoder.md` — per-script CLI, settings and modes
+  `docs/README_jxl_jpeg_transcoder.md`, `docs/README_jxl_recompressor.md` —
+  per-script CLI, settings and modes (every `--flag` must appear in its doc:
+  `tests/test_docs_cover_the_flags.py` enforces it)
 - `docs/README_jxl_tools.md` — the interactive wrapper
 - `docs/jxl_color_internals.md` — XYB, ICC blobs vs native primaries
 - `docs/bug_tracking_since_v1.0.md` — every fix since v1.0
