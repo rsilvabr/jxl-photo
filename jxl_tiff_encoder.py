@@ -1048,7 +1048,8 @@ DELETE_CONFIRM = True
 
 STRIP_METADATA = False
 # If True, strip all metadata from output (no EXIF/XMP preservation).
-# Only encoding params (cjxl d=X e=Y) are added to dc:Description.
+# Only the encode record (gen=N | cjxl d=X e=Y) is added to dc:Description —
+# and with ENCODE_TAG_MODE = "off", not even that.
 # Useful for creating clean JXL files without embedded metadata.
 # Can also be set via --strip CLI flag.
 
@@ -2158,11 +2159,14 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append("-exif:all=")
         # Strip all XMP (must come BEFORE setting new Description)
         args_lines.append("-xmp:all=")
-        # Then set encoding params in dc:Description. Fresh file, fresh chain:
-        # gen= reconciles to the lossy-entry count (1 lossy, 0 lossless).
-        encoding_desc, _s, _c, _o = _append_encode_entry(
-            "", CJXL_DISTANCE, CJXL_EFFORT)
-        args_lines.append(f"-xmp-dc:Description={encoding_desc}")
+        # Then set encoding params in dc:Description — unless ENCODE_TAG_MODE
+        # is "off": --strip promises no metadata, and the record IS metadata.
+        # Fresh file, fresh chain: gen= reconciles to the lossy-entry count
+        # (1 lossy, 0 lossless).
+        if ENCODE_TAG_MODE != "off":
+            encoding_desc, _s, _c, _o = _append_encode_entry(
+                "", CJXL_DISTANCE, CJXL_EFFORT)
+            args_lines.append(f"-xmp-dc:Description={encoding_desc}")
         # Target file
         args_lines.append(str(write_path))
         # Write args file (UTF-8 charset first so non-ASCII paths work)

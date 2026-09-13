@@ -322,7 +322,7 @@ class TestRoundTrip:
 # ---------------------------------------------------------------------------
 
 def _encoder_argfile(monkeypatch, tmp_path, existing_desc="", sw_stdout="",
-                     mode="xmp", distance=0.1) -> str:
+                     mode="xmp", distance=0.1, strip=False) -> str:
     """Run build_metadata_injection_args with all exiftool reads mocked and
     return the written argfile's text."""
     monkeypatch.setattr(enc, "ENCODE_TAG_MODE", mode)
@@ -341,5 +341,24 @@ def _encoder_argfile(monkeypatch, tmp_path, existing_desc="", sw_stdout="",
     tiff = tmp_path / "src.tif"
     tiff.write_bytes(b"II")
     arg = enc.build_metadata_injection_args(
-        tiff, tmp_path / "out.jxl", tmp_path, None, None, xmp)
+        tiff, tmp_path / "out.jxl", tmp_path, None, None, xmp,
+        strip_metadata=strip)
     return Path(arg).read_text(encoding="utf-8-sig")
+
+
+# ---------------------------------------------------------------------------
+# --strip must respect --encode-tag off: "no metadata" means NO metadata,
+# and the encode record is metadata. (Fixed separately from the lineage work.)
+# ---------------------------------------------------------------------------
+
+class TestStripMetadataRespectsOff:
+    def test_strip_writes_the_record_by_default(self, monkeypatch, tmp_path):
+        argfile = _encoder_argfile(monkeypatch, tmp_path, strip=True)
+        assert "gen=1 | cjxl d=0.1 e=7" in argfile
+
+    def test_strip_with_off_writes_nothing(self, monkeypatch, tmp_path):
+        argfile = _encoder_argfile(monkeypatch, tmp_path, mode="off", strip=True)
+        assert "cjxl d=" not in argfile
+        assert "gen=" not in argfile
+        # ...but the strip itself still happens
+        assert "-xmp:all=" in argfile and "-exif:all=" in argfile
