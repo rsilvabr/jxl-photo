@@ -28,6 +28,18 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 **v2.1.0** (2026-09-13) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
 
+#### Generation counter in the encode record
+
+The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
+
+Why it matters: controlled chain tests showed each lossy re-encode costs ~1 dB regardless of step size, and after generation 1 the nominal `d` stops describing quality (a 17-generation chain landed ~8.5 dB below a single direct encode at the same file size). The new **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file already carries a lossy generation and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
+
+#### ⚠️ `--encode-tag off` now strips the record (encoder)
+
+The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
+
+Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
+
 [What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.3)
 
 > ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
@@ -463,11 +475,11 @@ The ICC is base64-encoded and stored in XMP:
 
 ```xml
 <xmp:CreatorTool>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVog...</xmp:CreatorTool>
-<dc:description>cjxl d=0.1 e=7</dc:description>
+<dc:description>gen=1 | cjxl d=0.1 e=7</dc:description>
 ```
 
 - **xmp:CreatorTool:** Base64 ICC data with "ICC:" prefix (for round-trip preservation)
-- **dc:Description:** Encoding params `cjxl d=X e=Y` (visible in Windows Properties)
+- **dc:Description:** the encode record — an append-only lineage chain `gen=N | cjxl d=X e=Y | ...` where `gen=N` counts the lossy generations (visible in Windows Properties; any user caption stays first)
 
 → See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for full technical details.
 

@@ -94,6 +94,15 @@ SHARED_HELPERS = [
     "_decode_jxl_for_verify",
     "_canon_for_compare",
     "_compare_stats",
+    # The encode-record lineage (gen= token + append-only cjxl d=/e= chain).
+    # Encoder and recompressor must count, reconcile, strip and append in
+    # EXACTLY the same way: a drift here means one script writes a field the
+    # other miscounts, and the recompressor's --on-regeneration guard reads a
+    # generation count that is wrong in the damaging direction.
+    "_strip_encode_params",
+    "_reconcile_gen",
+    "_append_encode_entry",
+    "_log_gen_notes_once",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally

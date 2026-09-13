@@ -21,8 +21,12 @@
 - `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`)
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
-  `cjxl d=/e=`, refuses counterproductive re-encodes (copy/skip/ask), copies
-  jbrd JXLs verbatim by default, keep-smaller net; same delete gates
+  lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
+  recompressor both append one entry per encode and reconcile `gen` as
+  max(stored, lossy-entry count), never increment), refuses counterproductive
+  re-encodes (copy/skip/ask), guards repeat lossy generations via
+  `--on-regeneration` (gen ≥ 1 + lossy request), copies jbrd JXLs verbatim by
+  default, keep-smaller net; same delete gates
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
@@ -43,9 +47,11 @@
   plus the verify/integrity family shared by the backends:
   `_verify_jxl_integrity`/`_verify_file_integrity`, `has_jbrd_box`,
   `md5_of_file`, `_warn_distance_clamp`, `_would_skip`, `_decode_jxl_for_verify`,
-  `_canon_for_compare`, `_compare_stats`) so each stays standalone. Fix bugs in
-  ALL copies — `tests/test_helper_parity.py` pins the variants and fails the
-  moment one copy drifts.
+  `_canon_for_compare`, `_compare_stats`, plus the encode-record lineage
+  family shared by the encoder and the recompressor: `_strip_encode_params`,
+  `_reconcile_gen`, `_append_encode_entry`, `_log_gen_notes_once`) so each
+  stays standalone. Fix bugs in ALL copies — `tests/test_helper_parity.py`
+  pins the variants and fails the moment one copy drifts.
 - The recompressor's recursive finders skip its OWN output folder names
   (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — but
   only BELOW the input root: pointing a run AT such a folder to compress it

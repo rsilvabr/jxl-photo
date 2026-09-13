@@ -87,46 +87,46 @@ class TestParseEncodeParams:
 
 class TestStripEncodeParams:
     def test_strips_tag_keeps_caption(self):
-        assert rec._strip_encode_params("My caption | cjxl d=0.1 e=7") == "My caption"
+        assert rec._strip_encode_params("My caption | cjxl d=0.1 e=7") == ("My caption", 0)
 
     def test_strips_bare_tag_to_empty(self):
-        assert rec._strip_encode_params("cjxl d=0.1 e=7") == ""
+        assert rec._strip_encode_params("cjxl d=0.1 e=7") == ("", 0)
 
     def test_no_tag_unchanged(self):
-        assert rec._strip_encode_params("CreatorTool 1.0") == "CreatorTool 1.0"
+        assert rec._strip_encode_params("CreatorTool 1.0") == ("CreatorTool 1.0", 0)
 
     def test_dangling_pipes_removed(self):
-        assert rec._strip_encode_params("cjxl d=0.1 e=7 | Notes") == "Notes"
+        assert rec._strip_encode_params("cjxl d=0.1 e=7 | Notes") == ("Notes", 0)
 
 
 class TestRestampArgs:
-    def test_xmp_mode_replaces_tag_keeps_caption(self):
+    def test_xmp_mode_appends_to_chain_keeps_caption(self):
         lines = rec._restamp_args("My caption | cjxl d=0.1 e=7", "")
-        assert "-XMP-dc:Description=My caption | cjxl d=1.0 e=7" in lines
+        assert "-XMP-dc:Description=My caption | gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
         assert not any(l.startswith("-Software=") for l in lines)
 
     def test_xmp_mode_bare_tag(self):
         lines = rec._restamp_args("cjxl d=0.1 e=7", "")
-        assert lines == ["-XMP-dc:Description=cjxl d=1.0 e=7"]
+        assert lines == ["-XMP-dc:Description=gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7"]
 
     def test_xmp_mode_strips_stale_software_tag(self, monkeypatch):
         lines = rec._restamp_args("", "C1 | cjxl d=0.1 e=7")
-        assert "-XMP-dc:Description=cjxl d=1.0 e=7" in lines
+        assert "-XMP-dc:Description=gen=1 | cjxl d=1.0 e=7" in lines
         assert "-Software=C1" in lines  # stale tag removed from Software
 
     def test_software_mode(self, monkeypatch):
         monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "software")
         lines = rec._restamp_args("cjxl d=0.1 e=7", "C1 | cjxl d=0.1 e=7")
-        assert "-Software=C1 | cjxl d=1.0 e=7" in lines
+        assert "-Software=C1 | gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
         # and the stale XMP tag is stripped, not left to mislead a later run
         assert "-XMP-dc:Description=" in lines
 
     def test_off_mode_strips_everywhere(self, monkeypatch):
         monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "off")
-        lines = rec._restamp_args("Notes | cjxl d=0.1 e=7", "cjxl d=0.1 e=7")
+        lines = rec._restamp_args("Notes | gen=3 | cjxl d=0.1 e=7", "cjxl d=0.1 e=7")
         assert "-XMP-dc:Description=Notes" in lines
         assert "-Software=" in lines
-        assert not any("cjxl d=" in l for l in lines)
+        assert not any("cjxl d=" in l or "gen=" in l for l in lines)
 
     def test_off_mode_clean_file_adds_nothing(self, monkeypatch):
         monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "off")
@@ -283,8 +283,8 @@ class TestConvertOne:
         # Metadata copied from the source JXL...
         assert "-tagsfromfile" in lines and str(src) in lines
         assert "-xmp:all" in lines and "-exif:all" in lines
-        # ...and the tag restamped to the NEW parameters
-        assert "-XMP-dc:Description=cjxl d=1.0 e=7" in lines
+        # ...and the new parameters APPENDED to the chain, gen reconciled
+        assert "-XMP-dc:Description=gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
 
     def test_overwrite_status_when_final_exists(self, tmp_path, monkeypatch):
         src = _fake_jxl(tmp_path / "photo.jxl", size=5000)

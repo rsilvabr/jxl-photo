@@ -137,10 +137,13 @@ EMBED_ICC_IN_JXL = True
 # False → do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 ENCODE_TAG_MODE = "xmp"
-# Records encoding parameters in the JXL metadata.
+# Records encoding parameters in the JXL metadata as an append-only lineage
+# chain: "gen=N | cjxl d=X e=Y | cjxl d=... e=..." (gen = number of LOSSY
+# generations, reconciled from the chain on every write, never incremented)
 # "software" → appends to the EXIF Software field
-# "xmp"      → writes as XMP metadata (default)
-# "off"      → does not add anything
+# "xmp"      → writes as XMP metadata (default); any user caption stays FIRST
+# "off"      → records nothing AND strips any gen=/cjxl record the source
+#              TIFF carries — the only way to deliberately discard the lineage
 # Can also be set via --encode-tag CLI argument (xmp/software/off)
 # NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP:CreatorTool
 # and encoding params are concatenated to dc:Description.
@@ -362,6 +365,8 @@ Options:
                    export marker (default: script setting, empty = all)
   --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
   --encode-tag      Where to record encoding params: xmp (default), software, off
+                    ('off' also strips any gen=/cjxl record the source TIFF
+                    carries — the only way to deliberately discard the lineage)
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
   --icc-png-strategy cautious|heuristic|always|skip
                     How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
@@ -453,7 +458,14 @@ TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original Pro
 1. **Extract ICC** from source TIFF using exiftool (original ICC for XMP, patched for PNG)
 2. **Base64-encode** the ICC profile
 3. **Embed in XMP** metadata (`xmp:CreatorTool` field with `ICC:` prefix)
-4. **Encoding params** (cjxl d=0.1 e=7) go to `dc:description` (visible in Windows Properties)
+4. **Encoding params** go to `dc:description` as an append-only lineage
+   chain (`gen=1 | cjxl d=0.1 e=7`, visible in Windows Properties); any
+   existing user text (a caption) stays first. Every encode **appends** one
+   entry — re-encoding a TIFF produced by the decoder at identical d/e adds
+   a second entry, because decode-then-re-encode is exactly where a
+   generation of loss happens. `gen=N` counts the **lossy** (`d>0`) entries
+   and is reconciled from the chain on every write, never incremented; the
+   recompressor's `--on-regeneration` guard reads it.
 
 When converting back with `jxl_tiff_decoder.py`:
 1. Extract ICC from XMP metadata
@@ -469,7 +481,7 @@ The embedded ICC is stored as:
 <xmp:CreatorTool>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</xmp:CreatorTool>
 <dc:description>
   <rdf:Alt>
-    <rdf:li xml:lang="x-default">cjxl d=0.1 e=7</rdf:li>
+    <rdf:li xml:lang="x-default">gen=1 | cjxl d=0.1 e=7</rdf:li>
   </rdf:Alt>
 </dc:description>
 ```
@@ -644,7 +656,7 @@ Previous versions had a bug where XMP metadata was overwritten:
 ### The Fix
 
 This version uses **targeted XMP updates**:
-- `-xmp-dc:Description=` for encoding params (concatenated with existing dc:description)
+- `-xmp-dc:Description=` for the encode record (`gen=N | cjxl d=/e=` chain appended after any existing dc:description)
 - `-xmp-xmp:CreatorTool=` for ICC data (base64-encoded ICC profile)
 - All other XMP tags preserved via `-tagsfromfile`
 

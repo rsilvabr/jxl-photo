@@ -222,9 +222,11 @@ Choose the output format based on the source:
 - **JXL (smaller)** — Recompress the archive to a new distance/effort
   (`jxl_recompressor.py`): ICC, metadata and provenance markers carried over.
   Requests that cannot gain anything (same or lower distance than the source's
-  recorded `cjxl d=/e=`) fall back to a verbatim copy or are skipped, and a
-  re-encode that comes out *larger* keeps the original bytes. JPEG-recoverable
-  JXLs (jbrd) are copied verbatim by default.
+  recorded `cjxl d=/e=`) fall back to a verbatim copy or are skipped, files
+  that already carry a lossy generation (`gen≥1` in the record) trigger the
+  regeneration policy (`--on-regeneration`), and a re-encode that comes out
+  *larger* keeps the original bytes. JPEG-recoverable JXLs (jbrd) are copied
+  verbatim by default.
 
 ### Step 3 — Source Directory
 Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).
@@ -647,6 +649,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
 | `EXPORT_JXL_FOLDER` | `"16B_JXL_small"` | Mode 6/7 output folder |
 | `ON_DOWNGRADE` | `"ask"` | Policy when the request cannot gain (also wizard/CLI) |
+| `ON_REGENERATION` | `"ask"` | Policy when the file already carries a lossy generation (`gen≥1`) and the request adds another (also wizard/CLI) |
 | `ON_UNKNOWN` | `"convert"` | Policy for files with no `cjxl d=/e=` record |
 | `JBRD_POLICY` | `"copy"` | Policy for JPEG-recoverable JXLs (jbrd box) |
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |

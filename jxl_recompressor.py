@@ -592,6 +592,17 @@ ON_DOWNGRADE = "ask"
 # "skip"    -> leave it out of the run
 # "convert" -> re-encode anyway (you were warned)
 
+ON_REGENERATION = "ask"
+# What to do when the source file is ALREADY a lossy re-encode (gen >= 1 in
+# the encode record) and the request would add ANOTHER lossy generation.
+# Measured on real files: each lossy re-encode costs ~1 dB regardless of how
+# small the distance step is, and after generation 1 the nominal d stops
+# describing quality (a 17-generation chain landed 8.5 dB below a single
+# direct encode at the same file size). d_new > d_old cannot see this — it
+# compares one step at a time; the generation count is what the history
+# warns about. Same values as ON_DOWNGRADE, and independent of it: when both
+# fire, the more conservative action wins (skip > copy > ask > convert).
+
 ON_UNKNOWN = "convert"
 # What to do with JXLs that carry NO encoding record (not written by this
 # toolkit, or written with --encode-tag off), so nothing can be compared.
@@ -615,11 +626,13 @@ KEEP_SMALLER = True
 
 ENCODE_TAG_MODE = "xmp"
 # Where to record the NEW encoding parameters, mirroring jxl_tiff_encoder.py:
-# "xmp"      -> XMP-dc:Description (default; any previous cjxl d=/e= tag is
-#               replaced, unrelated text is kept)
+# "xmp"      -> XMP-dc:Description (default; the new cjxl d=/e= is APPENDED to
+#               the existing chain with the gen= token reconciled at the head
+#               of the machine block — unrelated text is kept)
 # "software" -> EXIF Software field
-# "off"      -> record nothing; any previous cjxl d=/e= tag is STRIPPED, so a
-#               later run never trusts stale parameters.
+# "off"      -> record nothing; any previous record (gen= + cjxl d=/e= chain)
+#               is STRIPPED, so a later run never trusts stale parameters.
+#               This is the only way to deliberately discard the lineage.
 
 VERIFY_ROUNDTRIP = False
 # Decode both the source JXL and the output and compare pixels before any
@@ -694,6 +707,24 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # The encoder's encoding-parameters tag: "cjxl d=0.1 e=7", possibly several in
 # a " | "-separated chain (the LAST one is the current file's).
 _ENCODE_TAG_RE = re.compile(r"cjxl\s+d=([0-9.]+)\s+e=(\d+)")
+
+# The stored generation token, read ONLY as a complete " | "-delimited segment
+# (or bounded by the field's start/end): "Project gen=3 phase 2" is running
+# text, not a token, and must never be read as one.
+_GEN_TAG_RE = re.compile(r"(?:^|\|)\s*gen=(\d+)\s*(?=\||$)")
+
+# The whole machine block as ONE unit: an optional gen= lead segment followed
+# by the contiguous cjxl d=/e= chain. The block only starts at a segment
+# boundary ((?:^|\|)), so it never bites into a caption's running text; and
+# matching only the first cjxl entry would leave an orphaned gen= and a
+# partial chain behind. Legacy fields (a chain with no gen=) are the normal
+# case and match in full.
+_MACHINE_BLOCK_RE = re.compile(
+    r"(?:^|\|)\s*"
+    r"(?:gen=\d+\s*\|\s*)?"
+    r"cjxl\s+d=[0-9.]+\s+e=\d+"
+    r"(?:\s*\|\s*cjxl\s+d=[0-9.]+\s+e=\d+)*"
+)
 
 _MIN_EFFECTIVE_DISTANCE = 0.05
 # cjxl clamps every lossy distance at or below this to the same value:
@@ -1222,8 +1253,8 @@ def _run_exiftool_argfile(args_lines, timeout=60):
 def _parse_encode_params(text: str):
     """(distance, effort) from a metadata string, or None.
 
-    The encoder concatenates with " | " and the recompressor REPLACES the tag,
-    so the LAST match in the string is the current file's parameters.
+    The chain is append-only (" | "-joined), so the LAST match in the string
+    is the current file's parameters.
     """
     found = _ENCODE_TAG_RE.findall(str(text))
     if not found:
@@ -1235,22 +1266,96 @@ def _parse_encode_params(text: str):
         return None
 
 
-def _strip_encode_params(text: str) -> str:
-    """Remove every cjxl d=/e= tag segment from a " | "-joined metadata string,
-    keeping any unrelated text (an original caption, a real CreatorTool)."""
-    cleaned = _ENCODE_TAG_RE.sub("", str(text))
+def _strip_encode_params(text: str):
+    """(cleaned_text, orphans) with the machine block removed.
+
+    Removes the gen= token and the WHOLE cjxl d=/e= chain (one unit) from a
+    " | "-joined metadata string, keeping any unrelated text (an original
+    caption, a real CreatorTool). Orphaned gen= segments — left behind by a
+    corrupted or hand-edited field — are removed ONLY as whole segments and
+    ONLY at the tail (the machine-block region): "Project gen=3 phase 2" and
+    "gen=2 | My caption" are user text and stay. `orphans` counts how many
+    were stripped so the caller can log it: an orphan means something wrote
+    the field badly earlier.
+    """
+    cleaned = _MACHINE_BLOCK_RE.sub("", str(text))
     parts = [p.strip() for p in cleaned.split("|")]
-    return " | ".join(p for p in parts if p)
+    parts = [p for p in parts if p]
+    orphans = 0
+    while parts and re.fullmatch(r"gen=\d+", parts[-1]):
+        parts.pop()
+        orphans += 1
+    return " | ".join(parts), orphans
+
+
+def _reconcile_gen(text: str):
+    """(gen, stored, counted) for the field — gen is DERIVED, never incremented.
+
+    counted = number of "cjxl d=X" chain entries with X > 0 (a d=0 lossless
+    entry is appended to the chain but costs no quality, so it is not a
+    generation). stored = the gen= token, 0 when absent or unparseable.
+    gen = max(stored, counted): if chain entries were removed the stored gen
+    is the better number, if entries were added without updating gen the
+    count is better — undercounting generations is the error that causes
+    damage, so the larger value wins in both directions. A malformed chain
+    entry never stops the rest from being counted. Legacy fields (chain, no
+    gen=) need no special case: max(0, counted) == counted.
+    """
+    s = str(text)
+    m = _GEN_TAG_RE.search(s)
+    stored = int(m.group(1)) if m else 0
+    counted = 0
+    for d, _e in _ENCODE_TAG_RE.findall(s):
+        try:
+            if float(d) > 0:
+                counted += 1
+        except ValueError:
+            continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
+    return max(stored, counted), stored, counted
+
+
+def _append_encode_entry(text: str, new_d, new_e):
+    """(new_text, stored, counted_before, orphans): append "cjxl d=new_d
+    e=new_e" to the field's chain and rewrite the gen= token at the head of
+    the machine block.
+
+    Append-only is the design: the chain is the lineage history, and
+    replacing it would erase the generation count that --on-regeneration
+    guards. The user's own text (a caption) stays FIRST — dc:Description is
+    visible in Windows Properties and machine output must not push a caption
+    behind it. gen is reconciled over the final chain (never incremented):
+    a wrong value self-corrects on the next pass. `stored`/`counted_before`
+    are returned so the caller can log a divergence (once per run); `orphans`
+    comes from _strip_encode_params.
+    """
+    s = str(text)
+    _gen_old, stored, counted = _reconcile_gen(s)
+    user, orphans = _strip_encode_params(s)
+    entries = [f"cjxl d={d} e={e}" for d, e in _ENCODE_TAG_RE.findall(s)]
+    entries.append(f"cjxl d={new_d} e={new_e}")
+    counted_new = counted
+    try:
+        if float(new_d) > 0:
+            counted_new += 1
+    except (TypeError, ValueError):
+        pass
+    gen = max(stored, counted_new)
+    block = " | ".join([f"gen={gen}"] + entries)
+    return (f"{user} | {block}" if user else block), stored, counted, orphans
 
 
 def _read_encode_params_batch(paths: list) -> dict:
-    """{path str: {'desc': str, 'software': str, 'params': (d,e)|None}} with
-    one exiftool call per 400 files — per-file spawns were minutes on a library.
+    """{path str: {'desc': str, 'software': str, 'params': (d,e)|None,
+    'gen': int}} with one exiftool call per 400 files — per-file spawns were
+    minutes on a library.
 
+    `gen` is the reconciled generation count (max of the stored gen= token
+    and the lossy chain length), read from the field that carries the record.
     Files exiftool cannot read come back with empty strings and params None,
     which classifies as 'unknown' — the ON_UNKNOWN policy decides.
     """
-    info = {str(p): {"desc": "", "software": "", "params": None} for p in paths}
+    info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0}
+            for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return info
@@ -1287,8 +1392,13 @@ def _read_encode_params_batch(paths: list) -> dict:
                 software = str(entry.get("Software") or "")
                 params = (_parse_encode_params(desc)
                           or _parse_encode_params(software))
+                gen = 0
+                if params is not None:
+                    record_field = (desc if _parse_encode_params(desc) is not None
+                                    else software)
+                    gen, _stored, _counted = _reconcile_gen(record_field)
                 info[index[key]] = {"desc": desc, "software": software,
-                                    "params": params}
+                                    "params": params, "gen": gen}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -1352,26 +1462,93 @@ def _policy_action(category: str, jbrd: bool) -> str:
     return ON_UNKNOWN
 
 
-def _restamp_args(desc: str, software: str) -> list:
-    """exiftool argfile lines that record the NEW encoding parameters on the
-    output, replacing the old tag wherever ENCODE_TAG_MODE says — and stripping
-    it everywhere else, so no stale d=/e= survives to mislead a later run.
+_ACTION_RANK = {"convert": 0, "ask": 1, "copy": 2, "skip": 3}
+
+
+def _more_conservative(a: str, b: str) -> str:
+    """The safer of two policy actions: skip > copy > ask > convert."""
+    return a if _ACTION_RANK[a] >= _ACTION_RANK[b] else b
+
+
+def _regeneration_action(gen: int, new_d: float):
+    """ON_REGENERATION when this request would add another lossy generation
+    to a file that already carries one; None when the guard does not apply.
+
+    A lossless request (new_d == 0) adds no generation — the d=0 entry is
+    appended to the chain but costs no quality, so the guard stays quiet and
+    --on-downgrade keeps covering the lossless-on-lossless cases.
     """
-    new_tag = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+    if gen >= 1 and new_d > 0:
+        return ON_REGENERATION
+    return None
+
+
+_gen_divergence_logged = False
+
+
+def _log_gen_notes_once(stored: int, counted: int) -> None:
+    """Divergence between the stored gen= and the chain length is information,
+    not an error (max() already kept the safer value) — log it once per run,
+    not per file. Legacy files (no gen= token, stored == 0) are the normal
+    case and never count as divergence.
+    """
+    global _gen_divergence_logged
+    if stored and stored != counted and not _gen_divergence_logged:
+        _gen_divergence_logged = True
+        logger.info("At least one file's stored gen= disagrees with its cjxl "
+                    "chain length — kept the larger (safer) value; the field "
+                    "was corrected on the restamp.")
+
+
+def _restamp_args(desc: str, software: str, label: str = "") -> list:
+    """exiftool argfile lines that APPEND the new encoding parameters to the
+    chain, wherever ENCODE_TAG_MODE says — and strip the record from the other
+    field, so no stale d=/e= survives to mislead a later run.
+
+    The chain is append-only (the encoder already concatenates): replacing it
+    would erase the generation history that --on-regeneration guards.
+    `label` (a file name) only prefixes the orphan-strip log lines.
+    """
     lines = []
-    clean_desc = _strip_encode_params(desc)
-    clean_sw = _strip_encode_params(software)
     if ENCODE_TAG_MODE == "xmp":
-        lines.append("-XMP-dc:Description=" + _argfile_safe(
-            f"{clean_desc} | {new_tag}" if clean_desc else new_tag))
+        new_desc, stored, counted, orphans = _append_encode_entry(
+            desc, CJXL_DISTANCE, CJXL_EFFORT)
+        _log_gen_notes_once(stored, counted)
+        if orphans:
+            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
+                           f"dc:Description of {label or 'a file'} — the field "
+                           f"was written badly earlier")
+        lines.append("-XMP-dc:Description=" + _argfile_safe(new_desc))
+        clean_sw, sw_orphans = _strip_encode_params(software)
+        if sw_orphans:
+            logger.warning(f"Stripped {sw_orphans} orphaned gen= token(s) from "
+                           f"Software of {label or 'a file'}")
         if clean_sw != software:
             lines.append("-Software=" + _argfile_safe(clean_sw))
     elif ENCODE_TAG_MODE == "software":
-        lines.append("-Software=" + _argfile_safe(
-            f"{clean_sw} | {new_tag}" if clean_sw else new_tag))
+        new_sw, stored, counted, orphans = _append_encode_entry(
+            software, CJXL_DISTANCE, CJXL_EFFORT)
+        _log_gen_notes_once(stored, counted)
+        if orphans:
+            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
+                           f"Software of {label or 'a file'} — the field was "
+                           f"written badly earlier")
+        lines.append("-Software=" + _argfile_safe(new_sw))
+        clean_desc, d_orphans = _strip_encode_params(desc)
+        if d_orphans:
+            logger.warning(f"Stripped {d_orphans} orphaned gen= token(s) from "
+                           f"dc:Description of {label or 'a file'}")
         if clean_desc != desc:
             lines.append("-XMP-dc:Description=" + _argfile_safe(clean_desc))
-    else:  # off: record nothing, and leave no stale tag behind
+    else:  # off: record nothing, and leave no stale record behind — gen and
+        # chain go together. This is the only way to deliberately discard
+        # the lineage.
+        clean_desc, d_orphans = _strip_encode_params(desc)
+        clean_sw, s_orphans = _strip_encode_params(software)
+        for field, n in (("dc:Description", d_orphans), ("Software", s_orphans)):
+            if n:
+                logger.warning(f"Stripped {n} orphaned gen= token(s) from "
+                               f"{field} of {label or 'a file'}")
         if clean_desc != desc:
             lines.append("-XMP-dc:Description=" + _argfile_safe(clean_desc))
         if clean_sw != software:
@@ -1748,7 +1925,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-exif:all", "-xmp:all", "-iptc:all"]
-            + _restamp_args(desc, software)
+            + _restamp_args(desc, software, label=jxl_path.name)
             + [str(write_path)], timeout=120)
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
@@ -1980,7 +2157,8 @@ def _ask_batch_resolution(asks):
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         logger.warning(f"{len(asks)} file(s) need a decision (policy 'ask') but this "
                        f"run is non-interactive — skipping them. Pass "
-                       f"--on-downgrade/--on-unknown to decide unattended.")
+                       f"--on-downgrade/--on-regeneration/--on-unknown to decide "
+                       f"unattended.")
         for it in asks:
             it["action"] = "skip"
         return
@@ -2010,7 +2188,9 @@ def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
-    global EXPORT_MARKER, EXPORT_JXL_SUBFOLDER
+    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER
+    global _gen_divergence_logged
+    _gen_divergence_logged = False
 
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
@@ -2036,6 +2216,13 @@ def main():
                         help="Requested d/e cannot gain anything (same or lower distance "
                              "than an already-lossy source): ask/copy/skip/convert "
                              "(default: ON_DOWNGRADE setting, 'ask')")
+    parser.add_argument("--on-regeneration", dest="on_regeneration", default=None,
+                        choices=["ask", "copy", "skip", "convert"],
+                        help="Source already carries a lossy generation (gen >= 1) "
+                             "and this request adds another one (~1 dB each, "
+                             "measured — nominal d no longer describes quality): "
+                             "ask/copy/skip/convert "
+                             "(default: ON_REGENERATION setting, 'ask')")
     parser.add_argument("--on-unknown", dest="on_unknown", default=None,
                         choices=["ask", "copy", "skip", "convert"],
                         help="File carries no cjxl d=/e= record: ask/copy/skip/convert "
@@ -2095,6 +2282,8 @@ def main():
         CJXL_BUFFERING = args.buffering
     if args.on_downgrade is not None:
         ON_DOWNGRADE = args.on_downgrade
+    if args.on_regeneration is not None:
+        ON_REGENERATION = args.on_regeneration
     if args.on_unknown is not None:
         ON_UNKNOWN = args.on_unknown
     if args.jbrd_policy is not None:
@@ -2181,7 +2370,8 @@ def main():
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
                 f"workers: {args.workers}")
-    logger.info(f"Policies: downgrade={ON_DOWNGRADE} | unknown={ON_UNKNOWN} | "
+    logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
+                f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
     if DELETE_SOURCE:
         logger.warning("--delete-source is ARMED: source JXLs will be deleted after "
@@ -2275,6 +2465,7 @@ def main():
         it["desc"] = info["desc"]
         it["software"] = info["software"]
         it["src_d"] = info["params"][0] if info["params"] else None
+        it["gen"] = info["gen"]
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT)
         it["jbrd"] = has_jbrd_box(it["src"])
@@ -2283,6 +2474,20 @@ def main():
                             "recoverable from this file; recompressing would "
                             "destroy that")
         it["action"] = _policy_action(it["category"], it["jbrd"])
+        # Regeneration guard: the file already carries a lossy generation and
+        # this request adds another. d_new > d_old compares one step at a time
+        # and cannot see the accumulated loss (~1 dB per generation, measured)
+        # — the gen= count can. Independent of --on-downgrade: when both fire,
+        # the more conservative action wins.
+        regen = _regeneration_action(it["gen"], CJXL_DISTANCE)
+        if regen is not None:
+            it["reason"] += (f" | already at generation {it['gen']}: another "
+                             f"lossy re-encode costs ~1 dB regardless of step "
+                             f"size (--on-regeneration)")
+            combined = _more_conservative(it["action"], regen)
+            if combined == "ask" and regen == "ask":
+                it["category"] = "regeneration"   # prompt group of its own
+            it["action"] = combined
 
     asks = [it for it in items if it["action"] == "ask"]
     if args.dry_run:

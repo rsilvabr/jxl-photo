@@ -641,13 +641,17 @@ OVERWRITE = "smart"
 # Never overwrites TIFFs or any other non-JXL format.
 
 ENCODE_TAG_MODE = "xmp"
-# Records encoding parameters (distance and effort) in the JXL metadata.
-# "software" -> appends to the EXIF Software field (e.g. "Capture One | cjxl d=0.5 e=7")
+# Records encoding parameters in the JXL metadata as an append-only lineage
+# chain: "gen=N | cjxl d=X e=Y | cjxl d=... e=..." (gen = number of LOSSY
+# generations, reconciled from the chain on every write, never incremented).
+# "software" -> appends to the EXIF Software field (e.g. "Capture One | gen=1 | cjxl d=0.5 e=7")
 #              Visible in IrfanView, exiftool, and most viewers.
 # "xmp"      -> writes as XMP-dc:Description custom field
 #              Cleaner — does not touch the original Software field
 #              Visible in Windows Properties, but not in IrfanView
-# "off"      -> does not add anything
+#              (any user caption stays FIRST; the gen=/chain block follows it)
+# "off"      -> records nothing AND strips any gen=/cjxl chain the source TIFF
+#              carries — the only way to deliberately discard the lineage
 # NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
 # the encoding tag is concatenated to dc:Description, and ICC goes to CreatorTool.
 
@@ -1911,6 +1915,136 @@ def extract_xmp_original(tiff_path, tmp_dir):
         return xmp_path
     return None
 
+# ---------------------------------------------------------------------------
+# Encoding-parameter record ("gen=N | cjxl d=X e=Y | ..." machine block)
+#
+# Append-only lineage: every encode/re-encode APPENDS one cjxl entry to the
+# chain and reconciles the gen= token at its head — derived from the chain,
+# never incremented, so a wrong value self-corrects on the next pass. The
+# user's own text (a caption) always stays first: dc:Description is visible
+# in Windows Properties. These helpers are deliberately identical to the
+# copies in jxl_recompressor.py (pinned by tests/test_helper_parity.py).
+# ---------------------------------------------------------------------------
+
+# The encoding-parameters tag: "cjxl d=0.1 e=7", possibly several in a
+# " | "-separated chain (the LAST one is the current file's).
+_ENCODE_TAG_RE = re.compile(r"cjxl\s+d=([0-9.]+)\s+e=(\d+)")
+
+# The stored generation token, read ONLY as a complete " | "-delimited segment
+# (or bounded by the field's start/end): "Project gen=3 phase 2" is running
+# text, not a token, and must never be read as one.
+_GEN_TAG_RE = re.compile(r"(?:^|\|)\s*gen=(\d+)\s*(?=\||$)")
+
+# The whole machine block as ONE unit: an optional gen= lead segment followed
+# by the contiguous cjxl d=/e= chain. The block only starts at a segment
+# boundary ((?:^|\|)), so it never bites into a caption's running text; and
+# matching only the first cjxl entry would leave an orphaned gen= and a
+# partial chain behind. Legacy fields (a chain with no gen=) are the normal
+# case and match in full.
+_MACHINE_BLOCK_RE = re.compile(
+    r"(?:^|\|)\s*"
+    r"(?:gen=\d+\s*\|\s*)?"
+    r"cjxl\s+d=[0-9.]+\s+e=\d+"
+    r"(?:\s*\|\s*cjxl\s+d=[0-9.]+\s+e=\d+)*"
+)
+
+# Divergence between a stored gen= and the chain length is logged once per
+# run, not per file. Reset in main().
+_gen_divergence_logged = False
+
+
+def _strip_encode_params(text: str):
+    """(cleaned_text, orphans) with the machine block removed.
+
+    Removes the gen= token and the WHOLE cjxl d=/e= chain (one unit) from a
+    " | "-joined metadata string, keeping any unrelated text (an original
+    caption, a real CreatorTool). Orphaned gen= segments — left behind by a
+    corrupted or hand-edited field — are removed ONLY as whole segments and
+    ONLY at the tail (the machine-block region): "Project gen=3 phase 2" and
+    "gen=2 | My caption" are user text and stay. `orphans` counts how many
+    were stripped so the caller can log it: an orphan means something wrote
+    the field badly earlier.
+    """
+    cleaned = _MACHINE_BLOCK_RE.sub("", str(text))
+    parts = [p.strip() for p in cleaned.split("|")]
+    parts = [p for p in parts if p]
+    orphans = 0
+    while parts and re.fullmatch(r"gen=\d+", parts[-1]):
+        parts.pop()
+        orphans += 1
+    return " | ".join(parts), orphans
+
+
+def _reconcile_gen(text: str):
+    """(gen, stored, counted) for the field — gen is DERIVED, never incremented.
+
+    counted = number of "cjxl d=X" chain entries with X > 0 (a d=0 lossless
+    entry is appended to the chain but costs no quality, so it is not a
+    generation). stored = the gen= token, 0 when absent or unparseable.
+    gen = max(stored, counted): if chain entries were removed the stored gen
+    is the better number, if entries were added without updating gen the
+    count is better — undercounting generations is the error that causes
+    damage, so the larger value wins in both directions. A malformed chain
+    entry never stops the rest from being counted. Legacy fields (chain, no
+    gen=) need no special case: max(0, counted) == counted.
+    """
+    s = str(text)
+    m = _GEN_TAG_RE.search(s)
+    stored = int(m.group(1)) if m else 0
+    counted = 0
+    for d, _e in _ENCODE_TAG_RE.findall(s):
+        try:
+            if float(d) > 0:
+                counted += 1
+        except ValueError:
+            continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
+    return max(stored, counted), stored, counted
+
+
+def _append_encode_entry(text: str, new_d, new_e):
+    """(new_text, stored, counted_before, orphans): append "cjxl d=new_d
+    e=new_e" to the field's chain and rewrite the gen= token at the head of
+    the machine block.
+
+    Append-only is the design: the chain is the lineage history, and
+    replacing it would erase the generation count that --on-regeneration
+    guards. The user's own text (a caption) stays FIRST — dc:Description is
+    visible in Windows Properties and machine output must not push a caption
+    behind it. gen is reconciled over the final chain (never incremented):
+    a wrong value self-corrects on the next pass. `stored`/`counted_before`
+    are returned so the caller can log a divergence (once per run); `orphans`
+    comes from _strip_encode_params.
+    """
+    s = str(text)
+    _gen_old, stored, counted = _reconcile_gen(s)
+    user, orphans = _strip_encode_params(s)
+    entries = [f"cjxl d={d} e={e}" for d, e in _ENCODE_TAG_RE.findall(s)]
+    entries.append(f"cjxl d={new_d} e={new_e}")
+    counted_new = counted
+    try:
+        if float(new_d) > 0:
+            counted_new += 1
+    except (TypeError, ValueError):
+        pass
+    gen = max(stored, counted_new)
+    block = " | ".join([f"gen={gen}"] + entries)
+    return (f"{user} | {block}" if user else block), stored, counted, orphans
+
+
+def _log_gen_notes_once(stored: int, counted: int) -> None:
+    """Divergence between the stored gen= and the chain length is information,
+    not an error (max() already kept the safer value) — log it once per run,
+    not per file. Legacy files (no gen= token, stored == 0) are the normal
+    case and never count as divergence.
+    """
+    global _gen_divergence_logged
+    if stored and stored != counted and not _gen_divergence_logged:
+        _gen_divergence_logged = True
+        logger.info("At least one file's stored gen= disagrees with its cjxl "
+                    "chain length — kept the larger (safer) value; the field "
+                    "was corrected on the restamp.")
+
+
 def read_existing_description(xmp_path):
     """Read existing dc:description from XMP file if present.
     Returns empty string if not found."""
@@ -2024,8 +2158,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append("-exif:all=")
         # Strip all XMP (must come BEFORE setting new Description)
         args_lines.append("-xmp:all=")
-        # Then set encoding params in dc:Description
-        encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
+        # Then set encoding params in dc:Description. Fresh file, fresh chain:
+        # gen= reconciles to the lossy-entry count (1 lossy, 0 lossless).
+        encoding_desc, _s, _c, _o = _append_encode_entry(
+            "", CJXL_DISTANCE, CJXL_EFFORT)
         args_lines.append(f"-xmp-dc:Description={encoding_desc}")
         # Target file
         args_lines.append(str(write_path))
@@ -2062,24 +2198,26 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append(f"-XMP-dc:Relation+={_argfile_safe(rel_value)}")
     
     # 3. Handle encoding parameters and ICC embedding in XMP
-    encoding_desc = f"cjxl d={CJXL_DISTANCE} e={CJXL_EFFORT}"
-    
+
     # Read existing description from original XMP if available
     existing_desc = ""
     if xmp_original:
         existing_desc = read_existing_description(xmp_original)
-    
-    # Build final dc:Description (concatenate if original exists)
-    if ENCODE_TAG_MODE == "xmp":
-        if existing_desc and existing_desc != encoding_desc and encoding_desc not in existing_desc:
-            # Concatenate: original | encoding_params (skip if already tagged,
-            # e.g. re-encoding a TIFF produced by the decoder)
-            final_description = f"{existing_desc} | {encoding_desc}"
-        elif existing_desc:
-            final_description = existing_desc
-        else:
-            final_description = encoding_desc
 
+    # The encode record is APPEND-ONLY: every encode appends one
+    # "cjxl d= e=" entry to the chain and reconciles the gen= token at the
+    # head of the machine block (user text, e.g. a caption, stays first).
+    # A re-encode at identical d/e appends too — decode-then-re-encode is
+    # exactly where a generation of loss happens, so deduplicating it would
+    # undercount the generations the recompressor's --on-regeneration guards.
+    if ENCODE_TAG_MODE == "xmp":
+        final_description, stored, counted, orphans = _append_encode_entry(
+            existing_desc, CJXL_DISTANCE, CJXL_EFFORT)
+        _log_gen_notes_once(stored, counted)
+        if orphans:
+            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
+                           f"dc:Description of {tiff_path.name} — the field "
+                           f"was written badly earlier")
         # Set dc:Description with concatenated content
         args_lines.append(f"-xmp-dc:Description={_argfile_safe(final_description)}")
 
@@ -2090,8 +2228,38 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
-        new_sw = f"{original_sw} | {encoding_desc}"
+        new_sw, stored, counted, orphans = _append_encode_entry(
+            original_sw, CJXL_DISTANCE, CJXL_EFFORT)
+        _log_gen_notes_once(stored, counted)
+        if orphans:
+            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
+                           f"Software of {tiff_path.name} — the field was "
+                           f"written badly earlier")
         args_lines.append(f"-Software={_argfile_safe(new_sw)}")
+
+    else:  # ENCODE_TAG_MODE == "off"
+        # Record nothing — AND strip any record the source TIFF carries (a
+        # TIFF produced by the decoder brings the JXL's gen=/cjxl chain along,
+        # and leaving it would let the recompressor trust parameters that
+        # describe a DIFFERENT file). Unrelated text is kept. This is the only
+        # way to deliberately discard the lineage; mirrors the recompressor's
+        # "off". Unrelated text survives; the machine block does not.
+        clean_desc, d_orphans = _strip_encode_params(existing_desc)
+        if clean_desc != existing_desc:
+            if d_orphans:
+                logger.warning(f"Stripped {d_orphans} orphaned gen= token(s) "
+                               f"from dc:Description of {tiff_path.name}")
+            args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
+        sw_arg = tmp_dir / "sw_read.args"
+        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        clean_sw, s_orphans = _strip_encode_params(original_sw)
+        if clean_sw != original_sw:
+            if s_orphans:
+                logger.warning(f"Stripped {s_orphans} orphaned gen= token(s) "
+                               f"from Software of {tiff_path.name}")
+            args_lines.append(f"-Software={_argfile_safe(clean_sw)}")
     
     # Always store original bit depth in dc:Relation so the decoder can restore
     # the original BitsPerSample per page according to --depth-policy.
@@ -4267,7 +4435,9 @@ def main():
     parser.add_argument("--export-marker",  type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
     parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
-                        help="Where to record encoding params: xmp (default), software, or off")
+                        help="Where to record encoding params: xmp (default), software, or off. "
+                             "'off' records nothing AND strips any existing gen=/cjxl d=/e= "
+                             "record from the output — the lineage is deliberately discarded")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
                         help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
     parser.add_argument("--icc-png-strategy", type=str, default=None,
@@ -4289,6 +4459,8 @@ def main():
     args = parser.parse_args()
 
     global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
+    global _gen_divergence_logged
+    _gen_divergence_logged = False
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:

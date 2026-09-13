@@ -37,10 +37,12 @@ py jxl_recompressor.py D:\Photos\Archive --mode 1 --distance 1.0 --dry-run
 
 ## How it decides what to do with each file
 
-Every JXL written by this toolkit records its encoding parameters
-(`cjxl d=X e=Y` in XMP-dc:Description, or in EXIF Software when the encoder
-ran with `--encode-tag software`). The recompressor reads that record and
-compares it against the request:
+Every JXL written by this toolkit records its encoding parameters as an
+append-only lineage chain (`gen=N | cjxl d=X e=Y | cjxl d=... e=...` in
+XMP-dc:Description, or in EXIF Software when the encoder ran with
+`--encode-tag software`). `gen=N` is the number of **lossy** generations the
+file has been through (a `d=0` entry is recorded but does not count). The
+recompressor reads that record and compares it against the request:
 
 | Situation | Category | Default action |
 |---|---|---|
@@ -51,9 +53,23 @@ compares it against the request:
 | Request `d_new < d_old` | **downgrade** — quality cannot be recovered; the file only grows | `ask` |
 | Lossless → lossless with effort ≤ recorded | **downgrade** — same pixels, no gain | `ask` |
 | No `cjxl d=/e=` record found | **unknown** | `convert` |
+| **`gen >= 1` and the request is lossy** | **regeneration** — one more lossy generation on top of the existing ones | `ask` |
 
-The policies are configurable (`--on-downgrade`, `--on-unknown`, and the
-matching settings in the script header). Each accepts:
+The **regeneration** row is independent of the others and fires *in addition*
+to them. Measured on real files, each lossy re-encode costs ~1 dB regardless
+of how small the distance step is, and after generation 1 the nominal `d`
+stops describing quality (a 17-generation chain of small steps landed ~8.5 dB
+below a single direct encode at the same file size). `d_new > d_old` cannot
+see this — it compares one step at a time, so a slow drip of `d=0.1 → 1.0 →
+1.5 → 2.0` runs years apart passes every check while the image degrades. The
+`gen=` count is what closes that hole. A lossless request (`d=0`) does not
+fire it: a lossless step adds no loss, so there is no new generation to warn
+about. When regeneration and downgrade both apply, the more conservative
+action wins (skip > copy > ask > convert).
+
+The policies are configurable (`--on-downgrade`, `--on-regeneration`,
+`--on-unknown`, and the matching settings in the script header). Each
+accepts:
 
 - **ask** — one batch prompt before the run (interactive only; unattended
   runs treat it as *skip* — fail closed)
@@ -82,16 +98,25 @@ is simply kept. Disable with `--no-keep-smaller`.
 
 cjxl does **not** carry metadata across a JXL→JXL re-encode, so the script
 copies it explicitly with exiftool (`-tagsfromfile`, EXIF/XMP/IPTC),
-restamps the `cjxl d=/e=` record with the **new** parameters (any previous
-tag is replaced; unrelated text in the field is kept), and preserves the
-provenance markers (`jxlphoto-src:`, `jxlphoto-srcsum:`, multi-page
-`jxlphoto-mpg:`, …) verbatim — an archive made by `jxl_tiff_encoder.py`
-stays provable as-is.
+**appends** the new `cjxl d=/e=` parameters to the lineage chain (the old
+entries stay — the chain is the history the regeneration guard reads), and
+preserves the provenance markers (`jxlphoto-src:`, `jxlphoto-srcsum:`,
+multi-page `jxlphoto-mpg:`, …) verbatim — an archive made by
+`jxl_tiff_encoder.py` stays provable as-is.
+
+The `gen=` token at the head of the chain is **derived, never incremented**:
+every write recounts the lossy (`d>0`) entries and keeps
+`max(stored gen, count)`, so a hand-edited field self-corrects on the next
+pass and the guard never undercounts. Any user text in the field (a caption)
+stays first. Verbatim-copy paths (policy copies, jbrd copies, the
+keep-smaller fallback) carry the field over byte-for-byte — no re-encode
+happened, so nothing is recomputed.
 
 `--encode-tag` controls where the new record goes: `xmp` (default),
-`software` (EXIF Software field) or `off` (record nothing — and any
-previous `cjxl d=/e=` tag is **stripped**, so a later run never trusts
-stale parameters).
+`software` (EXIF Software field) or `off` (record nothing — and any previous
+record, `gen=` and chain together, is **stripped**, so a later run never
+trusts stale parameters; it is the only way to deliberately discard the
+lineage).
 
 ## Output modes
 
@@ -149,6 +174,8 @@ input / output        Input JXL file or folder / optional output (modes 0, 2, 5)
 --effort 1-10         cjxl effort (default: CJXL_EFFORT = 7)
 --buffering 0-3       [libjxl >= 0.12] encoder buffering level
 --on-downgrade POL    ask/copy/skip/convert for requests that cannot gain (default: ask)
+--on-regeneration POL ask/copy/skip/convert when the file already carries a lossy
+                      generation (gen >= 1) and the request adds another (default: ask)
 --on-unknown POL      ask/copy/skip/convert for files with no d=/e= record (default: convert)
 --jbrd-policy POL     copy/skip/convert for JPEG-recoverable JXLs (default: copy)
 --no-keep-smaller     Keep the re-encoded file even when it is not smaller
@@ -179,6 +206,7 @@ CJXL_EFFORT = 7              # Effort: size/encode-time, NOT quality
 CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl
 OVERWRITE = "smart"          # False | "smart" (source newer) | True
 ON_DOWNGRADE = "ask"         # ask/copy/skip/convert
+ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 1 + lossy request)
 ON_UNKNOWN = "convert"       # ask/copy/skip/convert
 JBRD_POLICY = "copy"         # copy/skip/convert
 KEEP_SMALLER = True          # Verbatim copy when the re-encode is not smaller

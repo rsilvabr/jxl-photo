@@ -3606,6 +3606,14 @@ class InteractiveMenu:
                 dg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
                                 choices=["copy", "skip", "convert"], default="copy")
                 workflow.setdefault('advanced_options', {})['on_downgrade'] = dg
+                # Same reason: the child cannot prompt, so the regeneration
+                # guard (file already carries a lossy generation) is decided
+                # here too.
+                console.print("[dim]If a file is already a lossy re-encode (generation >= 1) and this "
+                              "run would add another generation (~1 dB each, measured):[/dim]")
+                rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
+                                choices=["copy", "skip", "convert"], default="copy")
+                workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
             elif 'lossy' in conv_type:
                 # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
                 # (convert_lossy is the only conversion type containing 'lossy')
@@ -3721,6 +3729,10 @@ class InteractiveMenu:
                 dg_input = input("(re-encoding cannot gain anything): copy/skip/convert [copy]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_downgrade'] = (
                     dg_input if dg_input in ("copy", "skip", "convert") else "copy")
+                print("If a file is already a lossy re-encode (generation >= 1) and this run")
+                rg_input = input("would add another generation (~1 dB each): copy/skip/convert [copy]: ").strip().lower()
+                workflow.setdefault('advanced_options', {})['on_regeneration'] = (
+                    rg_input if rg_input in ("copy", "skip", "convert") else "copy")
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -4345,6 +4357,8 @@ class InteractiveMenu:
                 table.add_row("Distance:", str(workflow.get('distance', 1.0)))
                 _dg = workflow.get('advanced_options', {}).get('on_downgrade')
                 table.add_row("If no gain possible:", _dg or "copy (child default: ask)")
+                _rg = workflow.get('advanced_options', {}).get('on_regeneration')
+                table.add_row("If already re-encoded:", _rg or "copy (child default: ask)")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 table.add_row("Effort:", str(workflow['effort']))
@@ -4405,6 +4419,8 @@ class InteractiveMenu:
                 print(f"Distance: {workflow.get('distance', 1.0)}")
                 _dg = workflow.get('advanced_options', {}).get('on_downgrade')
                 print(f"If no gain possible: {_dg or 'copy (child default: ask)'}")
+                _rg = workflow.get('advanced_options', {}).get('on_regeneration')
+                print(f"If already re-encoded: {_rg or 'copy (child default: ask)'}")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 print(f"Effort: {workflow['effort']}")
@@ -5535,6 +5551,8 @@ class InteractiveMenu:
 
             if advanced.get('on_downgrade'):
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
+            if advanced.get('on_regeneration'):
+                cmd.extend(['--on-regeneration', advanced['on_regeneration']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
@@ -6076,6 +6094,8 @@ class InteractiveMenu:
 
             if advanced.get('on_downgrade'):
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
+            if advanced.get('on_regeneration'):
+                cmd.extend(['--on-regeneration', advanced['on_regeneration']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
