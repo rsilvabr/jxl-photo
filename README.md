@@ -436,7 +436,7 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 
 ### Setup feels heavy?
 
-There is a simpler alternative that needs no Python and no libjxl — only ImageMagick and ExifTool: [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate), a standalone PowerShell script that compresses TIFFs with ZIP/Deflate. Much less compression than JXL, but far less to install. [Side-by-side numbers at the end of this README](#related-project-a-simpler-tiff-only-alternative).
+There is a simpler alternative that needs no libjxl — only ImageMagick and ExifTool (plus Python 3.9+ if you use the optional wizard UI): [tiff-workflow](https://github.com/rsilvabr/tiff-workflow), a PowerShell toolkit (with an optional Python wizard) that losslessly re-compresses TIFFs with ZIP/Deflate, copies EXIF from JPEG to TIFF, diagnoses padded 16-bit files, and generates sRGB thumbnails. Much less compression than JXL, but far less to install. [Side-by-side numbers at the end of this README](#related-project-a-simpler-tiff-only-alternative).
 
 ---
 
@@ -901,10 +901,10 @@ Getting there required finding and fixing several bugs that appears because of t
 
 ## Related project: a simpler, TIFF-only alternative
 
-If this toolkit's setup is more than you want to deal with, [convert_tiff_to_deflate](https://github.com/rsilvabr/convert_tiff_to_deflate) is a standalone PowerShell script that compresses TIFFs with ZIP/Deflate compression.
+If this toolkit's setup is more than you want to deal with, [tiff-workflow](https://github.com/rsilvabr/tiff-workflow) is a PowerShell toolkit (with an optional Python wizard UI) that losslessly re-compresses TIFFs with ZIP/Deflate compression — pixel data stays identical, only the compression is re-optimized. It also covers related TIFF chores: copying EXIF from JPEG to TIFF (Fuji S3/S5 Pro workflow), diagnosing padded 16-bit files, and generating colour-managed sRGB thumbnails.
 
-- **What you need:** PowerShell 7 (or Windows PowerShell 5.1), ImageMagick, ExifTool
-- **What's NOT needed:** Python or Python packages, libjxl (cjxl/djxl)
+- **What you need:** PowerShell 7 (or Windows PowerShell 5.1), ImageMagick, ExifTool — Python 3.9+ with `rich` only if you want the wizard UI
+- **What's NOT needed:** Python or Python packages for the direct PowerShell usage, libjxl (cjxl/djxl)
 
 | Format | 16-bit Size | 8-bit Size |
 |--------|-------------|------------|
