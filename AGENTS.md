@@ -82,7 +82,9 @@
 - `docs/README_jxl_tools.md` — the interactive wrapper
 - `docs/jxl_color_internals.md` — XYB, ICC blobs vs native primaries
 - `docs/bug_tracking_since_v1.0.md` — every fix since v1.0
-- `docs/version_history.md` — "What's New" for releases before v1.8
+- `docs/version_history.md` — detailed notes for all superseded releases
+  (the README keeps only the current version's changelog in full, plus the
+  summary table)
 - `docs/RELEASE_v*.md` — gitignored; local drafts to paste into GitHub Releases
 
 ## Releases
