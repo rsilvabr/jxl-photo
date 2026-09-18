@@ -2466,6 +2466,20 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
         return pixels, djxl_icc, reason, mode
 
 
+def _decode_output_is_ours(tiff_path: Path) -> bool:
+    """Does this TIFF carry the jxlphoto-src/srcsum marker this decoder writes
+    into every output it produces?
+
+    The marker is the difference between "a TIFF we decoded earlier, safe to
+    re-decode over" and "the original master (scanner/camera/lightroom
+    export), which must never be overwritten by a lossy decode". A read
+    failure comes back with no markers and fails CLOSED (not ours).
+    """
+    info = (_read_source_markers_batch([tiff_path]).get(str(tiff_path))
+            or {"src": None, "srcsum": None})
+    return bool(info.get("src") or info.get("srcsum"))
+
+
 def _would_skip_group(page_entries, final_path: Path) -> bool:
     """Would convert_multipage_jxl_group report SKIP for this group?
 
@@ -2481,7 +2495,15 @@ def _would_skip_group(page_entries, final_path: Path) -> bool:
     if OVERWRITE == "smart":
         try:
             newest = max(j.stat().st_mtime for j, _, _, _, _, _, _ in page_entries)
-            return newest <= final_path.stat().st_mtime
+            if newest <= final_path.stat().st_mtime:
+                return True
+            # JXL newer → the real run reconverts, or — when the existing TIFF
+            # is an original master (no jxlphoto-src marker) — REFUSES. A
+            # refusal is NOT a skip: the TIFF on disk is not this JXL's decode
+            # (the JXL is newer than it, and it never went through this tool),
+            # so it proves nothing about the JXL and must never let
+            # --delete-skipped delete it. Either way: not a skip.
+            return False
         except (OSError, ValueError):
             return False
     return False        # OVERWRITE True: always reconvert, never a skip
@@ -2522,6 +2544,25 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
                 return str(main_jxl), "skipped", str(final_path)
+            if not _decode_output_is_ours(final_path):
+                # The JXL is newer, but the TIFF on disk is an ORIGINAL MASTER
+                # (no jxlphoto-src marker — never through this decoder).
+                # Overwriting it with a decode would destroy the only copy of
+                # the master. Refuse; an explicit --overwrite is the way to
+                # say "I know what I am doing".
+                #
+                # Status "refused", NOT "skipped": a skip admits the source to
+                # --delete-skipped, and this TIFF is not the JXL's decode — the
+                # JXL would be deleted on the strength of an unrelated (or
+                # older) file, with a KEEP line right above the DELETED one.
+                n, total = next_count()
+                logger.warning(f"[{n}/{total}] KEEP (refusing to overwrite "
+                               f"{final_path.name}: this TIFF carries no "
+                               f"jxlphoto-src marker, so it is not a file this "
+                               f"tool decoded — it looks like the original "
+                               f"master. Re-run with --overwrite to replace "
+                               f"it anyway.) | {main_jxl.name}")
+                return str(main_jxl), "refused", str(final_path)
             logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
 
     overwritten = already_exists
@@ -2833,7 +2874,7 @@ def process_group(group_tasks, workers, target_icc=None):
                 # "aborted" is as silent as "skipped": nothing was
                 # written, and one line per never-attempted file is
                 # the wall of noise the abort exists to prevent.
-                if status not in ("skipped", "aborted"):
+                if status not in ("skipped", "aborted", "refused"):
                     if write_path.exists():
                         logger.warning(f"  KEEP in staging ({status}) | {write_path.name}")
                     else:
@@ -4006,6 +4047,28 @@ Examples:
             detail = ", ".join(f"{j.name}(p{idx}{' thumb' if th else ''}{' gray' if gray else ''})" for j, idx, th, _, _, gray, _ in entries)
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
+        # Preview the master-TIFF refusal too: without it the simulation
+        # promised an output the real run will refuse to write.
+        if OVERWRITE == "smart":
+            _would_refuse = []
+            for task in tasks:
+                _ft = task["final_tiff"]
+                try:
+                    if not _ft.exists():
+                        continue
+                    _newest = max(j.stat().st_mtime for j, *_ in task["entries"])
+                    if _newest <= _ft.stat().st_mtime:
+                        continue
+                except (OSError, ValueError):
+                    continue
+                if not _decode_output_is_ours(_ft):
+                    _would_refuse.append(_ft)
+            if _would_refuse:
+                logger.warning(f"Dry run: {len(_would_refuse)} existing TIFF(s) look like "
+                               f"ORIGINAL masters (no jxlphoto-src marker) and would be "
+                               f"REFUSED, not overwritten:")
+                for _ft in _would_refuse[:10]:
+                    logger.warning(f"  would REFUSE | {_ft}")
         if DELETE_SOURCE:
             _n = sum(len(t["entries"]) for t in tasks)
             logger.warning(
@@ -4151,6 +4214,12 @@ Examples:
 
     # Process
     ok = skipped = overwritten = aborted = 0
+    # Groups whose existing TIFF is an original master (see "refused" in
+    # convert_multipage_jxl_group). Counted apart: not a skip (nothing is up
+    # to date — the JXL is newer) and not an error (refusing is the safe,
+    # intended outcome, and a folder where the encoder left TIFF + JXL side
+    # by side would otherwise fail every scheduled sync).
+    refused = []
     err = len(provenance_failures) + len(group_conflicts)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
@@ -4182,6 +4251,8 @@ Examples:
         # nor a failure.
         elif status == "aborted":
             aborted += 1
+        elif status == "refused":
+            refused.append(str(result[2]) if len(result) > 2 else str(result[0]))
         elif status == "error":
             err += 1
             # result[0] is the source JXL path; result[2] is the reason.
@@ -4193,6 +4264,17 @@ Examples:
         logger.info(f"SYNC done: {ok} reconverted | {skipped} up to date | {err} errors")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    if refused:
+        logger.warning(f"Refused: {len(refused)} existing TIFF(s) look like ORIGINAL "
+                       f"masters (no jxlphoto-src marker) and were NOT overwritten; "
+                       f"their JXLs were not decoded and not deleted:")
+        for _p in refused[:10]:
+            logger.warning(f"  -> {_p}")
+        if len(refused) > 10:
+            logger.warning(f"  -> ... and {len(refused) - 10} more")
+        logger.warning("  Decode them into another folder (e.g. --mode 1), or pass "
+                       "--overwrite if replacing those TIFFs is really intended.")
 
     # Loudest line in the block: on a batch that ran for hours the reason it
     # stopped must not be buried above the per-file scrollback.
@@ -4214,6 +4296,7 @@ Examples:
         ok=ok, overwritten=overwritten, skipped=skipped, errors=err,
         log_file=log_file, failures=failed_files,
         extras={"Not attempted (run aborted)": aborted,
+                "Refused (existing TIFF is an original master)": len(refused),
                 "Sources deleted": _delete_stats["deleted"],
                 "Sources deleted (already archived)": _delete_stats["deleted_archived"],
                 "Sources KEPT by a delete gate": _delete_stats["kept"]},

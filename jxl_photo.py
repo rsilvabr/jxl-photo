@@ -434,6 +434,30 @@ _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 _COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
 
 
+def _recompress_entry_in_place(source, dest_path, mode) -> bool:
+    """Does a JXL -> JXL (recompressor) run REPLACE its sources?
+
+    Mode 8 always does (the output is the source path). Mode 0 does when it
+    has no output folder — or when that folder IS the source folder, which is
+    what every manifest row sends: the loader fills an empty Destination cell
+    with the Source, so testing "no Destination" alone never matched a
+    manifest entry, and the in-place gate was silently skipped.
+    """
+    if mode == 8:
+        return True
+    if mode != 0:
+        return False
+    if not dest_path:
+        return True
+    try:
+        src = Path(source)
+        src_dir = src.parent if src.is_file() else src
+        return (os.path.normcase(os.path.abspath(str(dest_path)))
+                == os.path.normcase(os.path.abspath(str(src_dir))))
+    except (OSError, ValueError):
+        return True     # cannot tell -> treat as destructive (fail closed)
+
+
 def _run_collapses_structure(mode, output_arg, source_root) -> bool:
     """Does THIS run drop the source's folder from the output path?
 
@@ -1529,6 +1553,12 @@ def _dest_folder_names(origin: str, dest: str) -> tuple:
     Returns (mode1_subfolder, mode3_subfolder). Keep in sync with
     CONVERTED_*_FOLDER / *_FOLDER_NAME constants in the scripts.
     """
+    if origin == 'jxl' and dest == 'jxl':
+        # jxl_recompressor: CONVERTED_JXL_FOLDER / JXL_FOLDER_NAME — NOT the
+        # transcoder's converted_jxl. Wrong names here made the previews and
+        # the "About to delete originals" panel point at folders the run
+        # never created.
+        return ('recompressed_jxl', 'JXL_recompressed')
     if dest == 'tiff':
         return ('converted_tiff', 'TIFF_16bits')
     if dest == 'jxl':
@@ -3313,12 +3343,35 @@ class InteractiveMenu:
         dest = workflow['dest_format']
         export_marker = self.config.config.export_marker
 
+        if origin == 'jxl' and dest == 'jxl':
+            # The recompressor has no "side by side": same extension in, same
+            # extension out means the output REPLACES the source file. Saying
+            # "stay side by side" here hid the most destructive default the
+            # wizard offers.
+            inplace_desc = (
+                "REPLACES each source JXL with the recompressed one, in the SAME\n"
+                "folder. The original bytes cannot be recovered afterwards.\n"
+                "[bold red]Input file/folder determines output location.[/bold red]\n"
+                "Single file -> same folder; folder -> every file replaced in place.\n"
+                "[bold green]Non-recursive[/bold green] - subfolders are NOT processed.")
+            inplace_rec_desc = (
+                "Like mode 0, RECURSIVE: walks every subfolder and REPLACES each\n"
+                "source JXL with its recompressed version, in place. The original\n"
+                "bytes cannot be recovered afterwards.")
+        else:
+            inplace_desc = (
+                f"{origin.upper()} and {dest.upper()} stay side by side in the SAME folder.\n"
+                f"Input file/folder determines output location.\n"
+                f"Single file -> same folder; folder -> flat output in that folder.\n"
+                f"[bold green]Non-recursive[/bold green] - subfolders are NOT processed.")
+            inplace_rec_desc = (
+                "Like mode 0, but RECURSIVE: walks every subfolder and writes each output\n"
+                "next to its source.\n"
+                "[bold green]Your originals are KEPT.[/bold green] Deleting them is [bold red][D][/bold red], "
+                "below — it is not a mode.")
+
         details = [
-            ("0", "In-place",
-             f"{origin.upper()} and {dest.upper()} stay side by side in the SAME folder.\n"
-             f"Input file/folder determines output location.\n"
-             f"Single file -> same folder; folder -> flat output in that folder.\n"
-             f"[bold green]Non-recursive[/bold green] - subfolders are NOT processed."),
+            ("0", "In-place", inplace_desc),
 
             ("1", "Subfolder",
              f"Creates a [green]'{_dest_folder_names(origin, dest)[0]}'[/green] subfolder next to each source folder.\n"
@@ -3356,11 +3409,7 @@ class InteractiveMenu:
              f"Files in other subfolders within export folders are ignored.\n"
              f"Use when you keep different color-space variants in separate subfolders."),
 
-            ("8", "In-place recursive",
-             f"Like mode 0, but RECURSIVE: walks every subfolder and writes each output\n"
-             f"next to its source.\n"
-             f"[bold green]Your originals are KEPT.[/bold green] Deleting them is [bold red][D][/bold red], "
-             f"below — it is not a mode."),
+            ("8", "In-place recursive", inplace_rec_desc),
 
             ("D", "Convert and DELETE the originals",
              f"[bold red]IRREVERSIBLE.[/bold red] Not a layout: you pick any mode 0-8 above, and the\n"
@@ -3536,18 +3585,19 @@ class InteractiveMenu:
         workflow['mode_config'] = mode_config
         return True
 
-    def _confirm_archive_mode(self) -> bool:
+    def _confirm_hhmm(self, headline: str, body: str) -> bool:
+        """The HHMM proof-of-presence prompt, shared by every destructive gate."""
         from datetime import datetime
         now = datetime.now()
         token = now.strftime("%H%M")
 
         if RICH_AVAILABLE and console:
-            console.print("[bold red]⚠️  DELETE ORIGINALS MODE[/bold red]")
-            console.print("[red]Original files will be DELETED[/red]")
+            console.print(f"[bold red]{headline}[/bold red]")
+            console.print(f"[red]{body}[/red]")
             console.print(f"Enter current time ({token}) to confirm:")
         else:
-            print("\n⚠️  DELETE ORIGINALS MODE")
-            print("⚠️  Original files will be DELETED")
+            print(f"\n{headline}")
+            print(f"⚠️  {body}")
             print(f"Enter {token} to confirm:")
 
         try:
@@ -3561,6 +3611,17 @@ class InteractiveMenu:
 
         self._print_success("Confirmed!")
         return True
+
+    def _confirm_archive_mode(self) -> bool:
+        return self._confirm_hhmm(
+            "⚠️  DELETE ORIGINALS MODE",
+            "Original files will be DELETED")
+
+    def _confirm_in_place_replace(self) -> bool:
+        return self._confirm_hhmm(
+            "⚠️  IN-PLACE REPLACEMENT",
+            "Source JXLs will be REPLACED by the recompressed versions — the "
+            "original bytes cannot be recovered afterwards")
 
     def _wizard_parameters_basic(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Step 6: Basic Parameters (always shown)"""
@@ -3607,12 +3668,16 @@ class InteractiveMenu:
                                 choices=["copy", "skip", "convert"], default="copy")
                 workflow.setdefault('advanced_options', {})['on_downgrade'] = dg
                 # Same reason: the child cannot prompt, so the regeneration
-                # guard (file already carries a lossy generation) is decided
-                # here too.
-                console.print("[dim]If a file is already a lossy re-encode (generation >= 1) and this "
-                              "run would add another generation (~1 dB each, measured):[/dim]")
+                # guard (file already lossy-recompressed at least once, gen>=2)
+                # is decided here too. Default "convert": the user just asked
+                # for a new distance, and the threshold (gen >= 2) means this
+                # only fires for files that were ALREADY recompressed once —
+                # the main use case (encoder previews -> archive) never
+                # reaches this question.
+                console.print("[dim]If a file was already lossy-recompressed once (generation >= 2) "
+                              "and this run would add another generation (~1 dB each, measured):[/dim]")
                 rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
-                                choices=["copy", "skip", "convert"], default="copy")
+                                choices=["copy", "skip", "convert"], default="convert")
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
             elif 'lossy' in conv_type:
                 # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -3729,10 +3794,10 @@ class InteractiveMenu:
                 dg_input = input("(re-encoding cannot gain anything): copy/skip/convert [copy]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_downgrade'] = (
                     dg_input if dg_input in ("copy", "skip", "convert") else "copy")
-                print("If a file is already a lossy re-encode (generation >= 1) and this run")
-                rg_input = input("would add another generation (~1 dB each): copy/skip/convert [copy]: ").strip().lower()
+                print("If a file was already lossy-recompressed once (generation >= 2) and this run")
+                rg_input = input("would add another generation (~1 dB each): copy/skip/convert [convert]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = (
-                    rg_input if rg_input in ("copy", "skip", "convert") else "copy")
+                    rg_input if rg_input in ("copy", "skip", "convert") else "convert")
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -4647,9 +4712,25 @@ class InteractiveMenu:
         # already points at, so the cmd builder below sees the decision.)
         self._confirm_lossy_delete_skipped(workflow)
 
+        # JXL -> JXL in-place entries (mode 0/8, no Destination) REPLACE the
+        # source files — the cmd builder passes --delete-confirm-off for
+        # those, so the wrapper MUST charge the HHMM token itself, exactly
+        # like the delete case.
+        _any_in_place_recompress = (
+            origin == 'jxl' and dest == 'jxl'
+            and any(_recompress_entry_in_place(_s, dest_path, detected_mode)
+                    for _s, dest_path, detected_mode in resolved_entries))
+
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
-                            or advanced.get('delete_source')):
-            if not self._confirm_archive_mode():
+                            or advanced.get('delete_source')
+                            or _any_in_place_recompress):
+            if _any_in_place_recompress and not (
+                    _flags_request_delete(workflow.get('expert_flags'))
+                    or advanced.get('delete_source')):
+                _confirmed = self._confirm_in_place_replace()
+            else:
+                _confirmed = self._confirm_archive_mode()
+            if not _confirmed:
                 return False
 
         total_entries = len(manifest_entries)
@@ -5549,6 +5630,12 @@ class InteractiveMenu:
             cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
             cmd.extend(['--effort', str(workflow.get('effort', 7))])
 
+            if _recompress_entry_in_place(source, dest_path, mode):
+                # In-place entry: replaces the sources. The wrapper charged
+                # the HHMM token in _execute_manifest_workflow; without this
+                # the child would re-ask MID-STREAM on an invisible stdin
+                # prompt — headless, exit 3 after doing nothing.
+                cmd.append('--delete-confirm-off')
             if advanced.get('on_downgrade'):
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
             if advanced.get('on_regeneration'):
@@ -5897,8 +5984,20 @@ class InteractiveMenu:
         # then ignored the flag outside mode 8.)
         _flag_delete = _flags_request_delete(workflow.get('expert_flags'))
         _adv_delete = bool(workflow.get('advanced_options', {}).get('delete_source'))
-        if not workflow.get('dry_run') and (_flag_delete or _adv_delete):
-            if not self._confirm_archive_mode():
+        # JXL -> JXL in modes 0/8 REPLACES the source files with the
+        # recompressed versions — as irreversible as a delete, so the same
+        # proof-of-presence gate applies. (The wrapper only ever passes an
+        # output positional to the recompressor in mode 2, so mode 0 is
+        # always in place here.)
+        _in_place_recompress = (origin == 'jxl' and dest == 'jxl'
+                                and workflow.get('mode') in (0, 8))
+        if not workflow.get('dry_run') and (_flag_delete or _adv_delete
+                                            or _in_place_recompress):
+            if _in_place_recompress and not (_flag_delete or _adv_delete):
+                _confirmed = self._confirm_in_place_replace()
+            else:
+                _confirmed = self._confirm_archive_mode()
+            if not _confirmed:
                 return False
 
         mode = workflow['mode']
@@ -6106,6 +6205,12 @@ class InteractiveMenu:
                 cmd.append('--overwrite')
             if advanced.get('sync'):
                 cmd.append('--sync')
+            if _in_place_recompress:
+                # The wrapper already charged the HHMM token above; without
+                # this the recompressor would ask its own confirmation again
+                # MID-STREAM on an invisible stdin prompt — and a headless run
+                # would exit 3 right there, after doing nothing.
+                cmd.append('--delete-confirm-off')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 # Wrapper already confirmed deletion (HHMM above); without
@@ -6614,10 +6719,21 @@ class InteractiveMenu:
             #     advanced_options at all (see _flags_request_delete).
             _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
             _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
-            if not dry_choice and (_flag_delete or _adv_delete):
+            # JXL -> JXL modes 0/8 replace the sources IN PLACE — a preset
+            # replaying one unattended would feed the recompressor's
+            # interactive confirmation an EOF stdin and die with exit 3 (or
+            # worse, used to invisibly prompt into a scheduler log). Same
+            # unattended gate as the delete case.
+            _in_place_recompress = (origin == 'jxl' and last_dest == 'jxl'
+                                    and last_mode in (0, 8))
+            if not dry_choice and (_flag_delete or _adv_delete
+                                   or _in_place_recompress):
+                why = ("replaces the source JXLs in place"
+                       if _in_place_recompress and not (_flag_delete or _adv_delete)
+                       else "deletes source files "
+                            f"({'--delete-source in expert flags' if _flag_delete else 'delete_source is on'})")
                 self._print_error(
-                    "This preset deletes source files "
-                    f"({'--delete-source in expert flags' if _flag_delete else 'delete_source is on'}). "
+                    f"This preset {why}. "
                     "That confirmation cannot be given unattended - run it from "
                     "the menu, or add --dry-run to simulate it here.")
                 return False

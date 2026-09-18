@@ -699,10 +699,20 @@ _counter = {"done": 0, "total": 0}
 # delete gate but main() owns the summary.
 _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
+# Per-file failure reason recorded by convert_one, so the run summary can say
+# WHAT failed instead of a bare "error" (the reason used to exist only in the
+# per-file log line, and the summary's failures list carried the status word).
+_error_details = {}
+
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
 # a recompressed archive stays provable by the DECODER's delete gates.
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+# Multi-page group id, written by the encoder into every page's dc:Relation.
+# Pages that share a document live or die together: the delete gate removes
+# the whole group or nothing (a half-deleted group is spread across two
+# folders with a dangling master page).
+MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
 
 # The encoder's encoding-parameters tag: "cjxl d=0.1 e=7", possibly several in
 # a " | "-separated chain (the LAST one is the current file's).
@@ -1254,9 +1264,13 @@ def _parse_encode_params(text: str):
     """(distance, effort) from a metadata string, or None.
 
     The chain is append-only (" | "-joined), so the LAST match in the string
-    is the current file's parameters.
+    is the current file's parameters. Only MACHINE-BLOCK segments count: a
+    caption merely containing "cjxl d=1 e=7" is user text, not an encode
+    record.
     """
-    found = _ENCODE_TAG_RE.findall(str(text))
+    found = []
+    for block in _MACHINE_BLOCK_RE.findall(str(text)):
+        found.extend(_ENCODE_TAG_RE.findall(block))
     if not found:
         return None
     d, e = found[-1]
@@ -1300,17 +1314,22 @@ def _reconcile_gen(text: str):
     damage, so the larger value wins in both directions. A malformed chain
     entry never stops the rest from being counted. Legacy fields (chain, no
     gen=) need no special case: max(0, counted) == counted.
+
+    Only MACHINE-BLOCK segments count: a caption merely containing
+    "cjxl d=1 e=7" is user text, not an encode record, and must not raise the
+    generation count.
     """
     s = str(text)
     m = _GEN_TAG_RE.search(s)
     stored = int(m.group(1)) if m else 0
     counted = 0
-    for d, _e in _ENCODE_TAG_RE.findall(s):
-        try:
-            if float(d) > 0:
-                counted += 1
-        except ValueError:
-            continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
+    for block in _MACHINE_BLOCK_RE.findall(s):
+        for d, _e in _ENCODE_TAG_RE.findall(block):
+            try:
+                if float(d) > 0:
+                    counted += 1
+            except ValueError:
+                continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
     return max(stored, counted), stored, counted
 
 
@@ -1327,11 +1346,18 @@ def _append_encode_entry(text: str, new_d, new_e):
     a wrong value self-corrects on the next pass. `stored`/`counted_before`
     are returned so the caller can log a divergence (once per run); `orphans`
     comes from _strip_encode_params.
+
+    Chain entries are read back from the MACHINE BLOCKS only: a caption that
+    merely contains "cjxl d=1 e=7" is user text and is not absorbed into the
+    chain (and not counted as a generation).
     """
     s = str(text)
     _gen_old, stored, counted = _reconcile_gen(s)
     user, orphans = _strip_encode_params(s)
-    entries = [f"cjxl d={d} e={e}" for d, e in _ENCODE_TAG_RE.findall(s)]
+    entries = []
+    for block in _MACHINE_BLOCK_RE.findall(s):
+        entries.extend(f"cjxl d={d} e={e}"
+                       for d, e in _ENCODE_TAG_RE.findall(block))
     entries.append(f"cjxl d={new_d} e={new_e}")
     counted_new = counted
     try:
@@ -1342,6 +1368,49 @@ def _append_encode_entry(text: str, new_d, new_e):
     gen = max(stored, counted_new)
     block = " | ".join([f"gen={gen}"] + entries)
     return (f"{user} | {block}" if user else block), stored, counted, orphans
+
+
+def _merge_lineage_blocks(desc: str, software: str):
+    """Merge the two fields' machine blocks: (entries, stored_gen).
+
+    The record can be SPLIT across dc:Description and Software (the user
+    switched --encode-tag, a file came through a tool that keeps only one
+    field, or an older version left a shadow copy behind). Whichever side
+    holds it, the chain must survive the restamp.
+
+    Entries are NEVER deduplicated inside one field: "cjxl d=0.1 e=7 | cjxl
+    d=0.1 e=7" is two real generations (decode, then re-encode at the same
+    settings — exactly what the append-only chain exists to record), and
+    collapsing them undercounts gen in the damaging direction. Across the two
+    fields:
+      * the same chain in both (a mirror), or one a prefix of the other (a
+        copy that was later extended), is ONE history -> the longer one;
+      * anything else is split history -> both, dc:Description first (the
+        older side in every case this toolkit produces: a decoder-made TIFF
+        carries the JXL's chain there, and the new encode lands in Software).
+    stored gen = max of both gen= tokens. Entries inside a caption's running
+    text never match: the block regex only matches whole " | "-delimited
+    segments.
+    """
+    chains = []
+    for text in (desc, software):
+        chain = []
+        for block in _MACHINE_BLOCK_RE.findall(str(text)):
+            chain.extend(_ENCODE_TAG_RE.findall(block))
+        chains.append(chain)
+    a, b = chains
+    if not a or b[:len(a)] == a:
+        entries = list(b) if len(b) >= len(a) else list(a)
+    elif not b or a[:len(b)] == b:
+        entries = list(a)
+    else:
+        entries = a + b
+    stored = 0
+    for text in (desc, software):
+        m = _GEN_TAG_RE.search(str(text))
+        if m:
+            stored = max(stored, int(m.group(1)))
+    return entries, stored
 
 
 def _read_encode_params_batch(paths: list) -> dict:
@@ -1390,13 +1459,30 @@ def _read_encode_params_batch(paths: list) -> dict:
                     continue
                 desc = str(entry.get("Description") or "")
                 software = str(entry.get("Software") or "")
-                params = (_parse_encode_params(desc)
-                          or _parse_encode_params(software))
-                gen = 0
-                if params is not None:
-                    record_field = (desc if _parse_encode_params(desc) is not None
-                                    else software)
-                    gen, _stored, _counted = _reconcile_gen(record_field)
+                # The record can be SPLIT across the two fields (an older
+                # version moved it, or left a shadow copy). Read the UNION:
+                # the current parameters are the last entry of the merged
+                # chain, and the generation count reconciles over BOTH —
+                # counting one side alone undercounts in exactly the
+                # damaging direction.
+                merged_entries, merged_stored = _merge_lineage_blocks(
+                    desc, software)
+                params = None
+                if merged_entries:
+                    d, e = merged_entries[-1]
+                    try:
+                        params = (float(d), int(e))
+                    except (TypeError, ValueError):
+                        params = None
+                counted = 0
+                for d, _e in merged_entries:
+                    try:
+                        if float(d) > 0:
+                            counted += 1
+                    except ValueError:
+                        continue
+                gen = max(merged_stored, counted) if (merged_entries
+                                                      or merged_stored) else 0
                 info[index[key]] = {"desc": desc, "software": software,
                                     "params": params, "gen": gen}
         except Exception as e:
@@ -1411,9 +1497,14 @@ def _read_encode_params_batch(paths: list) -> dict:
     return info
 
 
-def _classify(src_params, new_d: float, new_e: int):
+def _classify(src_params, new_d: float, new_e: int, gen: int = 0):
     """(category, reason) for recompressing a file whose recorded parameters
     are `src_params` ((d, e) or None) to the requested (new_d, new_e).
+
+    `gen` is the reconciled generation count: it matters when the LAST chain
+    entry is a lossless d=0 pass — the file LOOKS lossless but already
+    carries lossy generations, and calling this "the FIRST lossy generation"
+    would misdescribe exactly the case --on-regeneration guards.
 
     Categories:
       "ok"        — the request makes sense (smaller target, or first lossy
@@ -1434,6 +1525,11 @@ def _classify(src_params, new_d: float, new_e: int):
             return ("downgrade", f"source is lossless (d=0 e={e_old}) and the "
                                  f"request is also lossless with effort {new_e} <= {e_old}: "
                                  f"same pixels, no size gain to buy")
+        if gen >= 1:
+            return ("ok", f"the last recorded pass was lossless (d=0), but the "
+                          f"file already carries {gen} lossy generation(s) "
+                          f"(gen={gen}): this is ANOTHER one at d={new_d}, not "
+                          f"the first")
         return ("ok", f"source is lossless (d=0): this is the FIRST lossy "
                       f"generation, best possible quality at d={new_d}")
     if new_d > d_old:
@@ -1471,14 +1567,23 @@ def _more_conservative(a: str, b: str) -> str:
 
 
 def _regeneration_action(gen: int, new_d: float):
-    """ON_REGENERATION when this request would add another lossy generation
-    to a file that already carries one; None when the guard does not apply.
+    """ON_REGENERATION when this request would add a REPEATED lossy generation
+    to a file that has already been lossy-recompressed at least once; None
+    when the guard does not apply.
+
+    The threshold is gen >= 2, not >= 1: every lossy file the toolkit's own
+    encoder produces is born at gen=1, so guarding at 1 turned the
+    recompressor's MAIN use case — taking the encoder's d=0.1 preview to the
+    final d=1.0 — into an "ask" that silently skipped everything on
+    headless runs. The first recompression of an encoder output is a normal,
+    expected operation; the guard exists for the SECOND lossy re-encode
+    onwards, where each pass costs ~1 dB regardless of step size.
 
     A lossless request (new_d == 0) adds no generation — the d=0 entry is
     appended to the chain but costs no quality, so the guard stays quiet and
     --on-downgrade keeps covering the lossless-on-lossless cases.
     """
-    if gen >= 1 and new_d > 0:
+    if gen >= 2 and new_d > 0:
         return ON_REGENERATION
     return None
 
@@ -1508,11 +1613,28 @@ def _restamp_args(desc: str, software: str, label: str = "") -> list:
     The chain is append-only (the encoder already concatenates): replacing it
     would erase the generation history that --on-regeneration guards.
     `label` (a file name) only prefixes the orphan-strip log lines.
+
+    The chain that survives a field CHANGE is the UNION of both fields: if
+    the record lived in Software and this restamp writes dc:Description (or
+    the other way around), merging keeps every past entry and the stored
+    gen= — dropping the old field's chain silently undercounts generations
+    in the damaging direction.
     """
     lines = []
+    merged_entries, merged_stored = _merge_lineage_blocks(desc, software)
+    merged_chain = " | ".join(
+        ([f"gen={merged_stored}"] if merged_stored else [])
+        + [f"cjxl d={d} e={e}" for d, e in merged_entries])
+
+    def _seed(user_text: str) -> str:
+        user, _o = _strip_encode_params(user_text)
+        if user and merged_chain:
+            return f"{user} | {merged_chain}"
+        return user or merged_chain
+
     if ENCODE_TAG_MODE == "xmp":
         new_desc, stored, counted, orphans = _append_encode_entry(
-            desc, CJXL_DISTANCE, CJXL_EFFORT)
+            _seed(desc), CJXL_DISTANCE, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
         if orphans:
             logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
@@ -1527,7 +1649,7 @@ def _restamp_args(desc: str, software: str, label: str = "") -> list:
             lines.append("-Software=" + _argfile_safe(clean_sw))
     elif ENCODE_TAG_MODE == "software":
         new_sw, stored, counted, orphans = _append_encode_entry(
-            software, CJXL_DISTANCE, CJXL_EFFORT)
+            _seed(software), CJXL_DISTANCE, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
         if orphans:
             logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
@@ -1872,6 +1994,144 @@ def find_jxls_mode7(input_path: Path):
 # Per-file conversion
 # ---------------------------------------------------------------------------
 
+def reorder_jxl_boxes(jxl_path: Path):
+    """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
+    data = jxl_path.read_bytes()
+    file_size = len(data)
+
+    # Sanity check: reasonable file size (prevent OOM on malformed files)
+    MAX_JXL_SIZE = 4 * 1024 * 1024 * 1024  # 4GB max
+    if file_size > MAX_JXL_SIZE:
+        raise RuntimeError(f"JXL file too large ({file_size} bytes), skipping box reorder")
+    if file_size < 12:  # Minimum valid JXL: 12-byte signature
+        return  # Too small to have boxes, leave as-is
+
+    # Bare codestream has no boxes to reorder; leave as-is.
+    if data[:2] == b'\xff\x0a':
+        return
+
+    boxes = []
+
+    i = 0
+    MAX_BOX_SIZE = min(file_size, MAX_JXL_SIZE)
+
+    while i < file_size:
+        if i + 8 > file_size:
+            # Do NOT rewrite the file with only the parsed boxes — that would
+            # silently drop the trailing bytes and turn a file that fails the
+            # integrity gate into one that passes it (same rule as the extended
+            # box branch below, and as the encoder).
+            raise RuntimeError(f"Truncated box header at offset {i}: {file_size - i} trailing byte(s)")
+
+        size = int.from_bytes(data[i:i+4], "big")
+        name = data[i+4:i+8]
+
+        # Validate size to prevent integer overflow / OOM
+        if size > MAX_BOX_SIZE:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, possible corrupted file")
+        if 1 < size < 8:
+            raise RuntimeError(f"Invalid JXL box size {size} at offset {i}, minimum is 8")
+
+        if size == 1:
+            # Extended size (64-bit)
+            if i + 16 > file_size:
+                # Do NOT rewrite the file with only the parsed boxes — that
+                # would silently discard the rest (same rule as the encoder).
+                raise RuntimeError(f"Truncated extended box at offset {i}: file too short for 16-byte header")
+            ext_size = int.from_bytes(data[i+8:i+16], "big")
+            if ext_size > MAX_JXL_SIZE:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, possible corrupted file")
+            if ext_size < 16:
+                raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
+            if i + ext_size > file_size:
+                raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
+            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            size = ext_size
+            boxes.append((name, header, payload))
+        elif size == 0:
+            # Box extends to end of file
+            header, payload = data[i:i+8], data[i+8:]
+            boxes.append((name, header, payload))
+            break
+        else:
+            if i + size > file_size:
+                raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
+            header, payload = data[i:i+8], data[i+8:i+size]
+            boxes.append((name, header, payload))
+        i += size if size != 0 else file_size
+
+    CODESTREAM = {b"jxlc", b"jxlp"}
+    meta_order_boxes, meta_extra_boxes, codestream_boxes, other_boxes = [], [], [], []
+
+    for name, h, p in boxes:
+        if name in {b"JXL ", b"ftyp", b"jxll"}:
+            meta_order_boxes.append((name, h, p))
+        elif name in {b"Exif", b"xml ", b"jbrd", b"brob"}:
+            meta_extra_boxes.append((name, h, p))
+        elif name in CODESTREAM:
+            codestream_boxes.append((name, h, p))
+        else:
+            other_boxes.append((name, h, p))
+
+    # Final order: structure -> metadata -> codestream -> others
+    ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
+
+    # A box that declared size 0 ("extends to EOF") is only valid as the LAST
+    # box in the file. If regrouping moved it earlier, rewrite its header with
+    # the real computed size, otherwise everything after it becomes payload
+    # and the file is corrupt.
+    out = b""
+    for idx, (name, h, p) in enumerate(ordered):
+        declared = int.from_bytes(h[0:4], "big")
+        if declared == 0 and idx < len(ordered) - 1:
+            real_size = 8 + len(p)
+            try:
+                h = real_size.to_bytes(4, "big") + h[4:8]
+            except OverflowError:
+                # A file just under 4 GiB whose trailing size-0 box spans most
+                # of it computes a real_size that no longer fits the 32-bit
+                # field — report it like the truncation guards above, not as
+                # an uncaught traceback.
+                raise RuntimeError(
+                    f"Cannot re-header size-0 box {name!r}: real size {real_size} "
+                    f"exceeds the 32-bit box size field") from None
+        out += h + p
+    jxl_path.write_bytes(out)
+
+
+def _capture_output_identity(write_path: Path, final_path: Path):
+    """Capture (mtime_ns, size) of a pre-existing output (non-staging only).
+    Returns None for staging paths or nonexistent outputs."""
+    if write_path != final_path or not final_path.exists():
+        return None
+    try:
+        st = final_path.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity) -> None:
+    """Delete write_path ONLY if this run actually wrote to it.
+
+    - Staging (write != final): always this run's file -> delete.
+    - No pre-existing identity: anything there is this run's partial -> delete.
+    - Identity changed: this run truncated/rewrote it -> delete.
+    - Identity UNCHANGED: this run never touched it (e.g. the codec failed at
+      startup with rc!=0) -> the good pre-existing file is KEPT.
+    """
+    try:
+        if write_path != final_path or pre_identity is None:
+            if write_path.exists():
+                write_path.unlink()
+            return
+        st = write_path.stat()
+        if (st.st_mtime_ns, st.st_size) != pre_identity:
+            write_path.unlink()
+    except OSError:
+        pass
+
+
 def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 action: str, in_place: bool, desc: str, software: str,
                 src_distance):
@@ -1886,6 +2146,15 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
     the replacement at write_path.
     """
     n, total = next_count()
+    # Initialized BEFORE any statement that can raise so the except handler
+    # always has them (same pattern as the encoder and the transcoder): a
+    # failed conversion must never leave its partial output behind — without
+    # staging it sits at the FINAL path, where the next sync run would treat
+    # it as a finished archive and skip the file forever; in place it sits
+    # next to the source as <uuid>_name.jxl, where the next run picks it up
+    # as a NEW input.
+    output_dirty = False
+    _pre_identity = _capture_output_identity(write_path, final_path)
     try:
         if _aborted():
             return (str(jxl_path), "aborted", str(final_path))
@@ -1903,6 +2172,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 logger.info(f"[{n}/{total}] SKIP (policy copy: already in place) | {jxl_path.name}")
                 return (str(jxl_path), "skipped", str(final_path))
             write_path.parent.mkdir(parents=True, exist_ok=True)
+            output_dirty = True
             shutil.copy2(str(jxl_path), str(write_path))
             if not _verify_jxl_integrity(write_path):
                 raise RuntimeError("copied file failed the JXL integrity check")
@@ -1911,6 +2181,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
 
         # action == "convert"
         write_path.parent.mkdir(parents=True, exist_ok=True)
+        output_dirty = True
         container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
         cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
@@ -1922,8 +2193,15 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
         # in CreatorTool, jxlphoto-* provenance and multi-page group markers)
         # copied verbatim — then the encoding tag restamped to the NEW d/e.
+        #
+        # -api Compress=0: cjxl >= 0.12 carries the source's Exif/XMP across
+        # itself, as Brotli-compressed "brob" boxes, and exiftool edits them in
+        # that form. IrfanView cannot read brob (README: "Viewer quirks"), so
+        # without this the recompressed archive lost its visible EXIF even
+        # with the boxes reordered — the encoder's outputs use plain boxes.
         r2 = _run_exiftool_argfile(
-            ["-overwrite_original", "-tagsfromfile", str(jxl_path),
+            ["-overwrite_original", "-api", "Compress=0",
+             "-tagsfromfile", str(jxl_path),
              "-exif:all", "-xmp:all", "-iptc:all"]
             + _restamp_args(desc, software, label=jxl_path.name)
             + [str(write_path)], timeout=120)
@@ -1931,6 +2209,12 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             # A failed metadata copy is an ERROR, not a warning: the output
             # would silently miss the ICC/EXIF this whole tool exists to keep.
             raise RuntimeError(f"exiftool metadata copy: {(r2.stderr or '')[:200]}")
+
+        # exiftool re-appends its metadata boxes AFTER the codestream, which
+        # hides the Exif/XMP from viewers that only scan the boxes before it
+        # (IrfanView — named in the README as supported). Reorder BEFORE the
+        # integrity check so the verified bytes are the final on-disk bytes.
+        reorder_jxl_boxes(write_path)
 
         if not _verify_jxl_integrity(write_path):
             raise RuntimeError("output failed the JXL integrity check")
@@ -1972,9 +2256,15 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 str(final_path))
 
     except subprocess.TimeoutExpired:
+        if output_dirty:
+            _delete_partial_if_written(write_path, final_path, _pre_identity)
+        _error_details[str(jxl_path)] = f"codec timed out after {CJXL_TIMEOUT}s"
         logger.error(f"[{n}/{total}] TIMEOUT | {jxl_path.name}")
         return (str(jxl_path), "error", str(final_path))
     except Exception as e:
+        if output_dirty:
+            _delete_partial_if_written(write_path, final_path, _pre_identity)
+        _error_details[str(jxl_path)] = str(e)
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         _abort_if_disk_full(write_path.parent if write_path is not None else jxl_path.parent,
                             jxl_path.stat().st_size if jxl_path.exists() else 0)
@@ -2001,45 +2291,154 @@ def process_group(items, workers: int):
         futures = {_submit(ex, it): it for it in items}
         for fut in as_completed(futures):
             it = futures[fut]
-            src_str, status, final_str = fut.result()
+            # One crashing future must not take the whole batch down: record
+            # the item as an error and keep settling the rest.
+            try:
+                src_str, status, final_str = fut.result()
+            except Exception as e:
+                src_str, final_str = str(it["src"]), str(it["final"])
+                status = "error"
+                _error_details[src_str] = f"worker crashed: {e}"
+                logger.error(f"  WORKER CRASHED | {it['src'].name} | {e}")
             results[src_str] = (status, final_str)
             if status not in ("ok", "overwrite", "copied"):
                 continue
-            final_path = Path(final_str)
-            if it["write"] == final_path:
-                # No staging and not in place: written directly at the final path.
-                promoted.add(src_str)
-                continue
-            if it["in_place"]:
-                # The original is replaced ONLY now — after every gate above
-                # passed on the verified write_path. Same-volume os.replace is
-                # atomic; staging goes through _promote_from_staging.
-                if staging_used:
-                    moved = _promote_from_staging(it["write"], final_path)
-                else:
-                    try:
-                        os.replace(str(it["write"]), str(final_path))
-                        moved = True
-                    except OSError as e:
-                        logger.error(f"  REPLACE FAILED, original kept | {final_path.name} | {e}")
-                        moved = False
+            try:
+                final_path = Path(final_str)
+                if it["write"] == final_path:
+                    # No staging and not in place: written directly at the final path.
+                    promoted.add(src_str)
+                    continue
+                if it["in_place"]:
+                    # The original is replaced ONLY now — after every gate above
+                    # passed on the verified write_path. Same-volume os.replace is
+                    # atomic; staging goes through a temp file in the DESTINATION
+                    # folder first.
+                    #
+                    # Why not _promote_from_staging here: in place, the
+                    # destination file IS the only copy there is. A cross-volume
+                    # shutil.move copies ONTO it non-atomically — a failure
+                    # half-way left the original destroyed and the sole good copy
+                    # in staging under a UUID name, which --clean-staging sweeps
+                    # an hour later. Moving to a temp file in the destination
+                    # folder keeps the original intact until a same-volume
+                    # os.replace swaps it atomically.
+                    if staging_used:
+                        dest_tmp = (final_path.parent
+                                    / f"{uuid.uuid4().hex}_{final_path.name}")
+                        try:
+                            shutil.move(str(it["write"]), str(dest_tmp))
+                        except OSError as e:
+                            logger.error(f"  REPLACE FAILED, original kept | "
+                                         f"{final_path.name} | {e}")
+                            try:
+                                if dest_tmp.exists():
+                                    dest_tmp.unlink()
+                            except OSError:
+                                pass
+                            moved = False
+                        else:
+                            try:
+                                os.replace(str(dest_tmp), str(final_path))
+                                moved = True
+                            except OSError as e:
+                                # The complete new file survives as dest_tmp; the
+                                # original is untouched. Leave the temp file in
+                                # place (deleting it would destroy the only good
+                                # copy) and say exactly where it is.
+                                logger.error(f"  REPLACE FAILED, original kept; the "
+                                             f"complete re-encode is at {dest_tmp} "
+                                             f"(rename it over the original once the "
+                                             f"problem is fixed) | {final_path.name} | {e}")
+                                moved = False
+                    else:
+                        try:
+                            os.replace(str(it["write"]), str(final_path))
+                            moved = True
+                        except OSError as e:
+                            logger.error(f"  REPLACE FAILED, original kept | {final_path.name} | {e}")
+                            moved = False
+                    if not moved:
+                        results[src_str] = ("error", final_str)
+                        continue
+                    if not _verify_jxl_integrity(final_path):
+                        logger.error(f"  Replaced file failed the final integrity check | {final_path.name}")
+                        results[src_str] = ("error", final_str)
+                        continue
+                    promoted.add(src_str)
+                    logger.info(f" REPLACED (in place) | {final_path.name}")
+                    continue
+                moved = _promote_from_staging(it["write"], final_path)
                 if not moved:
                     results[src_str] = ("error", final_str)
                     continue
-                if not _verify_jxl_integrity(final_path):
-                    logger.error(f"  Replaced file failed the final integrity check | {final_path.name}")
-                    results[src_str] = ("error", final_str)
-                    continue
                 promoted.add(src_str)
-                logger.info(f" REPLACED (in place) | {final_path.name}")
-                continue
-            moved = _promote_from_staging(it["write"], final_path)
-            if not moved:
+            except Exception as e:
+                # The promotion block above runs in THIS thread, outside
+                # convert_one's own try: an unexpected failure here used to
+                # kill the whole run. Settle this item as an error instead.
                 results[src_str] = ("error", final_str)
-                continue
-            promoted.add(src_str)
+                _error_details[src_str] = f"promotion failed: {e}"
+                logger.error(f"  PROMOTION FAILED | {it['src'].name} | {e}")
 
     return results, promoted
+
+
+def _read_mpg_markers(paths: list) -> dict:
+    """{path str: group id | None} for the multi-page group marker
+    (jxlphoto-mpg:<id>) carried in XMP-dc:Relation.
+
+    One batched exiftool pass for the whole run — per-file spawns were
+    minutes on a library. A file whose marker cannot be read comes back
+    None, which the delete gate treats as "not part of any KNOWN group":
+    it falls back to single-file behavior there rather than failing closed,
+    because the marker read failing is not proof the file has no siblings.
+    """
+    mpg = {str(p): None for p in paths}
+    index = {os.path.normcase(str(p)): str(p) for p in paths}
+    if not paths:
+        return mpg
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                continue
+            data = json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                values = rel if isinstance(rel, list) else [str(rel)]
+                for token in values:
+                    token = str(token).strip()
+                    if token.startswith(MULTIPAGE_XMP_MARKER):
+                        key = os.path.normcase(str(Path(src)))
+                        if key in index:
+                            mpg[index[key]] = token[len(MULTIPAGE_XMP_MARKER):]
+                        break
+        except Exception:
+            continue
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return mpg
 
 
 def _delete_gate(items, results, promoted):
@@ -2048,12 +2447,30 @@ def _delete_gate(items, results, promoted):
 
     In-place items are excluded — their source was already replaced (or kept)
     inside process_group; there is nothing left to delete.
+
+    Multi-page documents are deleted as a GROUP: every page sharing a
+    jxlphoto-mpg id must pass its own gates, otherwise NO page of the group
+    is deleted. Deleting page 0 while a failed page survived would spread one
+    document across two folders and leave the remaining page pointing at a
+    master that no longer exists.
     """
-    if not (DELETE_SOURCE or DELETE_SKIPPED):
+    if not DELETE_SOURCE:
+        # --delete-skipped only WIDENS what --delete-source covers: without
+        # it the pair is inert (main() forces DELETE_SKIPPED off and warns;
+        # this belt-and-braces keeps the gate itself from ever deleting on
+        # the widened flag alone).
         return
-    for it in items:
-        if it["in_place"]:
-            continue
+
+    deletables = [it for it in items if not it["in_place"]]
+    mpg_of = _read_mpg_markers([it["src"] for it in deletables])
+
+    # Pass 1: decide per file, WITHOUT deleting yet. EVERY page is recorded,
+    # including the ones that will never be deleted this run (conversion
+    # failed, policy skip, refused, aborted): those are exactly the siblings
+    # the group veto below has to see. Leaving them out made a group whose
+    # IR page FAILED look like a one-page group, and page 0 was deleted alone.
+    decisions = []  # (it, status, final_path, ok, reason, settled)
+    for it in deletables:
         src = it["src"]
         src_str = str(src)
         status, final_str = results.get(src_str, ("error", str(it["final"])))
@@ -2061,37 +2478,65 @@ def _delete_gate(items, results, promoted):
         processed_this_run = src_str in promoted
         settled = processed_this_run or (DELETE_SKIPPED and status == "skipped")
         if not settled:
+            # Never deleted, never counted as a KEEP (its own failure or skip
+            # is already reported) — but it still vetoes its group.
+            decisions.append((it, status, final_path, False,
+                              "not converted in this run", False))
             continue
-        if not DELETE_SOURCE and not (DELETE_SKIPPED and status == "skipped"):
-            # --delete-skipped alone deletes ONLY the previously-archived ones.
-            continue
+        ok, reason = True, ""
         if not final_path.exists():
-            logger.warning(f" KEEP (output missing) | {src.name}")
-            _delete_stats["kept"] += 1
-            continue
-        if not _verify_jxl_integrity(final_path):
-            logger.warning(f" KEEP (output failed integrity check) | {src.name}")
-            _delete_stats["kept"] += 1
-            continue
-        if processed_this_run and it["action"] == "copy":
+            ok, reason = False, "output missing"
+        elif not _verify_jxl_integrity(final_path):
+            ok, reason = False, "output failed integrity check"
+        elif processed_this_run and it["action"] == "copy":
             # A verbatim copy is provable byte-for-byte — the strongest gate
             # there is, so it is required, not optional.
             try:
                 if md5_of_file(src) != md5_of_file(final_path):
-                    logger.warning(f" KEEP (copy MD5 mismatch) | {src.name}")
-                    _delete_stats["kept"] += 1
-                    continue
+                    ok, reason = False, "copy MD5 mismatch"
             except OSError as e:
-                logger.warning(f" KEEP (copy MD5 could not be checked: {e}) | {src.name}")
-                _delete_stats["kept"] += 1
-                continue
-        if VERIFY_ROUNDTRIP and status == "skipped":
-            ok, detail = _verify_roundtrip_jxl(src, final_path, it["src_d"],
-                                               CJXL_DISTANCE)
-            if not ok:
-                logger.warning(f" KEEP (round-trip verification failed: {detail}) | {src.name}")
-                _delete_stats["kept"] += 1
-                continue
+                ok, reason = False, f"copy MD5 could not be checked: {e}"
+        elif VERIFY_ROUNDTRIP and status == "skipped":
+            _rt_ok, detail = _verify_roundtrip_jxl(src, final_path, it["src_d"],
+                                                   CJXL_DISTANCE)
+            if not _rt_ok:
+                ok, reason = False, f"round-trip verification failed: {detail}"
+        decisions.append((it, status, final_path, ok, reason, True))
+
+    # Pass 2: a group is only as deletable as its weakest page. The veto is
+    # keyed by source path: `decisions` and the group lists hold references
+    # to the same tuples, so the pass-3 loop must see the veto through a
+    # separate set — reassigning the tuple inside a member list would leave
+    # `decisions` untouched.
+    vetoed = set()
+    by_group = {}
+    for dec in decisions:
+        _g = mpg_of.get(str(dec[0]["src"]))
+        if _g:
+            # Keyed by FOLDER too, like the decoder's grouping: the id hashes
+            # the source TIFF, so two copies of one split in two folders share
+            # it without being the same document.
+            by_group.setdefault((str(dec[0]["src"].parent), _g), []).append(dec)
+    for _g, members in by_group.items():
+        if all(m[3] for m in members):
+            continue        # whole group passed (or a lone page): decide alone
+        for m in members:
+            if m[3]:
+                vetoed.add(str(m[0]["src"]))
+
+    # Pass 3: apply.
+    for it, status, final_path, ok, reason, settled in decisions:
+        if not settled:
+            continue
+        if ok and str(it["src"]) in vetoed:
+            ok, reason = False, ("sibling page of the same multi-page document "
+                                 "did not pass its gates — the group is kept "
+                                 "together")
+        src = it["src"]
+        if not ok:
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP ({reason}) | {src.name}")
+            continue
         try:
             src.unlink()
             if status == "skipped":
@@ -2189,8 +2634,9 @@ def main():
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
     global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER
-    global _gen_divergence_logged
+    global _gen_divergence_logged, _error_details
     _gen_divergence_logged = False
+    _error_details = {}
 
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
@@ -2310,6 +2756,16 @@ def main():
         VERIFY_ROUNDTRIP = True
     if args.delete_skipped:
         DELETE_SKIPPED = True
+    if DELETE_SKIPPED and not DELETE_SOURCE:
+        # Same rule as the other three scripts: this flag only WIDENS what
+        # --delete-source deletes. Armed alone it used to delete
+        # already-archived sources with no confirmation and no provenance
+        # check — a same-named output from a DIFFERENT photo was enough to
+        # get the only copy of a source destroyed, silently and with exit 0.
+        # Now it does nothing, said out loud.
+        print("WARNING: --delete-skipped has no effect without --delete-source: it only "
+              "widens which sources the deletion covers. Nothing will be deleted.")
+        DELETE_SKIPPED = False
 
     # A DRY RUN validates without CREATING: a simulation that leaves two new
     # folders on disk is not a simulation. It never writes into either one, so
@@ -2426,6 +2882,30 @@ def main():
         logger.warning(f"The output positional is only honored in modes 0 and 2 "
                        f"(mode {args.mode} computes its own folders) — ignoring it")
 
+    # Mode 2 with an output that IS the input root is not "in place" — it is
+    # the worst of both layouts: mode 2 is RECURSIVE and writes every output
+    # FLAT by name, so root-level files are replaced in place while files
+    # from subfolders are flattened into the root, mixed with the originals
+    # they came from. Refuse it.
+    #
+    # Mode 0 is deliberately NOT refused: it is flat (never recursive), so an
+    # output equal to the input is exactly an in-place run — and it is what a
+    # manifest row sends, since an empty Destination cell falls back to the
+    # Source. Refusing it made every mode-0 manifest entry exit 2.
+    def _same_dir(a, b) -> bool:
+        return (os.path.normcase(os.path.abspath(str(a)))
+                == os.path.normcase(os.path.abspath(str(b))))
+
+    if (not single_file and args.output is not None and args.mode == 2
+            and _same_dir(args.output, args.input)):
+        logger.error(f"The output folder equals the input folder ({args.input}). "
+                     "Mode 2 is recursive and writes flat by name: root files "
+                     "would be replaced in place and files from subfolders "
+                     "would land in the root, mixed with the originals. Pick a "
+                     "different destination, or use mode 0 (flat) or 8 "
+                     "(recursive) for a true in-place run.")
+        sys.exit(2)
+
     items = []
     failures = []
     for f in files:
@@ -2449,7 +2929,11 @@ def main():
                 sys.exit(2)
             if final_path is None:
                 continue                             # outside the marker/subfolder
-        in_place = os.path.normcase(str(final_path)) == os.path.normcase(str(f))
+        # abspath on both sides: an absolute output next to a relative input
+        # (or the reverse) names the SAME file, and missing that made the run
+        # write the re-encode straight over its own input instead of taking
+        # the atomic in-place path.
+        in_place = _same_dir(final_path, f)
         items.append({"src": f, "final": final_path, "in_place": in_place})
 
     if not items:
@@ -2467,7 +2951,8 @@ def main():
         it["src_d"] = info["params"][0] if info["params"] else None
         it["gen"] = info["gen"]
         it["category"], it["reason"] = _classify(info["params"],
-                                                 CJXL_DISTANCE, CJXL_EFFORT)
+                                                 CJXL_DISTANCE, CJXL_EFFORT,
+                                                 gen=it["gen"])
         it["jbrd"] = has_jbrd_box(it["src"])
         if it["jbrd"] and JBRD_POLICY != "convert":
             it["reason"] = ("jbrd box present: the original JPEG is bit-exact "
@@ -2506,6 +2991,9 @@ def main():
     # otherwise it is another photo's archive and the run must not overwrite it
     # and delete this source. Both sides carry the ORIGINAL source's markers
     # (the recompressor copies them verbatim), so equality is the proof.
+    # Refused items leave the run, but the delete gate still has to see them:
+    # a refused page vetoes the deletion of its multi-page siblings.
+    provenance_refused = []
     if (DELETE_SOURCE and not args.dry_run
             and _run_collapses_structure(args.mode, args.output, args.input)):
         existing = [it for it in items
@@ -2530,6 +3018,7 @@ def main():
             if refused:
                 refused_ids = {id(it) for it in refused}
                 items = [it for it in items if id(it) not in refused_ids]
+                provenance_refused = refused
 
     # --- Dry run: report and stop ------------------------------------------
     if args.dry_run:
@@ -2544,7 +3033,8 @@ def main():
         if DELETE_SOURCE or DELETE_SKIPPED:
             n_del = sum(1 for it in items
                         if not it["in_place"] and it["action"] in ("convert", "copy"))
-            logger.info(f" DRY | --delete-source would delete {n_del} source(s) "
+            whose = "--delete-source" if DELETE_SOURCE else "--delete-skipped"
+            logger.info(f" DRY | {whose} would delete {n_del} source(s) "
                         f"after verification; in-place items replace themselves")
         emit_summary_json(args.summary_json, ok=n_convert + n_copy, overwritten=0,
                           skipped=n_skip, errors=len(failures), log_file=log_file,
@@ -2589,6 +3079,11 @@ def main():
             it["write"] = it["final"]
         work_items.append(it)
 
+    # The [n/total] progress counter must count what will actually run —
+    # after folder-mode filtering and policy skips — not the raw scan count,
+    # or the last file shows [38/212] on a 40-file run.
+    _counter["total"] = len(work_items)
+
     results, promoted = {}, set()
     interrupted = False
     try:
@@ -2599,21 +3094,30 @@ def main():
         logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
         # Fall through to the summary with partial results; exit 130 below.
 
-    _delete_gate(work_items, results, promoted)
+    # EVERY planned item, not just the ones that ran: policy-skipped and
+    # refused pages must still veto the deletion of their multi-page siblings.
+    _delete_gate(items + provenance_refused, results, promoted)
 
     # --- Summary -------------------------------------------------------------
     ok = sum(1 for s, _f in results.values() if s == "ok")
     copied = sum(1 for s, _f in results.values() if s == "copied")
     overwritten = sum(1 for s, _f in results.values() if s == "overwrite")
     skipped = sum(1 for s, _f in results.values() if s == "skipped") + n_policy_skip
-    errors = sum(1 for s, _f in results.values() if s in ("error", "aborted"))
+    # "aborted" is not an error: those files were never attempted because the
+    # run gave up early (disk full, interrupt). They are reported separately
+    # and only real failures count towards the exit code.
+    n_aborted = sum(1 for s, _f in results.values() if s == "aborted")
+    errors = sum(1 for s, _f in results.values() if s == "error")
     errors += len(failures)
     for src_str, (s, _f) in results.items():
         if s in ("error", "aborted"):
-            failures.append((src_str, s))
+            failures.append((src_str, _error_details.pop(src_str, s)))
 
-    logger.info(f"\nDone: {ok} recompressed | {copied} copied | {overwritten} overwrites "
-                f"| {skipped} skipped | {errors} errors")
+    done_line = (f"\nDone: {ok} recompressed | {copied} copied | {overwritten} overwrites "
+                 f"| {skipped} skipped | {errors} errors")
+    if n_aborted:
+        done_line += f" ({n_aborted} not attempted — the run had already aborted)"
+    logger.info(done_line)
     if _aborted():
         logger.error(f"Run aborted early: {_aborted()}")
     if DELETE_SOURCE or DELETE_SKIPPED:

@@ -145,6 +145,13 @@ def test_decoder_would_skip_matches_the_real_decision(tmp_path, monkeypatch):
     _make_newer(final, src)
     assert dec._would_skip_group(entries, final) is True
     _make_newer(src, final)
+    # JXL newer: reconverts when the existing TIFF is one of ours (carries
+    # the jxlphoto-src marker); an original master is REFUSED an overwrite.
+    # Neither is a skip — a refusal must never let --delete-skipped delete
+    # the JXL on the strength of a TIFF that is not its decode (round 36).
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    assert dec._would_skip_group(entries, final) is False
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
     assert dec._would_skip_group(entries, final) is False
     final.unlink()
     assert dec._would_skip_group(entries, final) is False
@@ -178,6 +185,10 @@ def _tr_run(tmp_path, monkeypatch, *, delete_skipped, stored="match",
     monkeypatch.setattr(tr, "TEMP2_DIR", None)
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: integrity)
     monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    # The delete gate now proves bit-exact recovery with a REAL
+    # djxl --reconstruct_jpeg before unlinking a JPEG source; these stubs
+    # cannot reconstruct, so stand in for a working reconstruction.
+    monkeypatch.setattr(tr, "_jxl_reconstructs_to", lambda j, s: True)
     tr.process_group_transcode([(src, final)], 1, decode=False, verify=False,
                                mode=3, reconvert_val=False, smart=True)
     return src

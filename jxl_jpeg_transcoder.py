@@ -1796,10 +1796,18 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
         # WHICH source made this output. Written BEFORE reorder_jxl_boxes:
         # every exiftool edit re-appends its boxes after the codestream, so
         # doing it afterwards would undo the reorder (bug #134's class).
+        # NEVER written into a JXL that carries a jbrd box, though: appending
+        # XMP to a JPEG-reconstruction container makes djxl --reconstruct_jpeg
+        # FAIL when the source JPEG already had XMP metadata — the original
+        # JPEG silently stops being bit-exactly recoverable while the delete
+        # gate still certifies the output (v2.0.0+ data-loss bug). Provenance
+        # for this path is the checksums.md5 db instead (see
+        # _provenance_filter and the delete gate's reconstruction test).
         try:
-            _run_exiftool_argfile(
-                ["-overwrite_original"] + _provenance_marker_args(src_path)
-                + [str(write_path)], timeout=60)
+            if not has_jbrd_box(write_path):
+                _run_exiftool_argfile(
+                    ["-overwrite_original"] + _provenance_marker_args(src_path)
+                    + [str(write_path)], timeout=60)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
 
@@ -1992,6 +2000,80 @@ def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity)
         pass
 
 
+def _jxl_reconstruct_md5(jxl_path: Path) -> Optional[str]:
+    """MD5 of the JPEG `djxl --reconstruct_jpeg` rebuilds from this JXL, or
+    None when the reconstruction fails, is empty, or cannot run (djxl < 0.12).
+
+    Does NOT compare against any original: it answers "is the original JPEG
+    recoverable at all, and what are its bytes", which is what the
+    --repair-jbrd audit needs when the original may already be gone.
+    """
+    if not _tool_at_least("djxl", 0, 12):
+        return None
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_", dir=TEMP_DIR)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        r = subprocess.run(
+            ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
+            capture_output=True, timeout=CODEC_TIMEOUT)
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            return None
+        return md5_of_file(tmp)
+    except Exception:
+        return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _jxl_reconstruct_ok(jxl_path: Path) -> bool:
+    """True iff `djxl --reconstruct_jpeg` succeeds and yields a non-empty JPEG."""
+    return _jxl_reconstruct_md5(jxl_path) is not None
+
+
+def _jxl_reconstructs_to(jxl_path: Path, jpeg_path: Path) -> bool:
+    """True iff `djxl --reconstruct_jpeg` on the JXL reproduces EXACTLY the
+    bytes of `jpeg_path`.
+
+    This is the REAL recovery gate for jbrd-carrying JXLs. Structural
+    integrity + the presence of a jbrd box are not enough: v2.0.0-v2.x wrote
+    XMP provenance markers into jbrd containers, which makes
+    --reconstruct_jpeg fail for any source JPEG that already had XMP — and
+    the old delete gate (jbrd present + integrity OK + MD5 recorded) certified
+    exactly such files, so --delete-source destroyed originals that could no
+    longer be recovered bit-exactly.
+
+    Unlike _jxl_binds_to_archived_jpeg there is NO self-hash shortcut: a
+    self-hash only proves the JXL is the file this run wrote, not that it
+    still reconstructs. Every check that cannot run (djxl < 0.12, tool error,
+    empty reconstruction) returns False: this guards an irreversible delete,
+    so it fails CLOSED.
+    """
+    if not _tool_at_least("djxl", 0, 12):
+        return False
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        r = subprocess.run(
+            ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
+            capture_output=True, timeout=CODEC_TIMEOUT)
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            return False
+        return md5_of_file(tmp) == md5_of_file(jpeg_path)
+    except Exception:
+        # A proof that could not run is not a proof.
+        return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
                                 stored_jpeg_md5: Optional[str]) -> bool:
     """Prove the JXL on disk is the file the archived JPEG came from.
@@ -2044,6 +2126,151 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
             tmp.unlink()
         except OSError:
             pass
+
+
+def _strip_provenance_markers(jxl_path: Path, info: dict):
+    """Remove the jxlphoto-src/srcsum tokens this toolkit wrote into
+    XMP-dc:Relation of `jxl_path`. Returns None on success, else the reason.
+
+    These markers were appended with `+=`, so any values the source JPEG
+    already had in dc:Relation survive; only our two tokens are removed.
+    exiftool refuses some files over a "[minor]" metadata oddity (seen on
+    JPEGs whose Exif references a Brotli directory): the edit is retried
+    with -m, and the exit code is CHECKED -- an edit that did not happen must
+    never be reported as "markers stripped". reorder_jxl_boxes runs
+    afterwards because every exiftool edit re-appends its boxes after the
+    codestream (bug #134's class).
+    """
+    lines = ["-overwrite_original"]
+    if info.get("src"):
+        lines.append("-XMP-dc:Relation-=" + SRC_PREFIX + info["src"])
+    if info.get("srcsum"):
+        lines.append("-XMP-dc:Relation-=" + SRCSUM_PREFIX + info["srcsum"])
+    if len(lines) == 1:
+        return "no toolkit markers to remove"
+    last_err = ""
+    for extra in ([], ["-m"]):
+        try:
+            r = _run_exiftool_argfile(extra + lines + [str(jxl_path)], timeout=60)
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if r.returncode == 0:
+            break
+        last_err = (r.stderr or r.stdout or f"rc={r.returncode}").strip()[:200]
+    else:
+        return f"exiftool could not edit the file ({last_err})"
+    after = (_read_source_markers_batch([jxl_path]).get(str(jxl_path))
+             or {"src": None, "srcsum": None})
+    if ((info.get("src") and after.get("src") == info["src"])
+            or (info.get("srcsum") and after.get("srcsum") == info["srcsum"])):
+        return "exiftool reported success but the markers are still there"
+    reorder_jxl_boxes(jxl_path)
+    return None
+
+
+def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
+    """(state, detail) for one JXL whose reconstruction fails.
+
+    The repair runs on a COPY next to the original and replaces it only when
+    the copy provably reconstructs: a failed attempt leaves the original
+    byte-for-byte untouched (editing the archive in place kept the edit even
+    when the reconstruction still failed). A dry run does the same work on
+    the copy and throws it away, so "WOULD REPAIR" is a tested prediction,
+    not a guess from the presence of the markers.
+
+    After a real repair the checksums.md5 lines for this name are refreshed:
+    the reconstructed JPEG's md5 (the stored one is the ORIGINAL JPEG's, which
+    differs in its re-serialized XMP bytes -- the image data is identical) and
+    the JXL's new self-hash. Without that every later lossless decode failed
+    its MD5 verification and the delete gates refused the file forever.
+    """
+    info = (_read_source_markers_batch([jxl_path]).get(str(jxl_path))
+            or {"src": None, "srcsum": None})
+    if not (info.get("src") or info.get("srcsum")):
+        return "broken", "reconstruction fails and there are no toolkit markers to remove"
+    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.name}"
+    try:
+        shutil.copy2(str(jxl_path), str(tmp))
+        why = _strip_provenance_markers(tmp, info)
+        if why is not None:
+            return "broken", f"{why}; the file was left untouched"
+        rec_md5 = _jxl_reconstruct_md5(tmp)
+        if rec_md5 is None:
+            return "broken", ("markers removed on a copy, but the reconstruction "
+                              "still fails; the file was left untouched")
+        if dry_run:
+            return "repairable", "markers removable; reconstruction then succeeds"
+        os.replace(str(tmp), str(jxl_path))
+        if (read_md5_db(jxl_path) is not None
+                or read_jxl_self_hash_db(jxl_path) is not None):
+            store_md5_db(jxl_path, rec_md5)
+            store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path))
+            return "repaired", "checksums.md5 updated for the repaired file"
+        return "repaired", "no checksums.md5 entry to update"
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def cmd_repair_jbrd(args) -> int:
+    """Audit (and fix) JXLs whose jbrd reconstruction is broken.
+
+    v2.0.0-v2.1.0 wrote XMP provenance markers into jbrd containers; for any
+    source JPEG that already had XMP that makes djxl --reconstruct_jpeg fail,
+    so the original JPEG is no longer recoverable bit-exactly even though the
+    image data is intact. For every JXL under the input root:
+
+      * no jbrd box          -> not applicable (nothing to reconstruct)
+      * reconstruction OK    -> fine, left untouched
+      * reconstruction fails -> the markers are stripped ON A COPY and the
+                                reconstruction retested; only a copy that
+                                reconstructs replaces the file (REPAIRED),
+                                otherwise the file is left as it was
+                                (STILL BROKEN)
+
+    A repaired file rebuilds a JPEG with IDENTICAL image data; its metadata
+    bytes differ from the original (exiftool re-serializes the XMP packet),
+    so its MD5 is not the original's. With --dry-run nothing is written.
+    Exit code: 0 when nothing is STILL BROKEN, 1 otherwise.
+    """
+    setup_logger()
+    root = args.input
+    files = [root] if root.is_file() else sorted(root.rglob("*.jxl"))
+    files = [f for f in files if f.is_file()]
+    logger.info(f"Repair: auditing {len(files)} JXL file(s) under {root}"
+                + (" (dry run: nothing is written)" if args.dry_run else ""))
+    ok = repaired = still_broken = no_jbrd = 0
+    for f in files:
+        if not has_jbrd_box(f):
+            no_jbrd += 1
+            continue
+        if _jxl_reconstruct_ok(f):
+            ok += 1
+            logger.info(f" OK | {f.name}")
+            continue
+        state, detail = _repair_one_jbrd(f, args.dry_run)
+        if state == "repaired":
+            repaired += 1
+            logger.warning(f" REPAIRED (JPEG recoverable again with identical image "
+                           f"data; its metadata bytes differ from the original -- "
+                           f"{detail}) | {f.name}")
+        elif state == "repairable":
+            repaired += 1
+            logger.warning(f" WOULD REPAIR ({detail}) | {f.name}")
+        else:
+            still_broken += 1
+            logger.error(f" STILL BROKEN ({detail}) | {f.name}")
+    logger.info(f"Repair summary: {ok} OK, {repaired} "
+                + ("repairable (dry run)" if args.dry_run else "repaired")
+                + f", {still_broken} still broken, {no_jbrd} without jbrd")
+    if still_broken:
+        logger.error("These files can no longer reproduce their original "
+                     "JPEG -- keep any source JPEGs you still have.")
+    return 1 if still_broken else 0
 
 
 def process_group_transcode(group_pairs: list, workers: int, decode: bool,
@@ -2278,10 +2505,30 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 # never be recovered bit-exactly (README's promise). This
                 # check is INDEPENDENT of MD5 storage (--no-md5 must not
                 # weaken it).
-                if final_file.suffix.lower() == '.jxl' and not has_jbrd_box(final_file):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
-                    continue
+                if final_file.suffix.lower() == '.jxl':
+                    if not has_jbrd_box(final_file):
+                        _delete_stats["kept"] += 1
+                        logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
+                        continue
+                    # THE real gate: a jbrd JXL can pass every check above and
+                    # still fail djxl --reconstruct_jpeg — e.g. v2.0.0-v2.x
+                    # wrote XMP markers into jbrd containers, breaking
+                    # reconstruction for sources that had XMP. The source may
+                    # only be deleted when the reconstruction ACTUALLY
+                    # reproduces its bytes. With djxl < 0.12 the test cannot
+                    # run, and an unverifiable output must block deletion.
+                    if _tool_at_least("djxl", 0, 12):
+                        if not _jxl_reconstructs_to(final_file, src_path):
+                            _delete_stats["kept"] += 1
+                            logger.warning(
+                                f" KEEP (djxl --reconstruct_jpeg does not reproduce "
+                                f"this JPEG; run --repair-jbrd to fix markers written "
+                                f"by v2.0.0+) | {src_path.name}")
+                            continue
+                    else:
+                        _delete_stats["kept"] += 1
+                        logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
+                        continue
             if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
                 # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
                 # is NOT guaranteed by the tool. The source may only be
@@ -2372,13 +2619,34 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
                 why = ("no checksum to prove it" if stored is None
                        else "the existing JPEG is not the one this JXL holds")
         else:
-            info = marks.get(str(out)) or {"src": None, "srcsum": None}
-            if _provenance_ok(info, src, PROVENANCE_CHECK):
-                kept.append((src, out))
-                continue
-            why = ("no provenance marker (written by an older version)"
-                   if not (info.get("src") or info.get("srcsum"))
-                   else "it was made from a different source")
+            # A jbrd-carrying JXL gets NO XMP markers (they would break
+            # djxl --reconstruct_jpeg), so marker provenance can never match.
+            # Its provenance is the checksums.md5 db instead — same idea as
+            # decode_lossless, but keyed by the OUTPUT's name: the db holds
+            # the SOURCE JPEG's hash under the JXL's name. The content-binding
+            # check additionally proves the JXL on disk is the file that
+            # archived this source, not a swapped same-named replacement.
+            if out.suffix.lower() == ".jxl" and has_jbrd_box(out):
+                stored = read_md5_db(out)
+                if stored is None:
+                    why = ("no checksum to prove it "
+                           "(was it written with --no-md5?)")
+                elif stored != md5_of_file(src):
+                    why = "the stored checksum does not match this source"
+                elif _jxl_binds_to_archived_jpeg(out, src, stored):
+                    kept.append((src, out))
+                    continue
+                else:
+                    why = ("this JXL is not the file the checksum was recorded "
+                           "for (swapped or replaced same-named JXL)")
+            else:
+                info = marks.get(str(out)) or {"src": None, "srcsum": None}
+                if _provenance_ok(info, src, PROVENANCE_CHECK):
+                    kept.append((src, out))
+                    continue
+                why = ("no provenance marker (written by an older version)"
+                       if not (info.get("src") or info.get("srcsum"))
+                       else "it was made from a different source")
         refused.append((src, out, why))
     if refused:
         logger.error(
@@ -2797,10 +3065,16 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
 
         # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode
         _copy_metadata(src_path, write_path)
+        # Provenance markers — but NEVER into a jbrd-carrying JXL: the appended
+        # XMP breaks djxl --reconstruct_jpeg for sources that already had XMP
+        # (same data-loss bug as the transcode path; see encode_one_transcode).
+        # At d=0 on a JPEG input cjxl keeps the jbrd box, so this write is
+        # skipped exactly when reconstruction matters.
         try:
-            _run_exiftool_argfile(
-                ["-overwrite_original"] + _provenance_marker_args(src_path)
-                + [str(write_path)], timeout=60)
+            if not has_jbrd_box(write_path):
+                _run_exiftool_argfile(
+                    ["-overwrite_original"] + _provenance_marker_args(src_path)
+                    + [str(write_path)], timeout=60)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
 
@@ -4055,6 +4329,18 @@ Examples:
     parser.add_argument("--force-convert", action="store_true",
                         help="Force convert command")
 
+    # Repair
+    parser.add_argument("--repair-jbrd", action="store_true",
+                        help="AUDIT/REPAIR mode (no conversion): scan every JXL "
+                             "under the input for broken JPEG reconstruction "
+                             "(v2.0.0-v2.x wrote XMP markers into jbrd "
+                             "containers, which makes djxl --reconstruct_jpeg "
+                             "fail for sources that already had XMP). Files "
+                             "whose reconstruction fails are fixed by "
+                             "stripping those markers and retested. --dry-run "
+                             "reports without writing. Exit 1 if any file is "
+                             "still broken.")
+
     return parser
 
 
@@ -4220,6 +4506,16 @@ def main():
     # TEMP2_DIR script setting, not just --staging) and it must never run on a
     # dry run — sweeping is a real deletion of the outputs the KEEP path
     # deliberately preserved for inspection.
+
+    # Repair mode: audit/fix broken jbrd reconstruction. Routed before the
+    # conversion commands because it neither converts nor cares about the
+    # input's file type; it only needs djxl >= 0.12 and exiftool.
+    if args.repair_jbrd:
+        if not _tool_at_least("djxl", 0, 12):
+            print("ERROR: --repair-jbrd requires djxl >= 0.12 "
+                  "(djxl --reconstruct_jpeg)")
+            sys.exit(2)
+        sys.exit(cmd_repair_jbrd(args))
 
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.

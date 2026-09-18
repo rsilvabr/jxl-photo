@@ -111,8 +111,12 @@ class TestRestampArgs:
 
     def test_xmp_mode_strips_stale_software_tag(self, monkeypatch):
         lines = rec._restamp_args("", "C1 | cjxl d=0.1 e=7")
-        assert "-XMP-dc:Description=gen=1 | cjxl d=1.0 e=7" in lines
-        assert "-Software=C1" in lines  # stale tag removed from Software
+        # The record MOVES fields: the Software chain is MIGRATED into the
+        # dc:Description chain (union, not dropped — dropping it would
+        # undercount the generations), and the user text "C1" stays in
+        # Software.
+        assert "-XMP-dc:Description=gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
+        assert "-Software=C1" in lines  # machine block removed from Software
 
     def test_software_mode(self, monkeypatch):
         monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "software")
@@ -507,7 +511,17 @@ class TestDeleteGate:
         rec._delete_gate([it], {str(src): ("error", str(final))}, set())
         assert src.exists()
 
-    def test_delete_skipped_only_touches_previously_archived(self, tmp_path, monkeypatch):
+    def test_delete_skipped_alone_is_inert(self, tmp_path, monkeypatch):
+        """C2: --delete-skipped without --delete-source must delete NOTHING.
+
+        Armed alone it used to "finish interrupted archives" silently — no
+        confirmation, no provenance check — and a same-named output from a
+        DIFFERENT photo was enough to get the only copy of a source
+        destroyed, with exit 0. Now it is inert, like in the other scripts;
+        finishing an interrupted archive requires --delete-source (which
+        brings the confirmation and the provenance gates with it).
+        """
+        monkeypatch.setattr(rec, "DELETE_SOURCE", False)
         monkeypatch.setattr(rec, "DELETE_SKIPPED", True)
         src_skip = _fake_jxl(tmp_path / "skip.jxl")
         fin_skip = _fake_jxl(tmp_path / "out" / "skip.jxl")
@@ -516,10 +530,9 @@ class TestDeleteGate:
         items = [_gate_item(src_skip, fin_skip), _gate_item(src_ok, fin_ok)]
         results = {str(src_skip): ("skipped", str(fin_skip)),
                    str(src_ok): ("ok", str(fin_ok))}
-        # src_ok was processed THIS run but --delete-source is off:
         rec._delete_gate(items, results, {str(src_ok)})
-        assert not src_skip.exists(), "delete-skipped must finish the interrupted archive"
-        assert src_ok.exists(), "--delete-skipped alone must not delete this run's work"
+        assert src_skip.exists(), "--delete-skipped alone deleted a source"
+        assert src_ok.exists(), "--delete-skipped alone deleted a source"
 
     def test_in_place_items_are_never_in_the_gate(self, tmp_path, monkeypatch):
         monkeypatch.setattr(rec, "DELETE_SOURCE", True)

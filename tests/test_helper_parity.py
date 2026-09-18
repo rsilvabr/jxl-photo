@@ -103,6 +103,11 @@ SHARED_HELPERS = [
     "_reconcile_gen",
     "_append_encode_entry",
     "_log_gen_notes_once",
+    # Union of the dc:Description and Software machine blocks: the record can
+    # be split across the two fields, and both scripts must merge entries and
+    # stored gen= identically or one of them undercounts generations when the
+    # field changes.
+    "_merge_lineage_blocks",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally

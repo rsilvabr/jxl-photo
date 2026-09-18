@@ -223,10 +223,20 @@ Choose the output format based on the source:
   (`jxl_recompressor.py`): ICC, metadata and provenance markers carried over.
   Requests that cannot gain anything (same or lower distance than the source's
   recorded `cjxl d=/e=`) fall back to a verbatim copy or are skipped, files
-  that already carry a lossy generation (`gen≥1` in the record) trigger the
-  regeneration policy (`--on-regeneration`), and a re-encode that comes out
-  *larger* keeps the original bytes. JPEG-recoverable JXLs (jbrd) are copied
-  verbatim by default.
+  that were already lossy-recompressed once (`gen≥2` in the record — every
+  lossy encoder output is born at `gen=1`, so its first recompression is the
+  normal case) trigger the regeneration policy (`--on-regeneration`), and a
+  re-encode that comes out *larger* keeps the original bytes. JPEG-recoverable
+  JXLs (jbrd) are copied verbatim by default.
+
+  **Modes 0 and 8 REPLACE the source JXLs** here (the recompressor writes the
+  new file over the old one; nothing stays "side by side"). The wizard says so
+  in the mode list and charges the HHMM token before the run, exactly like a
+  delete; `--run-preset` refuses such a preset unattended. In a manifest, a
+  mode-0 row whose Destination is empty or equal to its Source is the same
+  in-place run and is gated the same way (mode 8 always is). A mode-2 row
+  whose Destination equals its Source is refused by the recompressor (exit 2):
+  mode 2 would flatten the subfolders into the root, next to the originals.
 
 ### Step 3 — Source Directory
 Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).

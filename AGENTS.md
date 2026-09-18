@@ -18,15 +18,32 @@
 
 ## Active scripts
 - `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)
-- `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`)
-- `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy
+- `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Smart sync never
+  overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original
+  master): that is status `"refused"` — NOT `"skipped"`, because a skip
+  admits the source to `--delete-skipped`
+- `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy.
+  Never writes XMP provenance markers into a jbrd container (they break
+  `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
+  recovery with a real reconstruction before unlinking a JPEG; ships a
+  `--repair-jbrd` audit/repair mode for archives written by affected
+  v2.0.0–v2.x versions
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
   lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
   recompressor both append one entry per encode and reconcile `gen` as
   max(stored, lossy-entry count), never increment), refuses counterproductive
   re-encodes (copy/skip/ask), guards repeat lossy generations via
-  `--on-regeneration` (gen ≥ 1 + lossy request), copies jbrd JXLs verbatim by
-  default, keep-smaller net; same delete gates
+  `--on-regeneration` (gen ≥ 2 + lossy request — encoder outputs are born at
+  gen=1, so the guard must not fire on a file's first recompression), copies
+  jbrd JXLs verbatim by default, keep-smaller net; same delete gates.
+  `--delete-skipped` without `--delete-source` is inert (warning only), like
+  the other scripts; multi-page groups (jxlphoto-mpg, keyed by folder) delete
+  all-or-nothing — the gate must see EVERY planned page, including the ones
+  that failed, were policy-skipped or refused, or it cannot veto;
+  in-place promotion goes through a temp file in the destination folder plus
+  an atomic `os.replace`, never a cross-volume move onto the only copy.
+  `_merge_lineage_blocks` (parity-pinned with the encoder) never dedupes
+  inside one field — a repeated `cjxl d= e=` entry is a real generation.
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
@@ -64,6 +81,11 @@
 - Prefer verifying real behavior against real photos over reasoning alone — the
   test suite is synthetic/mocked, so codec-path bugs (ICC, bit depth,
   multi-page, channel counts) only show up against actual files.
+  `tests/test_audit_round36.py` holds the first real-codec tests (skipped
+  when cjxl/djxl/exiftool are absent) — rounds 35/36 found a v2.0.0 data-loss
+  bug (XMP markers breaking jbrd reconstruction) and five regressions that
+  the whole mocked suite passed. Add a real-codec test for any change that
+  touches what exiftool or the codecs write.
 - When fixing a bug, prove the new regression test **fails against the pre-fix
   code**, not merely that it passes after. Extract the old file rather than
   stashing:

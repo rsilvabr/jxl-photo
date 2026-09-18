@@ -338,6 +338,13 @@ Options:
   --force-transcode  Override auto-detect, force lossless transcoding
   --force-convert    Override auto-detect, force lossy conversion
   --decode           Force decode direction for JXL files
+  --repair-jbrd      AUDIT/REPAIR mode (no conversion): test every JXL under
+                     the input for broken JPEG reconstruction (v2.0.0-v2.x wrote
+                     XMP markers into jbrd containers, which breaks
+                     djxl --reconstruct_jpeg for sources that had XMP), strip
+                     those markers where found, retest, and report. --dry-run
+                     reports without writing. Exit 1 while any file is still
+                     broken. See "Repairing broken JPEG reconstruction".
 
   --no-md5           Skip MD5 storage (encode only)
   --no-verify        Skip MD5 verification (decode only)
@@ -454,6 +461,61 @@ Without a stored checksum, the lossless directions refuse by default
 (`DELETE_SOURCE_REQUIRE_MD5 = True`) rather than fall back to the structural
 check. Setting it to `False` allows the delete and logs the missing provenance
 per file.
+
+> ### Bit-exact recovery is proven, not assumed
+>
+> The delete gate on the encode direction also runs a **real**
+> `djxl --reconstruct_jpeg` against the source before the JPEG is unlinked: a
+> JXL can carry a `jbrd` box and pass every structural check and still fail
+> to reconstruct (see `--repair-jbrd` below). If the reconstruction does not
+> reproduce the source bytes, the JPEG is kept. With `djxl < 0.12` (no
+> `--reconstruct_jpeg`) the source is always kept on the encode direction.
+
+* * *
+
+## Repairing broken JPEG reconstruction (`--repair-jbrd`)
+
+v2.0.0–v2.x wrote XMP provenance markers (`jxlphoto-src:`/`jxlphoto-srcsum:`)
+into **every** JXL, including `jbrd` containers. For a source JPEG that
+already had XMP (typical of Lightroom / Capture One exports), that appended
+XMP makes `djxl --reconstruct_jpeg` **fail** — the original JPEG stops being
+recoverable bit-exactly, while every other check still passes. JPEGs without
+XMP were unaffected.
+
+Current versions never write markers into a `jbrd` container (provenance for
+that path is `checksums.md5` instead). For archives written by the affected
+versions:
+
+```powershell
+# Audit only — reports OK / WOULD REPAIR / STILL BROKEN per file:
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd --dry-run
+
+# Fix: strips the markers from the files that fail reconstruction and
+# retests each one:
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd
+```
+
+- Files whose reconstruction already works are left untouched.
+- The repair runs on a **copy** next to the file: the markers are removed
+  there and the reconstruction is retested, and only a copy that
+  reconstructs replaces the original. A file that cannot be repaired is left
+  **byte-for-byte as it was** and reported `STILL BROKEN` with the reason
+  (for example, exiftool refusing to edit the file).
+- `--dry-run` performs the same test on the copy and throws it away, so
+  `WOULD REPAIR` is a tested prediction, not a guess.
+- A repaired file reconstructs again; the recovered JPEG may differ in
+  **metadata bytes** (the XMP is rewritten) while the image data is
+  identical — so its MD5 is not the original JPEG's.
+- `checksums.md5` is refreshed for every repaired file that had an entry:
+  the reconstructed JPEG's MD5 and the JXL's new self-hash are appended, so
+  later lossless decodes verify against what the file really rebuilds.
+  Consequence: if you still have the ORIGINAL JPEG, its MD5 no longer
+  matches the database, and an encode-direction `--delete-source` keeps it
+  (correctly — it is not bit-exact recoverable).
+- Exit code is 1 while any file is still broken, 0 otherwise.
+
+**Every JPEG→JXL archive made with v2.0.0+ should pass through this check
+once** before the source JPEGs are discarded.
 
 * * *
 

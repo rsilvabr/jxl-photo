@@ -337,19 +337,30 @@ def test_transcoder_content_matching_survives_a_moved_source(tmp_path):
     moved.parent.mkdir(parents=True)
     moved.write_bytes(keep.read_bytes())            # identical bytes, new place
 
+    # jbrd JXLs carry NO XMP markers (they would break djxl
+    # --reconstruct_jpeg): their provenance is checksums.md5, which binds the
+    # OUTPUT's name to the SOURCE's BYTES. Identical bytes therefore prove
+    # provenance in EVERY --provenance mode — the moved source is accepted
+    # without the content opt-in.
     r = _runt("root", *TR_ARCHIVE, "--delete-skipped", cwd=tmp_path)
-    assert "REFUSING" in r.stdout
-    assert moved.exists()
-
-    r = _runt("root", *TR_ARCHIVE, "--delete-skipped", "--provenance", "content",
-              cwd=tmp_path)
     assert "REFUSING" not in r.stdout, r.stdout
     assert not moved.exists()
 
+    # Different bytes at the same name still refuse (checksum mismatch).
+    other = tmp_path / "root" / "D" / "foto.jpg"
+    other.parent.mkdir(parents=True)
+    _jpeg(other, 99)
+    r = _runt("root", *TR_ARCHIVE, "--delete-skipped", cwd=tmp_path)
+    assert "REFUSING" in r.stdout
+    assert other.exists()
+
 
 def test_lossless_jpeg_recovery_stays_byte_identical(tmp_path):
-    """The markers must not touch the one output that has to match the original
-    byte for byte — the whole promise of the lossless path."""
+    """A jbrd JXL must carry NO XMP provenance marker: appending one is what
+    broke djxl --reconstruct_jpeg for sources that already had XMP (v2.0.0+
+    data-loss bug). Provenance for this path is checksums.md5 instead, and
+    the recovery stays byte-identical — the whole promise of the lossless
+    path."""
     src = tmp_path / "orig.jpg"
     _jpeg(src, 3)
     original = src.read_bytes()
@@ -358,7 +369,7 @@ def test_lossless_jpeg_recovery_stays_byte_identical(tmp_path):
     jxl = tmp_path / "orig.jxl"
     assert tr.has_jbrd_box(jxl), "jbrd lost"
     marks = tr._read_source_markers_batch([jxl])[str(jxl)]
-    assert marks["src"], "the JXL carries no provenance marker"
+    assert not marks["src"], "a jbrd JXL must not carry an XMP marker"
 
     src.unlink()
     r = _runt("orig.jxl", "--force-transcode", "--decode", cwd=tmp_path)

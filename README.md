@@ -32,7 +32,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
 
-Why it matters: controlled chain tests showed each lossy re-encode costs ~1 dB regardless of step size, and after generation 1 the nominal `d` stops describing quality (a 17-generation chain landed ~8.5 dB below a single direct encode at the same file size). The new **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file already carries a lossy generation and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
+Why it matters: controlled chain tests showed each lossy re-encode costs ~1 dB regardless of step size, and after generation 1 the nominal `d` stops describing quality (a 17-generation chain landed ~8.5 dB below a single direct encode at the same file size). The **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file has **already been lossy-recompressed at least once** (`gen >= 2`) and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. The threshold is 2, not 1, because every lossy file this toolkit's encoder produces is born at `gen=1`: guarding at 1 turned the recompressor's main use case (encoder previews → final archive) into an `ask` that silently skipped everything headless. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
 
 #### ⚠️ `--encode-tag off` now strips the record (encoder)
 
@@ -41,6 +41,17 @@ The encoder's `off` previously only *omitted* the record — but a TIFF produced
 Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
 
 [What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.3)
+
+> ### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.1.0: check them before discarding the JPEGs
+>
+> Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
+>
+> ```powershell
+> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd --dry-run   # audit only
+> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd             # repair
+> ```
+>
+> A repaired file reconstructs a JPEG with **identical image data**; only its metadata bytes differ from the original. See [Repairing broken JPEG reconstruction](docs/README_jxl_jpeg_transcoder.md#repairing-broken-jpeg-reconstruction---repair-jbrd).
 
 > ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
 >
@@ -285,8 +296,12 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --to-srgb --quality 95
 # Shrink a near-lossless archive to "visually lossless"
 py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0
 
-# Recursive into a new tree, keeping the folder structure
-py jxl_recompressor.py "F:\Photos\Archive" "F:\Photos\Archive_small" --mode 5 --distance 2.0
+# Recursive, each subfolder gets its own JXL_recompressed/ (structure kept)
+py jxl_recompressor.py "F:\Photos\Archive" --mode 3 --distance 1.0
+
+# Recursive into ONE flat output folder (mode 2 honors the output positional;
+# modes 3/5/6/7 compute their own folders and ignore it)
+py jxl_recompressor.py "F:\Photos\Archive" "F:\Photos\Archive_small" --mode 2 --distance 2.0
 
 # Simulate first — nothing written, copied or deleted
 py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run
@@ -568,6 +583,10 @@ py jxl_tiff_encoder.py "F:\Photos" --multipage-mode ignore     # old behavior: p
 ```
 
 In the wizard the setting lives under **Advanced Options** (Step 6A — answer `y` when asked "Configure advanced options?"), and the Step 7 summary spells out the policy before you type YES. If you do choose a page-dropping policy, the encoder reports the totals in the run summary — and **mode 8 refuses to delete any source whose pages were dropped**, so you cannot lose them by accident.
+
+### The decoder never overwrites an original TIFF
+
+The encoder's default mode 0 leaves `photo.tif` and `photo.jxl` side by side, and the JXL is newer. A sync decode into that same folder used to overwrite the **original master** with the decode. The decoder now only overwrites TIFFs it wrote itself (they carry its `jxlphoto-src` marker); any other TIFF is **refused** — not decoded over, and its JXL never deleted — and listed at the end of the run. Decode into another folder (`--mode 1`/`3`) or pass `--overwrite` if replacing it is really intended. Details: [decoder README](docs/README_jxl_tiff_decoder.md#original-tiff-masters-are-never-overwritten).
 
 ### Lossy is the default: `--distance 0.1`
 

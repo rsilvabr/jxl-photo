@@ -56,15 +56,16 @@ class TestRegenerationGuard:
         # Run 1: fresh lossy encode at d=0.1 — gen 1.
         field, _, _, _ = enc._append_encode_entry("", 0.1, 7)
         assert field == "gen=1 | cjxl d=0.1 e=7"
-        # Run 2: d=1.0 > d=0.1 classifies "ok" (genuinely smaller target) —
-        # but the file is already a lossy generation, so the guard fires.
+        # Run 2: d=1.0 > d=0.1 classifies "ok" (genuinely smaller target).
+        # The guard does NOT fire: every lossy file this toolkit's encoder
+        # produces is born at gen=1, so guarding at gen>=1 would turn the
+        # recompressor's main use case (encoder preview -> final archive)
+        # into an "ask" that silently skips everything headless.
         gen, _, _ = rec._reconcile_gen(field)
         assert gen == 1
-        assert rec._regeneration_action(gen, 1.0) == "ask"
-        assert rec._more_conservative(
-            "convert", rec._regeneration_action(gen, 1.0)) == "ask"
+        assert rec._regeneration_action(gen, 1.0) is None
         # Run 3: after the restamp the chain carries both entries, gen=2,
-        # and the guard fires again for d=2.0.
+        # and the guard fires for any further lossy request (d=2.0).
         field2, _, _, _ = rec._append_encode_entry(field, 1.0, 7)
         assert field2 == "gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7"
         gen3, _, _ = rec._reconcile_gen(field2)

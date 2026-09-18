@@ -1988,17 +1988,22 @@ def _reconcile_gen(text: str):
     damage, so the larger value wins in both directions. A malformed chain
     entry never stops the rest from being counted. Legacy fields (chain, no
     gen=) need no special case: max(0, counted) == counted.
+
+    Only MACHINE-BLOCK segments count: a caption merely containing
+    "cjxl d=1 e=7" is user text, not an encode record, and must not raise the
+    generation count.
     """
     s = str(text)
     m = _GEN_TAG_RE.search(s)
     stored = int(m.group(1)) if m else 0
     counted = 0
-    for d, _e in _ENCODE_TAG_RE.findall(s):
-        try:
-            if float(d) > 0:
-                counted += 1
-        except ValueError:
-            continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
+    for block in _MACHINE_BLOCK_RE.findall(s):
+        for d, _e in _ENCODE_TAG_RE.findall(block):
+            try:
+                if float(d) > 0:
+                    counted += 1
+            except ValueError:
+                continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
     return max(stored, counted), stored, counted
 
 
@@ -2015,11 +2020,18 @@ def _append_encode_entry(text: str, new_d, new_e):
     a wrong value self-corrects on the next pass. `stored`/`counted_before`
     are returned so the caller can log a divergence (once per run); `orphans`
     comes from _strip_encode_params.
+
+    Chain entries are read back from the MACHINE BLOCKS only: a caption that
+    merely contains "cjxl d=1 e=7" is user text and is not absorbed into the
+    chain (and not counted as a generation).
     """
     s = str(text)
     _gen_old, stored, counted = _reconcile_gen(s)
     user, orphans = _strip_encode_params(s)
-    entries = [f"cjxl d={d} e={e}" for d, e in _ENCODE_TAG_RE.findall(s)]
+    entries = []
+    for block in _MACHINE_BLOCK_RE.findall(s):
+        entries.extend(f"cjxl d={d} e={e}"
+                       for d, e in _ENCODE_TAG_RE.findall(block))
     entries.append(f"cjxl d={new_d} e={new_e}")
     counted_new = counted
     try:
@@ -2030,6 +2042,49 @@ def _append_encode_entry(text: str, new_d, new_e):
     gen = max(stored, counted_new)
     block = " | ".join([f"gen={gen}"] + entries)
     return (f"{user} | {block}" if user else block), stored, counted, orphans
+
+
+def _merge_lineage_blocks(desc: str, software: str):
+    """Merge the two fields' machine blocks: (entries, stored_gen).
+
+    The record can be SPLIT across dc:Description and Software (the user
+    switched --encode-tag, a file came through a tool that keeps only one
+    field, or an older version left a shadow copy behind). Whichever side
+    holds it, the chain must survive the restamp.
+
+    Entries are NEVER deduplicated inside one field: "cjxl d=0.1 e=7 | cjxl
+    d=0.1 e=7" is two real generations (decode, then re-encode at the same
+    settings — exactly what the append-only chain exists to record), and
+    collapsing them undercounts gen in the damaging direction. Across the two
+    fields:
+      * the same chain in both (a mirror), or one a prefix of the other (a
+        copy that was later extended), is ONE history -> the longer one;
+      * anything else is split history -> both, dc:Description first (the
+        older side in every case this toolkit produces: a decoder-made TIFF
+        carries the JXL's chain there, and the new encode lands in Software).
+    stored gen = max of both gen= tokens. Entries inside a caption's running
+    text never match: the block regex only matches whole " | "-delimited
+    segments.
+    """
+    chains = []
+    for text in (desc, software):
+        chain = []
+        for block in _MACHINE_BLOCK_RE.findall(str(text)):
+            chain.extend(_ENCODE_TAG_RE.findall(block))
+        chains.append(chain)
+    a, b = chains
+    if not a or b[:len(a)] == a:
+        entries = list(b) if len(b) >= len(a) else list(a)
+    elif not b or a[:len(b)] == b:
+        entries = list(a)
+    else:
+        entries = a + b
+    stored = 0
+    for text in (desc, software):
+        m = _GEN_TAG_RE.search(str(text))
+        if m:
+            stored = max(stored, int(m.group(1)))
+    return entries, stored
 
 
 def _log_gen_notes_once(stored: int, counted: int) -> None:
@@ -2226,20 +2281,45 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append(f"-xmp-dc:Description={_argfile_safe(final_description)}")
 
     elif ENCODE_TAG_MODE == "software":
-        # For software mode, we don't modify dc:Description
-        # Instead, we update the EXIF Software field
+        # For software mode, we don't keep the record in dc:Description.
+        # Instead, we update the EXIF Software field.
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else "cjxl"
+        # A TIFF without a Software tag used to seed the chain with a bare
+        # "cjxl" segment ("cjxl | gen=1 | cjxl d=…") — the fallback is empty
+        # so the field carries ONLY the machine block.
+        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        # The dc:Description may carry a stale chain (e.g. a TIFF recovered by
+        # the decoder, or a re-tagged file): migrate it into the Software
+        # record instead of leaving a shadow copy that a later reader
+        # (the recompressor reads dc:Description FIRST) would trust.
+        clean_sw, sw_orphans = _strip_encode_params(original_sw)
+        merged_entries, merged_stored = _merge_lineage_blocks(
+            existing_desc, original_sw)
+        merged_chain = " | ".join(
+            ([f"gen={merged_stored}"] if merged_stored else [])
+            + [f"cjxl d={d} e={e}" for d, e in merged_entries])
+        if clean_sw and merged_chain:
+            seed_sw = f"{clean_sw} | {merged_chain}"
+        else:
+            seed_sw = clean_sw or merged_chain
         new_sw, stored, counted, orphans = _append_encode_entry(
-            original_sw, CJXL_DISTANCE, CJXL_EFFORT)
+            seed_sw, CJXL_DISTANCE, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
         if orphans:
             logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
                            f"Software of {tiff_path.name} — the field was "
                            f"written badly earlier")
         args_lines.append(f"-Software={_argfile_safe(new_sw)}")
+        # ...and strip the migrated chain from dc:Description, keeping any
+        # real caption.
+        clean_desc, d_orphans = _strip_encode_params(existing_desc)
+        if clean_desc != existing_desc:
+            if d_orphans:
+                logger.warning(f"Stripped {d_orphans} orphaned gen= token(s) "
+                               f"from dc:Description of {tiff_path.name}")
+            args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
 
     else:  # ENCODE_TAG_MODE == "off"
         # Record nothing — AND strip any record the source TIFF carries (a

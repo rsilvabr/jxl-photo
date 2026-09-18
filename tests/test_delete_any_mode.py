@@ -135,6 +135,10 @@ def test_transcoder_deletes_in_every_mode(tmp_path, monkeypatch, mode):
     monkeypatch.setattr(tr, "STORE_MD5", False)
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
     monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    # The delete gate proves bit-exact recovery with a REAL
+    # djxl --reconstruct_jpeg before unlinking the JPEG; these stubs cannot
+    # reconstruct, so stand in for a working one.
+    monkeypatch.setattr(tr, "_jxl_reconstructs_to", lambda j, s: True)
     monkeypatch.setattr(tr, "encode_one_transcode",
                         lambda s, w, f, *a, **k: (str(s), "ok", str(f), None))
 

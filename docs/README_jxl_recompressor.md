@@ -25,8 +25,11 @@ py jxl_recompressor.py D:\Photos\Archive --mode 1 --distance 1.0
 # Single file to a specific output folder
 py jxl_recompressor.py photo.jxl D:\Smaller --mode 0 --distance 2.0
 
-# Recursive, mirroring the tree into a new root
-py jxl_recompressor.py D:\Photos\Archive D:\Photos\Archive_small --mode 3 --distance 1.0
+# Recursive, mirroring the tree: each subfolder gets its own JXL_recompressed/
+py jxl_recompressor.py D:\Photos\Archive --mode 3 --distance 1.0
+
+# Recursive into a flat folder (mode 2 writes everything into the output root)
+py jxl_recompressor.py D:\Photos\Archive D:\Photos\Archive_small --mode 2 --distance 1.0
 
 # Sync an interrupted run — only recompress sources newer than their output
 py jxl_recompressor.py D:\Photos\Archive --mode 1 --distance 1.0 --sync
@@ -53,19 +56,25 @@ recompressor reads that record and compares it against the request:
 | Request `d_new < d_old` | **downgrade** — quality cannot be recovered; the file only grows | `ask` |
 | Lossless → lossless with effort ≤ recorded | **downgrade** — same pixels, no gain | `ask` |
 | No `cjxl d=/e=` record found | **unknown** | `convert` |
-| **`gen >= 1` and the request is lossy** | **regeneration** — one more lossy generation on top of the existing ones | `ask` |
+| **`gen >= 2` and the request is lossy** | **regeneration** — a REPEATED lossy re-encode, on top of generations the file already carries | `ask` |
 
 The **regeneration** row is independent of the others and fires *in addition*
-to them. Measured on real files, each lossy re-encode costs ~1 dB regardless
-of how small the distance step is, and after generation 1 the nominal `d`
-stops describing quality (a 17-generation chain of small steps landed ~8.5 dB
-below a single direct encode at the same file size). `d_new > d_old` cannot
-see this — it compares one step at a time, so a slow drip of `d=0.1 → 1.0 →
-1.5 → 2.0` runs years apart passes every check while the image degrades. The
-`gen=` count is what closes that hole. A lossless request (`d=0`) does not
-fire it: a lossless step adds no loss, so there is no new generation to warn
-about. When regeneration and downgrade both apply, the more conservative
-action wins (skip > copy > ask > convert).
+to them. The threshold is `gen >= 2`, not `>= 1`: every lossy JXL this
+toolkit's own encoder produces is born at `gen=1`, so guarding at 1 would turn
+the recompressor's main use case — taking the encoder's `d=0.1` previews to
+the final `d=1.0` archive — into an `ask` that silently skips everything on
+unattended runs. The first recompression of an encoder output is expected;
+the guard exists for the **second** lossy re-encode onwards. Measured on real
+files, each lossy re-encode costs ~1 dB regardless of how small the distance
+step is, and after generation 1 the nominal `d` stops describing quality (a
+17-generation chain of small steps landed ~8.5 dB below a single direct
+encode at the same file size). `d_new > d_old` cannot see this — it compares
+one step at a time, so a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years
+apart passes every check while the image degrades. The `gen=` count is what
+closes that hole. A lossless request (`d=0`) does not fire it: a lossless
+step adds no loss, so there is no new generation to warn about. When
+regeneration and downgrade both apply, the more conservative action wins
+(skip > copy > ask > convert).
 
 The policies are configurable (`--on-downgrade`, `--on-regeneration`,
 `--on-unknown`, and the matching settings in the script header). Each
@@ -96,13 +105,19 @@ is simply kept. Disable with `--no-keep-smaller`.
 
 ## Metadata
 
-cjxl does **not** carry metadata across a JXL→JXL re-encode, so the script
-copies it explicitly with exiftool (`-tagsfromfile`, EXIF/XMP/IPTC),
+cjxl cannot be trusted to carry metadata across a JXL→JXL re-encode (older
+builds drop it; cjxl 0.12 carries Exif/XMP, but Brotli-compressed),
+so the script copies it explicitly with exiftool (`-tagsfromfile`, EXIF/XMP/IPTC),
 **appends** the new `cjxl d=/e=` parameters to the lineage chain (the old
 entries stay — the chain is the history the regeneration guard reads), and
 preserves the provenance markers (`jxlphoto-src:`, `jxlphoto-srcsum:`,
 multi-page `jxlphoto-mpg:`, …) verbatim — an archive made by
 `jxl_tiff_encoder.py` stays provable as-is.
+
+The metadata is written as **plain** `Exif`/`xml ` boxes placed **before** the
+codestream — the same layout the encoder produces. cjxl 0.12 would otherwise
+leave them Brotli-compressed (`brob`) between the codestream parts, which
+IrfanView cannot read (see *Viewer quirks* in the main README).
 
 The `gen=` token at the head of the chain is **derived, never incremented**:
 every write recounts the lossy (`d>0`) entries and keeps
@@ -118,18 +133,26 @@ record, `gen=` and chain together, is **stripped**, so a later run never
 trusts stale parameters; it is the only way to deliberately discard the
 lineage).
 
+When a file carries the record in the OTHER field (it was written with a
+different `--encode-tag`), the chain is **migrated**, never dropped, and the
+generation count is read over both fields. Repeated entries are real history
+(`cjxl d=0.1 e=7 | cjxl d=0.1 e=7` is two generations — a decode and a
+re-encode at the same settings) and are never collapsed. Only when both
+fields hold the same chain (or one extends the other) is it treated as one
+history; otherwise both are kept, `dc:Description` first.
+
 ## Output modes
 
 Same semantics as the other scripts in the toolkit:
 
 | Mode | What it does |
 |---|---|
-| 0 | Explicit: file→file/folder. **Without an output argument, replaces the source in place** (confirmation required) |
+| 0 | Flat: file→file/folder. **Without an output argument — or with the source's own folder as output (what a manifest row sends) — replaces the source in place** (confirmation required) |
 | 1 | Flat folder → `recompressed_jxl/` subfolder inside it |
 | 2 | Flat folder → explicit output folder (default: `<input>/recompressed_jxl`) |
 | 3 | Recursive → mirror tree, `JXL_recompressed/` inside each source folder |
 | 4 | Recursive → folder token replace (`16B_JXL` → `16B_JXL_small`; `_JXL_small` appended if no token) |
-| 5 | Recursive → mirror the tree into a new root |
+| 5 | Recursive → sibling `JXL_recompressed/` next to each source folder |
 | 6 | Capture One `_EXPORT` workflow: files under marker folders → `<_EXPORT>/16B_JXL_small/` |
 | 7 | Mode 6 restricted to one export subfolder (`--export-subfolder`) |
 | 8 | Recursive **in place**: each JXL is replaced next to itself (confirmation required) |
@@ -138,6 +161,14 @@ Recursive scans skip this tool's **own output folders** below the input root
 (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`), so a
 re-run never eats its own output. Pointing the input **at** such a folder to
 compress it again is legitimate and works — only descendants are filtered.
+
+Mode 2 is recursive and writes **flat by name**: an output folder that
+equals the input folder is refused at startup (exit 2) — root files would be
+replaced in place while files from subfolders were flattened into the root,
+mixed with the originals they came from. Use mode 0 (flat) or 8 (recursive)
+for a true in-place run. Mode 0 accepts its own folder as output: it is flat,
+so that simply IS the in-place run. Modes 1/3/4/5/6/7 compute their own
+folders and ignore the output positional.
 
 ## Deleting the originals
 
@@ -151,9 +182,25 @@ compress it again is legitimate and works — only descendants are filtered.
 `--verify-roundtrip` additionally decodes both sides and compares pixels
 before deleting — pixel-exact for lossless→lossless, brightness/PSNR sanity
 floors when a lossy step is involved (`VERIFY_LOSSY_MIN_MEAN_RATIO`,
-`VERIFY_LOSSY_MIN_PSNR`). `--delete-skipped` also deletes sources whose
-output already existed (finishing an interrupted archive) — the existing
-output must pass every gate.
+`VERIFY_LOSSY_MIN_PSNR`). `--delete-skipped` widens the deletion to sources
+whose output already existed (finishing an interrupted archive) — the
+existing output must pass every gate. Armed **without** `--delete-source` it
+does nothing (with a warning): it used to delete already-archived sources
+with no confirmation and no provenance check, and a same-named output from a
+different photo was enough to destroy the only copy of a source.
+
+Multi-page documents delete as a **group**: every page sharing a
+`jxlphoto-mpg:` id in the same folder must pass its own gates, otherwise no
+page of the group is deleted — a half-deleted group would be spread across
+two folders with a dangling master page. A page that did not make it this run
+at all (its conversion failed, a policy skipped it, provenance refused it)
+counts as a failed page: it keeps its siblings too.
+
+In-place runs (mode 0/8, and staging promotions) replace the source only
+after the re-encode passed every gate, via a temp file in the destination
+folder and a same-volume atomic `os.replace` — a cross-volume move failure
+can no longer leave the original destroyed with the only good copy stranded
+in staging under a UUID name.
 
 Three interactive confirmations guard the deletion unless
 `--delete-confirm-off` is passed — the wrapper (`jxl_photo.py`) charges its
@@ -174,8 +221,8 @@ input / output        Input JXL file or folder / optional output (modes 0, 2, 5)
 --effort 1-10         cjxl effort (default: CJXL_EFFORT = 7)
 --buffering 0-3       [libjxl >= 0.12] encoder buffering level
 --on-downgrade POL    ask/copy/skip/convert for requests that cannot gain (default: ask)
---on-regeneration POL ask/copy/skip/convert when the file already carries a lossy
-                      generation (gen >= 1) and the request adds another (default: ask)
+--on-regeneration POL ask/copy/skip/convert on a REPEATED lossy re-encode
+                      (gen >= 2) and the request adds another (default: ask)
 --on-unknown POL      ask/copy/skip/convert for files with no d=/e= record (default: convert)
 --jbrd-policy POL     copy/skip/convert for JPEG-recoverable JXLs (default: copy)
 --no-keep-smaller     Keep the re-encoded file even when it is not smaller
@@ -206,7 +253,7 @@ CJXL_EFFORT = 7              # Effort: size/encode-time, NOT quality
 CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl
 OVERWRITE = "smart"          # False | "smart" (source newer) | True
 ON_DOWNGRADE = "ask"         # ask/copy/skip/convert
-ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 1 + lossy request)
+ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 2 + lossy request)
 ON_UNKNOWN = "convert"       # ask/copy/skip/convert
 JBRD_POLICY = "copy"         # copy/skip/convert
 KEEP_SMALLER = True          # Verbatim copy when the re-encode is not smaller

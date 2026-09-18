@@ -16,6 +16,8 @@ Round 31 / 2026-08-19: Full-repo audit — 10 bugs. The first one that loses ima
 Round 32 / 2026-08-19: Second sweep the same day over the paths round 31 did not run (matrix/basic/none, PNG and --to-srgb output, adopt, modes 1/3/4/5, CJK paths) — 1 bug: an RGB ICC attached to grayscale output
 Round 33 / 2026-08-23: Full-repo audit — 5 mediums, all in the archive/delete safety layer: a swapped same-named JXL could pass the decode-side provenance gates on the strength of its NAME (see top section)
 Round 34 / 2026-08-23: The low-severity sweep that follows every audit — 4 batches, one per script; none destroys data, each makes a tool lie a little or die ugly (see top section)
+Round 35 / 2026-09-18: First audit of v2.1.0 — 16 bugs, 4 critical: JPEG → JXL was no longer bit-exact recoverable for JPEGs with XMP (since v2.0.0), and three data-loss paths in the new recompressor/decoder (see top section)
+Round 36 / 2026-09-19: Review of the round-35 fixes against the real fixtures — 7 regressions they introduced (2 data-losing) plus the tracker renumbering (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -24,6 +26,55 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-36 audit (2026-09-19)
+
+A review of the round-35 fixes against the real fixtures (`E:\TESTE`: Capture One
+exports and the RGB+IR film scans). The round-35 suite passed in full; five of its
+fixes had nevertheless opened new holes, two of them data-losing, and every one
+invisible to the mocked tests. `tests/test_audit_round36.py` adds real-codec tests
+(cjxl/djxl/exiftool, skipped when absent) for exactly that reason.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 339 | **Refusing a master TIFF reported a SKIP — and `--delete-skipped` then deleted the JXL.** #326 returned `"skipped"` for the refusal. A skip admits the source to `--delete-skipped`, so with `--delete-source --delete-skipped` the JXL was deleted on the strength of a TIFF that is NOT its decode (it is older than the JXL and never went through this tool). Reproduced: `photoA.jxl` next to a `photoA.tif` holding a different photo — the log printed `KEEP (refusing to overwrite ...)` and the very next line `DELETED source (already archived)`. The dry-run preview (`_would_skip_group`) predicted the same deletion | decoder | ✅ FIXED (own status `"refused"`: never a skip, never deletable, silent in the staging mover, counted apart — a WARNING block lists the refused TIFFs at the end and the summary carries `Refused (existing TIFF is an original master)`; the exit code is unchanged, since refusing is the intended safe outcome and a folder where the encoder left TIFF + JXL side by side would otherwise fail every scheduled sync. `_would_skip_group` returns False for it, and the dry run now previews the refusals) |
+| 340 | **The lineage merge collapsed real generations.** #328's `_merge_lineage_blocks` deduplicated entries with a set, also INSIDE one field — but `cjxl d=0.1 e=7 \| cjxl d=0.1 e=7` (decode, then re-encode at the same settings) is two generations, the very case the append-only chain exists to record. A legacy two-generation file read as gen=1, so the gen≥2 regeneration guard stayed silent; a restamp deleted one history entry and wrote gen=2 instead of 3 | encoder, recompressor | ✅ FIXED (no dedup inside a field. Across the two fields: a mirror, or one chain being a prefix of the other, is ONE history (the longer one); anything else is split history and both are kept, dc:Description first — the older side in every shape this toolkit produces. Parity-pinned copies stay identical) |
+| 341 | **The multi-page veto never saw the page that failed.** #331 built the groups only from pages that were deletable this run; a page whose conversion FAILED (or was policy-skipped, or refused by provenance) was left out, the group looked one page long, and page 0 was deleted alone — reproduced with the film scan's IR page failing. Also: the group key was the id alone, so a copy of the same split in another folder could veto (or be vetoed by) this one | recompressor | ✅ FIXED (every planned page is recorded — not-settled ones as silent blockers that are never deleted nor counted as KEEP; `main()` passes all items, provenance refusals included; groups are keyed by (folder, id), like the decoder's) |
+| 342 | **Every mode-0 manifest row of JXL→JXL exited 2.** #332 refused an output equal to the input in mode 0 too — but mode 0 is flat, so that is exactly an in-place run, and a manifest row always sends it (the loader fills an empty Destination with the Source). The wrapper's in-place gate from #329 only matched an EMPTY Destination, which a manifest never has, so mode-8 rows fell into the child's hidden HHMM prompt again (headless: exit 3) | recompressor, wrapper | ✅ FIXED (the refusal applies to mode 2 only; the wrapper's new `_recompress_entry_in_place()` treats mode 8, and mode 0 with no Destination or Destination == Source, as in place — both for the HHMM gate and for `--delete-confirm-off`) |
+| 343 | **In-place detection compared unnormalized paths.** A relative input with an absolute output of the same folder (or the reverse) was not recognized as in place, so `cjxl` was pointed at its own input file as the output instead of taking the temp-file + atomic replace path | recompressor | ✅ FIXED (`abspath` + `normcase` on both sides) |
+| 344 | **`--repair-jbrd` could claim a repair it never made.** #323's strip ignored exiftool's exit code: on a JXL exiftool refuses to edit (a `[minor]` Exif oddity) it logged "markers stripped, reconstruction still fails" although nothing was stripped. The edit ran on the archive itself and stayed there when the reconstruction still failed. After a real repair `checksums.md5` still held the ORIGINAL JPEG's md5 and the old self-hash, so every later lossless decode failed MD5 verification and the delete gates refused the file forever | transcoder | ✅ FIXED (the repair works on a copy next to the file and replaces it only when the copy provably reconstructs — a failure leaves the archive byte-for-byte untouched; the exit code is checked, retried with `-m`, and the markers are re-read to confirm they are gone; after a repair the db gets the reconstructed JPEG's md5 and the new self-hash; a dry run performs the same test on the copy, so WOULD REPAIR is a tested prediction) |
+| 345 | **Recompressed metadata stayed Brotli-compressed.** #333 reordered the boxes, but cjxl ≥ 0.12 carries the source's Exif/XMP across as `brob` boxes and exiftool edits them in that form — IrfanView cannot read `brob` (README, *Viewer quirks*), so the EXIF stayed invisible | recompressor | ✅ FIXED (the restamp runs with `-api Compress=0`: plain `Exif`/`xml ` boxes, before the codestream, exactly like the encoder's outputs) |
+| 346 | **The round-35 entries were filed as #172–#187** at the end of this document, reusing numbers that already belong to v1.8.1 bugs (the table rows 172–187 below) and breaking the cross-references this file relies on | docs | ✅ FIXED (re-filed as #323–#338 in a Round-35 section at the top, in the file's table format) |
+
+---
+
+## Round-35 audit (2026-09-18)
+
+The first audit of v2.1.0, run against the real fixtures. Headline: since
+v2.0.0 the JPEG → JXL transcode was no longer bit-exact recoverable for any JPEG
+that already carried XMP, and `--delete-source` deleted those JPEGs anyway.
+Several of these fixes were reworked in round 36 (noted per row).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 323 | **CRITICAL — XMP markers in jbrd containers broke bit-exact JPEG recovery.** Since v2.0.0 (#268) the `jxlphoto-src:`/`jxlphoto-srcsum:` markers were written into every JXL, jbrd containers included. For a source JPEG that already had XMP (Lightroom / Capture One exports) the appended XMP makes `djxl --reconstruct_jpeg` fail, while the delete gate (MD5 recorded + jbrd present + integrity) still certified the output — `--delete-source` destroyed originals that could no longer be recovered. The same JPEG through v1.9.1 reconstructs with an identical MD5 | transcoder | ✅ FIXED (no marker is ever written into a jbrd container — provenance there is `checksums.md5` plus the content-binding check; the encode-direction delete gate runs a REAL `--reconstruct_jpeg` and compares bytes before unlinking a JPEG, failing closed with djxl < 0.12; new `--repair-jbrd` audit/repair mode — reworked in #344) |
+| 324 | **CRITICAL — `--delete-skipped` alone deleted sources** with no confirmation and no provenance check: in mode 2 a same-named output from a DIFFERENT photo was enough to destroy the only copy of a source, exit 0 | recompressor | ✅ FIXED (inert without `--delete-source`, with a warning, like the other three scripts) |
+| 325 | **CRITICAL — failed recompressions left their output behind**: at the FINAL path (smart sync then skipped the file forever), or as `<uuid>_name.jxl` next to the source in place (picked up as a new input next run) | recompressor | ✅ FIXED (the encoder's `output_dirty`/identity-checked cleanup, ported) |
+| 326 | **CRITICAL — the decoder overwrote the original TIFF master** in the default smart sync when the encoder's mode 0 had left `foto.tif` + `foto.jxl` side by side: "JXL newer" → OVERWRITE with the lossy decode, no delete flag involved | decoder | ✅ FIXED (an existing TIFF without the decoder's own `jxlphoto-src` marker is refused; `--overwrite` is the explicit override; TIFFs written in `--none` mode carry no XMP, so they need `--overwrite` to be re-decoded — the safe direction — reworked in #339) |
+| 327 | **HIGH — the regeneration guard fired on the main use case**: encoder outputs are born at gen=1, so `gen >= 1` turned every first recompression into `ask` — headless runs skipped everything, the wrapper's `copy` default copied without compressing | recompressor, wrapper | ✅ FIXED (threshold `gen >= 2`; wrapper default `convert`; README table corrected) |
+| 328 | **HIGH — lineage lost when the record changed fields**: the restamp stripped the other field's chain instead of merging it (gen=1 written where gen=2 was true); the encoder's software mode left a stale chain in dc:Description and seeded a bare `cjxl` segment | encoder, recompressor | ✅ FIXED (parity-pinned `_merge_lineage_blocks()`; reading reconciles gen over both fields — reworked in #340) |
+| 329 | **HIGH — wrapper out of step with the recompressor**: wrong folder names (`converted_jxl` for `recompressed_jxl`/`JXL_recompressed`) in previews and in the delete panel; modes 0/8 described as "side by side" where the recompressor REPLACES; in-place recompression not gated as destructive (no HHMM, `--run-preset` let it through, the child's prompt appeared invisibly mid-stream) | wrapper | ✅ FIXED (real names, REPLACE wording, HHMM gate + `--delete-confirm-off`, preset refusal — manifest detection reworked in #342) |
+| 330 | **MEDIUM — cross-volume in-place promotion could destroy the only copy**: the staging move copied ONTO the original non-atomically; on failure the only good copy stayed in staging under a UUID name, swept by `--clean-staging` an hour later | recompressor | ✅ FIXED (temp file in the destination folder, then an atomic `os.replace`) |
+| 331 | **MEDIUM — multi-page groups could be deleted page by page**, spreading a document across two folders | recompressor | ✅ FIXED (all-or-nothing per `jxlphoto-mpg:` group — reworked in #341) |
+| 332 | **MEDIUM — mode 2 with the output equal to the input** replaced root files in place and flattened subfolders into the root, mixed with the originals | recompressor | ✅ FIXED (refused with exit 2 — narrowed to mode 2 in #342) |
+| 333 | **MEDIUM — recompressed outputs hid their EXIF from IrfanView**: no `reorder_jxl_boxes` after the restamp | recompressor | ✅ FIXED (reorder after the restamp, before the integrity check — completed by #345) |
+| 334 | **MEDIUM — doc examples used modes that ignore the output positional** (mode 5 in the README, mode 3 in the recompressor README) | docs | ✅ FIXED |
+| 335 | **LOW — encoder software mode seeded the chain with a bare `cjxl` segment** when the TIFF had no Software tag | encoder | ✅ FIXED |
+| 336 | **LOW — a caption containing `cjxl d=1 e=7` counted as a generation** and was duplicated into the chain | encoder, recompressor | ✅ FIXED (chain entries read from whole machine-block segments only) |
+| 337 | **LOW — recompressor summary/progress**: aborted counted as errors; failure reasons reached the summary as a bare "error"; the dry run named `--delete-source` when only `--delete-skipped` was armed; `[n/total]` used the raw scan count; an exception outside `convert_one` killed the run | recompressor | ✅ FIXED |
+| 338 | **LOW — `_classify` called a gen≥1 chain ending in a `d=0` pass "the FIRST lossy generation"** | recompressor | ✅ FIXED |
 
 ---
 
@@ -3689,5 +3740,3 @@ The encoder now aborts with a clear error message instead of producing incorrect
 - `jxl_jpeg_transcoder.py` `cmd_auto()`, `_process_file_group()`
 
 ---
-
-
