@@ -26,7 +26,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ## Current version
 
-**v2.1.0** (2026-09-13) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
+**v2.1.0** (2026-09-20) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
 
 #### Generation counter in the encode record
 
@@ -39,6 +39,10 @@ Why it matters: controlled chain tests showed each lossy re-encode costs ~1 dB r
 The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
 
 Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
+
+#### New: `--modular on|off` (encoder) — measured: not for photos
+
+The lossy encoder is now selectable: `--modular on` forces the Modular encoder for lossy output (default off — cjxl's VarDCT decides). We measured before shipping: 7 real masters (Nikon Zf/Z8 ProPhoto 16-bit TIFFs, medium-format film scan, IR dust-channel scan, negative scan), SSIMULACRA2 at d=0.05/0.10 — quality is a wash (every margin ≤ 0.39), VarDCT smaller in 14/14 files (modular up to +33%) and 20–100× faster. So the flag exists for what Modular was built for (screenshots/graphics batches), the wrapper only asks inside Step 6A (advanced options), the default behavior is untouched, and the disk-space preflight estimate now matches the chosen encoder.
 
 [What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.3)
 
@@ -656,7 +660,7 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ### What's new — v2.1.0 (current stable)
 
-**Released 2026-09-13.** A new script joins the toolkit: **`jxl_recompressor.py`** — and a new destination in the wrapper ("JXL (smaller)"). No existing command line changes; nothing about TIFF/JPEG conversion moved.
+**Released 2026-09-20.** A new script joins the toolkit: **`jxl_recompressor.py`** — and a new destination in the wrapper ("JXL (smaller)"). No existing command line changes; nothing about TIFF/JPEG conversion moved.
 
 #### Why
 
@@ -669,8 +673,9 @@ Archives were written at `d=0.05–0.1` when disk was cheap. When storage runs s
 - **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and the MD5 binding the transcoder's delete gates rely on.
 - **Keep-smaller net.** A re-encode that comes out not-smaller than the source is replaced by the original bytes (in place: the original is simply kept).
 - **Same delete machinery as v2.0.x**: `--delete-source`, `--delete-skipped`, `--verify-roundtrip`, provenance checks, three confirmations — and in the wrapper, the same execution-time token gate.
+- **Also new in the encoder**: `--modular on|off` selects the lossy encoder (default off — cjxl's VarDCT decides). Measured on 7 real masters (camera TIFFs + film/IR/negative scans): quality a wash, VarDCT smaller in 14/14 and 20–100× faster — so this is for screenshots/graphics batches, and the wrapper only asks inside Step 6A (advanced options).
 
-Verified against real files, end to end: Capture One ProPhoto 16-bit exports and film scans (including RGB+IR scans where the IR channel is its own grayscale page) encoded to `d=0.1`, recompressed to `d=1.0` (archive 264 MB → 44 MB), every marker (multi-page group, grayscale, provenance, ICC) carried over verbatim, the recompressed archive decoded back to multi-page TIFFs with page structure, dtype, photometric and ICC placement identical to the originals (33–53 dB PSNR, no brightness shift), and `--delete-source --verify-roundtrip` deleting only after per-file pixel verification passed. **1223 tests** in the suite.
+Verified against real files, end to end: Capture One ProPhoto 16-bit exports and film scans (including RGB+IR scans where the IR channel is its own grayscale page) encoded to `d=0.1`, recompressed to `d=1.0` (archive 264 MB → 44 MB), every marker (multi-page group, grayscale, provenance, ICC) carried over verbatim, the recompressed archive decoded back to multi-page TIFFs with page structure, dtype, photometric and ICC placement identical to the originals (33–53 dB PSNR, no brightness shift), and `--delete-source --verify-roundtrip` deleting only after per-file pixel verification passed. **1327 tests** in the suite.
 
 ---
 
@@ -678,7 +683,7 @@ Verified against real files, end to end: Capture One ProPhoto 16-bit exports and
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.1.0** | 2026-09-13 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates |
+| **v2.1.0** | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case) |
 | v2.0.3 | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
 | v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
 | v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
