@@ -595,10 +595,11 @@ ON_DOWNGRADE = "ask"
 ON_REGENERATION = "ask"
 # What to do when the source file is ALREADY a lossy re-encode (gen >= 1 in
 # the encode record) and the request would add ANOTHER lossy generation.
-# Measured on real files: each lossy re-encode costs ~1 dB regardless of how
-# small the distance step is, and after generation 1 the nominal d stops
-# describing quality (a 17-generation chain landed 8.5 dB below a single
-# direct encode at the same file size). d_new > d_old cannot see this — it
+# Measured on real files: each extra lossy generation costs ~0.2-0.6 dB of
+# PSNR on top of what the byte reduction alone costs (at a fixed file size,
+# and growing with the number of generations), and the recorded nominal d
+# stops describing the result — a 19-generation chain landed 9 dB below a
+# single direct encode at the same file size. d_new > d_old cannot see this — it
 # compares one step at a time; the generation count is what the history
 # warns about. Same values as ON_DOWNGRADE, and independent of it: when both
 # fire, the more conservative action wins (skip > copy > ask > convert).
@@ -1577,7 +1578,8 @@ def _regeneration_action(gen: int, new_d: float):
     final d=1.0 — into an "ask" that silently skipped everything on
     headless runs. The first recompression of an encoder output is a normal,
     expected operation; the guard exists for the SECOND lossy re-encode
-    onwards, where each pass costs ~1 dB regardless of step size.
+    onwards, where each pass adds ~0.2-0.6 dB of loss on top of what the
+    byte reduction alone costs (measured at a fixed file size).
 
     A lossless request (new_d == 0) adds no generation — the d=0 entry is
     appended to the chain but costs no quality, so the guard stays quiet and
@@ -2665,8 +2667,9 @@ def main():
     parser.add_argument("--on-regeneration", dest="on_regeneration", default=None,
                         choices=["ask", "copy", "skip", "convert"],
                         help="Source already carries a lossy generation (gen >= 1) "
-                             "and this request adds another one (~1 dB each, "
-                             "measured — nominal d no longer describes quality): "
+                             "and this request adds another one (each adds ~0.2-0.6 dB "
+                             "of loss on top of the byte savings, measured — and the "
+                             "nominal d no longer describes quality): "
                              "ask/copy/skip/convert "
                              "(default: ON_REGENERATION setting, 'ask')")
     parser.add_argument("--on-unknown", dest="on_unknown", default=None,
@@ -2961,14 +2964,15 @@ def main():
         it["action"] = _policy_action(it["category"], it["jbrd"])
         # Regeneration guard: the file already carries a lossy generation and
         # this request adds another. d_new > d_old compares one step at a time
-        # and cannot see the accumulated loss (~1 dB per generation, measured)
+        # and cannot see the accumulated loss (~0.2-0.6 dB per generation on
+        # top of the byte savings, measured at a fixed file size)
         # — the gen= count can. Independent of --on-downgrade: when both fire,
         # the more conservative action wins.
         regen = _regeneration_action(it["gen"], CJXL_DISTANCE)
         if regen is not None:
             it["reason"] += (f" | already at generation {it['gen']}: another "
-                             f"lossy re-encode costs ~1 dB regardless of step "
-                             f"size (--on-regeneration)")
+                             f"lossy re-encode adds ~0.2-0.6 dB of loss on top "
+                             f"of the byte savings (--on-regeneration)")
             combined = _more_conservative(it["action"], regen)
             if combined == "ask" and regen == "ask":
                 it["category"] = "regeneration"   # prompt group of its own

@@ -1663,6 +1663,7 @@ class InteractiveMenu:
             ("5", "Reset all settings", True),
             ("6", "Move settings file", True),
             ("7", preset_label, True),
+            ("8", "Repair JPEG recovery in JXLs (jbrd audit/repair)", True),
             ("0", "Exit", True),
         ])
 
@@ -1694,6 +1695,56 @@ class InteractiveMenu:
                 if choice in valid_choices:
                     return choice
                 print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
+
+    def repair_jbrd_flow(self, status) -> None:
+        """Menu option 8: audit/repair jbrd JXLs whose JPEG recovery broke.
+
+        Thin wrapper over `jxl_jpeg_transcoder.py <folder> --repair-jbrd`: the
+        repair itself already works on a copy and only replaces a file when
+        the copy provably reconstructs, but the cautious route (a copy of the
+        folder) is said out loud before anything runs.
+        """
+        script = SCRIPT_DIR / 'jxl_jpeg_transcoder.py'
+        if not script.exists():
+            self._print_error(f"Script not found: {script}")
+            return
+        if not (status.get('djxl') and status.get('exiftool')):
+            self._print_error("djxl and exiftool are required for the repair audit.")
+            return
+
+        default_dir = self.config.config.last_input_dir or str(Path.home())
+        if RICH_AVAILABLE and console:
+            console.print("\n[bold cyan]Repair JPEG recovery (jbrd)[/bold cyan]")
+            console.print(
+                "[dim]v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files, "
+                "which can make djxl --reconstruct_jpeg fail for sources that already "
+                "had XMP. This scans every JXL under a folder and repairs the broken "
+                "ones. The repair works on a COPY and only replaces a file when the "
+                "copy provably reconstructs — the cautious route is still to run it "
+                "on a copy of the folder first.[/dim]")
+            folder = Prompt.ask("Folder to scan", default=default_dir)
+            audit = Confirm.ask("Audit only (dry run, nothing written)?", default=True)
+        else:
+            print("\n--- Repair JPEG recovery (jbrd) ---")
+            print("v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files,")
+            print("which can make djxl --reconstruct_jpeg fail for sources that")
+            print("already had XMP. The repair works on a COPY and only replaces a")
+            print("file when the copy provably reconstructs — the cautious route is")
+            print("still to run it on a copy of the folder first.")
+            folder = input(f"Folder to scan [{default_dir}]: ").strip() or default_dir
+            audit_input = input("Audit only (dry run, nothing written)? [Y/n]: ").strip().lower()
+            audit = not audit_input.startswith('n')
+
+        if not Path(folder).is_dir():
+            self._print_error(f"Folder not found: {folder}")
+            return
+
+        cmd = [sys.executable, str(script), folder, '--repair-jbrd']
+        if audit:
+            cmd.append('--dry-run')
+        rc = self._stream_child(cmd)
+        if rc != 0:
+            self._print_error("Repair reported files still broken — see the log above.")
 
     def edit_settings(self) -> None:
         current = self.config.config
@@ -3675,7 +3726,8 @@ class InteractiveMenu:
                 # the main use case (encoder previews -> archive) never
                 # reaches this question.
                 console.print("[dim]If a file was already lossy-recompressed once (generation >= 2) "
-                              "and this run would add another generation (~1 dB each, measured):[/dim]")
+                              "and this run would add another generation (each adds ~0.2-0.6 dB of "
+                              "loss on top of the byte savings, measured):[/dim]")
                 rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
                                 choices=["copy", "skip", "convert"], default="convert")
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
@@ -3795,7 +3847,7 @@ class InteractiveMenu:
                 workflow.setdefault('advanced_options', {})['on_downgrade'] = (
                     dg_input if dg_input in ("copy", "skip", "convert") else "copy")
                 print("If a file was already lossy-recompressed once (generation >= 2) and this run")
-                rg_input = input("would add another generation (~1 dB each): copy/skip/convert [convert]: ").strip().lower()
+                rg_input = input("would add another generation (each adds ~0.2-0.6 dB of loss on top of the byte savings): copy/skip/convert [convert]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = (
                     rg_input if rg_input in ("copy", "skip", "convert") else "convert")
             elif 'lossy' in conv_type:
@@ -4195,6 +4247,12 @@ class InteractiveMenu:
             if RICH_AVAILABLE and console:
                 no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
                 no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
+                # Only the JXL -> JPEG lossless path ever hits reconstruction.
+                auto_repair = False
+                if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
+                    auto_repair = Confirm.ask(
+                        "If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified)",
+                        default=False)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
@@ -4203,6 +4261,10 @@ class InteractiveMenu:
                 no_md5 = md5_input.startswith('y')
                 verify_input = input("Skip validation? [y/N]: ").strip().lower()
                 no_verify = verify_input.startswith('y')
+                auto_repair = False
+                if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
+                    ar_input = input("If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified) [y/N]: ").strip().lower()
+                    auto_repair = ar_input.startswith('y')
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
                 output_suffix = input("Output suffix (e.g., _converted): ").strip()
@@ -4216,6 +4278,8 @@ class InteractiveMenu:
 
             advanced_options['no_md5'] = no_md5
             advanced_options['no_verify'] = no_verify
+            if auto_repair:
+                advanced_options['auto_repair_jbrd'] = True
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
@@ -5719,6 +5783,8 @@ class InteractiveMenu:
                 cmd.append('--no-md5')
             if advanced.get('no_verify'):
                 cmd.append('--no-verify')
+            if advanced.get('auto_repair_jbrd'):
+                cmd.append('--auto-repair-jbrd')
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -6321,6 +6387,8 @@ class InteractiveMenu:
                 cmd.append('--no-md5')
             if advanced.get('no_verify'):
                 cmd.append('--no-verify')
+            if advanced.get('auto_repair_jbrd'):
+                cmd.append('--auto-repair-jbrd')
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -7077,6 +7145,9 @@ def _main():
 
         elif choice == "7":
             menu.presets_menu(status)
+
+        elif choice == "8":
+            menu.repair_jbrd_flow(status)
 
         elif choice == "3":
             status = checker.check_dependencies(force=True)

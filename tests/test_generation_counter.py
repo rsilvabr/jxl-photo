@@ -6,8 +6,9 @@ gen=N leads the machine block and is DERIVED (max of stored token and lossy
 chain length), never incremented. These tests pin:
 
 - the escalation hole: d_new > d_old passes every step of a lossy chain, so
-  only the gen count lets --on-regeneration fire (measured ~1 dB per lossy
-  generation regardless of step size);
+  only the gen count lets --on-regeneration fire (each extra lossy generation
+  adds ~0.2-0.6 dB of loss on top of the byte savings, measured at a fixed
+  file size);
 - reconciliation (max), legacy fields (chain, no gen=), d=0 not counting;
 - the recompressor appending instead of replacing, and the encoder appending
   even at identical d/e (no dedup);

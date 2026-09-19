@@ -317,7 +317,7 @@ def test_real_repair_recovers_a_marker_damaged_jxl(tmp_path):
     jxl = tmp_path / "photo.jxl"
     subprocess.run(["cjxl", str(jpg), str(jxl), "--lossless_jpeg=1"],
                    check=True, capture_output=True)
-    # What v2.0.0-v2.1.0 did to every JPEG -> JXL transcode:
+    # What v2.0.0-v2.0.3 did to every JPEG -> JXL transcode:
     subprocess.run(["exiftool", "-q", "-overwrite_original",
                     "-XMP-dc:Relation+=jxlphoto-src:0123456789abcdef",
                     "-XMP-dc:Relation+=jxlphoto-srcsum:fedcba9876543210",

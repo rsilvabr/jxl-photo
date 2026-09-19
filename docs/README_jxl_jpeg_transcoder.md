@@ -339,12 +339,19 @@ Options:
   --force-convert    Override auto-detect, force lossy conversion
   --decode           Force decode direction for JXL files
   --repair-jbrd      AUDIT/REPAIR mode (no conversion): test every JXL under
-                     the input for broken JPEG reconstruction (v2.0.0-v2.x wrote
+                     the input for broken JPEG reconstruction (v2.0.0-v2.0.3 wrote
                      XMP markers into jbrd containers, which breaks
                      djxl --reconstruct_jpeg for sources that had XMP), strip
                      those markers where found, retest, and report. --dry-run
                      reports without writing. Exit 1 while any file is still
                      broken. See "Repairing broken JPEG reconstruction".
+  --auto-repair-jbrd [JXL -> JPEG lossless decode, djxl >= 0.12] when the
+                     reconstruction fails, repair a COPY of the JXL and decode
+                     from it — the JXL itself is never modified (heal the
+                     archive with --repair-jbrd). The recovered JPEG has
+                     identical image data but re-serialized XMP, so it is not
+                     bit-identical to the original and the delete gate never
+                     deletes that JXL in the same run.
 
   --no-md5           Skip MD5 storage (encode only)
   --no-verify        Skip MD5 verification (decode only)
@@ -475,7 +482,7 @@ per file.
 
 ## Repairing broken JPEG reconstruction (`--repair-jbrd`)
 
-v2.0.0–v2.x wrote XMP provenance markers (`jxlphoto-src:`/`jxlphoto-srcsum:`)
+v2.0.0–v2.0.3 wrote XMP provenance markers (`jxlphoto-src:`/`jxlphoto-srcsum:`)
 into **every** JXL, including `jbrd` containers. For a source JPEG that
 already had XMP (typical of Lightroom / Capture One exports), that appended
 XMP makes `djxl --reconstruct_jpeg` **fail** — the original JPEG stops being
@@ -516,6 +523,26 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd
 
 **Every JPEG→JXL archive made with v2.0.0+ should pass through this check
 once** before the source JPEGs are discarded.
+
+### Decode-side remedies
+
+When a JXL→JPEG lossless decode hits the damage, the error now names both
+remedies instead of a bare djxl failure:
+
+- **`--repair-jbrd`** heals the archive (above). Safest route: run it on a
+  **copy** of the files first — the repair only replaces a file when the
+  repaired copy provably reconstructs, but a copy costs nothing.
+- **`--auto-repair-jbrd`** is the "I just want my JPEGs" path: on a failed
+  reconstruction it repairs a **copy in the system temp**, decodes from it,
+  and leaves the JXL byte-for-byte untouched. The recovered JPEG has
+  identical image data but re-serialized XMP bytes, so it is not
+  bit-identical to the original JPEG — which is why the delete gate refuses
+  to delete that JXL in the same run, and why the archive itself still needs
+  `--repair-jbrd` afterwards.
+
+Also available in the wrapper: the auto-repair is a Step 6A (advanced
+options) question on the JXL→JPEG direction, and `--repair-jbrd` is main
+menu option 8.
 
 * * *
 

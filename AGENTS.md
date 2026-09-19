@@ -27,7 +27,7 @@
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
   recovery with a real reconstruction before unlinking a JPEG; ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
-  v2.0.0–v2.x versions
+  v2.0.0–v2.0.3 versions
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
   lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
   recompressor both append one entry per encode and reconcile `gen` as

@@ -65,10 +65,12 @@ the recompressor's main use case — taking the encoder's `d=0.1` previews to
 the final `d=1.0` archive — into an `ask` that silently skips everything on
 unattended runs. The first recompression of an encoder output is expected;
 the guard exists for the **second** lossy re-encode onwards. Measured on real
-files, each lossy re-encode costs ~1 dB regardless of how small the distance
-step is, and after generation 1 the nominal `d` stops describing quality (a
-17-generation chain of small steps landed ~8.5 dB below a single direct
-encode at the same file size). `d_new > d_old` cannot see this — it compares
+files, each extra lossy generation costs ~0.2–0.6 dB of PSNR on top of what
+the byte reduction alone costs (at a fixed file size, and growing with the
+number of generations), and the recorded nominal `d` stops describing the
+result: a 19-generation chain of small steps landed 9 dB below a single
+direct encode at the same file size (nominal d≈1.5, perceptual quality of
+d≈4–7). `d_new > d_old` cannot see this — it compares
 one step at a time, so a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years
 apart passes every check while the image degrades. The `gen=` count is what
 closes that hole. A lossless request (`d=0`) does not fire it: a lossless

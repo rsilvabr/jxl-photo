@@ -80,6 +80,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 │  5  Reset all settings                                                                                             │
 │  6  Move settings file                                                                                             │
 │  7  Presets (2 saved)                                                                                              │
+│  8  Repair JPEG recovery (jbrd audit/repair)                                                                       │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -119,6 +120,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `5` | Reset all settings | Delete config and start fresh |
 | `6` | Move settings file | Toggle between script folder and User Profile |
 | `7` | Presets | Save the last workflow under a name and re-run it later. See below |
+| `8` | Repair JPEG recovery (jbrd) | Audit/repair JXLs whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers). Audit (dry run) is the default; the repair works on a copy and only replaces a file when the copy provably reconstructs |
 | `0` | Exit | Quit |
 
 The stored workflow is validated before a repeat or a preset replays it: the
@@ -582,6 +584,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Target ICC profile | 6A | JXL→TIFF |
 | Skip ICC cleanup | 6A | JXL→TIFF |
 | Skip MD5 verification | 6A | JPEG↔JXL |
+| Auto-repair broken JPEG recovery | 6A | JXL→JPEG only; repairs a copy and decodes from it, the JXL is never modified (default: off) |
 | Skip validation | 6A | JPEG↔JXL (risky) |
 | Output suffix | 6A | JPEG↔JXL |
 | Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
