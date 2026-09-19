@@ -161,6 +161,17 @@ CJXL_MODULAR = False
 # True  — forces Modular encoder for lossy (--modular=1).
 #   Less efficient for photos, but good for screenshots/UI art.
 #   Use only if you need non-XYB encoding for compatibility reasons.
+#
+# Measured (2026-09, 7 real images — Nikon Zf/Z8 ProPhoto 16-bit TIFFs,
+# medium-format film scan, IR dust-channel scan, negative scan; cjxl e=7,
+# d=0.05 and d=0.10, scored with SSIMULACRA2 against the sRGB reference):
+#   Quality: a wash — modular won 5 of 14 head-to-heads, VarDCT won 9,
+#     every margin ≤ 0.39 (indistinguishable).
+#   Size:   VarDCT smaller in 14 of 14 — modular up to +33% larger.
+#   Speed:  VarDCT 20-100x faster (1-6s vs 40-599s per file).
+# Conclusion: there is no photo use case for lossy modular; the False
+# default is correct. This setting exists for graphics/screenshot batches.
+# Can also be set via --modular CLI argument (on/off).
 
 D50_PATCH_MODE = "auto"
 # D50 illuminant patch for Capture One ICC compatibility.
@@ -368,6 +379,11 @@ Options:
                     ('off' also strips any gen=/cjxl record the source TIFF
                     carries — the only way to deliberately discard the lineage)
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
+  --modular         on/off — force the Modular encoder for LOSSY output (default off:
+                    cjxl's VarDCT). Screenshots/graphics only — measured on real
+                    photos: equal quality, bigger files, 20-100x slower (see
+                    CJXL_MODULAR in the settings section). Lossless always uses
+                    Modular regardless
   --icc-png-strategy cautious|heuristic|always|skip
                     How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
   --strip           Strip all metadata from output (no EXIF/XMP preservation;

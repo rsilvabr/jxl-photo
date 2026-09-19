@@ -603,6 +603,10 @@ CJXL_MODULAR = False
 #
 # Note: lossless (d=0) always uses Modular regardless of this setting.
 #       CJXL_MODULAR only affects lossy (d > 0).
+# Measured 2026-09 on 7 real photos/scans (SSIMULACRA2, d=0.05/0.10, e=7):
+#       quality a wash (margins <= 0.39), VarDCT smaller in 14/14 (modular
+#       up to +33%), VarDCT 20-100x faster. No photo use case for lossy
+#       modular — see docs/README_jxl_tiff_encoder.md (CJXL_MODULAR).
 
 USE_RAM_FOR_PNG = True
 # True  -> PNG intermediate stays entirely in RAM (faster, ~400MB RAM per worker)
@@ -2673,6 +2677,11 @@ def _sample_one_ratio(tiff_path: Path, distance: float, effort: int):
         jxl = tmp / "s.jxl"
         cmd = [_get_cjxl_cmd() or "cjxl", str(png), str(jxl),
                "-d", str(distance), "--effort", str(effort), "--container=1"]
+        # The estimate must match the real encode path: lossy modular files
+        # run up to a third larger, so estimating with VarDCT would
+        # under-report the space a --modular run needs.
+        if CJXL_MODULAR and distance > 0:
+            cmd.append("--modular=1")
         r = subprocess.run(cmd, capture_output=True, timeout=300)
         if r.returncode != 0 or not jxl.exists():
             return None
@@ -4524,6 +4533,11 @@ def main():
                              "record from the output — the lineage is deliberately discarded")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
                         help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
+    parser.add_argument("--modular",        type=str, default=None, choices=["on", "off"],
+                        help="Force the Modular encoder for LOSSY output (default off: cjxl's "
+                             "VarDCT). For screenshots/graphics only — measured on real photos: "
+                             "equal quality, bigger files, 20-100x slower. Lossless always uses "
+                             "Modular regardless.")
     parser.add_argument("--icc-png-strategy", type=str, default=None,
                         choices=["heuristic", "always", "skip", "cautious"],
                         help="How to handle ICC in the PNG intermediate for lossy encoding: "
@@ -4542,7 +4556,7 @@ def main():
                         help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
@@ -4653,6 +4667,8 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
         D50_PATCH_MODE = args.d50_patch
+    if args.modular is not None:
+        CJXL_MODULAR = (args.modular == "on")
     if args.icc_png_strategy is not None:
         ICC_PNG_STRATEGY = args.icc_png_strategy
 

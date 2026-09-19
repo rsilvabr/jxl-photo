@@ -577,6 +577,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Strip metadata | 6A | TIFF→JXL |
 | D50 patch mode | 6A | auto / on / off |
 | Encode tag location | 6A | xmp / software / off |
+| Force Modular encoder (lossy) | 6A | TIFF→JXL; NOT for photos — screenshots/graphics only (default off: VarDCT) |
 | ICC matrix mode | 6A | JXL→TIFF |
 | Target ICC profile | 6A | JXL→TIFF |
 | Skip ICC cleanup | 6A | JXL→TIFF |

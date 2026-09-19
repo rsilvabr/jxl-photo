@@ -3942,6 +3942,11 @@ class InteractiveMenu:
             if RICH_AVAILABLE and console:
                 strip_meta = Confirm.ask("Strip metadata?", default=False)
                 encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"], default="xmp")
+                # Measured on real photos: equal quality, bigger files, 20-100x
+                # slower — only sensible for screenshots/graphics batches.
+                force_modular = Confirm.ask(
+                    "Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only)",
+                    default=False)
                 # Thumbnail option
                 thumb_default = self.config.config.last_jpeg_thumbnail if self.config.config.last_jpeg_thumbnail is not None else False
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
@@ -3982,6 +3987,8 @@ class InteractiveMenu:
                 strip_meta = strip_input.startswith('y')
                 encode_tag_input = input("Encode tag (xmp/software/off) [xmp]: ").strip().lower() or "xmp"
                 encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else "xmp"
+                modular_input = input("Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only) [y/N]: ").strip().lower()
+                force_modular = modular_input.startswith('y')
                 # Thumbnail option
                 thumb_default = "y" if self.config.config.last_jpeg_thumbnail else "n"
                 thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
@@ -4023,6 +4030,8 @@ class InteractiveMenu:
 
             advanced_options['strip'] = strip_meta
             advanced_options['encode_tag'] = encode_tag
+            if force_modular:
+                advanced_options['modular'] = 'on'
             advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
@@ -5555,6 +5564,8 @@ class InteractiveMenu:
                 cmd.append('--strip')
             if advanced.get('d50_patch'):
                 cmd.extend(['--d50-patch', advanced['d50_patch']])
+            if advanced.get('modular') == 'on':
+                cmd.extend(['--modular', 'on'])
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -6052,6 +6063,8 @@ class InteractiveMenu:
                 cmd.append('--strip')
             if advanced.get('d50_patch'):
                 cmd.extend(['--d50-patch', advanced['d50_patch']])
+            if advanced.get('modular') == 'on':
+                cmd.extend(['--modular', 'on'])
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('delete_source'):
