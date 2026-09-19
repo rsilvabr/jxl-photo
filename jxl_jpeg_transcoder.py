@@ -1942,10 +1942,12 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                 logger.warning(f" AUTO-REPAIR (markers stripped on a copy; the JXL "
                                f"itself is unchanged — heal the archive with "
                                f"--repair-jbrd) | {jxl_path.name}")
-                r = subprocess.run(["djxl", "--reconstruct_jpeg",
-                                    str(repaired_copy), str(write_path)],
-                                   capture_output=True, timeout=CODEC_TIMEOUT)
-                shutil.rmtree(repaired_copy.parent, ignore_errors=True)
+                try:
+                    r = subprocess.run(["djxl", "--reconstruct_jpeg",
+                                        str(repaired_copy), str(write_path)],
+                                       capture_output=True, timeout=CODEC_TIMEOUT)
+                finally:
+                    shutil.rmtree(repaired_copy.parent, ignore_errors=True)
         if r.returncode != 0:
             hint = ""
             if is_jxl_decode and _tool_at_least("djxl", 0, 12):
