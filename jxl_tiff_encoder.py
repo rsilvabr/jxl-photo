@@ -1209,7 +1209,15 @@ def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file  = LOG_DIR / f"{timestamp}.log"
+    # PID suffix: two children of the same script started in the same second
+    # (two manifest entries) would otherwise open the SAME file in append;
+    # the counter covers a same-process repeat inside that second.
+    n = 0
+    while True:
+        log_file  = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
+        if not log_file.exists():
+            break
+        n += 1
 
     logger = logging.getLogger("jxl_convert")
     logger.setLevel(logging.INFO)
@@ -2274,15 +2282,44 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # exactly where a generation of loss happens, so deduplicating it would
     # undercount the generations the recompressor's --on-regeneration guards.
     if ENCODE_TAG_MODE == "xmp":
+        # The EXIF Software field can carry a STALE chain too (a TIFF recovered
+        # by the decoder copies -exif:all, chain included, from a JXL that was
+        # encoded with --encode-tag software). Left alone, -tagsfromfile
+        # -exif:all carries it into the JXL alongside the new Description
+        # record, and the recompressor would merge the two contradictory
+        # records and trust the stale one (wrong d/e, inflated gen). Mirror
+        # the "software" branch in reverse: merge both fields' chains into the
+        # Description record, then strip the machine block from Software
+        # (keeping any unrelated text, e.g. a real editor name).
+        sw_arg = tmp_dir / "sw_read.args"
+        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
+        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        merged_entries, merged_stored = _merge_lineage_blocks(
+            existing_desc, original_sw)
+        merged_chain = " | ".join(
+            ([f"gen={merged_stored}"] if merged_stored else [])
+            + [f"cjxl d={d} e={e}" for d, e in merged_entries])
+        user_text, _d_orphans = _strip_encode_params(existing_desc)
+        if user_text and merged_chain:
+            seed = f"{user_text} | {merged_chain}"
+        else:
+            seed = user_text or merged_chain
         final_description, stored, counted, orphans = _append_encode_entry(
-            existing_desc, CJXL_DISTANCE, CJXL_EFFORT)
+            seed, CJXL_DISTANCE, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
-        if orphans:
-            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
+        if orphans or _d_orphans:
+            logger.warning(f"Stripped {orphans + _d_orphans} orphaned gen= token(s) from "
                            f"dc:Description of {tiff_path.name} — the field "
                            f"was written badly earlier")
         # Set dc:Description with concatenated content
         args_lines.append(f"-xmp-dc:Description={_argfile_safe(final_description)}")
+        clean_sw, s_orphans = _strip_encode_params(original_sw)
+        if clean_sw != original_sw:
+            if s_orphans:
+                logger.warning(f"Stripped {s_orphans} orphaned gen= token(s) "
+                               f"from Software of {tiff_path.name}")
+            args_lines.append(f"-Software={_argfile_safe(clean_sw)}")
 
     elif ENCODE_TAG_MODE == "software":
         # For software mode, we don't keep the record in dc:Description.
@@ -3206,6 +3243,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
     # pre-existing JXL is never touched when we failed before writing.
     output_dirty = False
 
+    # Never write under the final name without staging: a run killed
+    # externally (idle-timeout kill, Ctrl+C, power loss) would leave a
+    # TRUNCATED file at the final path with a NEW mtime, which the next
+    # smart-sync run then treats as up to date forever. Write to a uuid temp
+    # BESIDE the final and swap it in with an atomic same-folder os.replace
+    # only after the integrity check passed — so the final name only ever
+    # names a verified, complete file.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+
     # Identity of a pre-existing output (non-staging only). The error handler
     # compares against this: a file whose identity is UNCHANGED was never
     # touched by this run (e.g. cjxl failed at startup) and must be kept.
@@ -3560,6 +3608,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # (The except handler deletes it via output_dirty.)
             if not _verify_jxl_integrity(write_path):
                 raise RuntimeError("cjxl returned 0 but the output failed the JXL integrity check")
+
+            if _promote_local:
+                # Atomic same-folder swap (see the _promote_local note above):
+                # a partial never carries the final name. A failure raises
+                # into the error handler, which deletes the temp.
+                os.replace(str(write_path), str(final_path))
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"

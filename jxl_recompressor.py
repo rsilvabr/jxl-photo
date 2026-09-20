@@ -813,7 +813,15 @@ def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file  = LOG_DIR / f"{timestamp}.log"
+    # PID suffix: two children of the same script started in the same second
+    # (two manifest entries) would otherwise open the SAME file in append;
+    # the counter covers a same-process repeat inside that second.
+    n = 0
+    while True:
+        log_file  = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
+        if not log_file.exists():
+            break
+        n += 1
 
     logger = logging.getLogger("jxl_recompress")
     logger.setLevel(logging.INFO)
@@ -2311,6 +2319,22 @@ def process_group(items, workers: int):
                     # No staging and not in place: written directly at the final path.
                     promoted.add(src_str)
                     continue
+                if not it["in_place"] and it["write"].parent == final_path.parent:
+                    # Beside-the-final uuid temp (no staging): same volume, so
+                    # os.replace is atomic and overwrites an existing output —
+                    # _promote_from_staging's shutil.move would NOT (os.rename
+                    # refuses an existing destination on Windows).
+                    try:
+                        os.replace(str(it["write"]), str(final_path))
+                        moved = True
+                    except OSError as e:
+                        logger.error(f"  REPLACE FAILED | {final_path.name} | {e}")
+                        moved = False
+                    if not moved:
+                        results[src_str] = ("error", final_str)
+                        continue
+                    promoted.add(src_str)
+                    continue
                 if it["in_place"]:
                     # The original is replaced ONLY now — after every gate above
                     # passed on the verified write_path. Same-volume os.replace is
@@ -2490,9 +2514,11 @@ def _delete_gate(items, results, promoted):
             ok, reason = False, "output missing"
         elif not _verify_jxl_integrity(final_path):
             ok, reason = False, "output failed integrity check"
-        elif processed_this_run and it["action"] == "copy":
+        elif processed_this_run and (it["action"] == "copy" or status == "copied"):
             # A verbatim copy is provable byte-for-byte — the strongest gate
-            # there is, so it is required, not optional.
+            # there is, so it is required, not optional. Status "copied" covers
+            # the KEEP_SMALLER fallback too: action stays "convert", but the
+            # output is a byte-copy of the source and must pass the same check.
             try:
                 if md5_of_file(src) != md5_of_file(final_path):
                     ok, reason = False, "copy MD5 mismatch"
@@ -2998,7 +3024,11 @@ def main():
     # Refused items leave the run, but the delete gate still has to see them:
     # a refused page vetoes the deletion of its multi-page siblings.
     provenance_refused = []
-    if (DELETE_SOURCE and not args.dry_run
+    # Also runs in a dry run — as a PREVIEW: the refusals are reported (and
+    # counted in the summary's errors) but no item leaves the plan. Gating this
+    # on `not args.dry_run` made the simulation promise outputs the real run
+    # would refuse (the decoder and the encoder already preview theirs).
+    if (DELETE_SOURCE
             and _run_collapses_structure(args.mode, args.output, args.input)):
         existing = [it for it in items
                     if it["action"] in ("convert", "copy") and not it["in_place"]
@@ -3017,9 +3047,12 @@ def main():
                           "— cannot prove it is this photo's archive; refusing to "
                           "overwrite it and delete the source")
                 failures.append((str(it["src"]), reason))
-                logger.error(f"REFUSED | {it['src'].name} | {reason}")
-                _log_rejected_file(str(it["src"]), f"provenance: {reason}")
-            if refused:
+                if args.dry_run:
+                    logger.info(f" DRY | would REFUSE | {it['src'].name} | {reason}")
+                else:
+                    logger.error(f"REFUSED | {it['src'].name} | {reason}")
+                    _log_rejected_file(str(it["src"]), f"provenance: {reason}")
+            if refused and not args.dry_run:
                 refused_ids = {id(it) for it in refused}
                 items = [it for it in items if id(it) not in refused_ids]
                 provenance_refused = refused
@@ -3044,7 +3077,10 @@ def main():
                           skipped=n_skip, errors=len(failures), log_file=log_file,
                           extras={"recompressed": n_convert, "copied": n_copy},
                           failures=failures, dry_run=True)
-        sys.exit(1 if failures else 0)
+        # A simulation exits 0 even with predicted failures (the refusals above):
+        # nothing happened, and errors>0 is already in the JSON summary — same
+        # contract as the encoder's dry run.
+        sys.exit(0)
 
     # --- Confirmation (destructive runs) ------------------------------------
     any_in_place_convert = any(it["in_place"] and it["action"] == "convert"
@@ -3080,7 +3116,14 @@ def main():
         elif TEMP2_DIR is not None:
             it["write"] = Path(TEMP2_DIR) / f"{uuid.uuid4().hex}_{it['src'].stem}.jxl"
         else:
-            it["write"] = it["final"]
+            # Never write under the final name: a run killed externally
+            # (idle-timeout kill, Ctrl+C, power loss) would leave a TRUNCATED
+            # file at the final path with a NEW mtime, which the next smart
+            # sync then treats as up to date forever. A uuid temp BESIDE the
+            # final, promoted with an atomic same-folder os.replace (handled
+            # in process_group), means the final name only ever names a
+            # verified, complete file.
+            it["write"] = it["final"].parent / f"{uuid.uuid4().hex}_{it['final'].name}"
         work_items.append(it)
 
     # The [n/total] progress counter must count what will actually run —

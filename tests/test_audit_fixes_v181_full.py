@@ -1452,7 +1452,10 @@ def test_zero_byte_output_marked_error_encoder(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kw):
         if "cjxl" in str(cmd[0]):
-            final.write_bytes(b"")  # cjxl "succeeds" but wrote 0 bytes
+            # cjxl "succeeds" but wrote 0 bytes — written to the OUTPUT
+            # argument (a uuid temp beside `final` since the atomic-rename
+            # change), not to `final` itself.
+            Path(cmd[2]).write_bytes(b"")
             return _FakeRun()
         return _FakeRun()
 

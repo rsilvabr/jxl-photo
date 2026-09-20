@@ -18,6 +18,7 @@ Round 33 / 2026-08-23: Full-repo audit — 5 mediums, all in the archive/delete 
 Round 34 / 2026-08-23: The low-severity sweep that follows every audit — 4 batches, one per script; none destroys data, each makes a tool lie a little or die ugly (see top section)
 Round 35 / 2026-09-18: First audit of v2.1.0 — 16 bugs, 4 critical: JPEG → JXL was no longer bit-exact recoverable for JPEGs with XMP (since v2.0.0), and three data-loss paths in the new recompressor/decoder (see top section)
 Round 36 / 2026-09-19: Review of the round-35 fixes against the real fixtures — 7 regressions they introduced (2 data-losing) plus the tracker renumbering (see top section)
+Round 37 / 2026-09-20: Second audit of v2.1.0 — 10 bugs, none in the conversion core: dry runs that promised what the real run refuses, outputs written under their final name, cross-process checksum races. Ships in v2.1.1 (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -26,6 +27,38 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-37 audit (2026-09-20)
+
+The second audit of v2.1.0, from `bugs_to_fix_260920.md`. Ten bugs, all in the
+safety/reporting layer around the codecs — the conversion core is again
+untouched. Headline: a dry run could promise outputs the real run refuses, and
+every script wrote its output under the FINAL name, so a run killed externally
+left a truncated file with a fresh mtime that the next smart-sync run trusted
+forever. All fixes ship in v2.1.1.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 347 | **The wrapper dropped the recompressor policies.** Step 6A rebuilt `advanced_options` from scratch, discarding the `on_downgrade`/`on_regeneration`/`on_unknown`/`jbrd_policy`/`no_keep_smaller` already chosen in Step 6 — the child fell back to `ask`, a SILENT SKIP on the wrapper's pipe. The manifest builder never emitted `--on-unknown`/`--jbrd-policy` at all, and the recompressor wizard branch never asked them | wrapper | ✅ FIXED (`_carry_recompress_policies()` carries the five keys through every branch of Step 6A, including the advanced-declined path; the recompressor branch asks `on_unknown` (default convert) and `jbrd_policy` (default copy) in rich and plain modes and no longer asks the transcoder's no-md5/no-verify/output-suffix; both builders emit `--on-unknown` and `--jbrd-policy`) |
+| 348 | **`--encode-tag xmp` ignored a lineage chain sitting in EXIF Software.** A TIFF recovered by the decoder from a `--encode-tag software` JXL carries the `gen=/cjxl d= e=` chain in EXIF Software; `-tagsfromfile -exif:all` copied it into the new JXL next to the fresh dc:Description record, and the recompressor — which merges both fields — trusted the STALE one (wrong d/e, inflated gen) | encoder | ✅ FIXED (the xmp branch mirrors the software branch in reverse: `_merge_lineage_blocks` over both fields seeds the dc:Description record, then the machine block is stripped from Software — unrelated user text, e.g. an editor name, is kept. Real-codec regression test: Software chain → merged Description, clean Software) |
+| 349 | **The keep-smaller fallback skipped the copy MD5 proof.** `_delete_gate` gated the byte-for-byte check on `action == "copy"`, but the KEEP_SMALLER fallback reports status `"copied"` with action still `"convert"` — a CORRUPT copy certified the deletion of its source | recompressor | ✅ FIXED (the gate fires on `action == "copy" or status == "copied"` — a verbatim copy is the strongest proof there is, so it is required, not optional) |
+| 350 | **Outputs were written under their FINAL name.** A run killed externally (idle-timeout kill, Ctrl+C, power loss) left a TRUNCATED file at the final path with a NEW mtime, which the next smart-sync run then treated as up to date forever | all four scripts | ✅ FIXED (uuid temp BESIDE the final, promoted with an atomic same-folder `os.replace` only after the integrity check — the final name only ever names a verified, complete file. Encoder/decoder/transcoder redirect inside the workers when `write_path == final_path`; the recompressor assigns the temp in `main()` and promotes in a new `process_group` branch — `_promote_from_staging`'s `shutil.move`/`os.rename` refuse an existing destination on Windows, so a keep-smaller re-run over an existing output needs `os.replace`) |
+| 351 | **`checksums.md5` appends raced between child processes.** `_md5_db_lock` is a thread lock — per process. Two manifest entries targeting the same folder are two child processes, and their appends interleaved mid-line, corrupting the db | transcoder | ✅ FIXED (`_append_checksum_line`: a sibling `<db>.lock` created O_EXCL with backoff, 10 s timeout, 120 s stale reclaim, fail-CLOSED on every path — a lock that cannot be taken means the line is NOT written, since a missing entry reads as "no provenance recorded" and blocks deletions, while a torn line is worse) |
+| 352 | **Dry runs skipped the provenance refusal gate** — the simulation promised outputs the real run refuses, and the summary reported errors=0 for a run that will fail. The recompressor dry run also exited nonzero | decoder, recompressor | ✅ FIXED (the gate runs in dry runs as a PREVIEW: `DRY \| would REFUSE` per file, counted in the summary's errors, no item leaves the plan; the recompressor dry run exits 0 — a simulation with predicted failures is still a successful simulation, same contract as the encoder's) |
+| 353 | **Two runs started in the same second opened the SAME log file** — timestamp-only names, so two manifest children appended interleaved into one log | all four scripts + wrapper | ✅ FIXED (`{timestamp}_{pid}.log`, with a counter bump for same-process repeats inside one second) |
+| 354 | **A missing final output left the decoder's delete gate silently** — `continue` with no `kept++` and no KEEP line, invisible in the summary | decoder | ✅ FIXED (`_delete_stats["kept"] += 1` + a `KEEP (final output missing)` warning) |
+| 355 | **The jbrd repair wrote its working copy as `*.jxl`** — a crash between the strip and the cleanup left a fake input the next recursive scan would eat — and `_jxl_binds_to_archived_jpeg`'s reconstruction `mkstemp` ignored `TEMP_DIR` | transcoder | ✅ FIXED (`<uuid>_repair_<stem>.tmp`; `mkstemp(dir=TEMP_DIR)`) |
+| 356 | **(a) The wrapper's mode-6 collision mirror exempted the requested subfolder** the real finder does NOT exempt (mode 6 has no requested subfolder — the exemption is mode-7 semantics), reporting collisions the child would never produce; **(b) `--repair-jbrd` demanded cjxl** it never invokes — repair only decodes (djxl ≥ 0.12) and edits metadata (exiftool) | wrapper, transcoder | ✅ FIXED ((a) the mirror passes `honor_requested_subfolder=(mode != 6)`, matching the finder exactly; (b) repair is routed before the full tool check with its own two-tool requirement) |
+
+Regression tests: `tests/test_audit_round37.py` (23 tests; the #348 lineage
+test is real-codec, skipped without cjxl/djxl/exiftool). Proven against the
+pre-fix code (`git show HEAD:<script>` copies): 20 of 23 fail. The three that
+pass are the #349 positive control (a faithful copy must still delete), the
+#350 recompressor promotion pin (pre-fix `shutil.move` also landed the bytes,
+just non-atomically), and the #351 concurrency test (torn appends are
+timing-dependent — the fail-closed lock test is the discriminator).
 
 ---
 

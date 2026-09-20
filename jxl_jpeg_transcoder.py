@@ -1179,7 +1179,15 @@ def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = LOG_DIR / f"{timestamp}.log"
+    # PID suffix: two children of the same script started in the same second
+    # (two manifest entries) would otherwise open the SAME file in append;
+    # the counter covers a same-process repeat inside that second.
+    n = 0
+    while True:
+        log_file = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
+        if not log_file.exists():
+            break
+        n += 1
 
     logger = logging.getLogger("jxl_jpeg_transcoder")
     logger.setLevel(logging.INFO)
@@ -1247,12 +1255,63 @@ def md5_of_file(path: Path) -> str:
 
 CHECKSUMS_FILENAME = "checksums.md5"
 
+_MD5_LOCK_TIMEOUT_S = 10.0
+_MD5_LOCK_STALE_S = 120.0
+
+def _append_checksum_line(db_path: Path, entry: str):
+    """Append one line to checksums.md5, serialized ACROSS PROCESSES.
+
+    _md5_db_lock (thread lock) only serializes this process; two manifest
+    entries targeting the same folder are separate child processes, and their
+    appends used to interleave mid-line, corrupting the db. The lock is a
+    sibling `<db>.lock` file created O_EXCL with backoff. Fail-CLOSED on every
+    path: a lock that cannot be taken means the line is NOT written (a missing
+    entry reads as "no provenance recorded", which blocks deletions) — never a
+    possibly-corrupt write. A lock older than _MD5_LOCK_STALE_S is from a
+    crashed process and is reclaimed.
+    """
+    lock_path = db_path.parent / (db_path.name + ".lock")
+    deadline = time.monotonic() + _MD5_LOCK_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age = 0.0  # vanished between open and stat: retry immediately
+            if age > _MD5_LOCK_STALE_S:
+                try:
+                    lock_path.unlink()
+                    continue
+                except OSError:
+                    pass  # someone else reclaimed it first
+            if time.monotonic() >= deadline:
+                logger.warning(f"checksums.md5 stayed locked for "
+                               f"{_MD5_LOCK_TIMEOUT_S:.0f}s — provenance line for "
+                               f"{db_path.parent.name} NOT recorded (fail closed)")
+                return
+            time.sleep(0.05)
+        except OSError as e:
+            logger.warning(f"Could not lock {lock_path} ({e}) — provenance line "
+                           f"NOT recorded (fail closed)")
+            return
+    try:
+        with _md5_db_lock:
+            with open(db_path, "a", encoding="utf-8") as f:
+                f.write(entry)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+
 def store_md5_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}\n"
-    with _md5_db_lock:
-        with open(db_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+    _append_checksum_line(db_path, entry)
 
 def read_md5_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
@@ -1285,9 +1344,7 @@ JXL_SELF_HASH_SUFFIX = ".jxl-md5"
 def store_jxl_self_hash_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}{JXL_SELF_HASH_SUFFIX}\n"
-    with _md5_db_lock:
-        with open(db_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+    _append_checksum_line(db_path, entry)
 
 def read_jxl_self_hash_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
@@ -1781,6 +1838,15 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     # the decode functions).
     output_dirty = False
     jxl_md5 = None
+    # Never write under the final name without staging: a run killed
+    # externally (idle-timeout kill, Ctrl+C, power loss) would leave a
+    # TRUNCATED file at the final path with a NEW mtime, which the next
+    # skip-existing/smart-sync run then treats as done forever. Write to a
+    # uuid temp BESIDE the final and swap it in with an atomic same-folder
+    # os.replace only after the integrity check passed.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -1852,9 +1918,15 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             jxl_md5 = md5_of_file(write_path)
             store_jxl_self_hash_db(checksum_path, jxl_md5)
 
+        if _promote_local:
+            # Atomic same-folder swap: the final name only ever names a
+            # verified, complete file. A failure raises into the except
+            # handler, which deletes the temp.
+            os.replace(str(write_path), str(final_path))
+
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
+        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {final_path.name}")
         # result[4] carries the JXL self-hash so the staging redistribution
         # below can file it next to the source hash at the destination.
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
@@ -1909,6 +1981,12 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     # Initialized before ANY early raise (jbrd check, mkdir) so the except
     # handler never hits unbound variables.
     output_dirty = False
+    # Never write under the final name without staging (see
+    # encode_one_transcode): uuid temp beside the final + atomic os.replace
+    # after the integrity check.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -1996,7 +2074,12 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                     logger.error(f"[{n}/{total}] MD5 FAIL (output deleted) | {jxl_path.name}")
                     return (str(jxl_path), "md5_fail", str(final_path), None)
         else:
-            logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {write_path.name}")
+            logger.info(f"[{n}/{total}] OK | {jxl_path.name} -> {final_path.name}")
+
+        if _promote_local:
+            # Atomic same-folder swap: the final name only ever names a
+            # verified, complete file (MD5-verified when a hash was stored).
+            os.replace(str(write_path), str(final_path))
 
         status = "reconvert" if overwritten else "ok"
         if repaired_copy is not None:
@@ -2107,7 +2190,7 @@ def _jxl_reconstructs_to(jxl_path: Path, jpeg_path: Path) -> bool:
     """
     if not _tool_at_least("djxl", 0, 12):
         return False
-    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_")
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_", dir=TEMP_DIR)
     os.close(fd)
     tmp = Path(tmp_name)
     try:
@@ -2158,7 +2241,7 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
     if not _tool_at_least("djxl", 0, 12):
         logger.debug(f" content-binding unavailable (legacy db, djxl<0.12) | {jxl_path.name}")
         return False
-    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlbind_")
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlbind_", dir=TEMP_DIR)
     os.close(fd)
     tmp = Path(tmp_name)
     try:
@@ -2278,7 +2361,10 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
     the JXL's new self-hash. Without that every later lossless decode failed
     its MD5 verification and the delete gates refused the file forever.
     """
-    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.name}"
+    # .tmp, not .jxl: a crash between here and the finally would otherwise
+    # leave a *.jxl next to the source that the next recursive scan treats as
+    # input. djxl/exiftool read content, not extensions.
+    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
     try:
         rec_md5, detail = _strip_markers_proving_repair(jxl_path, tmp)
         if rec_md5 is None:
@@ -3123,6 +3209,12 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
     # Initialized BEFORE any statement that can raise (mkdir, the codec
     # itself) so the except handler always has them.
     output_dirty = False
+    # Never write under the final name without staging (see
+    # encode_one_transcode): uuid temp beside the final + atomic os.replace
+    # after the integrity check.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -3183,9 +3275,12 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if not _verify_file_integrity(write_path):
             raise RuntimeError("cjxl returned 0 but the output failed the integrity check")
 
+        if _promote_local:
+            os.replace(str(write_path), str(final_path))
+
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {write_path.name}")
+        logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {final_path.name}")
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), None)
     except Exception as e:
         # Remove any partial output produced by THIS run (identity-checked) so
@@ -3318,6 +3413,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
     # Initialized before the try so the except handler can never hit an
     # unbound variable (e.g. if mkdir itself raises).
     output_dirty = False
+    # Never write under the final name without staging (see
+    # encode_one_transcode): uuid temp beside the final + atomic os.replace
+    # after the integrity check.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
     actual_out = write_path
     _pre_identity = _capture_output_identity(write_path, final_path)
 
@@ -3416,9 +3517,12 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         if not _verify_file_integrity(actual_out):
             raise RuntimeError("decode returned 0 but the output failed the integrity check")
 
+        if _promote_local:
+            os.replace(str(actual_out), str(final_path))
+
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
-        logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {actual_out.name}")
+        logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path.name}")
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
     except Exception as e:
@@ -4584,6 +4688,20 @@ def main():
           f"tree for the export marker. Got a file.")
         sys.exit(2)
 
+    # Repair mode: audit/fix broken jbrd reconstruction. Routed before the
+    # FULL tool check below because it neither converts nor cares about the
+    # input's file type; it only needs djxl >= 0.12 and exiftool — requiring
+    # cjxl too refused a repair on a machine that can perfectly well run one.
+    if args.repair_jbrd:
+        if not _tool_at_least("djxl", 0, 12):
+            print("ERROR: --repair-jbrd requires djxl >= 0.12 "
+                  "(djxl --reconstruct_jpeg)")
+            sys.exit(2)
+        if shutil.which(_get_exiftool_cmd()) is None:
+            print("ERROR: --repair-jbrd requires exiftool in PATH")
+            sys.exit(1)
+        sys.exit(cmd_repair_jbrd(args))
+
     # Required tools, once, before any cmd_* runs. Without this a missing
     # cjxl/djxl/exiftool turns into N cryptic per-file FileNotFoundError
     # instead of one clear message. (setup_logger() runs inside each cmd_*,
@@ -4613,16 +4731,6 @@ def main():
     # TEMP2_DIR script setting, not just --staging) and it must never run on a
     # dry run — sweeping is a real deletion of the outputs the KEEP path
     # deliberately preserved for inspection.
-
-    # Repair mode: audit/fix broken jbrd reconstruction. Routed before the
-    # conversion commands because it neither converts nor cares about the
-    # input's file type; it only needs djxl >= 0.12 and exiftool.
-    if args.repair_jbrd:
-        if not _tool_at_least("djxl", 0, 12):
-            print("ERROR: --repair-jbrd requires djxl >= 0.12 "
-                  "(djxl --reconstruct_jpeg)")
-            sys.exit(2)
-        sys.exit(cmd_repair_jbrd(args))
 
     # Route to appropriate command. Each cmd_* returns a (errors, cancelled)
     # tuple so automation/wrappers can detect failures and user cancellations.

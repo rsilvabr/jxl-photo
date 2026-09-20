@@ -3941,6 +3941,19 @@ class InteractiveMenu:
         origin = workflow['origin_format']
         dest = workflow['dest_format']
 
+        # The dict is rebuilt from scratch below — but Step 6 may already have
+        # written the recompressor policies into it (on_downgrade etc.), and
+        # losing them drops the child back to `ask`, which is a SILENT SKIP on
+        # the wrapper's pipe. Capture them up front and carry them across at
+        # the end of every branch.
+        _prev_adv = workflow.get('advanced_options') or {}
+
+        def _carry_recompress_policies(target: Dict) -> None:
+            for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
+                       'jbrd_policy', 'no_keep_smaller'):
+                if _k in _prev_adv:
+                    target[_k] = _prev_adv[_k]
+
         advanced_options = {}
 
         if RICH_AVAILABLE and console:
@@ -3987,6 +4000,7 @@ class InteractiveMenu:
                 advanced_options['provenance'] = workflow['provenance']
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
+            _carry_recompress_policies(advanced_options)
             workflow['advanced_options'] = advanced_options
             return self._wizard_parameters_expert(workflow)
 
@@ -4244,30 +4258,57 @@ class InteractiveMenu:
             advanced_options['depth_policy'] = depth_policy
 
         else:
+            # The recompressor has no --no-md5/--no-verify/--output-suffix
+            # flags (the cmd builder never emits them for jxl->jxl), so asking
+            # for them here would silently do nothing. It has its own policy
+            # questions instead.
+            _is_recompress = workflow.get('conversion_type') == 'jxl_recompress'
+            on_unknown = None
+            jbrd_policy = None
             if RICH_AVAILABLE and console:
-                no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
-                no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
-                # Only the JXL -> JPEG lossless path ever hits reconstruction.
-                auto_repair = False
-                if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
-                    auto_repair = Confirm.ask(
-                        "If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified)",
-                        default=False)
+                if _is_recompress:
+                    on_unknown = Prompt.ask(
+                        "JXL with no recorded encode settings (cannot tell whether re-encoding gains anything)",
+                        choices=["convert", "copy", "skip"], default="convert")
+                    jbrd_policy = Prompt.ask(
+                        "JXL carrying a lossless JPEG reconstruction (jbrd)",
+                        choices=["copy", "skip", "convert"], default="copy")
+                    no_md5 = no_verify = False
+                    auto_repair = False
+                    output_suffix = ""
+                else:
+                    no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
+                    no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
+                    # Only the JXL -> JPEG lossless path ever hits reconstruction.
+                    auto_repair = False
+                    if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
+                        auto_repair = Confirm.ask(
+                            "If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified)",
+                            default=False)
+                    output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
             else:
-                md5_input = input("Skip MD5 verification? [y/N]: ").strip().lower()
-                no_md5 = md5_input.startswith('y')
-                verify_input = input("Skip validation? [y/N]: ").strip().lower()
-                no_verify = verify_input.startswith('y')
-                auto_repair = False
-                if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
-                    ar_input = input("If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified) [y/N]: ").strip().lower()
-                    auto_repair = ar_input.startswith('y')
+                if _is_recompress:
+                    ou_input = input("JXL with no recorded encode settings: convert/copy/skip [convert]: ").strip().lower()
+                    on_unknown = ou_input if ou_input in ("convert", "copy", "skip") else "convert"
+                    jp_input = input("JXL with a lossless JPEG reconstruction (jbrd): copy/skip/convert [copy]: ").strip().lower()
+                    jbrd_policy = jp_input if jp_input in ("copy", "skip", "convert") else "copy"
+                    no_md5 = no_verify = False
+                    auto_repair = False
+                    output_suffix = ""
+                else:
+                    md5_input = input("Skip MD5 verification? [y/N]: ").strip().lower()
+                    no_md5 = md5_input.startswith('y')
+                    verify_input = input("Skip validation? [y/N]: ").strip().lower()
+                    no_verify = verify_input.startswith('y')
+                    auto_repair = False
+                    if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
+                        ar_input = input("If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified) [y/N]: ").strip().lower()
+                        auto_repair = ar_input.startswith('y')
+                    output_suffix = input("Output suffix (e.g., _converted): ").strip()
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
-                output_suffix = input("Output suffix (e.g., _converted): ").strip()
 
             if overwrite_mode == "1":
                 overwrite, sync = True, False
@@ -4276,8 +4317,12 @@ class InteractiveMenu:
             else:
                 overwrite, sync = False, False
 
-            advanced_options['no_md5'] = no_md5
-            advanced_options['no_verify'] = no_verify
+            if not _is_recompress:
+                advanced_options['no_md5'] = no_md5
+                advanced_options['no_verify'] = no_verify
+            else:
+                advanced_options['on_unknown'] = on_unknown
+                advanced_options['jbrd_policy'] = jbrd_policy
             if auto_repair:
                 advanced_options['auto_repair_jbrd'] = True
             advanced_options['overwrite'] = overwrite
@@ -4291,8 +4336,10 @@ class InteractiveMenu:
                 advanced_options['provenance'] = workflow['provenance']
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
-            advanced_options['output_suffix'] = output_suffix if output_suffix else None
+            if not _is_recompress:
+                advanced_options['output_suffix'] = output_suffix if output_suffix else None
 
+        _carry_recompress_policies(advanced_options)
         workflow['advanced_options'] = advanced_options
         return self._wizard_parameters_expert(workflow)
 
@@ -5140,7 +5187,7 @@ class InteractiveMenu:
         from datetime import datetime
         try:
             WRAPPER_LOG_DIR.mkdir(parents=True, exist_ok=True)
-            path = WRAPPER_LOG_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            path = WRAPPER_LOG_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(f"jxl_photo manifest run — {datetime.now():%Y-%m-%d %H:%M:%S}\n\n")
                 for text, _style in lines:
@@ -5405,7 +5452,12 @@ class InteractiveMenu:
                         if idx is None:
                             return False
                         below = [p.lower() for p in parts[idx + 1:]]
-                        return _child._skip_decoder_output(below)
+                        # Mode 6's real finder calls this with
+                        # honor_requested_subfolder=False (jxl_tiff_encoder.py);
+                        # mirroring the default True here could only ever
+                        # produce a false-positive collision — keep them equal.
+                        return _child._skip_decoder_output(
+                            below, honor_requested_subfolder=(mode != 6))
                 elif _child.__name__ == 'jxl_jpeg_transcoder' and origin == 'jpeg':
                     def _skip_check(f: Path, root: Path, mode: int) -> bool:
                         if mode < 2:
@@ -5715,6 +5767,8 @@ class InteractiveMenu:
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
             if advanced.get('on_regeneration'):
                 cmd.extend(['--on-regeneration', advanced['on_regeneration']])
+            if advanced.get('on_unknown'):
+                cmd.extend(['--on-unknown', advanced['on_unknown']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
@@ -6274,6 +6328,8 @@ class InteractiveMenu:
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
             if advanced.get('on_regeneration'):
                 cmd.extend(['--on-regeneration', advanced['on_regeneration']])
+            if advanced.get('on_unknown'):
+                cmd.extend(['--on-unknown', advanced['on_unknown']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):

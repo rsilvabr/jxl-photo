@@ -1046,7 +1046,15 @@ def setup_logger():
     global logger
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = LOG_DIR / f"{timestamp}.log"
+    # PID suffix: two children of the same script started in the same second
+    # (two manifest entries) would otherwise open the SAME file in append;
+    # the counter covers a same-process repeat inside that second.
+    n = 0
+    while True:
+        log_file = LOG_DIR / f"{timestamp}_{os.getpid()}{('_' + str(n)) if n else ''}.log"
+        if not log_file.exists():
+            break
+        n += 1
 
     logger = logging.getLogger("jxl_decode")
     logger.setLevel(logging.INFO)
@@ -2572,6 +2580,17 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     except OSError:
         pass
 
+    # Never write under the final name without staging: a run killed
+    # externally (idle-timeout kill, Ctrl+C, power loss) would leave a
+    # TRUNCATED file at the final path with a NEW mtime, which the next
+    # smart-sync run then treats as up to date forever. Write to a uuid temp
+    # BESIDE the final and swap it in with an atomic same-folder os.replace
+    # only after the integrity check passed — so the final name only ever
+    # names a verified, complete file.
+    _promote_local = write_path == final_path
+    if _promote_local:
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+
     # Identity of a pre-existing output (non-staging only). The error handler
     # compares against this: a file whose identity is UNCHANGED was never
     # touched by this run (e.g. djxl failed before TiffWriter ever opened the
@@ -2746,6 +2765,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # (The except handler deletes it.)
             if not _verify_tiff_integrity(write_path):
                 raise RuntimeError("output TIFF failed the integrity check")
+
+            if _promote_local:
+                # Atomic same-folder swap (see the _promote_local note above):
+                # a partial never carries the final name. A failure raises
+                # into the error handler, which deletes the temp.
+                os.replace(str(write_path), str(final_path))
 
             if not meta_ok:
                 # The pixels are fine and the TIFF stays on disk, but the JXL
@@ -2963,6 +2988,8 @@ def process_group(group_tasks, workers, target_icc=None):
                 continue
             final_tiff = task["final_tiff"]
             if not final_tiff.exists():
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (final output missing) | {task['main_jxl'].name}")
                 continue
             # A staged output whose move FAILED leaves a stale pre-existing
             # TIFF at the final path: it passes exists()+integrity below, but
@@ -4040,6 +4067,95 @@ Examples:
 
     _abort_on_duplicate_outputs([(task["main_jxl"], task["final_tiff"]) for task in tasks])
 
+    # Cross-RUN output collision (bug #268). _abort_on_duplicate_outputs only
+    # sees collisions inside THIS run; in the collapsing modes an output written
+    # by an earlier run can belong to different sources entirely, and
+    # overwriting it while deleting the new sources destroys the earlier photo.
+    # None mode writes EXIF only, no XMP — the v1.6.0 minimal-output contract —
+    # and the provenance marker lives in XMP, so copy_metadata (which writes it)
+    # is skipped entirely. Honouring the contract is right; being quiet about
+    # the consequence is not.
+    # _run_collapses_structure, not a hand-written `mode == 0 and output`: mode 0
+    # writing back into the source folder collapses nothing, and the ad-hoc test
+    # warned there anyway.
+    #
+    # Runs BEFORE the dry-run block so a simulation PREVIEWS the refusals (the
+    # encoder already does this) instead of promising outputs the real run will
+    # refuse to write.
+    if FORCE_NONE_MODE and (DELETE_SOURCE or _run_collapses_structure(
+            args.mode, args.output,
+            args.input.parent if args.input.is_file() else args.input)):
+        logger.warning(
+            "--none writes NO provenance marker (it keeps the minimal-metadata "
+            "contract, and the marker is XMP): these TIFFs will carry no record of "
+            "which JXLs made them. In modes 2/4/5/6/7 — and in mode 0 with an output "
+            "folder — a later run with --delete-source "
+            "will REFUSE every one of them, and this script has no way to adopt them "
+            "after the fact — the encoder's --provenance adopt has no counterpart here. "
+            "Drop --none for runs you intend to re-run with --delete-source, or keep "
+            "using a mode that preserves folder structure (0/1/3/8) for them.")
+
+    provenance_failures = []
+    _src_root = args.input.parent if args.input.is_file() else args.input
+    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
+        _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
+        if _existing:
+            logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
+                        f"(--provenance {PROVENANCE_CHECK})...")
+            _marks = _read_source_markers_batch(_existing)
+            _blocked = []
+            for _t in list(tasks):
+                _out = _t["final_tiff"]
+                if not _out.exists():
+                    continue
+                _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
+                _srcs = [e[0] for e in _t["entries"]]
+                if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
+                    continue
+                _why = ("no provenance marker (written by an older version)"
+                        if not (_info.get("src") or _info.get("srcsum"))
+                        else "it was made from a different source")
+                _blocked.append((_t, _why))
+            if _blocked:
+                if args.dry_run:
+                    # Simulation: report the refusals, touch nothing.
+                    logger.warning(
+                        f"Dry run: {len(_blocked)} group(s) would be REFUSED: their output "
+                        f"already exists and did not come from them.")
+                    for _t, _why in _blocked[:10]:
+                        logger.warning(f"  would REFUSE | {_t['main_jxl']}")
+                        logger.warning(f"    -> {_t['final_tiff']} ({_why})")
+                    if len(_blocked) > 10:
+                        logger.warning(f"  ... and {len(_blocked) - 10} more")
+                else:
+                    logger.error(
+                        f"REFUSING {len(_blocked)} group(s): their output already exists and "
+                        f"did not come from them. Converting would overwrite someone else's "
+                        f"output, and --delete-source would then destroy what it held.")
+                    for _t, _why in _blocked[:10]:
+                        logger.error(f"    {_t['main_jxl']}")
+                        logger.error(f"      -> {_t['final_tiff']} ({_why})")
+                    if len(_blocked) > 10:
+                        logger.error(f"    ... and {len(_blocked) - 10} more")
+                    logger.error(
+                        "  These were NOT converted and NOTHING was deleted. Rename them, "
+                        "pick a mode that keeps folder structure (0/1/3/8), or drop "
+                        "--delete-source." +
+                        ("" if PROVENANCE_CHECK == "content" else
+                         " If you MOVED the sources, re-run with --provenance content."))
+                    _bad = {id(_t) for _t, _ in _blocked}
+                    tasks = [t for t in tasks if id(t) not in _bad]
+                    # total is re-initialised for the reduced task list; done must
+                    # restart with it (same in-process re-run rule as above).
+                    _counter["done"] = 0
+                    _counter["total"] = len(tasks)
+                # A refusal is a FAILURE, not a quiet skip (see the encoder) —
+                # in a dry run it is a PREDICTED failure, reported as such.
+                provenance_failures = [
+                    (str(_t["main_jxl"]),
+                     f"refused: output {_t['final_tiff']} already exists and {_w}")
+                    for _t, _w in _blocked]
+
     # Dry run
     if args.dry_run:
         for task in tasks:
@@ -4111,85 +4227,12 @@ Examples:
             # rebuilt. Reporting errors:0 next to a non-empty failure list made
             # the wrapper's recap contradict itself (same rule as the encoder).
             # The EXIT CODE is untouched — a simulation still returns 0.
-            errors=len(group_conflicts),
-            failures=[(p, f"refused to merge the multi-page group: {r}")
+            errors=len(group_conflicts) + len(provenance_failures),
+            failures=provenance_failures + [(p, f"refused to merge the multi-page group: {r}")
                       for p, r in group_conflicts],
             log_file=log_file, dry_run=True,
         )
         return
-
-    # Cross-RUN output collision (bug #268). _abort_on_duplicate_outputs only
-    # sees collisions inside THIS run; in the collapsing modes an output written
-    # by an earlier run can belong to different sources entirely, and
-    # overwriting it while deleting the new sources destroys the earlier photo.
-    # None mode writes EXIF only, no XMP — the v1.6.0 minimal-output contract —
-    # and the provenance marker lives in XMP, so copy_metadata (which writes it)
-    # is skipped entirely. Honouring the contract is right; being quiet about
-    # the consequence is not.
-    # _run_collapses_structure, not a hand-written `mode == 0 and output`: mode 0
-    # writing back into the source folder collapses nothing, and the ad-hoc test
-    # warned there anyway.
-    if FORCE_NONE_MODE and (DELETE_SOURCE or _run_collapses_structure(
-            args.mode, args.output,
-            args.input.parent if args.input.is_file() else args.input)):
-        logger.warning(
-            "--none writes NO provenance marker (it keeps the minimal-metadata "
-            "contract, and the marker is XMP): these TIFFs will carry no record of "
-            "which JXLs made them. In modes 2/4/5/6/7 — and in mode 0 with an output "
-            "folder — a later run with --delete-source "
-            "will REFUSE every one of them, and this script has no way to adopt them "
-            "after the fact — the encoder's --provenance adopt has no counterpart here. "
-            "Drop --none for runs you intend to re-run with --delete-source, or keep "
-            "using a mode that preserves folder structure (0/1/3/8) for them.")
-
-    provenance_failures = []
-    _src_root = args.input.parent if args.input.is_file() else args.input
-    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
-        _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
-        if _existing:
-            logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
-                        f"(--provenance {PROVENANCE_CHECK})...")
-            _marks = _read_source_markers_batch(_existing)
-            _blocked = []
-            for _t in list(tasks):
-                _out = _t["final_tiff"]
-                if not _out.exists():
-                    continue
-                _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
-                _srcs = [e[0] for e in _t["entries"]]
-                if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
-                    continue
-                _why = ("no provenance marker (written by an older version)"
-                        if not (_info.get("src") or _info.get("srcsum"))
-                        else "it was made from a different source")
-                _blocked.append((_t, _why))
-            if _blocked:
-                logger.error(
-                    f"REFUSING {len(_blocked)} group(s): their output already exists and "
-                    f"did not come from them. Converting would overwrite someone else's "
-                    f"output, and --delete-source would then destroy what it held.")
-                for _t, _why in _blocked[:10]:
-                    logger.error(f"    {_t['main_jxl']}")
-                    logger.error(f"      -> {_t['final_tiff']} ({_why})")
-                if len(_blocked) > 10:
-                    logger.error(f"    ... and {len(_blocked) - 10} more")
-                logger.error(
-                    "  These were NOT converted and NOTHING was deleted. Rename them, "
-                    "pick a mode that keeps folder structure (0/1/3/8), or drop "
-                    "--delete-source." +
-                    ("" if PROVENANCE_CHECK == "content" else
-                     " If you MOVED the sources, re-run with --provenance content."))
-                _bad = {id(_t) for _t, _ in _blocked}
-                tasks = [t for t in tasks if id(t) not in _bad]
-                # total is re-initialised for the reduced task list; done must
-                # restart with it (same in-process re-run rule as above).
-                _counter["done"] = 0
-                _counter["total"] = len(tasks)
-                # A refusal is a FAILURE, not a quiet skip (see the encoder).
-                provenance_failures = [
-                    (str(_t["main_jxl"]),
-                     f"refused: output {_t['final_tiff']} already exists and {_w}")
-                    for _t, _w in _blocked]
 
     # Delete confirmation (after dry-run so simulations never prompt). Charged
     # for EVERY mode: deletion is a separate opt-in from the output layout, so a
