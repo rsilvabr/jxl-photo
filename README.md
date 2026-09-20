@@ -24,51 +24,6 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) and [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) to check. 
 
-## Current version
-
-**v2.1.0** (2026-09-20) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
-
-#### Generation counter in the encode record
-
-The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
-
-Why it matters: controlled chain tests showed that at a fixed byte budget each extra lossy generation costs ~0.2–0.6 dB of PSNR on top of what the byte reduction alone costs — and the marginal cost grows with the number of generations — while the recorded nominal `d` stops describing the result: a 19-generation chain landed 9 dB below a single direct encode at the same file size (nominal d≈1.5, perceptual quality of d≈4–7). The **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file has **already been lossy-recompressed at least once** (`gen >= 2`) and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. The threshold is 2, not 1, because every lossy file this toolkit's encoder produces is born at `gen=1`: guarding at 1 turned the recompressor's main use case (encoder previews → final archive) into an `ask` that silently skipped everything headless. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
-
-#### ⚠️ `--encode-tag off` now strips the record (encoder)
-
-The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
-
-Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
-
-#### New: `--modular on|off` (encoder) — measured: not for photos
-
-The lossy encoder is now selectable: `--modular on` forces the Modular encoder for lossy output (default off — cjxl's VarDCT decides). We measured before shipping: 7 real masters (Nikon Zf/Z8 ProPhoto 16-bit TIFFs, medium-format film scan, IR dust-channel scan, negative scan), SSIMULACRA2 at d=0.05/0.10 — quality is a wash (every margin ≤ 0.39), VarDCT smaller in 14/14 files (modular up to +33%) and 20–100× faster. So the flag exists for what Modular was built for (screenshots/graphics batches), the wrapper only asks inside Step 6A (advanced options), the default behavior is untouched, and the disk-space preflight estimate now matches the chosen encoder.
-
-#### New: decode-side remedies for the jbrd marker damage
-
-A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedies instead of a bare djxl error. **`--auto-repair-jbrd`** repairs a copy in the system temp and decodes from it — the JXL is never modified, and the delete gate never deletes that source in the same run (the recovered JPEG has identical image data but re-serialized XMP bytes). In the wrapper: the auto-repair is a Step 6A question on JXL→JPEG, and `--repair-jbrd` is **main menu option 8** (audit by default).
-
-[What changed, in full](#changelog) · [Release history](#release-history) · previous stable: [v2.0.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.0.3)
-
-> ### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.0.3: check them before discarding the JPEGs
->
-> Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
->
-> ```powershell
-> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd --dry-run   # audit only
-> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd             # repair
-> ```
->
-> A repaired file reconstructs a JPEG with **identical image data**; only its metadata bytes differ from the original. See [Repairing broken JPEG reconstruction](docs/README_jxl_jpeg_transcoder.md#repairing-broken-jpeg-reconstruction---repair-jbrd).
-
-> ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
->
-> **1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
->
-> **2. An archive made before this release can be refused.** Runs that delete sources in a folder-collapsing mode (2/4/5/6/7, and mode 0 with an output folder) now check that the existing output really came from the source about to replace it. Outputs written before v2.0.0 carry no such record, so they are refused rather than overwritten. For TIFF → JXL, `--provenance adopt` verifies and stamps them in a single pass; the decoder and the transcoder have no equivalent yet — use a structure-preserving mode (0/1/3/8) for those folders.
->
-> Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before running anything destructive. Nothing about ordinary conversion changed: same pixels, same ICC, same metadata.
-
 ---
 
 ## Features
@@ -123,6 +78,57 @@ A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedie
 - **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and its MD5 binding
 - **Keep-smaller net**: a re-encode that is not smaller than the source is replaced by the original bytes, so a run can never grow the archive
 - `--delete-source` with the same gates as the other scripts (integrity at the final path, MD5 match for copies, optional `--verify-roundtrip`)
+
+---
+
+## Current version
+
+**v2.1.1_beta1** (2026-09-20) — beta of the first maintenance release on v2.1.0: ten fixes from the second audit of the recompressor release, all in the safety/reporting layer — the conversion core is untouched. Highlights: **dry runs preview the provenance refusals** instead of promising outputs the real run refuses (and the recompressor dry run exits 0); **every output is written to a temp beside the final name** and swapped in atomically only after the integrity check — a killed run no longer leaves a truncated file the next smart sync would trust forever; **`checksums.md5` appends are serialized across manifest child processes** (no more torn lines); the **wrapper stops dropping the recompressor policies** and now asks/emits `on_unknown` and `jbrd_policy`; the encoder's `--encode-tag xmp` **merges a lineage chain sitting in EXIF Software** instead of leaving contradictory records; keep-smaller fallback copies must **prove the MD5 match** before any deletion. Plus: log filenames carry the pid (two runs in the same second no longer share one log), the decoder counts a missing final output as KEEP, jbrd repair temps no longer wear a `.jxl` name, and `--repair-jbrd` no longer requires cjxl. Full list: [bug tracking, round 37](docs/bug_tracking_since_v1.0.md). **1357 tests.**
+
+> **Beta:** these are delete-path and audit fixes, every one with a regression test proven to fail against the pre-fix code — but if you archive with `--delete-source`, the stable [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0) is the conservative choice until v2.1.1 final.
+
+Everything below shipped in **v2.1.0** (2026-09-20) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
+
+#### Generation counter in the encode record
+
+The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
+
+Why it matters: controlled chain tests showed that at a fixed byte budget each extra lossy generation costs ~0.2–0.6 dB of PSNR on top of what the byte reduction alone costs — and the marginal cost grows with the number of generations — while the recorded nominal `d` stops describing the result: a 19-generation chain landed 9 dB below a single direct encode at the same file size (nominal d≈1.5, perceptual quality of d≈4–7). The **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file has **already been lossy-recompressed at least once** (`gen >= 2`) and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. The threshold is 2, not 1, because every lossy file this toolkit's encoder produces is born at `gen=1`: guarding at 1 turned the recompressor's main use case (encoder previews → final archive) into an `ask` that silently skipped everything headless. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
+
+#### ⚠️ `--encode-tag off` now strips the record (encoder)
+
+The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
+
+Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
+
+#### New: `--modular on|off` (encoder) — measured: not for photos
+
+The lossy encoder is now selectable: `--modular on` forces the Modular encoder for lossy output (default off — cjxl's VarDCT decides). We measured before shipping: 7 real masters (Nikon Zf/Z8 ProPhoto 16-bit TIFFs, medium-format film scan, IR dust-channel scan, negative scan), SSIMULACRA2 at d=0.05/0.10 — quality is a wash (every margin ≤ 0.39), VarDCT smaller in 14/14 files (modular up to +33%) and 20–100× faster. So the flag exists for what Modular was built for (screenshots/graphics batches), the wrapper only asks inside Step 6A (advanced options), the default behavior is untouched, and the disk-space preflight estimate now matches the chosen encoder.
+
+#### New: decode-side remedies for the jbrd marker damage
+
+A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedies instead of a bare djxl error. **`--auto-repair-jbrd`** repairs a copy in the system temp and decodes from it — the JXL is never modified, and the delete gate never deletes that source in the same run (the recovered JPEG has identical image data but re-serialized XMP bytes). In the wrapper: the auto-repair is a Step 6A question on JXL→JPEG, and `--repair-jbrd` is **main menu option 8** (audit by default).
+
+[What changed, in full](#changelog) · [Release history](#release-history) · current stable: [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0)
+
+> ### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.0.3: check them before discarding the JPEGs
+>
+> Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
+>
+> ```powershell
+> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd --dry-run   # audit only
+> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd             # repair
+> ```
+>
+> A repaired file reconstructs a JPEG with **identical image data**; only its metadata bytes differ from the original. See [Repairing broken JPEG reconstruction](docs/README_jxl_jpeg_transcoder.md#repairing-broken-jpeg-reconstruction---repair-jbrd).
+
+> ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
+>
+> **1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
+>
+> **2. An archive made before this release can be refused.** Runs that delete sources in a folder-collapsing mode (2/4/5/6/7, and mode 0 with an output folder) now check that the existing output really came from the source about to replace it. Outputs written before v2.0.0 carry no such record, so they are refused rather than overwritten. For TIFF → JXL, `--provenance adopt` verifies and stamps them in a single pass; the decoder and the transcoder have no equivalent yet — use a structure-preserving mode (0/1/3/8) for those folders.
+>
+> Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before running anything destructive. Nothing about ordinary conversion changed: same pixels, same ICC, same metadata.
 
 ---
 
@@ -663,6 +669,22 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Changelog
 
+### What's new — v2.1.1_beta1 (current beta)
+
+**Released 2026-09-20.** Maintenance beta on top of v2.1.0 — ten fixes from the second audit of the recompressor release (round 37, bugs #347–#356), all in the safety/reporting layer. No command line and no file format changes.
+
+- **Dry runs no longer lie.** The decoder and recompressor skipped the provenance refusal gate in dry runs — the simulation promised outputs the real run refuses, with `errors: 0` in the summary. Both now preview the refusals (`DRY | would REFUSE`, counted as predicted errors), and the recompressor dry run exits 0.
+- **Outputs are never written under their final name.** A run killed externally used to leave a truncated file at the final path with a fresh mtime — which the next smart-sync run then treated as up to date forever. All four scripts now write a uuid temp beside the final and swap it in with an atomic same-folder `os.replace` only after the integrity check.
+- **`checksums.md5` appends are serialized across processes.** Two manifest entries targeting one folder are two child processes; the thread lock only serialized one, and appends interleaved mid-line. A sibling `.lock` file (fail-closed: an untaken lock skips the line, never a torn write).
+- **Wrapper: recompressor policies survive the wizard.** Step 6A rebuilt the advanced options from scratch and dropped `on_downgrade`/`on_regeneration`/`on_unknown`/`jbrd_policy`/`no_keep_smaller` (the child fell back to `ask` — a silent skip on the wrapper's pipe); the manifest builder never emitted `--on-unknown`/`--jbrd-policy` at all. The wizard now asks both on the recompressor path and carries the rest through every branch.
+- **Encoder: `--encode-tag xmp` merges the EXIF Software chain.** A TIFF recovered from a `--encode-tag software` JXL carries the lineage chain in EXIF Software; the xmp branch left it there beside the new dc:Description record, and the recompressor trusted the stale one. Both fields are now merged into dc:Description and the machine block is stripped from Software (unrelated text kept).
+- **Recompressor: keep-smaller fallback passes the MD5 gate.** The verbatim-copy proof keyed on `action == "copy"`, but the keep-smaller fallback reports status `"copied"` with action still `"convert"` — a corrupt copy certified the deletion of its source.
+- Smaller: log filenames carry the pid (two runs in the same second shared one log); the decoder counts a missing final output as a KEEP instead of leaving the gate silently; jbrd repair temps no longer wear a `.jxl` name (a crash left a fake input for the next scan) and honor `TEMP_DIR`; `--repair-jbrd` no longer requires cjxl (repair only needs djxl ≥ 0.12 + exiftool); the wrapper's mode-6 collision mirror matches the real finder's decoder-output skip.
+
+Every fix has a regression test proven to fail against the pre-fix code (`tests/test_audit_round37.py`, 23 tests). **1357 tests** in the suite.
+
+---
+
 ### What's new — v2.1.0 (current stable)
 
 **Released 2026-09-20.** A new script joins the toolkit: **`jxl_recompressor.py`** — and a new destination in the wrapper ("JXL (smaller)"). No existing command line changes; nothing about TIFF/JPEG conversion moved.
@@ -689,6 +711,7 @@ Verified against real files, end to end: Capture One ProPhoto 16-bit exports and
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **v2.1.1_beta1** | 2026-09-20 | Beta. Round-37 audit (10 fixes): dry runs preview the provenance refusals instead of promising them; outputs written via temp + atomic `os.replace` (a killed run no longer poisons smart sync); `checksums.md5` appends serialized across child processes; wrapper keeps the recompressor policies and emits `--on-unknown`/`--jbrd-policy`; encoder xmp mode merges the EXIF Software lineage chain; keep-smaller copies pass the MD5 gate; `--repair-jbrd` needs no cjxl |
 | **v2.1.0** | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 |
 | v2.0.3 | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
 | v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
