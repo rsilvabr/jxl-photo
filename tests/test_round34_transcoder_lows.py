@@ -139,7 +139,13 @@ def test_icc_intermediate_decode_requests_bit_depth(monkeypatch, tmp_path, fmt, 
     def fake_run(cmd, **kw):
         calls.append(list(cmd))
         # djxl: output is argv[2]; magick: output is the last argument.
-        target = Path(cmd[2] if cmd[0] == "djxl" else cmd[-1])
+        # Round 39: the magick output may carry an explicit "jpg:"/"png:"
+        # format prefix (the beside-final temp ends in ".tmp", so the format
+        # cannot be left to the extension) - strip it for the fake write.
+        out_arg = cmd[2] if cmd[0] == "djxl" else cmd[-1]
+        if out_arg[:4] in ("jpg:", "png:"):
+            out_arg = out_arg[4:]
+        target = Path(out_arg)
         target.write_bytes(_png26())
         return _FakeRun()
 

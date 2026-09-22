@@ -266,7 +266,8 @@ def _repeat_via_main(monkeypatch, config_path, answers):
     captured = []
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: config_path)
     monkeypatch.setattr(wp.DependencyChecker, "check_dependencies",
-                        lambda self, force=False: {"cjxl": True, "djxl": True})
+                        lambda self, force=False, persist=True, **kw:
+                        {"cjxl": True, "djxl": True})
     monkeypatch.setattr(wp.InteractiveMenu, "execute_workflow",
                         lambda self, wf, st: (captured.append(wf), True)[1])
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
@@ -577,7 +578,8 @@ def _run_cli(monkeypatch, config_path, argv):
     captured = []
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: config_path)
     monkeypatch.setattr(wp.DependencyChecker, "check_dependencies",
-                        lambda self, force=False: {"cjxl": True, "djxl": True})
+                        lambda self, force=False, persist=True, **kw:
+                        {"cjxl": True, "djxl": True})
     monkeypatch.setattr(wp.InteractiveMenu, "execute_workflow",
                         lambda self, wf, st: (captured.append(wf), True)[1])
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)

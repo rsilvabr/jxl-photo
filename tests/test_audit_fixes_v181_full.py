@@ -404,8 +404,14 @@ def test_orientation_preserved(tmp_path):
     """Orientation must round-trip: this pipeline never rotates pixels
     (tifffile.asarray and djxl keep stored pixel order), so the tag is
     required for correct display of rotated files."""
+    # A real TIFF: the Software lineage read is fail-closed now (a failed
+    # exiftool read raises instead of silently keeping the old chain), so
+    # exiftool needs a readable file — rc=0 + no Software tag is the normal
+    # no-tag state, not a read failure.
+    src = tmp_path / "src.tif"
+    tifffile.imwrite(src, np.zeros((2, 2, 3), dtype=np.uint8))
     args_file = enc.build_metadata_injection_args(
-        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        src, tmp_path / "out.jxl", tmp_path,
         exif_bin=None, icc_bytes=None, xmp_original=None,
     )
     content = args_file.read_text(encoding="utf-8")
@@ -544,8 +550,12 @@ def test_encoder_drops_stale_icc_from_existing_creator(monkeypatch, tmp_path):
     (the decoder extracts the FIRST valid segment)."""
     monkeypatch.setattr(enc, "read_existing_creator_tool",
                         lambda p: "OldApp | ICC:T0xESUJD")
+    # Real TIFF: the Software lineage read is fail-closed now — exiftool
+    # needs a readable file (rc=0 + no tag is the normal no-tag state).
+    src = tmp_path / "src.tif"
+    tifffile.imwrite(src, np.zeros((2, 2, 3), dtype=np.uint8))
     args_file = enc.build_metadata_injection_args(
-        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        src, tmp_path / "out.jxl", tmp_path,
         exif_bin=None, icc_bytes=b"\x00" * 200, xmp_original=tmp_path / "x.xmp",
     )
     content = args_file.read_text(encoding="utf-8")
@@ -669,8 +679,11 @@ def test_verify_integrity_requires_codestream(tmp_path):
 
 def test_encoder_stale_relation_markers_removed(monkeypatch, tmp_path):
     monkeypatch.setattr(enc, "read_existing_relation", lambda p: ["my-tag", "other"])
+    # Real TIFF: the Software lineage read is fail-closed now.
+    src = tmp_path / "src.tif"
+    tifffile.imwrite(src, np.zeros((2, 2, 3), dtype=np.uint8))
     args_file = enc.build_metadata_injection_args(
-        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        src, tmp_path / "out.jxl", tmp_path,
         exif_bin=None, icc_bytes=None, xmp_original=tmp_path / "x.xmp",
     )
     content = args_file.read_text(encoding="utf-8")

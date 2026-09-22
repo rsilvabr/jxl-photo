@@ -232,7 +232,7 @@ This allows mixed archives (some lossless-transcodable, some not) to be processe
 - `--force-convert` → Force lossy conversion (e.g., to apply ICC profile to lossless JXL)
 - `--decode` → Force decode direction for JXL files
 
-> **Note:** `--quality` has no effect when the input JXL contains a `jbrd` box — djxl reconstructs the original JPEG bit-exactly instead of re-encoding (the quality value is forwarded to djxl internally as `--jpeg_quality`). Use files without jbrd (e.g. from the TIFF encoder) for quality-driven conversions.
+> **Note:** `--quality` has no effect when the input JXL contains a `jbrd` box — djxl reconstructs the original JPEG bit-exactly instead of re-encoding, so no `--jpeg_quality` flag is forwarded on that path (it is only passed in the convert path, for files without jbrd). Use files without jbrd (e.g. from the TIFF encoder) for quality-driven conversions.
 
 * * *
 
@@ -404,8 +404,10 @@ Options:
   --no-ram           Use disk pipeline (slower, less memory)
   --output-name NAME Output folder name for convert mode (default: "converted")
   --output-suffix SFX Suffix for converted files (default: none — flat output)
-  --rename-from PAT  Literal substring to replace in filenames (not regex)
-  --rename-to REP    Replacement string for renamed files
+   --rename-from PAT  Literal substring to replace in filenames (not regex).
+                      Applied on the lossy convert path only — the lossless
+                      transcode path warns and ignores it
+   --rename-to REP    Replacement string for renamed files (convert path only)
   --dry-run          Preview operations without converting. With --delete-source
                      armed, every entry point (transcode, convert, auto) says so:
                      `Dry run: --delete-source is ARMED. Up to N source(s) would
@@ -707,7 +709,7 @@ py jxl_jpeg_transcoder.py "F:\Masters\JXL" --force-convert --to-srgb --quality 9
 ## Logs
 
 ```
-/Logs/jxl_jpeg_transcoder/YYYYMMDD_HHMMSS.log
+/Logs/jxl_jpeg_transcoder/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
 Opening line shows detected operation and active settings:

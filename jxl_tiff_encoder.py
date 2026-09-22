@@ -476,6 +476,11 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
     # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if not marker_lower:
+        # An empty marker matches nothing: without this, endswith("") is True
+        # and marker_lower[0] raises IndexError. Fail closed — a run without a
+        # marker must not silently treat every folder as an anchor.
+        return False
     if part_lower.startswith(marker_lower):
         rest = part_lower[len(marker_lower):]
         if not rest or rest[0] in '_- ':
@@ -1993,7 +1998,9 @@ def _reconcile_gen(text: str):
 
     counted = number of "cjxl d=X" chain entries with X > 0 (a d=0 lossless
     entry is appended to the chain but costs no quality, so it is not a
-    generation). stored = the gen= token, 0 when absent or unparseable.
+    generation). stored = the LARGEST gen= token, 0 when absent or unparseable
+    (a corrupt field carrying several self-corrects upward — undercounting is
+    the damaging direction).
     gen = max(stored, counted): if chain entries were removed the stored gen
     is the better number, if entries were added without updating gen the
     count is better — undercounting generations is the error that causes
@@ -2006,8 +2013,7 @@ def _reconcile_gen(text: str):
     generation count.
     """
     s = str(text)
-    m = _GEN_TAG_RE.search(s)
-    stored = int(m.group(1)) if m else 0
+    stored = max((int(v) for v in _GEN_TAG_RE.findall(s)), default=0)
     counted = 0
     for block in _MACHINE_BLOCK_RE.findall(s):
         for d, _e in _ENCODE_TAG_RE.findall(block):
@@ -2074,7 +2080,10 @@ def _merge_lineage_blocks(desc: str, software: str):
       * anything else is split history -> both, dc:Description first (the
         older side in every case this toolkit produces: a decoder-made TIFF
         carries the JXL's chain there, and the new encode lands in Software).
-    stored gen = max of both gen= tokens. Entries inside a caption's running
+    stored gen = max of ALL gen= tokens in both fields (_GEN_TAG_RE.findall,
+    like _reconcile_gen — a repeated gen= token is a real generation, never
+    deduped, and reading only the first one made a restamp rewrite a gen=5
+    file back down to gen=1). Entries inside a caption's running
     text never match: the block regex only matches whole " | "-delimited
     segments.
     """
@@ -2093,9 +2102,14 @@ def _merge_lineage_blocks(desc: str, software: str):
         entries = a + b
     stored = 0
     for text in (desc, software):
-        m = _GEN_TAG_RE.search(str(text))
-        if m:
-            stored = max(stored, int(m.group(1)))
+        # findall + max per field: a field can carry SEVERAL gen= tokens (a
+        # badly merged/written field) and search() reads only the FIRST —
+        # "gen=1 | cjxl d=0.1 e=7 | gen=5 | cjxl d=1.0 e=7" would store 1 and
+        # the restamp would erase gen=5, undercounting gen in the damaging
+        # direction. Same fix _reconcile_gen got (round 38).
+        gen_tokens = _GEN_TAG_RE.findall(str(text))
+        if gen_tokens:
+            stored = max(stored, max(int(v) for v in gen_tokens))
     return entries, stored
 
 
@@ -2294,7 +2308,18 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        if r_sw.returncode != 0:
+            # Fail CLOSED on the file: a failed Software read cannot tell a
+            # stale chain from no chain, and -tagsfromfile -exif:all would
+            # carry the stale one into the JXL (the recompressor then merges
+            # the two contradictory records and inflates gen). Empty stdout
+            # with rc=0 is the normal no-Software-tag state, NOT a failure —
+            # failing it would refuse every fresh TIFF.
+            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
+            raise RuntimeError(
+                f"exiftool could not read Software from {tiff_path.name} "
+                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
+        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
         merged_entries, merged_stored = _merge_lineage_blocks(
             existing_desc, original_sw)
         merged_chain = " | ".join(
@@ -2327,10 +2352,19 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if r_sw.returncode != 0:
+            # Fail CLOSED on the file: same stale-chain contamination as the
+            # "xmp" branch above — an unread Software field would leave the
+            # old chain in place for -tagsfromfile -exif:all to copy into the
+            # JXL. Empty stdout with rc=0 stays the normal no-tag state.
+            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
+            raise RuntimeError(
+                f"exiftool could not read Software from {tiff_path.name} "
+                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
         # A TIFF without a Software tag used to seed the chain with a bare
         # "cjxl" segment ("cjxl | gen=1 | cjxl d=…") — the fallback is empty
         # so the field carries ONLY the machine block.
-        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
         # The dc:Description may carry a stale chain (e.g. a TIFF recovered by
         # the decoder, or a re-tagged file): migrate it into the Software
         # record instead of leaving a shadow copy that a later reader
@@ -2378,7 +2412,16 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
         r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-        original_sw = r_sw.stdout.strip() if r_sw.returncode == 0 and r_sw.stdout else ""
+        if r_sw.returncode != 0:
+            # Fail CLOSED on the file: "off" must be a DELIBERATE discard of
+            # the lineage, not an accident of a failed read (the stale chain
+            # would survive in Software and migrate into the JXL exactly like
+            # the other modes). Empty stdout with rc=0 stays the no-tag state.
+            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
+            raise RuntimeError(
+                f"exiftool could not read Software from {tiff_path.name} "
+                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
+        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
         clean_sw, s_orphans = _strip_encode_params(original_sw)
         if clean_sw != original_sw:
             if s_orphans:
@@ -3252,7 +3295,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
     # names a verified, complete file.
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        # ".tmp, not .jxl" (same rule the transcoder's repair-jbrd got in
+        # v2.1.1): a kill between write and promote would leave the temp
+        # BESIDE the final with a real-sounding name, adoptable as a real
+        # input by the next run that scans this folder for JXLs (the decoder,
+        # the recompressor). os.replace below doesn't care about the
+        # extension, and nothing validates it before promotion.
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
 
     # Identity of a pre-existing output (non-staging only). The error handler
     # compares against this: a file whose identity is UNCHANGED was never
@@ -3295,6 +3344,30 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if photometric == tifffile.PHOTOMETRIC.PALETTE:
                     _log_rejected_file(str(tiff_path), "palette-color not supported")
                     raise ValueError("Palette-color TIFFs are not supported. Convert to RGB first.")
+                # MINISWHITE (0): page.asarray() returns the RAW samples, where
+                # 0 means WHITE, and the JXL comes back MINISBLACK — the
+                # archived image is tonally INVERTED, silently, and the source
+                # stays deletable by --delete-source. Reject like the other
+                # photometrics instead of inverting on read: TIFFs with a
+                # predictor or partial palettes make a sample flip risky.
+                if photometric == tifffile.PHOTOMETRIC.MINISWHITE:
+                    _log_rejected_file(str(tiff_path), "MINISWHITE (white=0) not supported")
+                    raise ValueError(
+                        "TIFF photometric MINISWHITE (white=0) is not supported. "
+                        "Invert to MINISBLACK first.")
+                # Lab-family and YCbCr photometrics: tifffile returns the RAW
+                # samples for these, so encoding them as RGB silently
+                # reinterprets the colors (a Lab master archives as RGB numbers
+                # and never comes back). Reject like CMYK/PALETTE instead of
+                # writing a false color model into the archive.
+                if photometric in (tifffile.PHOTOMETRIC.CIELAB,
+                                   tifffile.PHOTOMETRIC.ICCLAB,
+                                   tifffile.PHOTOMETRIC.ITULAB,
+                                   tifffile.PHOTOMETRIC.YCBCR):
+                    _log_rejected_file(str(tiff_path), f"{photometric.name} not supported")
+                    raise ValueError(
+                        f"TIFF photometric {photometric.name} is not supported. "
+                        f"Convert to RGB first.")
                 # Planar-separate TIFFs return (samples, H, W) from asarray(),
                 # which make_png_bytes would misread as (H, W, C) — reject
                 # clearly instead of scrambling the image.
@@ -3353,6 +3426,21 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 # discarded (grayscale-inherited) profiles must not inflate
                 # the "D50 patch applied" summary.
                 icc_bytes = apply_d50_policy(icc_original, tiff_path)
+                # The page's OWN ICC can still be an RGB profile on grayscale
+                # pixels (scanners tag every page with the same RGB profile).
+                # cjxl rejects a grayscale PNG carrying an RGB iCCP ("RGB color
+                # space not permitted on grayscale PNG"), failing the whole
+                # encode; keep the profile for the XMP round-trip only and let
+                # the PNG go out without iCCP. The data-space signature sits at
+                # header offset 16..
+                if (is_grayscale and icc_bytes and len(icc_bytes) >= 20
+                        and icc_bytes[16:20] != b"GRAY"):
+                    logger.warning(
+                        f"  >{tiff_path.name} (page {page_idx}): the page's ICC "
+                        f"profile is not grayscale "
+                        f"({icc_bytes[16:20].decode('ascii', 'replace')}); keeping "
+                        f"it in XMP only (a grayscale PNG cannot carry it)")
+                    icc_bytes = None
 
             # 5. Encode PNG with optional ICC in iCCP chunk (for cjxl encoding)
             # --container=1 is required for lossy JXL (d>0): without it, cjxl outputs a raw
@@ -3577,6 +3665,34 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     raise
                 except Exception as e_mark:
                     raise RuntimeError(f"multipage marker write failed: {e_mark}") from e_mark
+
+            # A split that yields exactly ONE output from a page > 0 has no
+            # group marker (group ids exist only for multi-output splits), but
+            # the page is still "page N": the reconstruction facts (inherited
+            # ICC, SubfileType) must travel with it or the decoder cannot
+            # restore the original tag structure. Written outside the
+            # multipage_group block, like the grayscale flag below. The page
+            # marker is harmless for standalone files (the decoder only reads
+            # it for marked groups) and records the real origin.
+            if not multipage_group and not STRIP_METADATA and page_idx > 0:
+                try:
+                    solo_args = ["-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx)]
+                    if icc_inherited:
+                        solo_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
+                    if subfiletype != 0:
+                        solo_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
+                    r_solo = _run_exiftool_argfile(
+                        ["-overwrite_original"] + solo_args + [str(write_path)],
+                        timeout=30
+                    )
+                    if r_solo.returncode != 0:
+                        err_msg = (r_solo.stderr or r_solo.stdout or "no output")[:200]
+                        raise RuntimeError(
+                            f"exiftool page marker write failed: {err_msg.strip()}")
+                except RuntimeError:
+                    raise
+                except Exception as e_solo:
+                    raise RuntimeError(f"page marker write failed: {e_solo}") from e_solo
 
             # Grayscale marker: must be written for standalone files too, otherwise
             # read_png_to_numpy returns a 3-channel RGB array and the decoder cannot
@@ -5189,11 +5305,19 @@ def main():
 
     # Dry run
     if args.dry_run:
+        # Predict the skips convert_one makes at conversion time (same
+        # _would_skip decision, TOCTOU fallback included): ok=len(all_items)
+        # counted outputs that would only be SKIPped and skipped= undercounted
+        # by the same amount — the wrapper sums these toplines, so the lie
+        # scaled across every manifest entry.
+        _sync_skips = sum(1 for t, j, *_ in all_items if _would_skip(t, j))
         for t, j, page_idx, is_thumb, subfiletype, samples in all_items:
             thumb_label = " [thumbnail]" if is_thumb else ""
             gray_label = " [grayscale]" if samples == 1 else ""
             logger.info(f" DRY | {t.name} page{page_idx}{thumb_label}{gray_label} > {j}")
         logger.info(f"Dry run: {len(all_items)} output(s) would be generated from {len(tiffs)} TIFF(s).")
+        if _sync_skips:
+            logger.info(f"Dry run: {_sync_skips} of them up to date — smart sync would SKIP them (no reconvert).")
         # A dry run of a DELETE run must say so. Without this the flag that
         # destroys originals was the one thing the simulation never mentioned.
         if DELETE_SOURCE:
@@ -5242,8 +5366,11 @@ def main():
         _log_discard_summary()
         emit_summary_json(
             args.summary_json,
-            ok=len(all_items), overwritten=0,
-            skipped=skipped_files + multipage_skipped,
+            # Up-to-date outputs are SKIPs, not conversions: ok must exclude
+            # them and skipped must include them, exactly like the real run
+            # (which counts them at 5412 and reports ok=synced).
+            ok=len(all_items) - _sync_skips, overwritten=0,
+            skipped=skipped_files + multipage_skipped + _sync_skips,
             # + the refusals. They are already in `failures`, and reporting
             # errors:0 next to a non-empty failure list made the wrapper's
             # recap contradict itself. The refusal is a real prediction: those

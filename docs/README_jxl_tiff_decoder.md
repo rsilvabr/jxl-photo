@@ -190,7 +190,7 @@ TIFF with transformed ICC
 
 > **Limitation**: Pillow's LittleCMS path currently processes the transform in 8-bit precision, so 16-bit output in Matrix mode is created by scaling 8-bit data. This is a known limitation of the Pillow/LittleCMS route; use Roundtrip mode for full 16-bit fidelity.
 
-> **Limitation**: Matrix mode decodes through PPM and transforms via an RGB-only LittleCMS pipeline, so **alpha channels are dropped** and **grayscale pages are expanded to 3-channel RGB** (three times the size, and a different page structure than the original). Both are logged when they happen. Roundtrip, Basic and None modes preserve alpha and keep grayscale single-channel.
+> **Limitation**: Matrix mode decodes through PPM and transforms via an RGB-only LittleCMS pipeline, so **alpha channels are dropped** and **grayscale pages are expanded to 3-channel RGB** (three times the size, and a different page structure than the original). Both are logged when they happen. Roundtrip, Basic and None modes preserve alpha and keep grayscale single-channel. Because alpha may have been dropped, `--delete-source` under `--matrix` always KEEPS the sources (fail closed): the gate can only delete pixels that provably reached the TIFF, and a PPM decode cannot prove it for alpha.
 
 ---
 
@@ -424,7 +424,7 @@ py jxl_tiff_decoder.py <input> [output] [options]
 
 Arguments:
   input           Input root folder or file
-  output          Output folder (mode 0 only)
+  output          Output folder (modes 0 and 2; other modes ignore it)
 
 Options:
   --mode 0-8          Output folder mode (default: 0)
@@ -533,7 +533,7 @@ Decoding is typically faster than encoding, as djxl is highly optimized.
 ## Logs
 
 ```
-<script_folder>/Logs/jxl_tiff_decoder/YYYYMMDD_HHMMSS.log
+<script_folder>/Logs/jxl_tiff_decoder/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
 Opening line shows all active settings. Each converted file logs:

@@ -470,6 +470,11 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
     # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if not marker_lower:
+        # An empty marker matches nothing: without this, endswith("") is True
+        # and marker_lower[0] raises IndexError. Fail closed — a run without a
+        # marker must not silently treat every folder as an anchor.
+        return False
     if part_lower.startswith(marker_lower):
         rest = part_lower[len(marker_lower):]
         if not rest or rest[0] in '_- ':
@@ -1200,23 +1205,26 @@ def _read_source_markers_batch(outputs: list) -> dict:
     return markers
 
 
-def _markers_match(out_info: dict, src_info: dict) -> bool:
+def _markers_match(out_info: dict, src_info: dict, mode_check: str = "path") -> bool:
     """Does the existing output record the SAME origin as the source JXL in
     front of it?
 
     Both sides carry the encoder's jxlphoto-src/srcsum pair pointing at the
     ORIGINAL source (the TIFF), so equality means "same photo": the recompressor
     copies them verbatim, and an earlier recompress of this same source stamped
-    the same ids. Either id matching is enough — src is the location, srcsum
-    the bytes; both None on either side proves nothing (fail closed: False).
+    the same ids.
+
+    mode_check mirrors the other scripts' --provenance: "path" requires the
+    recorded LOCATION (jxlphoto-src) to agree — the strict, documented default —
+    while "content" accepts a matching source-BYTES id (jxlphoto-srcsum), which
+    survives a moved folder. The flag used to be assigned and never read, so
+    path runs quietly accepted content-only matches.
     """
-    if out_info.get("srcsum") and src_info.get("srcsum"):
-        if out_info["srcsum"] == src_info["srcsum"]:
-            return True
-    if out_info.get("src") and src_info.get("src"):
-        if out_info["src"] == src_info["src"]:
-            return True
-    return False
+    if mode_check == "content":
+        return bool(out_info.get("srcsum") and src_info.get("srcsum")
+                    and out_info["srcsum"] == src_info["srcsum"])
+    return bool(out_info.get("src") and src_info.get("src")
+                and out_info["src"] == src_info["src"])
 
 
 def _argfile_safe(value) -> str:
@@ -1316,7 +1324,9 @@ def _reconcile_gen(text: str):
 
     counted = number of "cjxl d=X" chain entries with X > 0 (a d=0 lossless
     entry is appended to the chain but costs no quality, so it is not a
-    generation). stored = the gen= token, 0 when absent or unparseable.
+    generation). stored = the LARGEST gen= token, 0 when absent or unparseable
+    (a corrupt field carrying several self-corrects upward — undercounting is
+    the damaging direction).
     gen = max(stored, counted): if chain entries were removed the stored gen
     is the better number, if entries were added without updating gen the
     count is better — undercounting generations is the error that causes
@@ -1329,8 +1339,7 @@ def _reconcile_gen(text: str):
     generation count.
     """
     s = str(text)
-    m = _GEN_TAG_RE.search(s)
-    stored = int(m.group(1)) if m else 0
+    stored = max((int(v) for v in _GEN_TAG_RE.findall(s)), default=0)
     counted = 0
     for block in _MACHINE_BLOCK_RE.findall(s):
         for d, _e in _ENCODE_TAG_RE.findall(block):
@@ -1397,7 +1406,10 @@ def _merge_lineage_blocks(desc: str, software: str):
       * anything else is split history -> both, dc:Description first (the
         older side in every case this toolkit produces: a decoder-made TIFF
         carries the JXL's chain there, and the new encode lands in Software).
-    stored gen = max of both gen= tokens. Entries inside a caption's running
+    stored gen = max of ALL gen= tokens in both fields (_GEN_TAG_RE.findall,
+    like _reconcile_gen — a repeated gen= token is a real generation, never
+    deduped, and reading only the first one made a restamp rewrite a gen=5
+    file back down to gen=1). Entries inside a caption's running
     text never match: the block regex only matches whole " | "-delimited
     segments.
     """
@@ -1416,9 +1428,9 @@ def _merge_lineage_blocks(desc: str, software: str):
         entries = a + b
     stored = 0
     for text in (desc, software):
-        m = _GEN_TAG_RE.search(str(text))
-        if m:
-            stored = max(stored, int(m.group(1)))
+        gen_tokens = _GEN_TAG_RE.findall(str(text))
+        if gen_tokens:
+            stored = max(stored, max(int(v) for v in gen_tokens))
     return entries, stored
 
 
@@ -1541,17 +1553,29 @@ def _classify(src_params, new_d: float, new_e: int, gen: int = 0):
                           f"the first")
         return ("ok", f"source is lossless (d=0): this is the FIRST lossy "
                       f"generation, best possible quality at d={new_d}")
-    if new_d > d_old:
+    # Compare EFFECTIVE distances: cjxl clamps every lossy distance at or
+    # below _MIN_EFFECTIVE_DISTANCE to the same output (that is what the
+    # warning says), so d=0.02 and d=0.05 are the same quality on disk.
+    # Comparing nominals classified a --distance 0.05 request over a d=0.02
+    # source as "ok" and paid a lossy generation for byte-identical quality.
+    # d=0 (lossless) is not clamped and stays 0.
+    d_old_eff = max(d_old, _MIN_EFFECTIVE_DISTANCE) if d_old > 0 else 0.0
+    new_d_eff = max(new_d, _MIN_EFFECTIVE_DISTANCE) if new_d > 0 else 0.0
+    if new_d_eff > d_old_eff:
         return ("ok", f"smaller target: d={d_old} -> d={new_d} "
                       f"(one generation of lossy re-encode)")
-    if new_d == d_old:
+    if new_d_eff == d_old_eff:
+        clamp_note = ""
+        if 0 < d_old < _MIN_EFFECTIVE_DISTANCE or 0 < new_d < _MIN_EFFECTIVE_DISTANCE:
+            clamp_note = (f" (cjxl clamps lossy distances below "
+                          f"{_MIN_EFFECTIVE_DISTANCE} to the same output)")
         if new_e < e_old:
             return ("downgrade", f"same distance d={d_old} with LOWER effort "
                                  f"{new_e} < {e_old}: bigger file, same quality, "
-                                 f"plus a generation of loss")
+                                 f"plus a generation of loss{clamp_note}")
         return ("downgrade", f"same distance d={d_old}: re-encoding buys nothing "
                              f"but a generation of loss (effort {e_old}->{new_e} "
-                             f"only changes compute time here)")
+                             f"only changes compute time here){clamp_note}")
     return ("downgrade", f"source is already lossy at d={d_old}; d={new_d} is a "
                          f"HIGHER quality it cannot recover — the file only grows")
 
@@ -1792,8 +1816,10 @@ def _would_skip(jxl_path: Path, final_path: Path) -> bool:
 
     Mirrors the decision at the top of convert_one exactly — including its
     TOCTOU fallback, where an unreadable stat means "stale, convert it". Used
-    only by the dry-run preview of --delete-skipped: a destructive option that
-    could not be previewed would be the wrong kind of opt-in.
+    by the dry-run previews: the --delete-skipped would-delete count, so a
+    destructive option no longer promises deletions the run performs only for
+    outputs it actually (re)writes. Skips that --delete-skipped widens are
+    counted again by the caller.
     """
     if not final_path.exists():
         return False
@@ -1811,16 +1837,18 @@ def _would_skip(jxl_path: Path, final_path: Path) -> bool:
 # Output path resolution (modes 0-8). Modes 0/1 are resolved in main().
 # ---------------------------------------------------------------------------
 
-def resolve_output(jxl_path: Path, mode: int, input_root: Path):
+def resolve_output(jxl_path: Path, mode: int, input_root: Path,
+                   single_file: bool = False):
     # Mode 0: single file in-place — handled in main() before calling this
     # Mode 1: single file -> recompressed_jxl/ subfolder — handled in main()
 
     def _warn_if_outside(result: Path) -> Path:
         # Modes 4/5 can land OUTSIDE the selected input tree for files at its
         # root — surface that once per file instead of surprising the user
-        # later. Modes 3/4/5 accept a single FILE as input_root; anchor at the
-        # file's parent's parent so a legitimate sibling output is not flagged.
-        anchor = input_root.parent.parent if input_root.is_file() else input_root
+        # later. For a single-FILE run main() passes the file's parent as
+        # input_root, and the legitimate mode-4/5 output is a SIBLING of that
+        # folder: anchoring at the folder itself flagged every single-file run.
+        anchor = input_root.parent if single_file else input_root
         if result is not None and not _is_relative_to(result, anchor):
             logger.warning(f"Output outside input tree: {jxl_path.name} -> {result}")
         return result
@@ -1914,8 +1942,15 @@ _RECOMPRESSOR_OUTPUT_FOLDERS = frozenset(
 
 
 def _is_own_output_path(parts_lower) -> bool:
-    """True if any directory part is one of this tool's output folder names."""
-    return any(p in _RECOMPRESSOR_OUTPUT_FOLDERS for p in parts_lower)
+    """True if any directory part is one of this tool's output folder names,
+    or carries this tool's output suffix: mode 4's fallback renames a folder
+    without the token to <name>_JXL_small (an exact-name set never matches
+    those), and a recursive re-run used to re-encode its own output there.
+    Callers pass only the parts BELOW the input root, so pointing a run AT
+    such a folder to compress it again stays legitimate."""
+    return any(p in _RECOMPRESSOR_OUTPUT_FOLDERS
+               or p.endswith("_" + JXL_SUFFIX_REPLACE.lower())
+               for p in parts_lower)
 
 
 def _iter_jxls(paths, root=None):
@@ -1958,8 +1993,13 @@ def find_jxls_recursive(input_path: Path):
             filtered.append(f)
     skipped = len(raw) - len(filtered)
     if skipped:
+        # Name the suffix too: with item 16's fix a folder like
+        # "photos_JXL_small" is filtered without matching any of the exact
+        # names below, and a user seeing only those names would not recognise
+        # their folder in the message.
         logger.info(f"Ignored {skipped} JXL(s) inside recompressor output folders "
-                    f"({', '.join(sorted(_RECOMPRESSOR_OUTPUT_FOLDERS))}) — "
+                    f"({', '.join(sorted(_RECOMPRESSOR_OUTPUT_FOLDERS))}, or any "
+                    f"folder ending in _{JXL_SUFFIX_REPLACE}) — "
                     f"those are this tool's own outputs")
     return filtered
 
@@ -2161,8 +2201,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
     # failed conversion must never leave its partial output behind — without
     # staging it sits at the FINAL path, where the next sync run would treat
     # it as a finished archive and skip the file forever; in place it sits
-    # next to the source as <uuid>_name.jxl, where the next run picks it up
-    # as a NEW input.
+    # next to the source as <uuid>_name.tmp, which no scan adopts as a NEW
+    # input (and the REPLACE FAILED paths clean it up).
     output_dirty = False
     _pre_identity = _capture_output_identity(write_path, final_path)
     try:
@@ -2192,7 +2232,12 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # action == "convert"
         write_path.parent.mkdir(parents=True, exist_ok=True)
         output_dirty = True
-        container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
+        # --container=1 UNCONDITIONALLY: at d=0 the gate used to omit it, so a
+        # bare-codestream source (any third-party JXL) produced a bare output
+        # that the exiftool restamp below refuses to edit ("Will wrap JXL
+        # codestream in ISO BMFF container for writing") — a guaranteed ERROR
+        # per file. Wrapping an already-container input costs nothing.
+        container_flag = ["--container=1"]
         cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
                     + container_flag + _cjxl_buffering_flag())
@@ -2329,6 +2374,15 @@ def process_group(items, workers: int):
                         moved = True
                     except OSError as e:
                         logger.error(f"  REPLACE FAILED | {final_path.name} | {e}")
+                        # Remove the temp: the source is untouched (a failed
+                        # replace never destroys it), so leaving the verified
+                        # re-encode behind would only add a beside-final
+                        # orphan no sweep ever looks at. The next run
+                        # re-creates it.
+                        try:
+                            it["write"].unlink()
+                        except OSError:
+                            pass
                         moved = False
                     if not moved:
                         results[src_str] = ("error", final_str)
@@ -2350,8 +2404,11 @@ def process_group(items, workers: int):
                     # folder keeps the original intact until a same-volume
                     # os.replace swaps it atomically.
                     if staging_used:
+                        # Same .tmp rule as the in-place write temps: if the
+                        # promotion fails the temp stays behind (deliberately,
+                        # see below) and must not be adoptable as a NEW input.
                         dest_tmp = (final_path.parent
-                                    / f"{uuid.uuid4().hex}_{final_path.name}")
+                                    / f"{uuid.uuid4().hex}_{final_path.stem}.tmp")
                         try:
                             shutil.move(str(it["write"]), str(dest_tmp))
                         except OSError as e:
@@ -2383,6 +2440,13 @@ def process_group(items, workers: int):
                             moved = True
                         except OSError as e:
                             logger.error(f"  REPLACE FAILED, original kept | {final_path.name} | {e}")
+                            # Same cleanup as above: the original is intact,
+                            # the temp is worthless bytecode next to it (and
+                            # .tmp-named now, but do not leave it to rot).
+                            try:
+                                it["write"].unlink()
+                            except OSError:
+                                pass
                             moved = False
                     if not moved:
                         results[src_str] = ("error", final_str)
@@ -2410,23 +2474,25 @@ def process_group(items, workers: int):
     return results, promoted
 
 
-def _read_mpg_markers(paths: list) -> dict:
-    """{path str: group id | None} for the multi-page group marker
+def _read_mpg_markers(paths: list):
+    """({path str: group id | None}, complete) for the multi-page group marker
     (jxlphoto-mpg:<id>) carried in XMP-dc:Relation.
 
     One batched exiftool pass for the whole run — per-file spawns were
-    minutes on a library. A file whose marker cannot be read comes back
-    None, which the delete gate treats as "not part of any KNOWN group":
-    it falls back to single-file behavior there rather than failing closed,
-    because the marker read failing is not proof the file has no siblings.
+    minutes on a library. `complete` is False when any batch could not be
+    read: the delete gate then treats EVERY source as unverifiable (nothing
+    is deleted), because an unreadable page cannot be linked to its group —
+    and a page wrongly treated as a lone standalone could be deleted while
+    the siblings that complete its document are kept.
     """
     mpg = {str(p): None for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
-        return mpg
+        return mpg, True
     batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = 400
+    complete = True
     for i in range(0, len(paths), BATCH):
         chunk = paths[i:i + BATCH]
         argfile = None
@@ -2440,7 +2506,8 @@ def _read_mpg_markers(paths: list) -> dict:
             r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
                                capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=180)
-            if not r.stdout:
+            if r.returncode != 0 or not r.stdout:
+                complete = False
                 continue
             data = json.loads(r.stdout)
             for entry in data:
@@ -2457,6 +2524,7 @@ def _read_mpg_markers(paths: list) -> dict:
                             mpg[index[key]] = token[len(MULTIPAGE_XMP_MARKER):]
                         break
         except Exception:
+            complete = False
             continue
         finally:
             if argfile:
@@ -2464,7 +2532,7 @@ def _read_mpg_markers(paths: list) -> dict:
                     os.unlink(argfile)
                 except OSError:
                     pass
-    return mpg
+    return mpg, complete
 
 
 def _delete_gate(items, results, promoted):
@@ -2488,7 +2556,17 @@ def _delete_gate(items, results, promoted):
         return
 
     deletables = [it for it in items if not it["in_place"]]
-    mpg_of = _read_mpg_markers([it["src"] for it in deletables])
+    mpg_of, mpg_complete = _read_mpg_markers([it["src"] for it in deletables])
+    if not mpg_complete:
+        # Fail closed: an unreadable marker cannot prove a page is standalone,
+        # so no source in this run may be deleted. Without this, a page whose
+        # marker read failed was treated as a lone group and deleted while the
+        # siblings that complete its document could be kept (or vice versa).
+        _delete_stats["kept"] += len(deletables)
+        logger.error("Group markers could not be read for the whole run — "
+                     "NOTHING will be deleted (fail closed). Fix the exiftool "
+                     "failure and re-run; the outputs are already written.")
+        return
 
     # Pass 1: decide per file, WITHOUT deleting yet. EVERY page is recorded,
     # including the ones that will never be deleted this run (conversion
@@ -2514,11 +2592,17 @@ def _delete_gate(items, results, promoted):
             ok, reason = False, "output missing"
         elif not _verify_jxl_integrity(final_path):
             ok, reason = False, "output failed integrity check"
-        elif processed_this_run and (it["action"] == "copy" or status == "copied"):
+        elif it["action"] == "copy" or status == "copied":
             # A verbatim copy is provable byte-for-byte — the strongest gate
             # there is, so it is required, not optional. Status "copied" covers
             # the KEEP_SMALLER fallback too: action stays "convert", but the
             # output is a byte-copy of the source and must pass the same check.
+            # The MD5 is also required when the output PREDATES this run
+            # (status "skipped", admitted by --delete-skipped with an action
+            # of "copy"): without it that source was deleted on the strength
+            # of an integrity check alone, with nothing proving the
+            # pre-existing output is a verbatim copy of it. Fail closed: no
+            # proof, no delete.
             try:
                 if md5_of_file(src) != md5_of_file(final_path):
                     ok, reason = False, "copy MD5 mismatch"
@@ -2692,11 +2776,12 @@ def main():
                              "(default: ON_DOWNGRADE setting, 'ask')")
     parser.add_argument("--on-regeneration", dest="on_regeneration", default=None,
                         choices=["ask", "copy", "skip", "convert"],
-                        help="Source already carries a lossy generation (gen >= 1) "
-                             "and this request adds another one (each adds ~0.2-0.6 dB "
-                             "of loss on top of the byte savings, measured — and the "
-                             "nominal d no longer describes quality): "
-                             "ask/copy/skip/convert "
+                        help="Source already carries a lossy generation (gen >= 2 — "
+                             "encoder outputs are born at gen=1, so the first "
+                             "recompression is expected) and this request adds "
+                             "another one (each adds ~0.2-0.6 dB of loss on top of "
+                             "the byte savings, measured — and the nominal d no "
+                             "longer describes quality): ask/copy/skip/convert "
                              "(default: ON_REGENERATION setting, 'ask')")
     parser.add_argument("--on-unknown", dest="on_unknown", default=None,
                         choices=["ask", "copy", "skip", "convert"],
@@ -2746,6 +2831,15 @@ def main():
     if args.input is None:
         parser.error("input is required")
 
+    if not args.input.exists():
+        # Same treatment as the other three scripts: without it a typo'd preset
+        # path rglobbed into 0 files, printed "No JXL files found." and exited 0
+        # — an unattended run reported success for nothing.
+        parser.error(f"input path does not exist: {args.input}")
+
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+
     # Apply CLI over the script settings.
     if args.distance is not None:
         if not 0.0 <= args.distance <= 15.0:
@@ -2769,7 +2863,7 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
-    if args.export_marker is not None:
+    if args.export_marker:
         EXPORT_MARKER = args.export_marker
     if args.export_subfolder is not None:
         EXPORT_JXL_SUBFOLDER = args.export_subfolder
@@ -2795,6 +2889,14 @@ def main():
         print("WARNING: --delete-skipped has no effect without --delete-source: it only "
               "widens which sources the deletion covers. Nothing will be deleted.")
         DELETE_SKIPPED = False
+    if args.provenance is not None and not DELETE_SOURCE:
+        # Same spirit as the --delete-skipped warning above: --provenance is
+        # only READ by the cross-run provenance gate, which runs solely under
+        # --delete-source in a folder-collapsing mode. Armed alone it used to
+        # sit silently inert while the user believed their archive was guarded.
+        print("WARNING: --provenance has no effect without --delete-source: it only "
+              "checks an existing output's provenance before that source is "
+              "deleted. Nothing will be checked.")
 
     # A DRY RUN validates without CREATING: a simulation that leaves two new
     # folders on disk is not a simulation. It never writes into either one, so
@@ -2832,8 +2934,13 @@ def main():
 
     # Tool checks. A dry run needs none of them — it only plans.
     if not args.dry_run:
+        # exiftool resolves through _get_exiftool_cmd(), like the other three
+        # scripts: the stock Windows download ships as exiftool(-k).exe /
+        # exiftool-k, which a bare which("exiftool") misses and made the
+        # script refuse to run with the tool very much present.
         missing = [name for name in ("cjxl", "exiftool")
-                   if shutil.which(name) is None and shutil.which(name + ".exe") is None]
+                   if shutil.which(_get_exiftool_cmd() if name == "exiftool"
+                                   else name) is None]
         if missing:
             logger.error(f"Missing required tool(s): {', '.join(missing)} — see README "
                          f"(libjxl and exiftool must be on PATH)")
@@ -2952,7 +3059,7 @@ def main():
             final_path = (output_root or (input_root / CONVERTED_JXL_FOLDER)) / f.name
         else:
             try:
-                final_path = resolve_output(f, args.mode, input_root)
+                final_path = resolve_output(f, args.mode, input_root, single_file)
             except ValueError as e:
                 logger.error(str(e))
                 sys.exit(2)
@@ -2987,6 +3094,14 @@ def main():
             it["reason"] = ("jbrd box present: the original JPEG is bit-exact "
                             "recoverable from this file; recompressing would "
                             "destroy that")
+        elif it["jbrd"]:
+            # --jbrd-policy convert: the user overrode the preservation, but the
+            # README promises this is logged PER FILE — once re-encoded, the
+            # bit-exact JPEG recovery is gone for good.
+            it["reason"] += (" | jbrd box present: recompressing DESTROYS the "
+                             "bit-exact JPEG recovery (--jbrd-policy convert)")
+            logger.warning(f"jbrd JPEG recovery will be DESTROYED | "
+                           f"{it['src'].name} | --jbrd-policy convert")
         it["action"] = _policy_action(it["category"], it["jbrd"])
         # Regeneration guard: the file already carries a lossy generation and
         # this request adds another. d_new > d_old compares one step at a time
@@ -3024,6 +3139,7 @@ def main():
     # Refused items leave the run, but the delete gate still has to see them:
     # a refused page vetoes the deletion of its multi-page siblings.
     provenance_refused = []
+    refused_ids = set()
     # Also runs in a dry run — as a PREVIEW: the refusals are reported (and
     # counted in the summary's errors) but no item leaves the plan. Gating this
     # on `not args.dry_run` made the simulation promise outputs the real run
@@ -3040,7 +3156,7 @@ def main():
             for it in existing:
                 out_info = marker_info[str(it["final"])]
                 src_info = marker_info[str(it["src"])]
-                if _markers_match(out_info, src_info):
+                if _markers_match(out_info, src_info, PROVENANCE_CHECK):
                     continue
                 refused.append(it)
                 reason = ("existing output carries no matching provenance marker "
@@ -3052,24 +3168,37 @@ def main():
                 else:
                     logger.error(f"REFUSED | {it['src'].name} | {reason}")
                     _log_rejected_file(str(it["src"]), f"provenance: {reason}")
-            if refused and not args.dry_run:
+            if refused:
                 refused_ids = {id(it) for it in refused}
-                items = [it for it in items if id(it) not in refused_ids]
-                provenance_refused = refused
+                if not args.dry_run:
+                    items = [it for it in items if id(it) not in refused_ids]
+                    provenance_refused = refused
 
     # --- Dry run: report and stop ------------------------------------------
     if args.dry_run:
-        n_convert = sum(1 for it in items if it["action"] == "convert")
-        n_copy = sum(1 for it in items if it["action"] == "copy")
-        n_skip = len(items) - n_convert - n_copy
-        for it in items:
+        # A refused item stays in `items` (its DRY | would REFUSE line was
+        # already printed), but it must not inflate the plan or the would-delete
+        # count: the real run removes it and deletes nothing for it.
+        _plan = [it for it in items if id(it) not in refused_ids]
+        n_convert = sum(1 for it in _plan if it["action"] == "convert")
+        n_copy = sum(1 for it in _plan if it["action"] == "copy")
+        n_skip = len(_plan) - n_convert - n_copy
+        for it in _plan:
             tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
             extra = f" ({it['reason']})" if it["action"] != "convert" else ""
             place = " (in place)" if it["in_place"] else ""
             logger.info(f" DRY | {tag} | {it['src'].name} -> {it['final']}{place}{extra}")
         if DELETE_SOURCE or DELETE_SKIPPED:
-            n_del = sum(1 for it in items
-                        if not it["in_place"] and it["action"] in ("convert", "copy"))
+            # Mirror the real delete gate: an item whose output already exists
+            # and would SKIP inside convert_one is deleted only when
+            # --delete-skipped widens the gate (without it the item settles as
+            # an unconditional skip and is never deleted). Counting those made
+            # the preview promise deletions the run would not perform.
+            n_del = sum(1 for it in _plan
+                        if not it["in_place"]
+                        and it["action"] in ("convert", "copy")
+                        and (DELETE_SKIPPED
+                             or not _would_skip(it["src"], it["final"])))
             whose = "--delete-source" if DELETE_SOURCE else "--delete-skipped"
             logger.info(f" DRY | {whose} would delete {n_del} source(s) "
                         f"after verification; in-place items replace themselves")
@@ -3109,12 +3238,22 @@ def main():
             logger.info(f" SKIP (policy) | {it['src'].name} | {it['reason']}")
             continue
         if it["in_place"]:
+            # In-place temps wear a .tmp suffix, never a real .jxl name (the
+            # v2.1.1 --repair-jbrd pattern): a run killed externally used to
+            # leave a complete-looking JXL beside the source (or in staging,
+            # when TEMP2_DIR points inside the archive), which the next run
+            # picked up as a NEW input and paid another generation for.
+            # os.replace does not care about the extension.
             if TEMP2_DIR is not None:
-                it["write"] = Path(TEMP2_DIR) / f"{uuid.uuid4().hex}_{it['src'].stem}.jxl"
+                it["write"] = Path(TEMP2_DIR) / f"{uuid.uuid4().hex}_{it['src'].stem}.tmp"
             else:
-                it["write"] = it["src"].parent / f"{uuid.uuid4().hex}_{it['src'].stem}.jxl"
+                it["write"] = it["src"].parent / f"{uuid.uuid4().hex}_{it['src'].stem}.tmp"
         elif TEMP2_DIR is not None:
-            it["write"] = Path(TEMP2_DIR) / f"{uuid.uuid4().hex}_{it['src'].stem}.jxl"
+            # Same .tmp rule as the in-place temps above: a run killed
+            # externally must not leave a complete-looking .jxl lying in the
+            # temp dir for the next run to adopt as a NEW input. os.replace
+            # does not care about the extension.
+            it["write"] = Path(TEMP2_DIR) / f"{uuid.uuid4().hex}_{it['src'].stem}.tmp"
         else:
             # Never write under the final name: a run killed externally
             # (idle-timeout kill, Ctrl+C, power loss) would leave a TRUNCATED
@@ -3122,8 +3261,12 @@ def main():
             # sync then treats as up to date forever. A uuid temp BESIDE the
             # final, promoted with an atomic same-folder os.replace (handled
             # in process_group), means the final name only ever names a
-            # verified, complete file.
-            it["write"] = it["final"].parent / f"{uuid.uuid4().hex}_{it['final'].name}"
+            # verified, complete file. The temp wears a .tmp suffix, never the
+            # real .jxl name (the in-place temps above, same rule): an orphan
+            # beside the final would otherwise be adoptable as a NEW input on
+            # the next run — scanned, paid another generation for, or fed to
+            # the delete gate. os.replace does not care about the extension.
+            it["write"] = it["final"].parent / f"{uuid.uuid4().hex}_{it['final'].name}.tmp"
         work_items.append(it)
 
     # The [n/total] progress counter must count what will actually run —
@@ -3172,9 +3315,13 @@ def main():
                     f"{_delete_stats['deleted_archived']} already-archived deleted, "
                     f"{_delete_stats['kept']} kept")
 
+    # The wrapper's manifest recap pops these exact labels for its deletion
+    # panel; "deleted sources"/"kept sources" were invisible there.
     extras = {"recompressed": ok, "copied (policy/not smaller)": copied,
-              "deleted sources": _delete_stats["deleted"],
-              "kept sources": _delete_stats["kept"]}
+              "Sources deleted": _delete_stats["deleted"],
+              "Sources deleted (already archived)": _delete_stats["deleted_archived"],
+              "Sources KEPT by a delete gate": _delete_stats["kept"],
+              "Refused (output belongs to another source)": len(provenance_refused)}
     emit_summary_json(args.summary_json, ok=ok + copied, overwritten=overwritten,
                       skipped=skipped, errors=errors, log_file=log_file,
                       extras=extras, failures=failures)

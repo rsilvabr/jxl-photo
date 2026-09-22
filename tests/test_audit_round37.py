@@ -177,7 +177,7 @@ def test_copied_fallback_must_pass_the_md5_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "VERIFY_ROUNDTRIP", False)
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
-    monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: {})
+    monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: ({}, True))
 
     it = {"src": src, "final": final, "in_place": False,
           "action": "convert", "src_d": 1.0}
@@ -200,7 +200,7 @@ def test_copied_fallback_with_matching_bytes_is_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "VERIFY_ROUNDTRIP", False)
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
-    monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: {})
+    monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: ({}, True))
 
     it = {"src": src, "final": final, "in_place": False,
           "action": "convert", "src_d": 1.0}
@@ -245,9 +245,12 @@ def test_encoder_codec_writes_to_a_uuid_temp_beside_final(tmp_path, monkeypatch)
     target = cjxl_targets[0]
     assert target != final, "cjxl wrote straight to the final path"
     assert target.parent == final.parent
-    assert target.name.endswith("_" + final.name)
+    # ".tmp, not .jxl": a kill before promotion must not leave a file the
+    # next run's folder scan can adopt as a real JXL input.
+    assert target.name.endswith("_" + final.name + ".tmp")
+    assert not target.name.endswith(".jxl")
     assert final.exists() and final.read_bytes() == b"jxl-bytes"
-    assert list(tmp_path.glob("*_photo.jxl")) == [], "uuid temp left behind"
+    assert list(tmp_path.glob("*_photo.jxl*")) == [], "uuid temp left behind"
 
 
 def test_encoder_failed_codec_leaves_nothing_at_final(tmp_path, monkeypatch):
@@ -278,7 +281,7 @@ def test_encoder_failed_codec_leaves_nothing_at_final(tmp_path, monkeypatch):
     assert status == "error"
     assert cjxl_targets and cjxl_targets[0] != final
     assert not final.exists(), "a partial output carries the final name"
-    assert list(tmp_path.glob("*_photo.jxl")) == [], "uuid temp left behind"
+    assert list(tmp_path.glob("*_photo.jxl*")) == [], "uuid temp left behind"
 
 
 def test_recompressor_main_assigns_a_beside_final_temp(tmp_path, monkeypatch):
@@ -316,7 +319,10 @@ def test_recompressor_main_assigns_a_beside_final_temp(tmp_path, monkeypatch):
     it = captured["items"][0]
     assert it["write"] != it["final"], "the re-encode writes under the final name"
     assert it["write"].parent == it["final"].parent
-    assert it["write"].name.endswith("_" + it["final"].name)
+    # Round 39 (audit item 26): the beside-final temp ends in ".tmp" so no
+    # orphan is adoptable as a real input on the next scan.
+    assert it["write"].name.endswith("_" + it["final"].name + ".tmp"), \
+        f"temp lost the .tmp rule: {it['write'].name}"
 
 
 def test_recompressor_promotes_beside_final_temp_over_existing(tmp_path, monkeypatch):

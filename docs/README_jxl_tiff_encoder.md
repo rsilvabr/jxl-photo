@@ -783,7 +783,7 @@ not characterised here — if you are on one, upgrading is the answer.
 ## Logs
 
 ```
-<script_folder>/Logs/jxl_tiff_encoder/YYYYMMDD_HHMMSS.log
+<script_folder>/Logs/jxl_tiff_encoder/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
 Opening line shows all active settings:

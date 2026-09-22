@@ -80,8 +80,13 @@ def _make_newer(target: Path, than: Path):
 # ---------------------------------------------------------------------------
 
 def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
-             staging=None, incomplete=False):
-    """One JXL whose TIFF already exists, so the group reports SKIP."""
+             staging=None, incomplete=False, ours=True):
+    """One JXL whose TIFF already exists, so the group reports SKIP.
+
+    ours=True stands in for a jxlphoto-src marker on the TIFF (the marker the
+    real decoder writes into every output it produces): since round 39 a skip
+    is only admitted to --delete-skipped when the marker proves the TIFF is
+    this decoder's own decode."""
     import os
     src = tmp_path / "photo.jxl"
     _jxl_stub(src)
@@ -96,6 +101,7 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     monkeypatch.setattr(dec, "TEMP2_DIR", staging)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: integrity)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: ours)
     # A dict now: the KIND of incompleteness decides the advice in the KEEP line.
     monkeypatch.setattr(dec, "_incomplete_groups",
                         {os.path.normcase(str(src)): "truncated"} if incomplete else {})
@@ -143,7 +149,14 @@ def test_decoder_would_skip_matches_the_real_decision(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     _make_newer(final, src)
+    # Up to date: a skip is admitted on the MARKER, never on the timestamp —
+    # our own decode skips (round 39), a marker-less original master is
+    # refused, and a refusal is never a skip (the dry-run mirror used to say
+    # True on the mtime alone).
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
     assert dec._would_skip_group(entries, final) is True
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    assert dec._would_skip_group(entries, final) is False
     _make_newer(src, final)
     # JXL newer: reconverts when the existing TIFF is one of ours (carries
     # the jxlphoto-src marker); an original master is REFUSED an overwrite.

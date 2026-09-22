@@ -42,12 +42,16 @@ from typing import Optional
 
 def _verify_file_integrity(file_path: Path) -> bool:
     """Verify output file integrity before deleting source.
-    
-    Checks based on file extension:
-    - JXL: Valid JXL signature
-    - JPEG: Valid JPEG markers (SOI)
-    - PNG: Valid PNG signature
-    - TIFF: Valid TIFF header
+
+    Branch selection is by content signature where one is unambiguous
+    (beside-final temps end in ".tmp" since the item-26 fix — a truncated
+    temp is exactly what this check exists to catch), falling back to the
+    extension for the rest (a bare ".tmp" of unknown kind refuses — no
+    false pass for garbage):
+    - JXL: Valid JXL signature + well-formed box chain ending at EOF
+    - JPEG: Valid SOI + an EOI at the logical end (trailer-after-EOI is OK)
+    - PNG: Valid PNG signature + IEND in the tail
+    - TIFF: Valid TIFF header + readable last pixel
     """
     if not file_path.exists():
         return False
@@ -65,8 +69,20 @@ def _verify_file_integrity(file_path: Path) -> bool:
 
         if len(header) < 2:
             return False
-        
-        if ext == '.jxl':
+
+        # Beside-final temps end in ".tmp" (item 26), but this check must
+        # still verify them — a truncated temp is exactly what it exists to
+        # catch. So the branch is chosen by CONTENT where a signature is
+        # unambiguous, and falls back to the extension for everything else
+        # (TIFF, or a bare ".tmp" of unknown kind, which then refuses — no
+        # false pass for garbage).
+        _is_jxl = header == b'\x00\x00\x00\x0cJXL \r\n\x87\n'
+        _is_jpeg = header[0:2] == b'\xff\xd8' or ext in ('.jpg', '.jpeg', '.jfif', '.jpe')
+        _is_png = header[0:8] == b'\x89PNG\r\n\x1a\n' or ext == '.png'
+        _is_tiff = (ext in ('.tif', '.tiff')
+                    and not (_is_jxl or _is_jpeg or _is_png))
+
+        if _is_jxl:
             # Bare JXL: 0xFF 0x0A. Every output this toolkit produces is a
             # CONTAINER (metadata boxes are always injected), so a bare
             # codestream here means a broken mid-write — and bare files get no
@@ -106,20 +122,36 @@ def _verify_file_integrity(file_path: Path) -> bool:
                     i += size
             return has_codestream and i == file_size
         
-        elif ext in ('.jpg', '.jpeg', '.jfif', '.jpe'):
-            # SOI at the start AND an EOI (0xFFD9) near the end — a truncated
-            # or short-written JPEG must never pass the delete gate. The EOI
-            # does NOT have to be the last two bytes: jbrd bit-exact
-            # reconstruction preserves trailing data after the EOI (Motion
-            # Photos, appended thumbnails, scanner payloads), so search the
-            # tail instead of requiring EOI at EOF.
+        elif _is_jpeg:
+            # SOI at the start AND an EOI (0xFFD9) at the LOGICAL end of the
+            # JPEG — a truncated or short-written JPEG must never pass the
+            # delete gate. The EOI does NOT have to be the last two bytes:
+            # jbrd bit-exact reconstruction preserves trailing data after the
+            # EOI (Motion Photos, appended thumbnails, scanner payloads), so
+            # the scan walks BACKWARD from EOF until it finds one. The old
+            # fixed 64 KiB tail window rejected exactly the files the comment
+            # above names — a 200 KB Motion Photo trailer pushed the EOI out
+            # of the window, the encode and its bit-exact reconstruction were
+            # perfect, yet this check refused both the JPEG and the recovered
+            # copy of it (2026-09-21 audit, item 2). Trailer-after-EOI is
+            # legitimate; no EOI anywhere is not.
             if header[0:2] != b'\xff\xd8':
                 return False
             with open(file_path, 'rb') as f:
-                f.seek(max(0, stat.st_size - 65536))
-                return b'\xff\xd9' in f.read()
+                _CHUNK = 1 << 20
+                pos = stat.st_size
+                carry = b""     # bytes already covered by the previous (later) chunk
+                while pos > 2:
+                    step = min(_CHUNK, pos - 2)
+                    pos -= step
+                    f.seek(pos)
+                    buf = f.read(step)
+                    if b'\xff\xd9' in buf + carry:
+                        return True
+                    carry = buf[:1]  # an EOI can straddle the chunk boundary
+                return False
 
-        elif ext == '.png':
+        elif _is_png:
             # PNG signature AND the IEND chunk closing the stream (search the
             # tail: PNGs with appended data are valid too).
             if header[0:8] != b'\x89PNG\r\n\x1a\n':
@@ -130,7 +162,7 @@ def _verify_file_integrity(file_path: Path) -> bool:
                 f.seek(max(0, stat.st_size - 65536))
                 return b'IEND' in f.read()
 
-        elif ext in ('.tif', '.tiff'):
+        elif _is_tiff:
             # TIFF: signature, then force a real read of the last page's last
             # pixel — tifffile is lazy and a truncated file can pass a
             # header-only check.
@@ -514,6 +546,11 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
     # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if not marker_lower:
+        # An empty marker matches nothing: without this, endswith("") is True
+        # and marker_lower[0] raises IndexError. Fail closed — a run without a
+        # marker must not silently treat every folder as an anchor.
+        return False
     if part_lower.startswith(marker_lower):
         rest = part_lower[len(marker_lower):]
         if not rest or rest[0] in '_- ':
@@ -1318,8 +1355,17 @@ def read_md5_db(jxl_path: Path) -> Optional[str]:
     if not db_path.exists():
         return None
     target = jxl_path.name
-    with open(db_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    # The db is a plain text file that can be torn (crash mid-append), locked
+    # by an AV scanner, or saved by Notepad with a BOM. Any read failure must
+    # return None — "no provenance recorded" — because a caller either uses it
+    # as a delete proof (None = fail-closed KEEP) or to REFUSE overwriting
+    # (None = refuse). utf-8-sig swallows the BOM the plain utf-8 read turned
+    # into a perpetual mismatch (2026-09-21 audit, item 23).
+    try:
+        with open(db_path, "r", encoding="utf-8-sig") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
     # Read from bottom to top to get the most recent entry
     for line in reversed(lines):
         line = line.strip()
@@ -1351,8 +1397,14 @@ def read_jxl_self_hash_db(jxl_path: Path) -> Optional[str]:
     if not db_path.exists():
         return None
     target = jxl_path.name + JXL_SELF_HASH_SUFFIX
-    with open(db_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+    # Same hardening as read_md5_db: torn/locked/non-UTF8 db -> None, which
+    # makes the caller fall back to the reconstruction proof (or refuse) —
+    # never crash the run and never trust a half-read db (item 23).
+    try:
+        with open(db_path, "r", encoding="utf-8-sig") as f:
+            lines = f.readlines()
+    except Exception:
+        return None
     # Read from bottom to top to get the most recent entry
     for line in reversed(lines):
         line = line.strip()
@@ -1739,7 +1791,8 @@ def determine_command(input_path: Path, force_transcode: bool = False,
 # TRANSCODE IMPLEMENTATION
 # --------------------------------------------─
 
-def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode: bool) -> Path:
+def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode: bool,
+                             single_file: bool = False) -> Path:
     out_ext = ".jpg" if decode else ".jxl"
     conv_folder = RECOVERED_JPEG_FOLDER if decode else CONVERTED_JXL_FOLDER
     input_root = Path(input_root)
@@ -1751,7 +1804,21 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
     def _warn_if_outside(result: Path) -> Path:
         # Modes 4/5 can land OUTSIDE the input tree for files at its root —
         # surface that (same warning as the TIFF encoder/decoder).
-        if result is not None and not _is_relative_to(result, input_root):
+        # Modes 4/5 accept a single FILE as input: testing the output against
+        # the file itself can never pass (a path is never "under" a file), and
+        # testing against the file's parent still flags EVERY legitimate
+        # single-file mode-4/5 run: those modes write a SIBLING of the file's
+        # folder by design. The tree such a run must stay inside is the folder
+        # holding that sibling pair. The single_file flag is explicit because
+        # the callers disagree on what input_root means: cmd_transcode and
+        # cmd_convert pass the file's PARENT here, cmd_auto passes the FILE —
+        # an is_file() inference alone fired for one and never for the other
+        # (2026-09-21 audit, item 29; recompressor pattern).
+        if single_file:
+            anchor = input_root.parent.parent if input_root.is_file() else input_root.parent
+        else:
+            anchor = input_root
+        if result is not None and not _is_relative_to(result, anchor):
             logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
         return result
 
@@ -1844,9 +1911,18 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
     # skip-existing/smart-sync run then treats as done forever. Write to a
     # uuid temp BESIDE the final and swap it in with an atomic same-folder
     # os.replace only after the integrity check passed.
+    #
+    # The temp ends in ".tmp", NOT the final extension (the v2.1.1
+    # repair-jbrd rule: ".tmp, not .jxl"): a run killed between the write
+    # and the os.replace below would otherwise leave an adoptable
+    # "<uuid>_<name>.jxl" beside the final — this folder is scanned again
+    # on the next run, and the orphan would be picked up as real input
+    # (2026-09-21 audit, item 26). os.replace does not care about the
+    # extension, and cjxl picks the JXL writer for an unknown extension
+    # (verified against cjxl 0.12.0).
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -1983,10 +2059,13 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
     output_dirty = False
     # Never write under the final name without staging (see
     # encode_one_transcode): uuid temp beside the final + atomic os.replace
-    # after the integrity check.
+    # after the integrity check. The ".tmp" suffix (not the final ".jpg")
+    # follows the same rule as there: no orphan adoptable as real input
+    # (item 26); djxl needs --output_format for a non-standard extension,
+    # added on the command below.
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -2006,6 +2085,14 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         # Mutually exclusive with --jpeg_quality / --pixels_to_jpeg (not used on this path).
         if is_jxl_decode and _tool_at_least("djxl", 0, 12):
             djxl_cmd.insert(1, "--reconstruct_jpeg")
+        # The beside-final temp ends in ".tmp" (item 26), and djxl infers the
+        # output format from the extension — say which one it is. A no-op
+        # when staging supplies a real extension.
+        if _tool_at_least("djxl", 0, 12):
+            if is_jxl_decode:
+                djxl_cmd.insert(1, "--output_format=jpeg")
+            elif write_path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                djxl_cmd.insert(1, "--output_format=png")
         output_dirty = True
         r = subprocess.run(djxl_cmd, capture_output=True, timeout=CODEC_TIMEOUT)
         repaired_copy = None
@@ -2022,6 +2109,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                                f"--repair-jbrd) | {jxl_path.name}")
                 try:
                     r = subprocess.run(["djxl", "--reconstruct_jpeg",
+                                        "--output_format=jpeg",
                                         str(repaired_copy), str(write_path)],
                                        capture_output=True, timeout=CODEC_TIMEOUT)
                 finally:
@@ -2039,8 +2127,25 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
 
         # Validate the decoded output itself (rc=0 does not guarantee a
         # well-formed file). The MD5 comparison below is an even stronger
-        # check, but only runs when a checksum was stored.
-        if not _verify_file_integrity(write_path):
+        # check, but only runs when a checksum was stored. When the
+        # structural check fails, a REAL md5 match against the stored
+        # original's hash may still accept the file: a JPEG with a large
+        # appended trailer (Motion Photo) is complete and bit-exact even
+        # where a structural heuristic refuses it, and the decode path was
+        # rejecting exactly such files AFTER the encoder had already deleted
+        # the source (2026-09-21 audit, item 2). Fail-closed: only an actual
+        # md5_of_file comparison shortcuts the structural check — never a
+        # missing/failed one.
+        _structural_ok = _verify_file_integrity(write_path)
+        _recovered_md5 = None
+        if not _structural_ok and verify and stored_md5 is not None:
+            try:
+                _recovered_md5 = md5_of_file(write_path)
+            except OSError:
+                _recovered_md5 = None
+            if _recovered_md5 == stored_md5:
+                _structural_ok = True
+        if not _structural_ok:
             raise RuntimeError("djxl returned 0 but the output failed the integrity check")
 
         n, total = next_count()
@@ -2059,7 +2164,10 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
             elif stored_md5 is None:
                 logger.warning(f"[{n}/{total}] OK (no MD5 stored) | {jxl_path.name}")
             else:
-                recovered_md5 = md5_of_file(write_path)
+                # Reuse the hash the structural-check fallback may already
+                # have computed (item 2) instead of reading the file again.
+                recovered_md5 = (_recovered_md5 if _recovered_md5 is not None
+                                 else md5_of_file(write_path))
                 if recovered_md5 == stored_md5:
                     md5_verified = True
                     logger.info(f"[{n}/{total}] OK [MD5 PASS] | {jxl_path.name}")
@@ -2237,7 +2345,14 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
     """
     self_hash = read_jxl_self_hash_db(jxl_path)
     if self_hash is not None:
-        return md5_of_file(jxl_path) == self_hash
+        # The hash read itself (locked file, vanished mid-gate) must not
+        # escape this function: an exception here would kill the whole run
+        # instead of failing THIS proof closed (item 23 — md5_of_file was
+        # outside the try that shields the rest of the checks).
+        try:
+            return md5_of_file(jxl_path) == self_hash
+        except OSError:
+            return False
     if not _tool_at_least("djxl", 0, 12):
         logger.debug(f" content-binding unavailable (legacy db, djxl<0.12) | {jxl_path.name}")
         return False
@@ -2329,12 +2444,16 @@ def _auto_repair_copy(jxl_path: Path):
     """A repaired COPY of a jbrd JXL whose reconstruction fails, or None.
 
     Used by AUTO_REPAIR_JBRD on the decode path: the repaired copy lives in
-    the system temp (never beside the source, where a *.jxl glob would pick
-    it up next run), the original JXL is never modified — healing the archive
-    is --repair-jbrd's job. Caller deletes the returned path's parent dir.
+    the temp (TEMP_DIR when set, else the system temp — never beside the
+    source, where a *.jxl glob would pick it up next run), the original JXL
+    is never modified — healing the archive is --repair-jbrd's job. The temp
+    wears a ".tmp" name (same rule as _repair_one_jbrd): if TEMP_DIR points
+    INTO the archive, a hard kill must not leave an adoptable *.jxl there.
+    Caller deletes the returned path's parent dir.
     """
-    tmp_dir = Path(tempfile.mkdtemp(prefix="jxl_autorepair_"))
-    tmp = tmp_dir / jxl_path.name
+    _dir = str(TEMP_DIR) if TEMP_DIR else None
+    tmp_dir = Path(tempfile.mkdtemp(prefix="jxl_autorepair_", dir=_dir))
+    tmp = tmp_dir / f"{jxl_path.stem}.tmp"
     try:
         rec_md5, _detail = _strip_markers_proving_repair(jxl_path, tmp)
     except Exception:
@@ -2363,8 +2482,17 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
     """
     # .tmp, not .jxl: a crash between here and the finally would otherwise
     # leave a *.jxl next to the source that the next recursive scan treats as
-    # input. djxl/exiftool read content, not extensions.
-    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
+    # input. djxl/exiftool read content, not extensions. On a DRY RUN the
+    # copy goes to TEMP_DIR instead (like _jxl_reconstruct_md5's decode
+    # temp): the audit promised "nothing is written", and beside-the-source
+    # writes fail outright on read-only media — the audit marked every file
+    # there STILL BROKEN (2026-09-21 audit, item 27). Same `.tmp` suffix.
+    if dry_run:
+        _dry_dir = Path(TEMP_DIR) if TEMP_DIR else Path(tempfile.gettempdir())
+        _dry_dir.mkdir(parents=True, exist_ok=True)
+        tmp = _dry_dir / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
+    else:
+        tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
     try:
         rec_md5, detail = _strip_markers_proving_repair(jxl_path, tmp)
         if rec_md5 is None:
@@ -2407,7 +2535,7 @@ def cmd_repair_jbrd(args) -> int:
     so its MD5 is not the original's. With --dry-run nothing is written.
     Exit code: 0 when nothing is STILL BROKEN, 1 otherwise.
     """
-    setup_logger()
+    log_file = setup_logger()
     root = args.input
     files = [root] if root.is_file() else sorted(root.rglob("*.jxl"))
     files = [f for f in files if f.is_file()]
@@ -2422,7 +2550,12 @@ def cmd_repair_jbrd(args) -> int:
             ok += 1
             logger.info(f" OK | {f.name}")
             continue
-        state, detail = _repair_one_jbrd(f, args.dry_run)
+        try:
+            state, detail = _repair_one_jbrd(f, args.dry_run)
+        except Exception as e:
+            # A locked/read-only/in-use file must not abort the whole audit:
+            # report it as still broken and keep walking the remaining files.
+            state, detail = "broken", f"repair raised {type(e).__name__}: {e}"
         if state == "repaired":
             repaired += 1
             logger.warning(f" REPAIRED (JPEG recoverable again with identical image "
@@ -2440,6 +2573,17 @@ def cmd_repair_jbrd(args) -> int:
     if still_broken:
         logger.error("These files can no longer reproduce their original "
                      "JPEG -- keep any source JPEGs you still have.")
+    # Emit the machine-readable summary from INSIDE the repair path: main()
+    # routes the repair with sys.exit(cmd_repair_jbrd(...)) before its own
+    # emit_summary_json, so --summary-json used to print nothing at all for a
+    # repair run (and the wrapper labelled it "[no summary]").
+    _extras = {"without jbrd (not applicable)": no_jbrd}
+    if args.dry_run:
+        _extras["repairable (dry run)"] = repaired
+    record_summary(ok=ok + repaired, overwritten=0, skipped=no_jbrd,
+                   errors=still_broken, log_file=log_file, extras=_extras,
+                   dry_run=bool(args.dry_run))
+    emit_summary_json(args.summary_json)
     return 1 if still_broken else 0
 
 
@@ -2646,7 +2790,14 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                         f" DELETING an already-archived source with NO provenance check "
                         f"(no checksum stored) | {src_path.name}")
                 else:
-                    actual = md5_of_file(src_path if not decode else final_file)
+                    try:
+                        actual = md5_of_file(src_path if not decode else final_file)
+                    except OSError as e:
+                        _delete_stats["kept"] += 1
+                        logger.warning(
+                            f" KEEP (checksum could not be verified: {e}) | "
+                            f"{src_path.name}")
+                        continue
                     if actual != stored:
                         _delete_stats["kept"] += 1
                         logger.warning(
@@ -2788,7 +2939,14 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
             continue
         if decode_lossless:
             stored = read_md5_db(src)
-            if stored is not None and stored == md5_of_file(out):
+            _out_md5 = None
+            if stored is not None:
+                try:
+                    _out_md5 = md5_of_file(out)
+                except OSError as e:
+                    refused.append((src, out, f"could not hash the existing output ({e})"))
+                    continue
+            if stored is not None and stored == _out_md5:
                 # The JPEG matches the stored hash — but that hash is keyed by
                 # the JXL's NAME. A swapped same-named JXL passes that check,
                 # so bind it to the JXL's CONTENT before trusting the pair.
@@ -2813,14 +2971,20 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
                 if stored is None:
                     why = ("no checksum to prove it "
                            "(was it written with --no-md5?)")
-                elif stored != md5_of_file(src):
-                    why = "the stored checksum does not match this source"
-                elif _jxl_binds_to_archived_jpeg(out, src, stored):
-                    kept.append((src, out))
-                    continue
                 else:
-                    why = ("this JXL is not the file the checksum was recorded "
-                           "for (swapped or replaced same-named JXL)")
+                    try:
+                        _src_md5 = md5_of_file(src)
+                    except OSError as e:
+                        refused.append((src, out, f"could not hash the source ({e})"))
+                        continue
+                    if stored != _src_md5:
+                        why = "the stored checksum does not match this source"
+                    elif _jxl_binds_to_archived_jpeg(out, src, stored):
+                        kept.append((src, out))
+                        continue
+                    else:
+                        why = ("this JXL is not the file the checksum was recorded "
+                               "for (swapped or replaced same-named JXL)")
             else:
                 info = marks.get(str(out)) or {"src": None, "srcsum": None}
                 if _provenance_ok(info, src, PROVENANCE_CHECK):
@@ -2850,7 +3014,13 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
 
 def _delete_extras() -> dict:
     """Deletion counts for the run summary, so the wrapper's manifest recap can
-    report the most destructive thing the tool does instead of staying silent."""
+    report the most destructive thing the tool does instead of staying silent.
+
+    Empty without --delete-source: nothing was delete-eligible, and a nonzero
+    "kept" from a staging anomaly would have read as a gate holding something
+    back on a run that could not delete anything."""
+    if not DELETE_SOURCE:
+        return {}
     return {
         "Sources deleted": _delete_stats["deleted"],
         "Sources deleted (already archived)": _delete_stats["deleted_archived"],
@@ -2941,6 +3111,14 @@ def cmd_transcode(args, auto_decode: bool = False):
                 f"{mode_str} | Staging: {TEMP2_DIR or 'disabled'} | Workers: {args.workers}")
     logger.info(f"Input: {args.input}")
 
+    # resolve_output_transcode has no rename parameters: only the lossy
+    # convert path applies --rename-from/--rename-to. Accepting the flags
+    # here without a word looked like a rename had been honored
+    # (2026-09-21 audit, item 24).
+    if getattr(args, "rename_from", "") or getattr(args, "rename_to", ""):
+        logger.warning("--rename-from/--rename-to are ignored for JPEG->JXL "
+                       "transcode paths (only the lossy convert path applies them)")
+
     # Collect files
     if args.input.is_file():
         files = [args.input]
@@ -2965,8 +3143,10 @@ def cmd_transcode(args, auto_decode: bool = False):
 
     # Build pairs
     pairs = []
+    _single_file = args.input.is_file()
     for f in files:
-        out = resolve_output_transcode(f, args.mode, output_root, decode)
+        out = resolve_output_transcode(f, args.mode, output_root, decode,
+                                       single_file=_single_file)
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
@@ -2999,7 +3179,12 @@ def cmd_transcode(args, auto_decode: bool = False):
         # default (dry_run=false, ok=0, log=""), so the wrapper's recap showed a
         # simulation as a finished real run with zeros and never printed its
         # [DRY RUN] banner. The encoder and decoder report the planned count.
-        record_summary(ok=len(pairs), overwritten=0, skipped=0, errors=0,
+        if _refused:
+            logger.warning(f"Dry run: {len(_refused)} pair(s) would be REFUSED by "
+                           f"the provenance check (see above); the real run fails "
+                           f"those files.")
+        record_summary(ok=len(pairs), overwritten=0, skipped=0,
+                       errors=len(_refused),
                        log_file=log_file, dry_run=True)
         return (0, False)
 
@@ -3086,7 +3271,8 @@ def cmd_transcode(args, auto_decode: bool = False):
 
 def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: str,
                            ext: str, rename_from: str = "", rename_to: str = "",
-                           output_root: Path = None, decode: bool = False) -> Path:
+                           output_root: Path = None, decode: bool = False,
+                           single_file: bool = False) -> Path:
     stem = src_path.stem
     if rename_from and rename_from in stem:
         stem = stem.replace(rename_from, rename_to, 1)
@@ -3097,6 +3283,18 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
     sfx_from = JXL_SUFFIX_TO_REPLACE if decode else JPEG_SUFFIX_TO_REPLACE
     sfx_to = JPEG_SUFFIX_REPLACE_DEC if decode else JXL_SUFFIX_REPLACE
     exp_out = EXPORT_JPEG_FOLDER if decode else EXPORT_JXL_FOLDER
+
+    # Anchor for the modes-4/5 outside-the-tree warning. Callers disagree on
+    # what output_root means for a single-file run: cmd_convert passes the
+    # file's PARENT, cmd_auto passes the FILE itself — cover both (the
+    # single_file flag is what makes the anchor climb at all; item 29).
+    _warn_anchor = None
+    if output_root:
+        _root = Path(output_root)
+        if single_file:
+            _warn_anchor = _root.parent.parent if _root.is_file() else _root.parent
+        else:
+            _warn_anchor = _root
 
     if mode == 0:
         if output_root and Path(output_root) != src_path.parent:
@@ -3131,14 +3329,14 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
             new_name = old_name + "_" + sfx_to
             logger.warning(f"'{sfx_from}' not found as a token in '{old_name}', using '{new_name}'")
         result = src_path.parent.parent / new_name / f"{stem}.{ext}"
-        if output_root and not _is_relative_to(result, Path(output_root)):
+        if _warn_anchor and not _is_relative_to(result, _warn_anchor):
             logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
         return result
     elif mode == 5:
         # Sibling folder (e.g., JXL_jpeg/ or JPEG_recovered/) — aligned with
         # encoder/decoder mode 5
         result = src_path.parent.parent / sibling_folder / f"{stem}.{ext}"
-        if output_root and not _is_relative_to(result, Path(output_root)):
+        if _warn_anchor and not _is_relative_to(result, _warn_anchor):
             logger.warning(f"Output outside input tree: {src_path.name} -> {result}")
         return result
     elif mode in (6, 7):
@@ -3211,10 +3409,12 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
     output_dirty = False
     # Never write under the final name without staging (see
     # encode_one_transcode): uuid temp beside the final + atomic os.replace
-    # after the integrity check.
+    # after the integrity check. ".tmp" suffix per the item-26 rule: no
+    # orphan beside the final is adoptable as real input; cjxl defaults to
+    # the JXL writer for an unknown extension.
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     _pre_identity = _capture_output_identity(write_path, final_path)
 
     try:
@@ -3251,15 +3451,22 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
-        # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode
-        _copy_metadata(src_path, write_path)
-        # Provenance markers — but NEVER into a jbrd-carrying JXL: the appended
-        # XMP breaks djxl --reconstruct_jpeg for sources that already had XMP
-        # (same data-loss bug as the transcode path; see encode_one_transcode).
-        # At d=0 on a JPEG input cjxl keeps the jbrd box, so this write is
-        # skipped exactly when reconstruction matters.
+        # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode —
+        # but NEVER into a jbrd-carrying JXL. _copy_metadata's
+        # `-tagsfromfile -xmp:all` REWRITES the XMP inside the container, and
+        # on a jbrd container that re-serialization breaks
+        # `djxl --reconstruct_jpeg` (exiftool reorders the rdf:Description
+        # blocks): the original JPEG silently stops being bit-exactly
+        # recoverable while every structural check still passes — the exact
+        # v2.0.0+ data-loss class this box-guard exists for (reproduced in the
+        # 2026-09-21 audit, item 1). At d=0 on a JPEG input cjxl keeps the
+        # jbrd box AND the original metadata, so the copy is not needed there;
+        # at d>0 there is no jbrd and the copy runs as before.
+        # Provenance markers live under the same guard: the appended XMP
+        # breaks reconstruction the same way (see encode_one_transcode).
         try:
             if not has_jbrd_box(write_path):
+                _copy_metadata(src_path, write_path)
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(src_path)
                     + [str(write_path)], timeout=60)
@@ -3325,9 +3532,20 @@ def _get_srgb_icc_path() -> Optional[str]:
         try:
             from PIL import ImageCms
             icc_path = Path(tempfile.gettempdir()) / "jxl_photo_sRGB.icc" if TEMP_DIR is None else Path(TEMP_DIR) / "jxl_photo_sRGB.icc"
-            if not icc_path.exists():
+            if not icc_path.exists() or icc_path.stat().st_size < 128:
                 profile_bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-                icc_path.write_bytes(profile_bytes)
+                # Atomic write: a crash mid-write used to leave a truncated
+                # profile cached under this stable name, failing every future
+                # --to-srgb run until someone deleted it by hand.
+                _part = icc_path.with_name(icc_path.name + f".{os.getpid()}.part")
+                try:
+                    _part.write_bytes(profile_bytes)
+                    os.replace(str(_part), str(icc_path))
+                finally:
+                    try:
+                        _part.unlink()
+                    except OSError:
+                        pass
             _srgb_icc_cache = str(icc_path)
         except Exception:
             _srgb_icc_cache = False  # do not retry every file
@@ -3415,10 +3633,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
     output_dirty = False
     # Never write under the final name without staging (see
     # encode_one_transcode): uuid temp beside the final + atomic os.replace
-    # after the integrity check.
+    # after the integrity check. ".tmp" suffix per the item-26 rule: no
+    # orphan beside the final is adoptable as real input. Because djxl and
+    # magick both infer the output format from the file EXTENSION, the ".tmp"
+    # name cannot be handed to them directly: the codec branches below
+    # translate it back with --output_format (djxl) / an explicit format
+    # (magick - png|jpeg), and "direct" djxl-to-JPEG goes through the
+    # --output_format=jpeg flag.
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     actual_out = write_path
     _pre_identity = _capture_output_identity(write_path, final_path)
 
@@ -3430,6 +3654,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # (cmd_convert / _process_file_group) before output pairs are built,
         # so staging and final paths always agree. A runtime switch here would
         # make should_process consult the wrong extension (dead code, removed).
+
+        # The beside-final temp ends in ".tmp" (item 26), which djxl/magick
+        # cannot map to a format by extension. djxl gets --output_format
+        # (_fmt_flag) on the direct branches; magick gets an explicit
+        # "jpg:"/"png:" prefix on the output (it otherwise falls back to the
+        # INPUT's format for an unknown extension, which would write PNG
+        # bytes into a JPEG deliverable). With staging the extension is real
+        # and the explicit spec is a harmless no-op.
+        _fmt_flag = "--output_format=png" if is_png else "--output_format=jpeg"
+        _magick_out = ("png:" if is_png else "jpg:") + str(actual_out)
 
         if output_icc and not MAGICK_AVAILABLE:
             # Fail loudly: silently keeping the embedded ICC would deliver
@@ -3464,13 +3698,13 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                         # _icc_args_for).
                         magick_output = _icc_args_for(tmp_png, output_icc, ["-depth", str(bit_depth)])
                         logger.debug(f"Using ICC conversion: {magick_output[:2]}")
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
                         raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
-                # Direct djxl to PNG
-                r = subprocess.run(["djxl", str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
+                # Direct djxl to PNG (explicit format: the temp may end in .tmp)
+                r = subprocess.run(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
         else:
@@ -3492,14 +3726,15 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                         # an sRGB profile is as wrong as the PNG case above.
                         magick_output = _icc_args_for(tmp_png, output_icc, ["-quality", str(quality)])
                         logger.debug(f"Using ICC conversion: {magick_output[:2]}")
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [str(actual_out)], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     except subprocess.CalledProcessError as cpe:
                         err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
                         raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
             else:
-                # Direct djxl to JPG (preserves embedded ICC)
+                # Direct djxl to JPG (preserves embedded ICC; explicit format:
+                # the temp may end in .tmp)
                 quality_flag = f"--jpeg_quality={quality}"
-                r = subprocess.run(["djxl", quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
+                r = subprocess.run(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
                 if r.returncode != 0:
                     raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
@@ -3786,7 +4021,8 @@ def cmd_convert(args, from_jxl: bool = True):
             out = resolve_output_convert(f, args.mode, args.output_name,
                                          _eff_suffix, "jxl",
                                          args.rename_from, args.rename_to,
-                                         resolve_root, decode=False)
+                                         resolve_root, decode=False,
+                                         single_file=args.input.is_file())
         else:
             # Default to jpg if format is somehow None, else use specified
             fmt = args.format if args.format else "jpeg"
@@ -3794,7 +4030,8 @@ def cmd_convert(args, from_jxl: bool = True):
             out = resolve_output_convert(f, args.mode, args.output_name,
                                          _eff_suffix, ext,
                                          args.rename_from, args.rename_to,
-                                         resolve_root, decode=True)
+                                         resolve_root, decode=True,
+                                         single_file=args.input.is_file())
         if out is None:
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
@@ -3824,8 +4061,16 @@ def cmd_convert(args, from_jxl: bool = True):
                 f"file(s) would be DELETED, each only after its output is "
                 f"written and passes the integrity check.")
         # Same rule as cmd_transcode: without this the wrapper reads the
-        # untouched default and reports the simulation as a real run.
-        record_summary(ok=len(pairs), overwritten=0, skipped=0, errors=0,
+        # untouched default and reports the simulation as a real run. The
+        # refusals are failures the real run would charge (item 25 — the
+        # dry run said errors=0 right below a "REFUSING N"), so they are
+        # counted here too.
+        if _refused:
+            logger.warning(f"Dry run: {len(_refused)} pair(s) would be REFUSED by "
+                           f"the provenance check (see above); the real run fails "
+                           f"those files.")
+        record_summary(ok=len(pairs), overwritten=0, skipped=0,
+                       errors=len(_refused),
                        log_file=log_file, dry_run=True)
         return (0, False)
 
@@ -3900,6 +4145,32 @@ def cmd_convert(args, from_jxl: bool = True):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
+            # THE real recovery gate, ported from the transcode path (process_
+            # group_transcode): structural integrity is not enough when the
+            # JXL carries a jbrd box. --force-convert --distance 0 on a JPEG
+            # yields EXACTLY that (cjxl keeps jbrd at d=0), and a jbrd JXL can
+            # pass every structural check while still failing
+            # djxl --reconstruct_jpeg — e.g. v2.0.0-v2.0.3 wrote XMP markers
+            # into jbrd containers, and exiftool's -tagsfromfile re-serialized
+            # the XMP of any source that already had some. The source may only
+            # be deleted when the reconstruction ACTUALLY reproduces its
+            # bytes. With djxl < 0.12 the test cannot run, and an unverifiable
+            # output must block deletion (fail closed).
+            if (final_file.suffix.lower() == '.jxl'
+                    and src_path.suffix.lower() in JPEG_EXTS
+                    and has_jbrd_box(final_file)):
+                if _tool_at_least("djxl", 0, 12):
+                    if not _jxl_reconstructs_to(final_file, src_path):
+                        _delete_stats["kept"] += 1
+                        logger.warning(
+                            f" KEEP (djxl --reconstruct_jpeg does not reproduce "
+                            f"this JPEG; run --repair-jbrd to fix markers written "
+                            f"by v2.0.0+) | {src_path.name}")
+                        continue
+                else:
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
+                    continue
             if final_file is None or not _verify_file_integrity(final_file):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
@@ -4123,9 +4394,14 @@ def cmd_auto(args):
         # lists — otherwise a fully filtered-out group still asks for the token.
         # PNG -> JXL is lossy only at distance > 0 (distance 0 is lossless
         # modular) — cmd_convert's rule; charging the strict HHMM token for a
-        # lossless plan trained users to hand it out for nothing.
+        # lossless plan trained users to hand it out for nothing. But d=0 is
+        # still LOSSLESS, so a PNG-only plan at d=0 must ask the WEAK
+        # confirmation (confirm_deletion_jpeg) like cmd_convert does: with
+        # both flags below False the folder was emptied with no confirmation
+        # at all (2026-09-21 audit, item 6).
         has_lossy = bool(planned["JXL-lossy"]) or (bool(planned["PNG"]) and args.distance > 0)
-        has_lossless = bool(planned["JPEG"]) or bool(planned["JXL-jbrd"])
+        has_lossless = (bool(planned["JPEG"]) or bool(planned["JXL-jbrd"])
+                        or (bool(planned["PNG"]) and args.distance <= 0))
         if has_lossy:
             if not confirm_deletion_lossy():
                 logger.info("Deletion not confirmed -- exiting.")
@@ -4185,7 +4461,9 @@ def cmd_auto(args):
         # A dry run converts nothing, so `totals` is all zeros — report the
         # PLANNED output count instead, matching what the encoder/decoder put
         # in their dry-run summaries. Otherwise the wrapper's recap shows a
-        # simulation of 5000 files as a row of zeros.
+        # simulation of 5000 files as a row of zeros. `totals["err"]` now
+        # carries the dry-run provenance refusals too (item 25), so a
+        # simulated REFUSING N is no longer reported as a clean run.
         ok=len(all_pairs) if args.dry_run else totals["ok"],
         overwritten=totals["overwritten"], skipped=totals["skipped"],
         errors=totals["err"], log_file=log_file,
@@ -4236,13 +4514,15 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         if use_transcode:
             # Lossless transcode: direction depends on input extension
             is_jpeg_input = f.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
-            out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input)
+            out = resolve_output_transcode(f, args.mode, output_root, decode=not is_jpeg_input,
+                                           single_file=args.input.is_file())
         else:
             out = resolve_output_convert(
                 f, args.mode, args.output_name,
                 args.output_suffix if args.output_suffix is not None else (CONVERT_OUTPUT_SUFFIX or ""),
                 out_ext, args.rename_from, args.rename_to,
-                resolve_root, decode=(direction == "from_jxl")
+                resolve_root, decode=(direction == "from_jxl"),
+                single_file=args.input.is_file()
             )
         if out:
             pairs.append((f, out))
@@ -4282,16 +4562,29 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
             logger.warning(
                 f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
                 f"file(s) in this group would be DELETED.")
-        # Zeros, like cmd_transcode's and cmd_convert's dry runs: a simulation
-        # does not fail. _provenance_filter has already logged each refusal, so
-        # they are not invisible. (Whether a dry run should report the refusals
-        # it PREDICTS is a separate question, open for all three commands.)
-        return {"ok": 0, "err": 0, "skipped": 0}
+        # Zeros for the CONVERSION, like cmd_transcode's and cmd_convert's dry
+        # runs: a simulation does not fail. The provenance REFUSALS are
+        # different: the real run charges them as errors (the fix that
+        # reached cmd_transcode only), so the simulation reports the same
+        # tally instead of errors=0 right below a "REFUSING N" (item 25).
+        # _provenance_filter has already logged each refusal, so they are
+        # not invisible.
+        return dict(_refused_tally)
 
     if not pairs:
         # Everything in this group was refused. Returning zeros here was the
         # other half of the same bug.
         return _refused_tally
+
+    # The transcode resolver takes no rename parameters (item 24): in auto
+    # mode the convert groups DO apply --rename-from/--rename-to, so the
+    # warning is scoped to the groups that ignore them — not shouted for the
+    # whole run.
+    if use_transcode and (getattr(args, "rename_from", "")
+                          or getattr(args, "rename_to", "")):
+        logger.warning("--rename-from/--rename-to are ignored for the JPEG->JXL "
+                       "transcode paths in this group (only the lossy convert "
+                       "path applies them)")
 
     tally = dict(_refused_tally)
     tally["failures"] = list(_refused_tally["failures"])
@@ -4377,6 +4670,27 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
+                # THE real recovery gate, ported from the transcode path (same
+                # as cmd_convert's gate): a jbrd-carrying JXL output (PNG->JXL
+                # never has one, but a JPEG routed through a lossy convert at
+                # d=0 does) must PROVE it still reconstructs the original JPEG
+                # bit-exactly before the unlink. djxl < 0.12 cannot run the
+                # test, so it fails closed.
+                if (final_file.suffix.lower() == '.jxl'
+                        and src_path.suffix.lower() in JPEG_EXTS
+                        and has_jbrd_box(final_file)):
+                    if _tool_at_least("djxl", 0, 12):
+                        if not _jxl_reconstructs_to(final_file, src_path):
+                            _delete_stats["kept"] += 1
+                            logger.warning(
+                                f" KEEP (djxl --reconstruct_jpeg does not reproduce "
+                                f"this JPEG; run --repair-jbrd to fix markers written "
+                                f"by v2.0.0+) | {src_path.name}")
+                            continue
+                    else:
+                        _delete_stats["kept"] += 1
+                        logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
+                        continue
                 if final_file is None or not _verify_file_integrity(final_file):
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
@@ -4587,6 +4901,14 @@ def main():
         print(f"ERROR: --decode requires a .jxl input (got {args.input.name})")
         sys.exit(1)
 
+    # --force-transcode means "encode this JPEG to JXL". On a non-JPEG file it
+    # used to fail once per file deep inside the worker; reject it up front.
+    if (args.force_transcode and not args.decode and args.input.is_file()
+            and args.input.suffix.lower() not in JPEG_EXTS):
+        print(f"ERROR: --force-transcode requires a JPEG input "
+              f"(got {args.input.name}). Use --force-convert for JXL/PNG inputs.")
+        sys.exit(2)
+
     # Range checks the encoder has done all along. Without them --distance 99
     # and --quality 500 sailed through argparse and failed inside cjxl/djxl
     # once PER FILE, with the real cause named nowhere. Exit 2 = "aborted /
@@ -4645,6 +4967,30 @@ def main():
     if cmd == "error":
         print(f"ERROR: {reason}")
         sys.exit(1)
+
+    # ICC conversion is only applied by the CONVERT (re-encode) paths. The
+    # lossless transcode recovers the original bytes, so --to-srgb /
+    # --icc-profile has nothing to convert there; saying nothing made the flag
+    # look honored. Only the pure "transcode" route gets the warning: "auto"
+    # converts the JXL pairs WITH the profile (cmd_auto), so the flag is not
+    # dead there.
+    if args.icc_profile is not None and cmd == "transcode":
+        print("WARNING: --to-srgb/--icc-profile has no effect on the lossless "
+              "transcode path (the original bytes are recovered). Use "
+              "--force-convert for a color-managed re-encode.")
+
+    # A jbrd-carrying JXL is always routed to the LOSSLESS transcode decode,
+    # which by definition reproduces the original JPEG — --format/--bit-depth
+    # only reach the lossy convert decoder, so the usage example
+    # `photo.jxl --format png` silently returned a JPEG (2026-09-21 audit,
+    # item 22). The routing itself is correct (jbrd MUST go through
+    # transcode), so say the flags are ignored instead of pretending.
+    if (cmd == "transcode" and auto_decode and args.input.is_file()
+            and (args.format is not None or args.bit_depth is not None)):
+        print("WARNING: this JXL carries a jbrd box: the lossless recovery "
+              "path always writes the ORIGINAL JPEG, so --format/--bit-depth "
+              "are ignored. Use --force-convert for PNG or other re-encoded "
+              "output.")
 
     # Set default mode based on command if not specified
     if args.mode is None:

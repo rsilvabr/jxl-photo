@@ -195,15 +195,26 @@ class TestPolicyAction:
 
 
 class TestMarkersMatch:
-    def test_srcsum_match(self):
+    def test_srcsum_match_in_content_mode(self):
         a = {"src": None, "srcsum": "abc123"}
         b = {"src": "x", "srcsum": "abc123"}
-        assert rec._markers_match(a, b) is True
+        assert rec._markers_match(a, b, "content") is True
+
+    def test_srcsum_alone_does_not_satisfy_path_mode(self):
+        a = {"src": None, "srcsum": "abc123"}
+        b = {"src": "x", "srcsum": "abc123"}
+        assert rec._markers_match(a, b, "path") is False
+        assert rec._markers_match(a, b) is False          # path is the default
 
     def test_src_match(self):
         a = {"src": "loc1", "srcsum": None}
         b = {"src": "loc1", "srcsum": "different"}
         assert rec._markers_match(a, b) is True
+
+    def test_content_mode_requires_srcsum(self):
+        a = {"src": "loc1", "srcsum": None}
+        b = {"src": "loc1", "srcsum": "different"}
+        assert rec._markers_match(a, b, "content") is False
 
     def test_mismatch_fails_closed(self):
         a = {"src": "loc1", "srcsum": "sum1"}
@@ -466,6 +477,13 @@ def _gate_item(src, final, action="convert", in_place=False):
 
 
 class TestDeleteGate:
+    @pytest.fixture(autouse=True)
+    def _no_mpg_markers(self, monkeypatch):
+        # Group-marker reading is exercised elsewhere; these tests target the
+        # per-file gates, so stub it as "read OK, no markers". The real reader
+        # on these stub files now fails closed (no deletion at all).
+        monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: ({}, True))
+
     def test_converted_source_deleted_after_integrity(self, tmp_path, monkeypatch):
         monkeypatch.setattr(rec, "DELETE_SOURCE", True)
         src = _fake_jxl(tmp_path / "a.jxl")

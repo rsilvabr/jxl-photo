@@ -621,7 +621,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
-| `DELETE_CONFIRM` | `True` | Require HHMM confirmation for mode 8 delete |
+| `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 
 **CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (max compression on libjxl ≥ 0.12), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
 
@@ -649,7 +649,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `JPEG_DEFAULT_QUALITY` | `95` | Default JPEG quality |
 | `PNG_DEFAULT_BIT_DEPTH` | `16` | Default PNG bit depth |
 | `STORE_MD5` | `True` | Store MD5 for losslessness verification |
-| `DELETE_CONFIRM` | `True` | Require confirmation for mode 8 delete |
+| `DELETE_CONFIRM` | `True` | Require confirmation before deleting (`--delete-source` works in every mode) |
 | `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy encode |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for lossy pixel encodes (setting only, no CLI flag); `None` = use cjxl default (fast); `0` = best compression, slower |
 
@@ -663,7 +663,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `EXPORT_MARKER` | `"_EXPORT"` | Path anchor for modes 6/7 |
 | `EXPORT_JXL_FOLDER` | `"16B_JXL_small"` | Mode 6/7 output folder |
 | `ON_DOWNGRADE` | `"ask"` | Policy when the request cannot gain (also wizard/CLI) |
-| `ON_REGENERATION` | `"ask"` | Policy when the file already carries a lossy generation (`gen≥1`) and the request adds another (also wizard/CLI) |
+| `ON_REGENERATION` | `"ask"` | Policy when the file already carries a lossy generation (`gen≥2` — files are born at `gen=1`, so a first recompression never fires the guard) and the request adds another (also wizard/CLI) |
 | `ON_UNKNOWN` | `"convert"` | Policy for files with no `cjxl d=/e=` record |
 | `JBRD_POLICY` | `"copy"` | Policy for JPEG-recoverable JXLs (jbrd box) |
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
@@ -708,13 +708,13 @@ If `rich` is missing, the tool runs in plain-text mode with the same functionali
 
 Each underlying script writes its own log:
 ```
-<script_folder>/Logs/<script_name>/YYYYMMDD_HHMMSS.log
+<script_folder>/Logs/<script_name>/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
 `jxl_photo.py` streams the selected script's output in real-time and only writes
 a log of its own for **manifest runs** — a combined summary across all entries:
 ```
-Logs/jxl_photo/YYYYMMDD_HHMMSS.log
+Logs/jxl_photo/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
 * * *

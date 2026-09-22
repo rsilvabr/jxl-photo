@@ -107,8 +107,12 @@ def test_stale_icc_stripped_with_real_reader(monkeypatch, tmp_path):
                             stdout="Creator Tool : OldApp | ICC:T0xESUJD\n"))
     xmp = tmp_path / "x.xmp"
     xmp.write_text("<x/>", encoding="utf-8")
+    # Real TIFF: the Software lineage read is fail-closed now — exiftool
+    # needs a readable file (rc=0 + no tag is the normal no-tag state).
+    src = tmp_path / "src.tif"
+    tifffile.imwrite(src, np.zeros((2, 2, 3), dtype=np.uint8))
     args_file = enc.build_metadata_injection_args(
-        tmp_path / "src.tif", tmp_path / "out.jxl", tmp_path,
+        src, tmp_path / "out.jxl", tmp_path,
         exif_bin=None, icc_bytes=b"\x00" * 200, xmp_original=xmp,
     )
     content = args_file.read_text(encoding="utf-8")

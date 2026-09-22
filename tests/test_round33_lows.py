@@ -183,7 +183,8 @@ def test_list_presets_works_without_codecs(tmp_path, monkeypatch, capsys):
     cfg_path = _config_with_preset(tmp_path)
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: cfg_path)
     monkeypatch.setattr(wp.DependencyChecker, "check_dependencies",
-                        lambda self, force=False: {"cjxl": False, "djxl": False})
+                        lambda self, force=False, persist=True, **kw:
+                        {"cjxl": False, "djxl": False})
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
     monkeypatch.setattr(sys, "argv", ["jxl_photo.py", "--list-presets"])
     with pytest.raises(SystemExit) as exit_info:
@@ -373,7 +374,8 @@ def test_ctrlc_exits_main_with_130(tmp_path, monkeypatch):
     cfg_path = _config_with_preset(tmp_path)
     monkeypatch.setattr(wp.ConfigManager, "_get_config_path", lambda self: cfg_path)
     monkeypatch.setattr(wp.DependencyChecker, "check_dependencies",
-                        lambda self, force=False: {"cjxl": True, "djxl": True})
+                        lambda self, force=False, persist=True, **kw:
+                        {"cjxl": True, "djxl": True})
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
 
     def _boom(self, wf, st):

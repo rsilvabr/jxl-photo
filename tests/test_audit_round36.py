@@ -128,7 +128,7 @@ def _group(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
     monkeypatch.setattr(rec, "_read_mpg_markers",
-                        lambda paths: {str(p): "group-1" for p in paths})
+                        lambda paths: ({str(p): "group-1" for p in paths}, True))
     return items
 
 

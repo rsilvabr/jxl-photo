@@ -202,7 +202,8 @@ def test_recompressor_delete_gate_requires_delete_source(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "DELETE_SOURCE", False)
     monkeypatch.setattr(rec, "DELETE_SKIPPED", True)   # armed alone
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
-    monkeypatch.setattr(rec, "_read_mpg_markers", lambda paths: {str(p): None for p in paths})
+    monkeypatch.setattr(rec, "_read_mpg_markers",
+                        lambda paths: ({str(p): None for p in paths}, True))
 
     items = [{"src": src, "final": final, "in_place": False, "action": "copy",
               "src_d": 1.0}]
@@ -388,7 +389,7 @@ def _mpg_run(tmp_path, monkeypatch, *, p1_ok, p2_ok):
     monkeypatch.setattr(rec, "DELETE_SOURCE", True)
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "_read_mpg_markers",
-                        lambda paths: {str(p): "group-1" for p in paths})
+                        lambda paths: ({str(p): "group-1" for p in paths}, True))
     monkeypatch.setattr(rec, "_verify_jxl_integrity",
                         lambda p: p1_ok if p.name == "p0.jxl" else p2_ok)
     items = [{"src": s, "final": f, "in_place": False, "action": "convert",

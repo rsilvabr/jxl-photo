@@ -408,6 +408,11 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
     # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if not marker_lower:
+        # An empty marker matches nothing: without this, endswith("") is True
+        # and marker_lower[0] raises IndexError. Fail closed — a run without a
+        # marker must not silently treat every folder as an anchor.
+        return False
     if part_lower.startswith(marker_lower):
         rest = part_lower[len(marker_lower):]
         if not rest or rest[0] in '_- ':
@@ -1238,11 +1243,22 @@ def extract_icc_native(jxl_path, tmp_dir):
     """
     try:
         icc_path = tmp_dir / "native.icc"
-        _run_exiftool_argfile(
+        # exiftool -o REFUSES to overwrite an existing file, and tmp_dir is
+        # shared by every page of a group: without unlinking first, page N
+        # silently read page N-1's profile. Check the return code too —
+        # ignoring it turned that stale file into a "successful" extraction.
+        try:
+            icc_path.unlink()
+        except OSError:
+            pass
+        r = _run_exiftool_argfile(
             ["-o", str(icc_path), "-b", "-ICC_Profile", str(jxl_path)], timeout=30
         )
-        if icc_path.exists() and icc_path.stat().st_size > 128:
-            return icc_path.read_bytes()
+        if r.returncode == 0 and icc_path.exists() and icc_path.stat().st_size > 128:
+            data = icc_path.read_bytes()
+            # Validate the ICC magic number 'acsp' at header offset 36-39.
+            if data[36:40] == b"acsp":
+                return data
     except Exception as e:
         logger.debug(f"Native ICC extraction failed: {e}")
     return None
@@ -1882,7 +1898,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
     pixel integrity gate anyway, and --delete-source then removed the JXL
     holding the only copy of that metadata. The caller must treat False as a
     per-file failure (the pixels are fine — the TIFF stays — but the delete
-    gate fails closed on it).
+    gate fails closed on it). The same verdict applies to a failed
+    PROVENANCE MARKER write: without the marker a later run reads the output
+    as an original master and refuses it, so it must not pass as ok either.
     """
     try:
         # Copy all metadata from JXL. Writes on large TIFFs can take a while
@@ -2008,9 +2026,30 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 add_lines += _provenance_marker_args(list(provenance_sources))
             if len(add_lines) > 1:
                 add_lines.append(str(tiff_path))
-                _run_exiftool_argfile(add_lines, timeout=60)
+                r_rel = _run_exiftool_argfile(add_lines, timeout=60)
+                if r_rel.returncode != 0:
+                    # The provenance marker is what a LATER run uses to tell
+                    # this output from an original master (_provenance_ok, and
+                    # _decode_output_is_ours for the smart-sync skip). A TIFF
+                    # written without it is refused on the next run — and this
+                    # run would have reported "ok" while the delete gate
+                    # removed the JXL holding the only other copy of this
+                    # metadata. Not a silent skip: warn and fail the file,
+                    # exactly like a failed EXIF/XMP copy above.
+                    copied = False
+                    logger.warning(
+                        f"  PROVENANCE MARKER WRITE FAILED (exiftool rc={r_rel.returncode}) | "
+                        f"{tiff_path.name} | "
+                        f"{(r_rel.stderr or r_rel.stdout or 'no output').strip()} — "
+                        f"a later run will treat this TIFF as an original master")
         except Exception as e_rel:
-            logger.debug(f"Relation marker write skipped: {e_rel}")
+            # Same verdict as a non-zero rc above: the block either wrote the
+            # provenance marker or it did not. An exception here used to be
+            # logged at DEBUG and the metadata copy still reported success —
+            # the TIFF left without its marker and was read as a master on
+            # the next run. "Skipped" must never read as ok.
+            logger.warning(f"Relation/provenance marker write FAILED: {e_rel}")
+            copied = False
         return copied
     except Exception as e:
         # A raised failure mid-copy means the metadata is partial at best —
@@ -2492,9 +2531,11 @@ def _would_skip_group(page_entries, final_path: Path) -> bool:
     """Would convert_multipage_jxl_group report SKIP for this group?
 
     Mirrors the decision at the top of that function exactly, including its
-    TOCTOU fallback (an unreadable stat means "stale, convert it"). Used only by
-    the dry-run preview of --delete-skipped: a destructive option that cannot be
-    previewed is the wrong kind of opt-in.
+    TOCTOU fallback (an unreadable stat means "stale, convert it") and its
+    marker rule: in BOTH mtime directions a skip is admitted only on the
+    jxlphoto-src marker — a marker-less original master comes back "refused",
+    never "skipped". Used only by the dry-run preview of --delete-skipped: a
+    destructive option that cannot be previewed is the wrong kind of opt-in.
     """
     if not final_path.exists():
         return False
@@ -2504,7 +2545,12 @@ def _would_skip_group(page_entries, final_path: Path) -> bool:
         try:
             newest = max(j.stat().st_mtime for j, _, _, _, _, _, _ in page_entries)
             if newest <= final_path.stat().st_mtime:
-                return True
+                # The mtime says "up to date" — but the real run admits the
+                # skip ONLY on the marker: a marker-less TIFF is an original
+                # master, reported "refused" (never "skipped"), and a refusal
+                # must never let --delete-skipped delete the JXL on the
+                # strength of a file this decoder never produced.
+                return _decode_output_is_ours(final_path)
             # JXL newer → the real run reconverts, or — when the existing TIFF
             # is an original master (no jxlphoto-src marker) — REFUSES. A
             # refusal is NOT a skip: the TIFF on disk is not this JXL's decode
@@ -2549,6 +2595,29 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # the conversion instead of crashing the whole batch.
                 newest_jxl_mtime, final_mtime = 1, 0
             if newest_jxl_mtime <= final_mtime:
+                # The mtime says "up to date" — but only a jxlphoto-src marker
+                # says the TIFF is actually THIS decoder's output. An original
+                # master (scanner/camera/lightroom export) that was re-saved,
+                # touched, restored from a backup or re-synced by a cloud drive
+                # carries a NEWER mtime than the JXL beside it; returning
+                # "skipped" here would admit that JXL to --delete-skipped and
+                # delete it on the strength of a file this decoder never
+                # produced.
+                #
+                # Status "refused", NOT "skipped" — the same rule as the
+                # "JXL newer" branch below, applied in BOTH mtime directions:
+                # the marker, never the timestamp, is what a skip is admitted
+                # on. An explicit --overwrite is the way to say "I know what
+                # I am doing".
+                if not _decode_output_is_ours(final_path):
+                    n, total = next_count()
+                    logger.warning(f"[{n}/{total}] KEEP (refusing to treat "
+                                   f"{final_path.name} as up to date: this TIFF "
+                                   f"carries no jxlphoto-src marker, so it is not "
+                                   f"a file this tool decoded — it looks like the "
+                                   f"original master. Re-run with --overwrite to "
+                                   f"replace it anyway.) | {main_jxl.name}")
+                    return str(main_jxl), "refused", str(final_path)
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
                 return str(main_jxl), "skipped", str(final_path)
@@ -2587,9 +2656,16 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     # BESIDE the final and swap it in with an atomic same-folder os.replace
     # only after the integrity check passed — so the final name only ever
     # names a verified, complete file.
+    #
+    # The temp ends in ".tmp", NOT the final extension (the v2.1.1 repair-jbrd
+    # rule: ".tmp, not .jxl"): a run killed between the write and the
+    # os.replace below would otherwise leave an adoptable
+    # "<uuid>_<name>.tif" beside the final — this folder is scanned again on
+    # the next run, and the orphan would be picked up as real input.
+    # os.replace does not care about the extension.
     _promote_local = write_path == final_path
     if _promote_local:
-        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}"
+        write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
 
     # Identity of a pre-existing output (non-staging only). The error handler
     # compares against this: a file whose identity is UNCHANGED was never
@@ -2737,10 +2813,18 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # the tifffile-injected Software/ImageDescription tags ONLY if
                 # they still hold tifffile defaults — a legitimate value copied
                 # from the source JXL must survive.
-                _run_exiftool_argfile(
+                r_exif = _run_exiftool_argfile(
                     ["-overwrite_original", "-tagsfromfile", str(main_jxl),
                      "-exif:all", str(write_path)], timeout=180
                 )
+                if r_exif.returncode != 0:
+                    # Same rule as copy_metadata: a failed metadata copy is a
+                    # per-file ERROR, so the delete gate keeps the source that
+                    # holds the only copy of that EXIF.
+                    meta_ok = False
+                    _err = (r_exif.stderr or r_exif.stdout or "no output")[:200]
+                    logger.error(f" METADATA COPY FAILED (None mode) | "
+                                 f"{main_jxl.name} | {_err.strip()}")
                 r_sw0 = _run_exiftool_argfile(
                     ["-s", "-s", "-s", "-IFD0:Software", str(write_path)], timeout=30
                 )
@@ -2766,23 +2850,37 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             if not _verify_tiff_integrity(write_path):
                 raise RuntimeError("output TIFF failed the integrity check")
 
-            if _promote_local:
-                # Atomic same-folder swap (see the _promote_local note above):
-                # a partial never carries the final name. A failure raises
-                # into the error handler, which deletes the temp.
-                os.replace(str(write_path), str(final_path))
-
             if not meta_ok:
-                # The pixels are fine and the TIFF stays on disk, but the JXL
-                # holds metadata that did NOT make it across. Report a real
-                # error — the status feeds the delete gate, which fails closed
-                # on anything but ok/overwrite, so the source holding the only
-                # copy of that metadata is NOT deleted.
+                # The pixels are fine, but the JXL holds metadata that did NOT
+                # make it across — and the verdict must come BEFORE the
+                # promotion below. A metadata-failed output promoted to the
+                # final name carries a NEW mtime: the next smart-sync run then
+                # classifies the group as SKIP (sync) and --delete-skipped
+                # deletes the JXL, which is the only copy of the metadata that
+                # was lost. Discard the fresh output instead: the pre-existing
+                # TIFF (if any) keeps its OLD mtime, so the next run
+                # reconverts and gets another chance, the status feeds the
+                # delete gate (which fails closed on anything but
+                # ok/overwrite), and the source is NOT deleted.
+                if write_path != final_path:
+                    try:
+                        if write_path.exists():
+                            write_path.unlink()
+                    except OSError:
+                        pass
                 n, total = next_count()
                 logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | "
                              f"metadata copy failed (see above)")
-                return str(main_jxl), "error", ("metadata copy failed — the TIFF is "
-                                                "kept and the source was NOT deleted")
+                return str(main_jxl), "error", ("metadata copy failed — the fresh "
+                                                "output was discarded and the source "
+                                                "was NOT deleted")
+
+            if _promote_local:
+                # Atomic same-folder swap (see the _promote_local note above):
+                # a partial never carries the final name. A failure raises
+                # into the error handler, which deletes the temp. Only a
+                # verified output whose metadata crossed whole reaches this.
+                os.replace(str(write_path), str(final_path))
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -3010,13 +3108,33 @@ def process_group(group_tasks, workers, target_icc=None):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
+            # A SKIPPED source is judged on the FILE — and the marker is the
+            # part of the file that says whose decode this TIFF is. The skip
+            # decision itself is a timestamp comparison (convert_multipage_
+            # jxl_group checks the marker in both branches, but this gate is
+            # the last line of defence): an original master with no
+            # jxlphoto-src marker — re-saved, touched, restored from a backup,
+            # re-synced by a cloud drive — must never certify a deletion, no
+            # matter how fresh its mtime looks. Fail closed: keep the sources.
+            if was_skipped and not _decode_output_is_ours(final_tiff):
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"the existing {final_tiff.name} carries no jxlphoto-src marker, "
+                    f"so it is not a file this tool decoded — it cannot prove these "
+                    f"sources are archived")
+                continue
             # Pages of this group were not in the run. Every check above passes
             # — the single-page TIFF written is valid and complete — so this is
             # the only place that can stop the deletion. Fail closed: a page
             # that exists only in the source must keep the source alive.
             _why_kind = _incomplete_groups.get(os.path.normcase(str(task["main_jxl"])))
             if _why_kind and not ALLOW_INCOMPLETE_GROUPS:
-                _delete_stats["kept"] += 1
+                # Count the JXLs actually preserved, not 1: the whole point of
+                # this KEEP is that N sources survive.
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
                 _tail = ("the markers disagree about the size of the split, so nothing "
                          "here proves this TIFF is complete"
                          if _why_kind == "inconsistent" else
@@ -3027,14 +3145,50 @@ def process_group(group_tasks, workers, target_icc=None):
                     f" KEEP (incomplete multi-page group) | {task['main_jxl'].name} | "
                     f"{_tail}")
                 continue
+            # A multipage-marker read that FAILED this run (exiftool timeout,
+            # crash, rc≠0) leaves the affected files standing at the standalone
+            # defaults — the safe fallback for DECODING a page, and exactly
+            # what splits a marked multi-page group into one-page groups whose
+            # TIFFs pass every integrity check below. No downstream check can
+            # then tell that the other pages only exist in the JXLs about to be
+            # removed. Same fail-closed recipe as _incomplete_groups (and as
+            # the recompressor's mpg_complete=False, round 38): retain every
+            # source of an affected group for THIS run. Not overridable —
+            # --allow-incomplete-groups speaks to archive state, not to a
+            # broken exiftool.
+            _unread = [e[0] for e in task["entries"]
+                       if os.path.normcase(str(e[0])) in _mpg_marker_failures]
+            if _unread:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"the multipage markers of "
+                    f"{', '.join(p.name for p in _unread)} could not be read this "
+                    f"run, so this group cannot be proven complete — nothing is "
+                    f"deleted; fix the exiftool failure and re-run")
+                continue
             # Delete only the sources whose pixels actually made it into the
             # TIFF. Thumbnails excluded by --thumbnail-handling ignore are NOT
             # in the output, so deleting them destroys data the user never got
             # back — "don't put it in the TIFF" is not "erase it". They are
             # kept and reported instead; the cost is a skip-forever
             # thumbnail-only group on later runs, which is noisy but harmless.
+            # Matrix mode decodes through PPM (RGB, no alpha). Whether a source
+            # carried alpha cannot be proven without a second decode, so no
+            # source of a matrix run is deleted: the gate's rule is that only
+            # sources whose pixels all reached the TIFF may go, and matrix
+            # cannot prove that. Fail closed, like ignored thumbnails.
+            if USE_MATRIX_MODE:
+                _delete_stats["kept"] += len(task["entries"])
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"--matrix decodes through PPM and cannot prove alpha was not "
+                    f"dropped; use roundtrip/basic mode to delete them")
+                continue
             _orphan_thumbs = list(task.get("ignored_thumbs", []))
             if _orphan_thumbs:
+                _delete_stats["kept"] += len(_orphan_thumbs)
                 logger.warning(
                     f" KEPT {len(_orphan_thumbs)} ignored thumbnail source(s) | "
                     f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
@@ -3183,7 +3337,19 @@ def _group_naming_path(main_jxl: Path, entries: list, was_marked_group: bool = N
         return main_jxl
     stem, _page, _thumb = _parse_jxl_page_suffix(main_jxl.stem)
     if stem and stem != main_jxl.stem:
-        return main_jxl.with_name(stem + main_jxl.suffix)
+        # Strip ONLY a suffix the encoder actually generated. It names page 0
+        # with the plain stem and page N>0 with _pageN, so a numeric suffix is
+        # generated only when it matches a real page > 0 — the anchor's
+        # marker page index. A source TIFF named scan_page2.tif produces the
+        # anchor scan_page2.jxl for page 0, whose `_page2` is part of the
+        # ORIGINAL NAME; stripping it renamed the reconstruction to scan.tif
+        # (and could collide with a real scan.tif). `_thumbnail` is only
+        # generated for a page whose marker says it IS a thumbnail.
+        _anchor = next((e for e in entries if e[0] == main_jxl), None)
+        _anchor_page = _anchor[1] if _anchor else 0
+        _anchor_thumb = bool(_anchor[2]) if _anchor else False
+        if (_anchor_page > 0 and _page == _anchor_page) or (_thumb and _anchor_thumb):
+            return main_jxl.with_name(stem + main_jxl.suffix)
     return main_jxl
 
 
@@ -3233,7 +3399,15 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     except OSError:
                         pass
             if not r.stdout:
-                logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} file(s) (rc={r.returncode}); treating them as standalone")
+                # Fail closed for the delete gate: standalone defaults are the
+                # safe fallback for DECODING, but a marked multi-page group
+                # whose markers are unread splits into one-page groups whose
+                # TIFFs pass every integrity check — so record the failure and
+                # let the gate retain the sources of any affected group.
+                logger.warning(f"Multipage marker read failed for a batch of {len(chunk)} "
+                               f"file(s) (rc={r.returncode}); treating them as standalone — "
+                               f"the delete gate will KEEP their sources this run")
+                _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
                 continue
             # exiftool exits non-zero when it fails on ANY file of the batch,
             # but still prints valid JSON for the rest. Discarding that JSON
@@ -3244,8 +3418,20 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
             # standalone defaults already seeded in `markers`.
             data = _json.loads(r.stdout)
             if r.returncode != 0:
+                # exiftool exited non-zero: it failed on AT LEAST ONE file of
+                # the batch, and a format-level failure may not even carry an
+                # "Error" key in the JSON (the message goes to stderr with an
+                # empty SourceFile-only entry). The healthy entries still
+                # parse below — the markers they return keep the real groups
+                # intact for DECODING — but no file of a partially-failed
+                # batch can prove it is standalone rather than unread, so the
+                # whole chunk is recorded and the delete gate retains its
+                # sources this run (fail closed, like mpg_complete=False in
+                # the recompressor).
                 logger.warning(f"Marker read: exiftool rc={r.returncode} on a batch of {len(chunk)} file(s); "
-                               f"using the {len(data)} entry/entries it returned, the rest are standalone")
+                               f"using the {len(data)} entry/entries it returned, the rest are "
+                               f"standalone — the delete gate will KEEP this batch's sources")
+                _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
             for entry in data:
                 src = entry.get("SourceFile")
                 rel = entry.get("Relation")
@@ -3308,8 +3494,16 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     # in the dict where it would be silently ignored.
                     logger.warning(f"Marker read: path mismatch, treated as standalone | {src}")
         except Exception as e:
-            # On any batch failure, leave those files as standalone (safe default)
-            logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) treated as standalone")
+            # On any batch failure (a timeout raises TimeoutExpired into this
+            # handler too), leave those files as standalone — the safe default
+            # for DECODING. NOT for DELETING: the group markers are unread, so
+            # no group containing these files can be proven complete and the
+            # delete gate retains their sources this run (fail closed, like
+            # the recompressor's mpg_complete=False from round 38).
+            logger.warning(f"Multipage marker batch error ({e}); {len(chunk)} file(s) "
+                           f"treated as standalone — the delete gate will KEEP their "
+                           f"sources this run")
+            _mpg_marker_failures.update(os.path.normcase(str(j)) for j in chunk)
             continue
     return markers
 
@@ -3326,6 +3520,17 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 # find, disagreeing markers may have every page present and nothing to fetch,
 # and an "extra" group holds files that do not belong to it at all.
 _incomplete_groups = {}
+
+# Files whose multipage-marker read FAILED this run (exiftool timeout, rc≠0,
+# crash, empty output), keyed by os.path.normcase(str(path)). The standalone
+# defaults the reader falls back to are the safe choice for DECODING a page,
+# but they are also exactly what splits a marked multi-page group into
+# one-page groups whose TIFFs are valid and deletable — so the delete gate
+# refuses to delete any source of a group holding an unread file (fail
+# closed, like _incomplete_groups; the same recipe as the recompressor's
+# mpg_complete=False from round 38). Cleared by collect_multipage_groups on
+# every run.
+_mpg_marker_failures: set = set()
 
 # Groups this run REFUSED to merge: they carry MORE members than the split
 # recorded and nothing could tell which ones belong (see _split_group_by_srcsum).
@@ -3471,6 +3676,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     # in the same interpreter) must not inherit a previous run's verdicts.
     _incomplete_groups.clear()
     _group_conflicts.clear()
+    _mpg_marker_failures.clear()
     _pending_incomplete: list = []
 
     # Read markers first; they are needed even when reconstruction is disabled
@@ -4164,19 +4370,24 @@ Examples:
             logger.info(f" DRY | {task['main_jxl'].name} -> {task['final_tiff']} | {detail}")
         logger.info(f"Dry run: {len(tasks)} output(s) would be generated from {len(jxls)} JXL(s).")
         # Preview the master-TIFF refusal too: without it the simulation
-        # promised an output the real run will refuse to write.
+        # promised an output the real run will refuse to write. _would_refuse
+        # is kept outside the smart-only branch: the --delete-source preview
+        # below must exclude these groups in every mode (the delete gate
+        # admits only ok/overwrite, and a refusal is neither).
+        _would_refuse = []
         if OVERWRITE == "smart":
-            _would_refuse = []
             for task in tasks:
                 _ft = task["final_tiff"]
                 try:
                     if not _ft.exists():
                         continue
-                    _newest = max(j.stat().st_mtime for j, *_ in task["entries"])
-                    if _newest <= _ft.stat().st_mtime:
-                        continue
                 except (OSError, ValueError):
                     continue
+                # Both mtime directions refuse a marker-less TIFF: up to date
+                # or not, an original master is never overwritten and never
+                # reported as a skip. The old `continue` before this check
+                # (TIFF newer = up to date) hid the up-to-date masters from
+                # this preview while the real run refused them.
                 if not _decode_output_is_ours(_ft):
                     _would_refuse.append(_ft)
             if _would_refuse:
@@ -4186,43 +4397,117 @@ Examples:
                 for _ft in _would_refuse[:10]:
                     logger.warning(f"  would REFUSE | {_ft}")
         if DELETE_SOURCE:
-            _n = sum(len(t["entries"]) for t in tasks)
-            logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {_n} source JXL(s) would be "
-                f"DELETED, each only after its TIFF is written and passes the "
-                f"integrity check.")
+            # Groups the provenance gate predicted as REFUSED are excluded: the
+            # real run removes them from the plan and deletes nothing for them,
+            # so counting them here promised deletions that never happen. Same
+            # for the master-TIFF refusals previewed above, and for --matrix:
+            # its delete gate keeps EVERY source (it decodes through PPM and
+            # cannot prove alpha was not dropped), so promising deletions
+            # contradicted the gate point by point.
+            _refused_names = {_p for _p, _ in provenance_failures}
+            _master_refused = {os.path.normcase(str(_ft)) for _ft in _would_refuse}
+            if USE_MATRIX_MODE:
+                logger.warning(
+                    f"Dry run: --delete-source is ARMED, but --matrix decodes through "
+                    f"PPM and cannot prove alpha reached the TIFF, so the real run "
+                    f"would DELETE NO source JXL(s) — all "
+                    f"{sum(len(t['entries']) for t in tasks)} would be KEPT.")
+            else:
+                _n = sum(len(t["entries"]) for t in tasks
+                         if str(t["main_jxl"]) not in _refused_names
+                         and os.path.normcase(str(t["final_tiff"])) not in _master_refused)
+                logger.warning(
+                    f"Dry run: --delete-source is ARMED. Up to {_n} source JXL(s) would be "
+                    f"DELETED, each only after its TIFF is written and passes the "
+                    f"integrity check.")
 
         # Preview --delete-skipped: a dry run returns before process_group, so
         # without this the one destructive option acting on files this run does
-        # NOT write would have no preview at all.
+        # NOT write would have no preview at all. It mirrors the real gate
+        # check by check — including the refusals and the marker
+        # certification, so "kept" counts the JXLs actually preserved, not
+        # one per group.
         if DELETE_SOURCE and DELETE_SKIPPED:
+            _refused_names = {_p for _p, _ in provenance_failures}
+            _master_refused = {os.path.normcase(str(_ft)) for _ft in _would_refuse}
             _would_delete, _would_keep = [], []
             for task in tasks:
+                _n_src = len(task["entries"]) + len(task.get("ignored_thumbs", []))
                 if not _would_skip_group(task["entries"], task["final_tiff"]):
+                    # Not a skip. In smart sync that is either a reconvert
+                    # (the --delete-source topline's business) or a REFUSED
+                    # master: the real run reports a KEEP and deletes nothing,
+                    # so preview that as a keep instead of letting the group
+                    # vanish from the count.
+                    if os.path.normcase(str(task["final_tiff"])) in _master_refused:
+                        _would_keep.append((task["main_jxl"],
+                                            "existing TIFF looks like an original "
+                                            "master (would be REFUSED)", _n_src))
+                    continue
+                if str(task["main_jxl"]) in _refused_names:
+                    _would_keep.append((task["main_jxl"],
+                                        "provenance gate would refuse it", _n_src))
+                    continue
+                if os.path.normcase(str(task["final_tiff"])) in _master_refused:
+                    _would_keep.append((task["main_jxl"],
+                                        "existing TIFF looks like an original "
+                                        "master (would be REFUSED)", _n_src))
+                    continue
+                if USE_MATRIX_MODE:
+                    _would_keep.append((task["main_jxl"],
+                                        "--matrix cannot prove alpha reached "
+                                        "the TIFF", _n_src))
+                    continue
+                if any(os.path.normcase(str(e[0])) in _mpg_marker_failures
+                       for e in task["entries"]):
+                    _would_keep.append((task["main_jxl"],
+                                        "multipage marker read failed this run "
+                                        "(group cannot be proven complete)", _n_src))
                     continue
                 if (os.path.normcase(str(task["main_jxl"])) in _incomplete_groups
                         and not ALLOW_INCOMPLETE_GROUPS):
-                    _would_keep.append((task["main_jxl"], "incomplete multi-page group"))
+                    _would_keep.append((task["main_jxl"], "incomplete multi-page group",
+                                        _n_src))
                 elif _verify_tiff_integrity(task["final_tiff"]):
                     _would_delete.append(task)
                 else:
-                    _would_keep.append((task["main_jxl"], "output failed the integrity check"))
+                    _would_keep.append((task["main_jxl"], "output failed the integrity check",
+                                        _n_src))
+            # The real gate certifies a SKIPPED source on the FILE: the
+            # jxlphoto-src marker is what proves the existing TIFF is this
+            # decoder's own output. Batch-read the markers once and move
+            # marker-less groups to would-keep — an original master must never
+            # be counted as "would DELETE" (item 3's rule, previewed).
+            if _would_delete:
+                _marks = _read_source_markers_batch([t["final_tiff"] for t in _would_delete])
+                _proven = []
+                for t in _would_delete:
+                    _info = _marks.get(str(t["final_tiff"])) or {"src": None, "srcsum": None}
+                    if _info.get("src") or _info.get("srcsum"):
+                        _proven.append(t)
+                    else:
+                        _would_keep.append(
+                            (t["main_jxl"],
+                             "existing TIFF carries no jxlphoto-src marker (not this "
+                             "tool's decode — refused)", len(t["entries"])))
+                _would_delete = _proven
             if _would_delete or _would_keep:
                 _n_files = sum(len(t["entries"]) for t in _would_delete)
+                _n_keep = sum(n for _, _, n in _would_keep)
                 logger.warning(
                     f"Dry run: --delete-skipped would DELETE {_n_files} already-archived "
                     f"source JXL(s) from {len(_would_delete)} group(s), and keep "
-                    f"{len(_would_keep)}.")
+                    f"{_n_keep}.")
                 for _t in _would_delete[:10]:
                     for _j, *_ in _t["entries"]:
                         logger.warning(f"  would DELETE | {_j}")
                 if len(_would_delete) > 10:
                     logger.warning(f"  ... and {len(_would_delete) - 10} more group(s)")
-                for _j, _why in _would_keep[:10]:
-                    logger.info(f"  would KEEP ({_why}) | {_j}")
+                for _j, _why, _n in _would_keep[:10]:
+                    logger.info(f"  would KEEP {_n} source(s) ({_why}) | {_j}")
         emit_summary_json(
             args.summary_json,
-            ok=len(tasks), overwritten=0, skipped=0,
+            ok=max(0, len(tasks) - len(provenance_failures)), overwritten=0, skipped=0,
             # A refused merge is a real prediction: those groups will not be
             # rebuilt. Reporting errors:0 next to a non-empty failure list made
             # the wrapper's recap contradict itself (same rule as the encoder).

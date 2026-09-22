@@ -214,7 +214,8 @@ invisible stdin.
 ```
 py jxl_recompressor.py <input> [output] [flags]
 
-input / output        Input JXL file or folder / optional output (modes 0, 2, 5)
+input / output        Input JXL file or folder / optional output (modes 0 and 2;
+                      other modes warn that the output positional is ignored)
 --mode 0-8            Output folder mode (default 0)
 --workers N           Parallel workers (default: min(CPU, 16))
 --overwrite           Always recompress, even if the output exists

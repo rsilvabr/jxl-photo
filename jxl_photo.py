@@ -19,7 +19,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Initialize wrapper logger early so manifest/path validation code can log safely.
 # Without a handler these messages would hit Python's lastResort (raw stderr,
@@ -361,6 +361,11 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
     # endswith is inherently safe: the marker's own leading underscore anchors it.
+    if not marker_lower:
+        # An empty marker matches nothing: without this, endswith("") is True
+        # and marker_lower[0] raises IndexError. Fail closed — a run without a
+        # marker must not silently treat every folder as an anchor.
+        return False
     if part_lower.startswith(marker_lower):
         rest = part_lower[len(marker_lower):]
         if not rest or rest[0] in '_- ':
@@ -451,6 +456,14 @@ def _recompress_entry_in_place(source, dest_path, mode) -> bool:
         return True
     try:
         src = Path(source)
+        if src.is_file():
+            # A manifest row may carry the FILE itself as Destination (the
+            # loader copies a one-column Source into that cell). Comparing it to
+            # the parent never matched, the output positional was emitted, and
+            # the recompressor computed `<file>\<name>` — the entry never ran.
+            if (os.path.normcase(os.path.abspath(str(dest_path)))
+                    == os.path.normcase(os.path.abspath(str(src)))):
+                return True
         src_dir = src.parent if src.is_file() else src
         return (os.path.normcase(os.path.abspath(str(dest_path)))
                 == os.path.normcase(os.path.abspath(str(src_dir))))
@@ -708,8 +721,27 @@ class ConfigManager:
 
     def save_config(self) -> None:
         try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(asdict(self.config), f, indent=2, ensure_ascii=False)
+            # Atomic write (same recipe the children adopted in v2.1.1): dump
+            # to a unique temp file FIRST, then swap it in with os.replace.
+            # Two instances writing at once (the menu and a Task Scheduler
+            # run), or a crash mid-dump, used to leave a TRUNCATED config on
+            # disk — and _load_config throws every saved preset away when the
+            # JSON does not parse. The final name now only ever names a
+            # complete file; a killed write leaves at most a .tmp orphan that
+            # nothing reads. os.replace needs the same volume, so the temp
+            # lives in the config file's own folder.
+            import uuid
+            tmp_path = (self.config_path.parent
+                        / f".{self.config_path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(asdict(self.config), f, indent=2, ensure_ascii=False)
+                os.replace(str(tmp_path), str(self.config_path))
+            finally:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
         except IOError as e:
             print(f"Error: Failed to save config: {e}")
 
@@ -881,9 +913,15 @@ class DependencyChecker:
         except ImportError:
             return False
 
-    def check_dependencies(self, force: bool = False) -> Dict[str, bool]:
+    def check_dependencies(self, force: bool = False, persist: bool = True) -> Dict[str, bool]:
         # Honor `force`: without it, return the cached result when available
         # (detection spawns one subprocess per tool).
+        #
+        # `persist=False` runs the detection but writes NOTHING to disk. It
+        # exists for --list-presets, documented read-only: the tool discovery
+        # still runs (the status bar stays honest) but the discovered paths and
+        # the dependencies_checked stamp are not committed, so merely LISTING
+        # presets never rewrites the config file.
         if not force and self._deps_status is not None:
             return self._deps_status
         tools_to_check = {
@@ -905,7 +943,8 @@ class DependencyChecker:
                 detected_paths[tool_name] = None
                 status[tool_name] = False
 
-        self.config.update_tool_paths(detected_paths)
+        if persist:
+            self.config.update_tool_paths(detected_paths)
 
         status['tifffile'] = self.config._check_tiff_support()
         status['numpy'] = status['tifffile']
@@ -914,8 +953,11 @@ class DependencyChecker:
         status['rich'] = self._check_rich()
         status['icc_profiles'] = status.get('magick', False)
 
+        # In-memory either way (the status display reads it); on disk only
+        # when the caller did not ask for read-only.
         self.config.config.available_features = status
-        self.config.save_config()
+        if persist:
+            self.config.save_config()
 
         self._deps_status = status
         return status
@@ -1412,11 +1454,19 @@ class FolderAnalyzer:
         elif mode in [4, 5]:
             # Mode 4: rename (replace origin with dest in folder name)
             # Mode 5: sibling folder next to each source folder
-            sibling_name = {
-                'tiff': 'TIFF_16bits',
-                'jpeg': 'JPEG_recovered',
-                'png': 'JPEG_recovered',
-            }.get(self.dest, 'JXL_16bits' if self.origin == 'tiff' else 'JXL_jpeg')
+            # Mode 5's SIBLING names differ from the mode-1/3 subfolder names
+            # (the transcoder's jxl->jpeg sibling is JPEG_recovered, not
+            # recovered_jpeg; jpeg->jxl is JXL_jpeg, not converted_jxl), so the
+            # mode-3 helper cannot be reused here. Only the jxl->jxl case was
+            # wrong: the recompressor writes JXL_recompressed.
+            if self.origin == 'jxl' and self.dest == 'jxl':
+                sibling_name = _dest_folder_names(self.origin, self.dest)[1]
+            else:
+                sibling_name = {
+                    'tiff': 'TIFF_16bits',
+                    'jpeg': 'JPEG_recovered',
+                    'png': 'JPEG_recovered',
+                }.get(self.dest, 'JXL_16bits' if self.origin == 'tiff' else 'JXL_jpeg')
             # Same recursion rule as mode 3, but the root is not an eligible
             # entry here, so it must not be treated as an ancestor either —
             # otherwise every entry would collapse onto a folder that is never
@@ -1429,7 +1479,12 @@ class FolderAnalyzer:
                     # Replace origin in the FOLDER NAME (not the relative
                     # path — the scripts operate on parent.name) with the
                     # script's actual destination suffix.
-                    _dest_suffix = 'JPEG_recovered' if self.dest in ('jpeg', 'png') else self.dest.upper()
+                    if self.origin == 'jxl' and self.dest == 'jxl':
+                        _dest_suffix = 'JXL_small'   # jxl_recompressor.JXL_SUFFIX_REPLACE
+                    elif self.dest in ('jpeg', 'png'):
+                        _dest_suffix = 'JPEG_recovered'
+                    else:
+                        _dest_suffix = self.dest.upper()
                     new_name = _replace_suffix_token(Path(folder).name, self.origin, _dest_suffix)
                     if new_name == Path(folder).name:
                         new_name = Path(folder).name + "_" + _dest_suffix
@@ -1722,7 +1777,12 @@ class InteractiveMenu:
                 "ones. The repair works on a COPY and only replaces a file when the "
                 "copy provably reconstructs — the cautious route is still to run it "
                 "on a copy of the folder first.[/dim]")
-            folder = Prompt.ask("Folder to scan", default=default_dir)
+            # Explorer's "Copy as path" wraps the folder in double quotes;
+            # every other wizard prompt strips them (_strip_surrounding_quotes)
+            # and this one used to hand them to Path().is_dir() raw — "Folder
+            # not found" for a folder that exists.
+            folder = _strip_surrounding_quotes(
+                Prompt.ask("Folder to scan", default=default_dir))
             audit = Confirm.ask("Audit only (dry run, nothing written)?", default=True)
         else:
             print("\n--- Repair JPEG recovery (jbrd) ---")
@@ -1731,7 +1791,8 @@ class InteractiveMenu:
             print("already had XMP. The repair works on a COPY and only replaces a")
             print("file when the copy provably reconstructs — the cautious route is")
             print("still to run it on a copy of the folder first.")
-            folder = input(f"Folder to scan [{default_dir}]: ").strip() or default_dir
+            folder = _strip_surrounding_quotes(
+                input(f"Folder to scan [{default_dir}]: ").strip() or default_dir)
             audit_input = input("Audit only (dry run, nothing written)? [Y/n]: ").strip().lower()
             audit = not audit_input.startswith('n')
 
@@ -2483,9 +2544,30 @@ class InteractiveMenu:
         Shared by the wizard and by "Repeat last workflow" so both get the same
         Mode/traversal/direction guards — these decide which script runs on which
         folders, and mode 8 deletes sources, so a repeat must never take a laxer
-        path than the wizard did."""
+        path than the wizard did.
+
+        Path anchoring: RELATIVE source/dest cells resolve against the CSV's own
+        folder, not against the wrapper's CWD. A scheduled run (--run-preset from
+        Task Scheduler) starts in C:\\Windows\\System32 — a preset whose manifest
+        carried relative paths used to scan, convert and delete inside the
+        scheduler's working directory. Absolute paths pass through untouched;
+        '..' is refused outright either way.
+        """
         entries = []
         directions = set()
+        csv_dir = Path(manifest_path).resolve().parent
+        anchored: List[str] = []
+
+        def _anchor(p: str) -> str:
+            """Anchor one manifest path against the CSV's folder (see above)."""
+            if not p:
+                return p
+            q = Path(p)
+            if q.is_absolute():
+                return p
+            anchored.append(p)
+            return str(csv_dir / q)
+
         stream = self._open_manifest_for_read(manifest_path)
         if stream is None:
             self._print_error(
@@ -2542,6 +2624,8 @@ class InteractiveMenu:
                         # Validate paths to prevent directory traversal. Check
                         # path PARTS (not a substring match, which false-
                         # positives on legitimate names like "2024..final").
+                        # The check runs on the TYPED cell, before anchoring —
+                        # '..' is refused whatever it would resolve against.
                         if '..' in Path(source).parts or '..' in Path(dest).parts:
                             # Refuse the whole manifest, do not skip the row.
                             # Skipping shrank the run silently: the summary
@@ -2551,9 +2635,27 @@ class InteractiveMenu:
                             # Mode checks above.
                             self._print_error(
                                 f"Path traversal in manifest entry: {source} -> {dest}\n"
-                                f"Use absolute paths (or paths without '..') and run it again.")
+                                f"Relative paths ARE allowed — they resolve against the manifest's "
+                                f"own folder, not the wrapper's working directory — but '..' is "
+                                f"refused outright. Use absolute paths (or paths relative to the "
+                                f"CSV folder, without '..') and run it again.")
                             return None
-                        entries.append((source, dest, entry_mode))
+                        # Anchor AFTER the '..' refusal: relative paths become
+                        # absolute against the CSV's folder so the guards, the
+                        # cmd builder and the children all see the same
+                        # location regardless of the wrapper's CWD.
+                        entries.append((_anchor(source), _anchor(dest), entry_mode))
+
+        # Say the anchoring out loud ONCE per load: a relative path that used to
+        # mean "relative to wherever the wrapper happened to start" now means
+        # "relative to this CSV", and a scheduled run must show that in its log.
+        if anchored:
+            note = (f"{len(anchored)} relative path(s) in the manifest resolved "
+                    f"against the manifest's own folder: {csv_dir}")
+            if RICH_AVAILABLE and console:
+                console.print(f"[dim]{note}[/dim]")
+            else:
+                print(note)
 
         if not entries:
             if RICH_AVAILABLE and console:
@@ -2711,9 +2813,26 @@ class InteractiveMenu:
         export_marker = self.config.config.export_marker
 
         m1_name, m3_name = _dest_folder_names(origin, dest)
+        if origin == 'jxl' and dest == 'jxl':
+            # Same extension in and out: the recompressor has NO "side by side"
+            # — mode 0/8 outputs REPLACE the source file (in-place promotion by
+            # os.replace). The [?] details already say so (see
+            # _show_mode_details_and_select, and its comment about how saying
+            # "stay side by side" hid the most destructive default the wizard
+            # offers) — but the menu itself, where the decision is actually
+            # made, still sold modes 0/8 as "originals kept". Mirror the honest
+            # wording here, at the moment of choice.
+            m0_desc = ("Replaces each source JXL with the recompressed one, in the "
+                       "same folder (originals [bold red]NOT kept[/bold red])")
+            m8_desc = ("Like mode 0, RECURSIVE: every source JXL is REPLACED in "
+                       "place, all subfolders (originals [bold red]NOT kept[/bold red])")
+        else:
+            m0_desc = f"{origin.upper()} and {dest.upper()} side by side in same folder"
+            m8_desc = ("JXL next to each source file, all subfolders "
+                       "(originals kept — use [D] to delete)")
         modes = [
             ("0", "In-place",
-             f"{origin.upper()} and {dest.upper()} side by side in same folder"),
+             m0_desc),
             ("1", "Subfolder",
              f"Creates [green]'{m1_name}'[/green] subfolder"),
             ("2", "Flat -> output folder",
@@ -2729,7 +2848,7 @@ class InteractiveMenu:
             ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
              f"Like mode 6, but only one subfolder of the export marker (asked in Step 5; empty = all = mode 6)"),
             ("8", "In-place recursive",
-             "JXL next to each source file, all subfolders (originals kept — use [D] to delete)")
+             m8_desc)
         ]
 
         if RICH_AVAILABLE and console:
@@ -2746,9 +2865,12 @@ class InteractiveMenu:
             console.print()
 
             for key, name, desc in modes:
-                # Nothing in this list destroys anything any more — mode 8 keeps
-                # your files. [D] below is the destructive entry and carries the
-                # red, or the warning colour would point at the wrong option.
+                # [D] below is the DELETING entry and carries the red, or the
+                # warning colour would point at the wrong option. But deletion
+                # is not the only way this menu can lose a file: for a JXL->JXL
+                # run, modes 0 and 8 OVERWRITE the source in place (their
+                # descriptions carry the red "NOT kept" warning) — the entries
+                # themselves stay green so [D] remains the one red option.
                 console.print(f"[{key}] [bold green]{name}[/bold green]")
                 console.print(f"    {desc}\n")
 
@@ -3347,8 +3469,16 @@ class InteractiveMenu:
         export_marker = self.config.config.export_marker
 
         m1_name, m3_name = _dest_folder_names(origin, dest)
+        # Same differentiation as the Step-4 menu above: JXL->JXL in-place
+        # REPLACES the sources, it does not sit "side by side" with them.
+        if origin == 'jxl' and dest == 'jxl':
+            m0_desc = "Replaces each source JXL in place (originals NOT kept)"
+            m8_desc = "Replaces every source JXL in place, all subfolders (originals NOT kept)"
+        else:
+            m0_desc = f"{origin.upper()} and {dest.upper()} side by side"
+            m8_desc = "Output next to each source, all subfolders"
         modes = [
-            ("0", "In-place", f"{origin.upper()} and {dest.upper()} side by side"),
+            ("0", "In-place", m0_desc),
             ("1", "Subfolder", f"Creates '{m1_name}' subfolder"),
             ("2", "Flat", "All to one folder (recursive)"),
             ("3", "Recursive", f"'{m3_name}' in each subfolder"),
@@ -3356,7 +3486,7 @@ class InteractiveMenu:
             ("5", "Sibling", f"Creates sibling folder next to source"),
             ("6", f"Marker {export_marker} (full)", f"Only inside folders matching '{export_marker}'"),
             ("7", f"Marker {export_marker} (subfolder)", f"Only one subfolder of '{export_marker}'"),
-            ("8", "In-place recursive", "Output next to each source, all subfolders"),
+            ("8", "In-place recursive", m8_desc),
         ]
 
         if RICH_AVAILABLE and console:
@@ -4688,15 +4818,19 @@ class InteractiveMenu:
 
         # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
         # reaches the children as --export-subfolder — which comes from
-        # mode_config, always empty on a mode-99 run. Auto-generated manifests
-        # bake the subfolder into the Source itself (<marker>/<sub>), so it can
-        # be derived back — and SHOULD be passed explicitly, because a child
-        # whose EXPORT_*_SUBFOLDER constant was edited would otherwise filter
-        # the entry by the wrong name. Entries naming DIFFERENT subfolders need
-        # no flag at all: each Source already scopes its own child process.
-        # The one dangerous shape is a HAND-WRITTEN entry with Mode=7 and a
-        # Source ABOVE the marker: with an empty subfolder its child converts
-        # EVERY subfolder of the marker — mode 6 wearing a mode-7 label.
+        # mode_config. On a mode-99 (manifest) run it USED to be always empty;
+        # the item-19 fix now preserves export_marker/export_subfolder in the
+        # workflow, so a manifest recorded with a subfolder arrives with it
+        # set and skips this derivation entirely. Auto-generated manifests
+        # bake the subfolder into the Source itself (<marker>/<sub>), so it
+        # can also be derived back — and SHOULD be passed explicitly, because
+        # a child whose EXPORT_*_SUBFOLDER constant was edited would otherwise
+        # filter the entry by the wrong name. Entries naming DIFFERENT
+        # subfolders need no flag at all: each Source already scopes its own
+        # child process. The one dangerous shape is a HAND-WRITTEN entry with
+        # Mode=7 and a Source ABOVE the marker: with an empty subfolder its
+        # child converts EVERY subfolder of the marker — mode 6 wearing a
+        # mode-7 label.
         if (any(m == 7 for _, _, m in resolved_entries)
                 and not (workflow.get('mode_config') or {}).get('export_subfolder')):
             derived = set()
@@ -4782,6 +4916,13 @@ class InteractiveMenu:
         # The scan itself walks every Source recursively and can take minutes on
         # large trees, so it is skipped when collisions are IMPOSSIBLE — see
         # _manifest_needs_collision_scan for exactly when that holds.
+        # The same walk also records each entry's resolved output folders
+        # (cross_sink) for the output-x-Source check below; when the scan is
+        # skipped the cross case is impossible too — every entry then writes
+        # only inside its own Source tree, so another entry's Source sitting
+        # there would already be a Source overlap, which the gate refuses to
+        # declare safe.
+        cross_out_folders: Dict[int, Set[str]] = {}
         if not self._manifest_needs_collision_scan(resolved_entries, _marker):
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
@@ -4796,6 +4937,7 @@ class InteractiveMenu:
                 origin=origin, dest=dest,
                 export_marker=_marker,
                 export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
+                cross_sink=cross_out_folders,
             )
         if collisions:
             self._print_error(
@@ -4814,6 +4956,47 @@ class InteractiveMenu:
                 "(a non-manifest run detects this itself)."
             )
             return False
+
+        # Cross-entry output x Source: one entry's output folder is another
+        # entry's Source — the folder often does not exist yet (the first entry
+        # creates it during the run), so neither the output-x-output scan nor
+        # the Source-x-Source overlap above can see it, and a disk-level check
+        # cannot either. Entry B would then process the files A just created:
+        # for JXL->JXL that is a lost generation; for every direction it is a
+        # silent dependency on another entry's success. Chaining on purpose is
+        # legitimate, so this follows the Source-overlap pattern: loud warning,
+        # unattended runs refused (fail closed), attended runs may continue.
+        cross_collisions = self._manifest_output_source_collisions(
+            resolved_entries, cross_out_folders)
+        if cross_collisions:
+            head = (f"{len(cross_collisions)} manifest entry pair(s) chain outputs into "
+                    f"inputs — one entry's OUTPUT folder is another entry's SOURCE:")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{head}[/yellow]")
+            else:
+                print(f"WARNING: {head}")
+            for src_a, src_b, out in cross_collisions[:10]:
+                msg = (f"  output of [{self._truncate_path(src_a, 30)}] -> "
+                       f"{self._truncate_path(out, 30)}  ==  Source of "
+                       f"[{self._truncate_path(src_b, 30)}]")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{msg}[/yellow]")
+                else:
+                    print(msg)
+            if len(cross_collisions) > 10:
+                print(f"  ... and {len(cross_collisions) - 10} more")
+            if workflow.get('unattended'):
+                self._print_error(
+                    "Refusing to run unattended: this manifest reads folders that "
+                    "another entry of the same run writes. Run it from the menu, or "
+                    "split it into separate runs.")
+                return False
+            if RICH_AVAILABLE and console:
+                ok_cross = Confirm.ask("Run anyway?", default=False)
+            else:
+                ok_cross = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+            if not ok_cross:
+                return False
 
         # delete_source gets --delete-confirm-off from the cmd builder — so the
         # wrapper MUST charge the HHMM token itself, or nothing asks at all.
@@ -4840,6 +5023,17 @@ class InteractiveMenu:
             origin == 'jxl' and dest == 'jxl'
             and any(_recompress_entry_in_place(_s, dest_path, detected_mode)
                     for _s, dest_path, detected_mode in resolved_entries))
+
+        # ...and nobody can type the HHMM token in a scheduled run. The
+        # _run_saved_session gate keys on last_mode (0/8) and misses manifest
+        # presets, which store 99 — so the refusal has to happen here, where the
+        # resolved entries (and their real modes) are known.
+        if _any_in_place_recompress and workflow.get('unattended') and not dry_run:
+            self._print_error(
+                "Refusing to run unattended: this manifest recompresses JXLs in "
+                "place (mode 0/8), and the HHMM confirmation cannot be given "
+                "here. Run it from the menu, or add --dry-run to simulate it.")
+            return False
 
         if not dry_run and (_flags_request_delete(workflow.get('expert_flags'))
                             or advanced.get('delete_source')
@@ -4931,6 +5125,7 @@ class InteractiveMenu:
                 raise
             aborted = False
             usage_err = None
+            killed = False
             if rc == 0:
                 ok_count += 1
                 state = "ok"
@@ -4955,9 +5150,28 @@ class InteractiveMenu:
                 # and every remaining entry carries the same flags, so it would
                 # die identically. Stopping is still right; calling it a safety
                 # abort is not (see _CHILD_USAGE_ERROR_RE).
+                #
+                # Contract update: rc == -1 (below) is the SAME fatal class.
+                # It means the wrapper never got a real exit code from the
+                # child — killed by the idle timeout mid-work, never launched,
+                # or deadlocked past the post-run wait — and the remaining
+                # entries are not relaunched either.
                 error_count += 1
                 usage_err = self._last_child_usage_error
                 state = "rejected" if usage_err else "aborted"
+                aborted = True
+            elif rc == -1:
+                # -1 is not "some files failed": _stream_child returns it when
+                # the child was KILLED by the idle timeout in the middle of its
+                # work, never launched at all, or hung past the post-run wait.
+                # A child killed mid-encode / mid-delete-gate / mid-move leaves
+                # state nobody can reason about, and a launch failure would
+                # repeat identically for every remaining entry — relaunching
+                # the rest is "a few files failed" accounting for what is a
+                # stop-everything condition. Treated exactly like exit 2.
+                error_count += 1
+                state = "killed"
+                killed = True
                 aborted = True
             else:
                 error_count += 1
@@ -4976,6 +5190,20 @@ class InteractiveMenu:
                            f"carries the same flags, so the manifest stops here. "
                            f"This is a WRAPPER bug — it built a command the script "
                            f"does not accept — not a problem with your files.")
+                elif killed:
+                    # Not the exit-2 wording: a KILLED child may have died in
+                    # the middle of a file (or a delete), so even "nothing was
+                    # deleted after the abort" cannot be promised. The manifest
+                    # stops; the summary above shows which entries completed.
+                    msg = ("Entry killed (exit -1): the child was terminated — "
+                           "no output for too long, a launch failure, or a hang "
+                           "past the wait timeout — possibly in the middle of a "
+                           "file. The rest of the manifest will NOT be "
+                           "relaunched: a launch failure would repeat for every "
+                           "entry, and a child killed mid-run must not be "
+                           "followed by more deleting. Check the child log, fix "
+                           "the cause and re-run — sync mode resumes where this "
+                           "stopped.")
                 else:
                     # "Nothing was deleted" was a promise the wrapper could not
                     # keep: exit 2 is also the disk-full abort, which fires part
@@ -5332,7 +5560,8 @@ class InteractiveMenu:
     def _manifest_output_collisions(self, manifest_entries: List, origin_exts: set,
                                     origin: str = None, dest: str = None,
                                     export_marker: str = None,
-                                    export_subfolder: str = None) -> List:
+                                    export_subfolder: str = None,
+                                    cross_sink: Optional[Dict[int, Set[str]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -5361,6 +5590,13 @@ class InteractiveMenu:
         returns None for files the child would skip (e.g. outside the export
         marker in modes 6/7), keeping the guard free of collisions the child
         would never produce.
+
+        `cross_sink` (optional): when a dict is passed, it is filled with each
+        entry index -> the set of output folders that entry resolved to. The
+        cross-entry guard (_manifest_output_source_collisions) reuses exactly
+        this notion of "output tree" — it cannot be computed from the Destination
+        cells alone, because modes 1/3/4/5/6/7 derive their outputs from
+        script constants.
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
@@ -5468,17 +5704,41 @@ class InteractiveMenu:
                         # Its recursive finders (modes 2-8) skip this tool's OWN
                         # output folder names BELOW the input root (pointing a
                         # run AT such a folder is legitimate); the flat finders
-                        # are unfiltered.
+                        # are unfiltered. Mode 4's FALLBACK output folder
+                        # ("<name>_JXL_small", created when the JXL token is
+                        # missing from the folder name) is its output too:
+                        # recognized as a _jxl_small SUFFIX, the same semantic
+                        # change _is_own_output_path received in
+                        # jxl_recompressor.py. Checked here as well (not only
+                        # via the child) so the mirror keeps guarding even if
+                        # the child copy it imports ever drifts back — and the
+                        # "only BELOW the root" rule is untouched: `below` is
+                        # still computed relative to the root, exactly like the
+                        # child's own finders compute it.
                         if mode < 2:
                             return False
                         try:
                             below = [p.lower() for p in f.relative_to(root).parts[:-1]]
                         except ValueError:
                             below = [p.lower() for p in f.parts[:-1]]
-                        return _child._is_own_output_path(below)
+                        return (_child._is_own_output_path(below)
+                                or any(p.endswith("_jxl_small") for p in below))
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
+
+        def _record_output(f: Path, out_folder) -> None:
+            """Collision bookkeeping for one resolved source file."""
+            if out_folder is None:
+                return
+            key = os.path.normcase(str(out_folder))
+            seen = by_dest.setdefault(key, {})
+            stem = os.path.normcase(f.stem)
+            prev = seen.get(stem)
+            if prev is None:
+                seen[stem] = f
+            elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
+                collisions.append((prev, f, out_folder))
         # The child resolvers WARN on modes 4/5 (outside-tree outputs, missing
         # suffix token). The real run emits those lines itself — duplicated
         # here, one per scanned file, they are pure noise.
@@ -5496,11 +5756,32 @@ class InteractiveMenu:
             _marker_stack.enter_context(
                 _with_child_marker(_child, export_marker, export_subfolder))
         try:
-            for source, dest_path, mode in manifest_entries:
+            for ei, (source, dest_path, mode) in enumerate(manifest_entries):
                 if not dest_path:
                     continue
+                # Per-entry output-tree recording for the cross-entry guard
+                # (only when a sink was handed in).
+                _entry_outs = (cross_sink.setdefault(ei, set())
+                               if cross_sink is not None else None)
                 src_root = Path(source)
                 try:
+                    if src_root.is_file():
+                        # A file Source is a legitimate manifest row, and the
+                        # cross-entry collision guard must see it too: it used
+                        # to be skipped here, silently. Resolve it exactly like
+                        # the folder walk resolves one file (parent as root).
+                        if resolver is None or mode is None:
+                            _file_out = Path(dest_path)
+                        elif _skip_check is not None and _skip_check(src_root, src_root.parent, mode):
+                            _file_out = None
+                        else:
+                            _file_out = resolver(src_root, mode, src_root.parent, dest_path)
+                        if _file_out is not None:
+                            _record_output(src_root, _file_out.parent)
+                            if _entry_outs is not None:
+                                _entry_outs.add(os.path.normcase(
+                                    os.path.abspath(str(_file_out.parent))))
+                        continue
                     if not src_root.is_dir():
                         continue
                 except OSError:
@@ -5552,6 +5833,9 @@ class InteractiveMenu:
                         continue
                     if out_folder is None:
                         continue
+                    if _entry_outs is not None:
+                        _entry_outs.add(os.path.normcase(
+                            os.path.abspath(str(out_folder))))
                     key = os.path.normcase(str(out_folder))
                     seen = by_dest.setdefault(key, {})
                     # Outputs are named from the stem, so a stem clash is a clash
@@ -5609,6 +5893,68 @@ class InteractiveMenu:
                         overlaps.append((src_a, src_b))
         return overlaps
 
+    @staticmethod
+    def _manifest_output_source_collisions(manifest_entries: List,
+                                           entry_out_folders: Dict[int, Set[str]]) -> List:
+        """Cross-entry check the two guards above cannot make: one entry's
+        OUTPUT folder is another entry's SOURCE.
+
+        _manifest_output_collisions compares output x output;
+        _manifest_source_overlaps compares Source x Source. Neither sees entry B
+        whose Source IS the folder entry A writes its outputs to — and that
+        folder usually does not even EXIST at planning time (A creates it during
+        the run), so no disk-level check can see it either. B then processes A's
+        fresh outputs as its inputs: for the recompressor that is a lost
+        generation on files that were just written; for every direction it is a
+        run whose input set silently depends on another entry having run first.
+
+        The audit case: A (mode 1) recompresses G:\\lib into
+        G:\\lib\\recompressed_jxl; B's Source IS that folder (mode 0). A is
+        FLAT, so the source-overlap guard does not flag B's Source nested inside
+        A's Source — and B's Source did not exist when the manifest was written.
+
+        `entry_out_folders` is the per-entry set of resolved output folders
+        recorded by _manifest_output_collisions during its walk — the same
+        notion of "output tree" the children's own resolvers produce, not a
+        guess from the Destination cells (which modes 1/3/4/5/6/7 ignore).
+
+        Flagging rules mirror _manifest_source_overlaps: equal paths are always
+        flagged, whatever B's mode; a folder of A's that merely sits INSIDE B's
+        Source only matters when B recurses into it (a flat B reads direct
+        children only, so nested outputs are unreachable for it). A B.source
+        strictly BELOW one of A's output folders is deliberately NOT flagged:
+        every child writes its outputs DIRECTLY into its output folders, so a
+        subfolder of one never receives outputs — flagging it would only warn
+        about harmless disjoint trees.
+
+        Returns a list of (source_a, source_b, out_folder) tuples, at most one
+        per (A, B) pair.
+        """
+        def _recurses(mode) -> bool:
+            return mode is None or mode in _RECURSIVE_MANIFEST_MODES
+
+        entries = [(s, os.path.normcase(os.path.abspath(str(s))), m)
+                   for s, _d, m in manifest_entries]
+        found = []
+        seen_pairs: Set[Tuple[str, str]] = set()
+        for i, outs in (entry_out_folders or {}).items():
+            if i < 0 or i >= len(entries):
+                continue
+            src_a = entries[i][0]
+            for out in outs:
+                for j, (src_b, norm_b, mode_b) in enumerate(entries):
+                    if j == i:
+                        continue
+                    if norm_b != out and not (out.startswith(norm_b + os.sep)
+                                              and _recurses(mode_b)):
+                        continue
+                    key = (os.path.normcase(os.path.abspath(str(src_b))), out)
+                    if key in seen_pairs:
+                        continue
+                    seen_pairs.add(key)
+                    found.append((src_a, src_b, out))
+        return found
+
     def _append_provenance_flags(self, cmd: List, advanced: Dict,
                                  origin: str, dest: str) -> None:
         """Emit --provenance (and --no-adopt-scan) for the child about to run.
@@ -5651,7 +5997,20 @@ class InteractiveMenu:
         cmd = [sys.executable, script, source]
         # Only append the output positional when it is non-empty — an empty
         # Destination would become Path('.') (the wrapper's CWD) downstream.
-        if dest_path:
+        # A file Source whose Destination cell is the file itself (how the
+        # loader normalizes an empty cell) must NOT be sent either: the child
+        # would read it as an output DIRECTORY named after the file.
+        _dest_is_source_file = False
+        if dest_path and mode == 0:
+            try:
+                _src_p = Path(source)
+                if _src_p.is_file():
+                    _dest_is_source_file = (
+                        os.path.normcase(os.path.abspath(str(dest_path)))
+                        == os.path.normcase(os.path.abspath(str(_src_p))))
+            except (OSError, ValueError):
+                _dest_is_source_file = False
+        if dest_path and not _dest_is_source_file:
             cmd.append(dest_path)
         cmd.extend(['--mode', str(mode), '--workers', str(workers)])
         # Every manifest child reports machine-readable totals so the run can be
@@ -6049,10 +6408,14 @@ class InteractiveMenu:
         return process.returncode
 
     def _run_subprocess(self, cmd: List) -> int:
-        """Run subprocess and return its exit code (-1 on launch failure).
+        """Run subprocess and return its exit code.
 
         Exit code contract with the child scripts: 0 = success, 1 = some
         files failed, 2 = aborted, 3 = user declined a confirmation.
+        -1 = the streaming wrapper killed the child (idle timeout), the
+        launch failed, or the post-run wait timed out — no real child exit
+        code exists, and a manifest run treats it as the same fatal class
+        as exit 2.
         """
         # (_stream_child clears the per-run state, including this one.)
         return self._stream_child(cmd)
@@ -6534,9 +6897,11 @@ class InteractiveMenu:
         # Without the direction test, a JXL->TIFF preset advertised the q= of
         # whatever JPEG run came before it (save_last_session only overwrites
         # last_quality when a run supplies one) — a knob the decoder never reads.
-        quality_driven = (session.get('last_origin_format') == 'jpeg'
-                          or (session.get('last_origin_format') == 'jxl'
-                              and session.get('last_dest_format') in ('jpeg', 'png')))
+        # JPEG->JXL does NOT get --quality (lossy uses --distance, lossless uses
+        # none), so the old `origin == 'jpeg'` clause advertised a dead knob on
+        # every JPEG preset.
+        quality_driven = (session.get('last_origin_format') == 'jxl'
+                          and session.get('last_dest_format') in ('jpeg', 'png'))
         distance = session.get('last_distance')
         if distance_driven and distance is not None:
             bits.append(f"d={_sane_distance(distance):g}")
@@ -6717,6 +7082,18 @@ class InteractiveMenu:
                 # _load_manifest_entries already explained why.
                 return False
 
+        # Which knob the run is actually steered by — decided by the DIRECTION,
+        # mirroring _describe_session (fix #319a): TIFF->JXL and the lossy
+        # converts (JPEG->JXL lossy, JXL->JXL recompress) are distance-driven;
+        # quality only where the child actually receives --quality (JXL->JPEG /
+        # JXL->PNG). The old chain advertised "Quality" on EVERY JPEG->JXL
+        # preset — a flag the child never receives — and hid Distance on
+        # JXL->JXL, the parameter the recompression IS. Both mistakes sat right
+        # above the "Proceed?" of the repeat/preset dialog.
+        _distance_driven = (last_origin == 'tiff'
+                            or last_conv_type in ('convert_lossy', 'jxl_recompress'))
+        _quality_driven = (last_origin == 'jxl' and last_dest in ('jpeg', 'png'))
+
         if RICH_AVAILABLE and console:
             settings = [
                 ["Manifest", f"{Path(manifest_path).name} ({len(manifest_entries)} entries)"]
@@ -6727,15 +7104,10 @@ class InteractiveMenu:
                 ["Workers", str(last_workers)],
                 ["Effort", str(last_effort)],
             ]
-            # Show relevant field based on origin format
-            # TIFF→JXL & JPEG→JXL-lossy: distance-driven | JXL→JPEG: quality
-            if last_origin == 'tiff' and last_distance is not None:
+            # Show the knob that actually steers this run (see above).
+            if _distance_driven and last_distance is not None:
                 settings.append(["Distance", f"{last_distance}"])
-            elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
-                settings.append(["Distance", f"{last_distance}"])
-            elif last_origin == 'jpeg':
-                settings.append(["Quality", str(last_quality)])
-            elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
+            elif not _distance_driven and _quality_driven and last_quality is not None:
                 settings.append(["Quality", str(last_quality)])
             settings.append(["Staging", last_staging or "(none)"])
             # Surface silently-reapplied dangerous settings (they are NOT
@@ -6763,15 +7135,12 @@ class InteractiveMenu:
             print(f"  Mode:         {last_mode}")
             print(f"  Workers:      {last_workers}")
             print(f"  Effort:       {last_effort}")
-            # Show relevant field based on origin format (same rule as the
-            # rich panel: JPEG→JXL-lossy is distance-driven, not quality).
-            if last_origin == 'tiff' and last_distance is not None:
+            # Same rule as the rich panel: the knob that actually steers this
+            # run (see _distance_driven/_quality_driven above, mirror of
+            # _describe_session).
+            if _distance_driven and last_distance is not None:
                 print(f"  Distance:     {last_distance}")
-            elif last_origin == 'jpeg' and last_conv_type == 'convert_lossy' and last_distance is not None:
-                print(f"  Distance:     {last_distance}")
-            elif last_origin == 'jpeg':
-                print(f"  Quality:      {last_quality}")
-            elif last_origin == 'jxl' and last_quality is not None and last_conv_type in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
+            elif not _distance_driven and _quality_driven and last_quality is not None:
                 print(f"  Quality:      {last_quality}")
             print(f"  Staging:      {last_staging or '(none)'}")
             _last_adv = session.get('last_advanced_options') or {}
@@ -6925,7 +7294,20 @@ class InteractiveMenu:
             # mode_config is mode-SPECIFIC: a stale export_subfolder from a
             # previous mode-7 run must not leak into mode 0/3/6 repeats
             # (it changes child behavior, e.g. the decoder-output filter).
-            _keep = {6: ('export_marker',), 7: ('export_marker', 'export_subfolder')}
+            _keep = {6: ('export_marker',),
+                     7: ('export_marker', 'export_subfolder'),
+                     # Manifest repeat (99): the analyzer and the cmd builder
+                     # take the marker from mode_config FIRST and only fall
+                     # back to the global — so an empty mode_config made a
+                     # preset saved with a custom marker run with whatever the
+                     # CURRENT global marker is (or with none at all: the
+                     # builder omits --export-marker when the global is the
+                     # default _EXPORT). A saved field must be REPLAYED, not
+                     # silently swapped for a different one; every other
+                     # mode's fields pass through the _session_number_error
+                     # validation up top instead of being discarded, and
+                     # markers are strings, so preservation is the guard here.
+                     99: ('export_marker', 'export_subfolder')}
             _src = session.get('last_mode_config') or {}
             workflow['mode_config'] = {k: _src[k] for k in _keep.get(workflow['mode'], ()) if k in _src}
 
@@ -7055,7 +7437,12 @@ def _main():
     menu = InteractiveMenu(config, checker)
 
     force_check = args.recheck or not config.config.dependencies_checked
-    status = checker.check_dependencies(force=force_check)
+    # --list-presets is documented read-only: detect the tools so the status
+    # bar is honest, but do not let the check write the discovered paths /
+    # dependencies_checked stamp back into the config file (the check used to
+    # rewrite it on EVERY initialization, listing included).
+    status = checker.check_dependencies(force=force_check,
+                                        persist=not args.list_presets)
 
     menu.display_status(status)
 

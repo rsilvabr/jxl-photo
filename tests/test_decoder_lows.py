@@ -88,9 +88,12 @@ def test_copy_metadata_success_still_returns_true(monkeypatch, tmp_path):
     assert dec.copy_metadata(tmp_path / "a.jxl", tif, tmp_path) is True
 
 
-def test_metadata_copy_failure_is_an_error_and_keeps_the_tiff(monkeypatch, tmp_path):
-    """The pixels are fine — the TIFF must be kept — but the group reports a
-    real error, which is what the delete gate fails closed on."""
+def test_metadata_copy_failure_is_an_error_and_discards_the_output(monkeypatch, tmp_path):
+    """The pixels are fine but the metadata did not cross: the group reports a
+    real error (which is what the delete gate fails closed on) and the fresh
+    output is NOT promoted — a promoted TIFF would carry a fresh mtime, the
+    next smart-sync run would SKIP it, and --delete-skipped would delete the
+    JXL holding the only copy of the lost metadata (round 39, audit item 21)."""
     src = tmp_path / "photo.jxl"
     _jxl_stub(src)
     out = tmp_path / "photo.tif"
@@ -108,9 +111,10 @@ def test_metadata_copy_failure_is_an_error_and_keeps_the_tiff(monkeypatch, tmp_p
         src, [(src, 0, False, False, 0, False, None)], out, out)
 
     assert status == "error", "a metadata-copy failure must surface as an error"
-    assert out.exists(), "the pixel-valid TIFF must be kept"
-    with tifffile.TiffFile(str(out)) as t:
-        assert len(t.pages) == 1
+    assert "discarded" in reason
+    assert not out.exists(), "a metadata-failed output must not be promoted to final"
+    assert not list(tmp_path.glob("*_photo.tif*")), "no temp leftover beside the final"
+    assert src.exists(), "the JXL holds the only good copy — it must stay"
 
 
 def test_metadata_copy_failure_blocks_delete(monkeypatch, tmp_path):
@@ -144,7 +148,9 @@ def test_metadata_copy_failure_blocks_delete(monkeypatch, tmp_path):
 
     assert results[0][1] == "error", "a metadata-copy failure must surface as an error"
     assert src.exists(), "metadata copy failed but the only copy was deleted"
-    assert final.exists(), "the pixel-valid TIFF must be kept"
+    # Round 39 (audit item 21): the fresh output is discarded, not promoted —
+    # the source JXL is the copy that must survive.
+    assert not final.exists(), "a metadata-failed output must not be promoted to final"
 
 
 # ---------------------------------------------------------------------------

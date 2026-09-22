@@ -179,7 +179,11 @@ def _run_decode(monkeypatch, tmp_path, version, name="a"):
 def test_reconstruct_jpeg_added_on_v012(monkeypatch, tmp_path):
     res, calls = _run_decode(monkeypatch, tmp_path, (0, 12, 0))
     assert res[1] == "ok"
-    assert calls[0][1] == "--reconstruct_jpeg"
+    # Round 39 (audit item 26): the decode temp may end in ".tmp", so the
+    # output format is now stated explicitly alongside --reconstruct_jpeg —
+    # the position-free assertion pins the flag, not the arg order.
+    assert "--reconstruct_jpeg" in calls[0]
+    assert "--output_format=jpeg" in calls[0]
 
 
 def test_reconstruct_jpeg_absent_on_v011(monkeypatch, tmp_path):
