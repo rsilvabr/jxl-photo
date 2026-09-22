@@ -11,6 +11,46 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.1.0
+
+**Released 2026-09-20, superseded by v2.1.1_beta1 and kept here for reference.** A new script joins the toolkit: **`jxl_recompressor.py`** — and a new destination in the wrapper ("JXL (smaller)"). No existing command line changes; nothing about TIFF/JPEG conversion moved.
+
+### Why
+
+Archives were written at `d=0.05–0.1` when disk was cheap. When storage runs short, the right move is a **single** generation of lossy re-encode to `d=1.0–2.0` — not several, and never blind. The recompressor is the batch tool for that move.
+
+### What it guarantees
+
+- **Metadata survives.** cjxl carries nothing across a JXL→JXL re-encode, so the script copies EXIF/XMP/IPTC with exiftool, keeps the base64 ICC and every `jxlphoto-*` provenance marker verbatim, and restamps `cjxl d=/e=` with the **new** parameters (the old tag is replaced wherever it lived; unrelated text is kept).
+- **Counterproductive requests are caught.** Each file's recorded parameters are compared against the request: same distance, or a *lower* distance than an already-lossy source, cannot gain anything. The default policy asks once per batch (unattended runs fail closed to *skip*); `copy`/`skip`/`convert` are selectable per policy (`--on-downgrade`, `--on-unknown`).
+- **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and the MD5 binding the transcoder's delete gates rely on.
+- **Keep-smaller net.** A re-encode that comes out not-smaller than the source is replaced by the original bytes (in place: the original is simply kept).
+- **Same delete machinery as v2.0.x**: `--delete-source`, `--delete-skipped`, `--verify-roundtrip`, provenance checks, three confirmations — and in the wrapper, the same execution-time token gate.
+
+### Generation counter in the encode record
+
+The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
+
+Why it matters: controlled chain tests showed that at a fixed byte budget each extra lossy generation costs ~0.2–0.6 dB of PSNR on top of what the byte reduction alone costs — and the marginal cost grows with the number of generations — while the recorded nominal `d` stops describing the result: a 19-generation chain landed 9 dB below a single direct encode at the same file size (nominal d≈1.5, perceptual quality of d≈4–7). The **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file has **already been lossy-recompressed at least once** (`gen >= 2`) and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. The threshold is 2, not 1, because every lossy file this toolkit's encoder produces is born at `gen=1`: guarding at 1 turned the recompressor's main use case (encoder previews → final archive) into an `ask` that silently skipped everything headless. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
+
+### ⚠️ `--encode-tag off` now strips the record (encoder)
+
+The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
+
+Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
+
+### New: `--modular on|off` (encoder) — measured: not for photos
+
+The lossy encoder is now selectable: `--modular on` forces the Modular encoder for lossy output (default off — cjxl's VarDCT decides). We measured before shipping: 7 real masters (Nikon Zf/Z8 ProPhoto 16-bit TIFFs, medium-format film scan, IR dust-channel scan, negative scan), SSIMULACRA2 at d=0.05/0.10 — quality is a wash (every margin ≤ 0.39), VarDCT smaller in 14/14 files (modular up to +33%) and 20–100× faster. So the flag exists for what Modular was built for (screenshots/graphics batches), the wrapper only asks inside Step 6A (advanced options), the default behavior is untouched, and the disk-space preflight estimate now matches the chosen encoder.
+
+### New: decode-side remedies for the jbrd marker damage
+
+A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedies instead of a bare djxl error. **`--auto-repair-jbrd`** repairs a copy in the system temp and decodes from it — the JXL is never modified, and the delete gate never deletes that source in the same run (the recovered JPEG has identical image data but re-serialized XMP bytes). In the wrapper: the auto-repair is a Step 6A question on JXL→JPEG, and `--repair-jbrd` is **main menu option 8** (audit by default).
+
+Verified against real files, end to end: Capture One ProPhoto 16-bit exports and film scans (including RGB+IR scans where the IR channel is its own grayscale page) encoded to `d=0.1`, recompressed to `d=1.0` (archive 264 MB → 44 MB), every marker (multi-page group, grayscale, provenance, ICC) carried over verbatim, the recompressed archive decoded back to multi-page TIFFs with page structure, dtype, photometric and ICC placement identical to the originals (33–53 dB PSNR, no brightness shift), and `--delete-source --verify-roundtrip` deleting only after per-file pixel verification passed. **1334 tests** in the suite.
+
+---
+
 ## v2.0.3
 
 **Released 2026-08-23.** Bug fixes only. No command line and no file format changes: v2.0.2 commands keep working exactly as written. Three audit rounds (32–34) across all four scripts, verified against the real fixtures — the 16-bit Capture One exports and the RGB+IR film scans — not just the mocked suite.

@@ -4,7 +4,33 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 
 ---
 
-# Why JPEG XL?
+## Contents
+
+- [Why JPEG XL?](#why-jpeg-xl)
+- [Features](#features)
+- [Scripts](#scripts)
+- [Requirements & Installation](#requirements--installation)
+- [Quick Start — Interactive Wrapper](#quick-start--interactive-wrapper)
+- [Auto Mode (since v1.3)](#auto-mode-since-v13)
+- [Individual Scripts](#individual-scripts)
+- [Recommended Settings](#recommended-settings)
+- [Configuration File Location](#configuration-file-location)
+- [ICC Preservation: How It Works](#icc-preservation-how-it-works)
+- [Verifying ICC Preservation](#verifying-icc-preservation)
+- [Behavior, Defaults & Known Limitations](#behavior-defaults--known-limitations)
+- [Documentation](#documentation)
+- [Notices for upgraders](#notices-for-upgraders)
+- [Current version](#current-version)
+- [Changelog](#changelog)
+- [More about this project](#more-about-this-project)
+- [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
+- [Disclaimer](#disclaimer)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+---
+
+## Why JPEG XL?
 
 Spectacular compression with no compromise on bit depth.
 
@@ -44,95 +70,48 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - JXL → JPEG/PNG with ICC color space conversion (sRGB, AdobeRGB, ProPhoto RGB)
 - JPEG preview embedding
 
-### 4. **Professional Workflow Support**
-- Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
-- Parallel processing (tested up to 32 workers)
-- Sync mode (reconvert only changed files)
-- Staging SSD support for large collections
-- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`)
-
-### 5. **Archive and replace** *(v2.0.0)*
-- `--delete-source` in **every** mode — convert into a separate tree and drop the originals
-- The source is removed only after its output is written to its **final** path, passes an integrity check there, and (with `--verify-roundtrip`) decodes back to the source pixels
-- `--delete-skipped` finishes an archive interrupted between the conversion and the unlink
-- Three confirmations before anything is deleted, the last one a time token that cannot be answered by reflex
-
-### 6. **Provenance: which source made this output** *(v2.0.0)*
-- The folder-collapsing modes let two files with the same name land on the same output. Every conversion records **which source it came from** (`jxlphoto-src` / `jxlphoto-srcsum` in XMP), so a later delete run refuses to overwrite one archive with an unrelated photo
-- `--provenance path` (default, free) · `content` (survives folders you moved) · `adopt` (TIFF → JXL only: verifies and stamps an archive built before this existed, one time)
-- A mismatch always fails closed: not converted, nothing overwritten, nothing deleted
-- Lossless JXL → JPEG is bound to the JXL's **content**, not its name: `checksums.md5` now also stores the JXL's own MD5 (a `<name>.jxl-md5` companion line), and a delete run compares it — older databases fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12), and when no proof can run the source is kept
-
-### 7. **Multi-page and film scans**
-- Split each page of a multi-page TIFF into its own JXL and reconstruct the original later — per-page ICC, bit depth, grayscale and `SubfileType` all restored (the IR page of a scan keeps its role)
-- A split that arrives with **pages missing** is detected and its sources kept: the short TIFF it would produce is a perfectly valid file, so nothing downstream could tell
-
-### 8. **Built for unattended runs**
-- Exit codes: `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation
-- `--summary-json` emits one machine-readable line per run; the wrapper consumes it to total a multi-entry manifest
-- A full output volume stops the run instead of failing every remaining file one by one
-
-### 9. **JXL → JXL recompression** *(v2.1.0)*
+### 4. **JXL → JXL recompression** *(v2.1.0)*
 - Re-encode an existing JXL archive smaller (`cjxl in.jxl out.jxl -d X -e Y`): ICC, EXIF/XMP/IPTC and the `jxlphoto-*` provenance markers carried over, new parameters restamped
 - **Counterproductive requests are caught**: each file's recorded `cjxl d=/e=` is compared against the request — same-distance and lower-distance asks fall back to a verbatim copy (default policy asks first; unattended runs fail closed to skip)
 - **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and its MD5 binding
 - **Keep-smaller net**: a re-encode that is not smaller than the source is replaced by the original bytes, so a run can never grow the archive
 - `--delete-source` with the same gates as the other scripts (integrity at the final path, MD5 match for copies, optional `--verify-roundtrip`)
 
----
+### 5. **Professional Workflow Support**
+- Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
+- Parallel processing (tested up to 32 workers)
+- Sync mode (reconvert only changed files)
+- Staging SSD support for large collections
+- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`)
 
-## Current version
+### 6. **Archive and replace** *(v2.0.0)*
+- `--delete-source` in **every** mode — convert into a separate tree and drop the originals
+- The source is removed only after its output is written to its **final** path, passes an integrity check there, and (with `--verify-roundtrip`) decodes back to the source pixels
+- `--delete-skipped` finishes an archive interrupted between the conversion and the unlink
+- Three confirmations before anything is deleted, the last one a time token that cannot be answered by reflex
 
-**v2.1.1_beta1** (2026-09-20) — beta of the first maintenance release on v2.1.0: ten fixes from the second audit of the recompressor release, all in the safety/reporting layer — the conversion core is untouched. Highlights: **dry runs preview the provenance refusals** instead of promising outputs the real run refuses (and the recompressor dry run exits 0); **every output is written to a temp beside the final name** and swapped in atomically only after the integrity check — a killed run no longer leaves a truncated file the next smart sync would trust forever; **`checksums.md5` appends are serialized across manifest child processes** (no more torn lines); the **wrapper stops dropping the recompressor policies** and now asks/emits `on_unknown` and `jbrd_policy`; the encoder's `--encode-tag xmp` **merges a lineage chain sitting in EXIF Software** instead of leaving contradictory records; keep-smaller fallback copies must **prove the MD5 match** before any deletion. Plus: log filenames carry the pid (two runs in the same second no longer share one log), the decoder counts a missing final output as KEEP, jbrd repair temps no longer wear a `.jxl` name, and `--repair-jbrd` no longer requires cjxl. Full list: [bug tracking, round 37](docs/bug_tracking_since_v1.0.md). **1357 tests.**
+### 7. **Provenance: which source made this output** *(v2.0.0)*
+- The folder-collapsing modes let two files with the same name land on the same output. Every conversion records **which source it came from** (`jxlphoto-src` / `jxlphoto-srcsum` in XMP), so a later delete run refuses to overwrite one archive with an unrelated photo
+- `--provenance path` (default, free) · `content` (survives folders you moved) · `adopt` (TIFF → JXL only: verifies and stamps an archive built before this existed, one time)
+- A mismatch always fails closed: not converted, nothing overwritten, nothing deleted
+- Lossless JXL → JPEG is bound to the JXL's **content**, not its name: `checksums.md5` now also stores the JXL's own MD5 (a `<name>.jxl-md5` companion line), and a delete run compares it — older databases fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12), and when no proof can run the source is kept
 
-> **Beta:** these are delete-path and audit fixes, every one with a regression test proven to fail against the pre-fix code — but if you archive with `--delete-source`, the stable [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0) is the conservative choice until v2.1.1 final.
+### 8. **Multi-page and film scans**
+- Split each page of a multi-page TIFF into its own JXL and reconstruct the original later — per-page ICC, bit depth, grayscale and `SubfileType` all restored (the IR page of a scan keeps its role)
+- A split that arrives with **pages missing** is detected and its sources kept: the short TIFF it would produce is a perfectly valid file, so nothing downstream could tell
 
-Everything below shipped in **v2.1.0** (2026-09-20) — new script: **`jxl_recompressor.py`**, a JXL → JXL recompressor for shrinking an existing archive (the `d=0.05–0.1` masters) to `d=1.0–2.0` when storage runs short — ICC, EXIF/XMP and every `jxlphoto-*` provenance marker carried over, and the new parameters restamped. It reads the recorded `cjxl d=/e=` from each file and refuses to pay a lossy generation for nothing: same-distance and higher-quality requests fall back to a verbatim copy (or ask first), JPEG-recoverable JXLs (jbrd) are copied by default, and any re-encode that comes out *larger* is replaced by the original bytes. Available in the wrapper as destination "JXL (smaller)", with `--delete-source` behind the usual gates. No changes to existing command lines.
-
-#### Generation counter in the encode record
-
-The encode record is now an append-only lineage chain with a generation counter: `gen=N | cjxl d=X e=Y | cjxl d=... e=...` (any user caption stays first — the field is visible in Windows Properties). Every encode or recompression **appends** one entry (the recompressor used to *replace* the record, erasing the history), and `gen=N` counts the **lossy** (`d>0`) entries — reconciled from the chain on every write via `max(stored, count)`, never incremented, so a hand-edited field self-corrects on the next pass. The encoder also no longer deduplicates: re-encoding a decoder-produced TIFF at identical d/e appends a second entry, because decode-then-re-encode is exactly where a generation of loss happens.
-
-Why it matters: controlled chain tests showed that at a fixed byte budget each extra lossy generation costs ~0.2–0.6 dB of PSNR on top of what the byte reduction alone costs — and the marginal cost grows with the number of generations — while the recorded nominal `d` stops describing the result: a 19-generation chain landed 9 dB below a single direct encode at the same file size (nominal d≈1.5, perceptual quality of d≈4–7). The **`--on-regeneration`** policy (`ask`/`copy`/`skip`/`convert`, default `ask`, unattended = skip) fires when a file has **already been lossy-recompressed at least once** (`gen >= 2`) and the request adds another — closing the hole where a slow drip of `d=0.1 → 1.0 → 1.5 → 2.0` runs years apart passed every per-step check. The threshold is 2, not 1, because every lossy file this toolkit's encoder produces is born at `gen=1`: guarding at 1 turned the recompressor's main use case (encoder previews → final archive) into an `ask` that silently skipped everything headless. It sits beside `--on-downgrade`/`--on-unknown`, unchanged, and when two policies fire the more conservative action wins. The wrapper asks the question up front, like the other policies.
-
-#### ⚠️ `--encode-tag off` now strips the record (encoder)
-
-The encoder's `off` previously only *omitted* the record — but a TIFF produced by the decoder carries the JXL's `dc:Description` along, so the stale `cjxl d=/e=` chain survived into a file it did not describe, and the recompressor would trust it. Now `off` matches the recompressor: it records nothing **and** strips any `gen=`/`cjxl` record from the copied Description/Software (unrelated text is kept). It remains the only way to deliberately discard the lineage. If you relied on `off` carrying old metadata through, that no longer happens.
-
-Legacy archives need no migration: a chain with no `gen=` reads as `gen =` (lossy entry count), exactly what it always meant.
-
-#### New: `--modular on|off` (encoder) — measured: not for photos
-
-The lossy encoder is now selectable: `--modular on` forces the Modular encoder for lossy output (default off — cjxl's VarDCT decides). We measured before shipping: 7 real masters (Nikon Zf/Z8 ProPhoto 16-bit TIFFs, medium-format film scan, IR dust-channel scan, negative scan), SSIMULACRA2 at d=0.05/0.10 — quality is a wash (every margin ≤ 0.39), VarDCT smaller in 14/14 files (modular up to +33%) and 20–100× faster. So the flag exists for what Modular was built for (screenshots/graphics batches), the wrapper only asks inside Step 6A (advanced options), the default behavior is untouched, and the disk-space preflight estimate now matches the chosen encoder.
-
-#### New: decode-side remedies for the jbrd marker damage
-
-A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedies instead of a bare djxl error. **`--auto-repair-jbrd`** repairs a copy in the system temp and decodes from it — the JXL is never modified, and the delete gate never deletes that source in the same run (the recovered JPEG has identical image data but re-serialized XMP bytes). In the wrapper: the auto-repair is a Step 6A question on JXL→JPEG, and `--repair-jbrd` is **main menu option 8** (audit by default).
-
-[What changed, in full](#changelog) · [Release history](#release-history) · current stable: [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0)
-
-> ### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.0.3: check them before discarding the JPEGs
->
-> Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
->
-> ```powershell
-> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd --dry-run   # audit only
-> py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd             # repair
-> ```
->
-> A repaired file reconstructs a JPEG with **identical image data**; only its metadata bytes differ from the original. See [Repairing broken JPEG reconstruction](docs/README_jxl_jpeg_transcoder.md#repairing-broken-jpeg-reconstruction---repair-jbrd).
-
-> ### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
->
-> **1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
->
-> **2. An archive made before this release can be refused.** Runs that delete sources in a folder-collapsing mode (2/4/5/6/7, and mode 0 with an output folder) now check that the existing output really came from the source about to replace it. Outputs written before v2.0.0 carry no such record, so they are refused rather than overwritten. For TIFF → JXL, `--provenance adopt` verifies and stamps them in a single pass; the decoder and the transcoder have no equivalent yet — use a structure-preserving mode (0/1/3/8) for those folders.
->
-> Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before running anything destructive. Nothing about ordinary conversion changed: same pixels, same ICC, same metadata.
+### 9. **Built for unattended runs**
+- Exit codes: `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation
+- `--summary-json` emits one machine-readable line per run; the wrapper consumes it to total a multi-entry manifest
+- A full output volume stops the run instead of failing every remaining file one by one
 
 ---
 
-##  Scripts
+> **⚠️ Upgrading from v1.9.1–v2.0.3?** Read the [notices for upgraders](#notices-for-upgraders) before running anything destructive: saved command lines changed behavior in v2.0.0, and JPEG → JXL archives made with v2.0.0–v2.0.3 may need the jbrd repair.
+
+---
+
+## Scripts
 
 | Script | Purpose | Key Feature |
 |--------|---------|-------------|
@@ -142,10 +121,127 @@ A failed `djxl --reconstruct_jpeg` on the JXL→JPEG path now names both remedie
 | [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
 | [`jxl_recompressor.py`](jxl_recompressor.py) | JXL → JXL recompressor | Shrinks an existing archive to a new distance/effort; refuses counterproductive re-encodes (copy/skip/ask), keeps metadata and provenance |
 
+---
+
+## Requirements & Installation
+
+### 1. Python 3.9+ and Packages
+
+```powershell
+# Install required packages
+pip install tifffile numpy pillow rich imagecodecs
+```
+
+ **Important:** Install packages in the same Python version you'll use to run the scripts.
+
+### 2. External Tools (Download Executables, NOT Source Code)
+
+| Tool | Download URL | What to Download | Extract to |
+|------|-------------|------------------|------------|
+| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`   **(NOT `jxl-x64-windows.zip`)** | `C:\tools\libjxl\` or your choice |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
+| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
+
+### Tested dependency versions
+
+Versions used before and after the dependency update on 2026-07-12 (last tested commit: `f390463`):
+
+| Component | Tested until commit `f390463` (2026-07-12) | Current (recommended) |
+|---|---|---|
+| libjxl (`cjxl`/`djxl`) | v0.11.2 | v0.12.0 |
+| numpy | 2.4.3 | 2.5.1 |
+| tifffile | 2026.3.3 | 2026.6.1 |
+| Pillow | 12.1.1 | 12.3.0 |
+| imagecodecs | 2026.3.6 | 2026.6.26 |
+| rich | 14.3.3 | 15.0.0 |
+| exiftool | 13.52 | 13.59 |
+| ImageMagick | 7.1.2-17 | 7.1.2-27 |
+
+Older versions may still work, but the current versions are what we test against.
+
+> **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
+>
+> On v0.12 the default path streams instead of buffering the whole image, so RAM per worker is modest: measured **0.99 GB** for a 24 MP file, **1.55 GB** at 45 MP and **3.32 GB** for a 93 MP scan (lossless, effort 9). Effort barely moves memory — megapixels do, at roughly 35–40 MB per megapixel per worker. Those figures are 16-bit input; 8-bit encodes 3–7× faster but uses only 4–21 % less memory, so it does not buy you extra workers. See [RAM per worker](docs/README_jxl_tiff_encoder.md#ram-per-worker) before raising `--workers`.
+
+#### Common Download Mistakes
+
+| Wrong Download | Why It Fails | Correct Download |
+|---------------|--------------|------------------|
+| `jxl-x64-windows.zip` | Only DLLs, no executables | `jxl-x64-windows-static.zip` |
+| `exiftool-XX.XX.tar.gz` | Perl source code, needs Perl installed | `exiftool-XX.XX_64.zip` (Windows executable) |
+
+#### exiftool Setup
+
+> **No renaming needed:** the scripts detect both `exiftool.exe` and `exiftool(-k).exe`.
+
+The Windows download comes as `exiftool(-k).exe`. If you prefer the plain name anyway:
+
+```powershell
+# Option A: Rename the file
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps the original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
+```
+
+The `(-k)` suffix means "keep console open" — the original behavior. Either name works.
+
+### 3. Add to PATH (PowerShell)
+
+**Replace the example paths below with YOUR actual installation paths:**
+
+```powershell
+# EDIT THESE PATHS to match where YOU extracted the tools:
+$myPaths = @(
+    "C:\tools\libjxl\bin",                           # where cjxl.exe and djxl.exe are
+    "C:\tools\exiftool",                              # where exiftool.exe is (RENAMED!)
+    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
+)
+
+# Add to user PATH
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+
+# RESTART your PowerShell/terminal after this!
+```
+
+### 4. Verify Installation
+
+> **Important:** All tools must be in your PATH for both the wrapper and individual scripts to find them. The wrapper and scripts only search the system PATH — they do not look in other directories.
+
+**Restart PowerShell**, then run:
+
+```powershell
+# Each should return a version number
+cjxl --version          # Should show: cjxl v0.XX.X
+exiftool -ver           # Should show: 12.XX or 13.XX
+magick -version         # Should show: ImageMagick version
+python -c "import tifffile, PIL, rich; print('All Python packages OK')"
+
+# Test full environment
+cd "C:\Users\YourName\Documents\GitHub\jxl-photo"  # adjust path
+py jxl_photo.py
+```
+
+You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich`
+
+### Troubleshooting
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
+| `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
+| `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
+| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
+| PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
+
+### Setup feels heavy?
+
+There is a simpler alternative that needs no libjxl — only ImageMagick and ExifTool (plus Python 3.9+ if you use the optional wizard UI): [tiff-workflow](https://github.com/rsilvabr/tiff-workflow), a PowerShell toolkit that losslessly re-compresses TIFFs with ZIP/Deflate. Much less compression than JXL, but far less to install — [side-by-side numbers at the end of this README](#related-project-a-simpler-tiff-only-alternative).
 
 ---
 
-##  Quick Start — Interactive Wrapper
+## Quick Start — Interactive Wrapper
 
 The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided menu:
 
@@ -192,7 +288,7 @@ The wizard guides you through: Source format → Destination → Directory → O
 
 ---
 
-##  Auto Mode (since v1.3)
+## Auto Mode (since v1.3)
 
 > Auto Mode reads your folder structure and *recommends* a mode — it never runs anything you have not confirmed. The recommendation fits common layouts; when it does not match what you had in mind, pick the mode yourself with **[N]**.
 
@@ -234,7 +330,7 @@ F:\2025\São Paulo\_EXPORT\16bit,F:\2025\São Paulo\_EXPORT\16B_JXL,7,tiff2jxl
 
 ---
 
-##  Individual Scripts
+## Individual Scripts
 
 ### Typical workflow (script commands)
 
@@ -325,152 +421,58 @@ py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run
 py jxl_recompressor.py "F:\Photos\Archive" --mode 8 --distance 1.0 --verify-roundtrip
 ```
 
-
 ### After conversion
 Depending on your needs, three common approaches:
 
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space. Tools like FreeFileSync support folder filters that make this easy.
 2. Delete TIFFs, keep only JXL — a separate script for this can be found here: [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports)
-3. Use the configurable option to delete TIFFs after conversion available in this script. 
-
-
+3. Use the configurable option to delete TIFFs after conversion available in this script.
 
 ---
 
-##  Documentation
+## Recommended Settings
 
-| Document | Contents |
-|----------|----------|
-| [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
-| [docs/README_jxl_tiff_encoder.md](docs/README_jxl_tiff_encoder.md) | Full documentation for TIFF → JXL encoding |
-| [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | Full documentation for JXL → TIFF decoding |
-| [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
-| [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | Full documentation for JXL → JXL recompression |
-| [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
-| [docs/version_history.md](docs/version_history.md) | Detailed notes for all superseded releases |
-| [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
+### Archival (Master Files)
+
+```python
+# jxl_tiff_encoder.py
+CJXL_DISTANCE = 0.05      # Near-lossless, ~47MB for 45MP
+#OR#
+CJXL_DISTANCE = 0.1       # Also Near-lossless, ~34MB for 45MP
+
+CJXL_EFFORT = 7           # Good compression speed tradeoff
+EMBED_ICC_IN_JXL = True   # Always preserve ICC!
+```
+
+### Web / Delivery
+
+```python
+# jxl_tiff_encoder.py
+CJXL_DISTANCE = 1.0       # Visually lossless, ~8MB
+CJXL_EFFORT = 7
+
+# jxl_tiff_decoder.py
+DJXL_OUTPUT_DEPTH = 8     # Smaller files
+TIFF_COMPRESSION = "zip"
+ADD_JPEG_PREVIEW = True   # Fast Explorer thumbnails
+```
 
 ---
 
-## Requirements & Installation
+## Configuration File Location
 
-### 1. Python 3.9+ and Packages
+The wrapper (`jxl_photo.py`) saves settings in `.jxl_tools_config.json`:
 
-```powershell
-# Install required packages
-pip install tifffile numpy pillow rich imagecodecs
-```
+1. **First priority:** Script directory (where `jxl_photo.py` is located)
+2. **Fallback:** User home directory (`%USERPROFILE%` on Windows, `~` on Linux/Mac)
 
- **Important:** Install packages in the same Python version you'll use to run the scripts.
+This allows per-project configurations — place a config file in the script folder for project-specific settings, or use the user home for global defaults.
 
-### 2. External Tools (Download Executables, NOT Source Code)
-
-| Tool | Download URL | What to Download | Extract to |
-|------|-------------|------------------|------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`   **(NOT `jxl-x64-windows.zip`)** | `C:\tools\libjxl\` or your choice |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
-| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
-
-### Tested dependency versions
-
-Versions used before and after the dependency update on 2026-07-12 (last tested commit: `f390463`):
-
-| Component | Tested until commit `f390463` (2026-07-12) | Current (recommended) |
-|---|---|---|
-| libjxl (`cjxl`/`djxl`) | v0.11.2 | v0.12.0 |
-| numpy | 2.4.3 | 2.5.1 |
-| tifffile | 2026.3.3 | 2026.6.1 |
-| Pillow | 12.1.1 | 12.3.0 |
-| imagecodecs | 2026.3.6 | 2026.6.26 |
-| rich | 14.3.3 | 15.0.0 |
-| exiftool | 13.52 | 13.59 |
-| ImageMagick | 7.1.2-17 | 7.1.2-27 |
-
-Older versions may still work, but the current versions are what we test against.
-
-> **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
->
-> On v0.12 the default path streams instead of buffering the whole image, so RAM per worker is modest: measured **0.99 GB** for a 24 MP file, **1.55 GB** at 45 MP and **3.32 GB** for a 93 MP scan (lossless, effort 9). Effort barely moves memory — megapixels do, at roughly 35–40 MB per megapixel per worker. Those figures are 16-bit input; 8-bit encodes 3–7× faster but uses only 4–21 % less memory, so it does not buy you extra workers. See [RAM per worker](docs/README_jxl_tiff_encoder.md#ram-per-worker) before raising `--workers`.
-
-####  Common Download Mistakes
-
-| Wrong Download | Why It Fails | Correct Download |
-|---------------|--------------|------------------|
-| `jxl-x64-windows.zip` | Only DLLs, no executables | `jxl-x64-windows-static.zip` |
-| `exiftool-XX.XX.tar.gz` | Perl source code, needs Perl installed | `exiftool-XX.XX_64.zip` (Windows executable) |
-
-#### exiftool Setup
-
-> **No renaming needed:** the scripts detect both `exiftool.exe` and `exiftool(-k).exe`.
-
-The Windows download comes as `exiftool(-k).exe`. If you prefer the plain name anyway:
-
-```powershell
-# Option A: Rename the file
-Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
-
-# Option B: Duplicate and rename (keeps the original)
-Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
-```
-
-The `(-k)` suffix means "keep console open" — the original behavior. Either name works.
-
-### 3. Add to PATH (PowerShell)
-
-**Replace the example paths below with YOUR actual installation paths:**
-
-```powershell
-# EDIT THESE PATHS to match where YOU extracted the tools:
-$myPaths = @(
-    "C:\tools\libjxl\bin",                           # where cjxl.exe and djxl.exe are
-    "C:\tools\exiftool",                              # where exiftool.exe is (RENAMED!)
-    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
-)
-
-# Add to user PATH
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
-
-# RESTART your PowerShell/terminal after this!
-```
-
-### 4. Verify Installation
-
-> **Important:** All tools must be in your PATH for both the wrapper and individual scripts to find them. The wrapper and scripts only search the system PATH — they do not look in other directories.
-
-**Restart PowerShell**, then run:
-
-```powershell
-# Each should return a version number
-cjxl --version          # Should show: cjxl v0.XX.X
-exiftool -ver           # Should show: 12.XX or 13.XX
-magick -version         # Should show: ImageMagick version
-python -c "import tifffile, PIL, rich; print('All Python packages OK')"
-
-# Test full environment
-cd "C:\Users\YourName\Documents\GitHub\jxl-photo"  # adjust path
-py jxl_photo.py
-```
-
-You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich`
-
-### Troubleshooting
-
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
-| `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
-| `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
-| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
-| PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
-
-### Setup feels heavy?
-
-There is a simpler alternative that needs no libjxl — only ImageMagick and ExifTool (plus Python 3.9+ if you use the optional wizard UI): [tiff-workflow](https://github.com/rsilvabr/tiff-workflow), a PowerShell toolkit (with an optional Python wizard) that losslessly re-compresses TIFFs with ZIP/Deflate, copies EXIF from JPEG to TIFF, diagnoses padded 16-bit files, and generates sRGB thumbnails. Much less compression than JXL, but far less to install. [Side-by-side numbers at the end of this README](#related-project-a-simpler-tiff-only-alternative).
+To move settings between locations: use option **6** in the main menu.
 
 ---
 
-##  ICC Preservation: How It Works
+## ICC Preservation: How It Works
 
 ### Without This Toolkit (default cjxl behavior)
 
@@ -512,48 +514,6 @@ The ICC is base64-encoded and stored in XMP:
 - **dc:Description:** the encode record — an append-only lineage chain `gen=N | cjxl d=X e=Y | ...` where `gen=N` counts the lossy generations (visible in Windows Properties; any user caption stays first)
 
 → See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for full technical details.
-
----
-
-##  Recommended Settings
-
-### Archival (Master Files)
-
-```python
-# jxl_tiff_encoder.py
-CJXL_DISTANCE = 0.05      # Near-lossless, ~47MB for 45MP
-#OR#
-CJXL_DISTANCE = 0.1       # Also Near-lossless, ~34MB for 45MP
-
-CJXL_EFFORT = 7           # Good compression speed tradeoff
-EMBED_ICC_IN_JXL = True   # Always preserve ICC!
-```
-
-### Web / Delivery
-
-```python
-# jxl_tiff_encoder.py
-CJXL_DISTANCE = 1.0       # Visually lossless, ~8MB
-CJXL_EFFORT = 7
-
-# jxl_tiff_decoder.py
-DJXL_OUTPUT_DEPTH = 8     # Smaller files
-TIFF_COMPRESSION = "zip"
-ADD_JPEG_PREVIEW = True   # Fast Explorer thumbnails
-```
-
----
-
-## Configuration File Location
-
-The wrapper (`jxl_photo.py`) saves settings in `.jxl_tools_config.json`:
-
-1. **First priority:** Script directory (where `jxl_photo.py` is located)
-2. **Fallback:** User home directory (`%USERPROFILE%` on Windows, `~` on Linux/Mac)
-
-This allows per-project configurations — place a config file in the script folder for project-specific settings, or use the user home for global defaults.
-
-To move settings between locations: use option **6** in the main menu.
 
 ---
 
@@ -652,7 +612,7 @@ The decoder's Matrix mode (`--matrix`, for color-space conversion via LittleCMS)
 
 ### eciRGB v2 and Special ICC Profiles
 
-The cjxl/dxjl converters were optimized for:
+The cjxl/djxl converters were optimized for:
 - sRGB (gamma ~2.2)
 - Rec.2020 (standard gamma)
 - Linear spaces
@@ -664,6 +624,54 @@ Profiles with special transfer curves like **eciRGB v2** (L* curve) may have sli
 - Convert to Rec.2020 before JXL encoding
 
 See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical details.
+
+---
+
+## Documentation
+
+| Document | Contents |
+|----------|----------|
+| [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
+| [docs/README_jxl_tiff_encoder.md](docs/README_jxl_tiff_encoder.md) | Full documentation for TIFF → JXL encoding |
+| [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | Full documentation for JXL → TIFF decoding |
+| [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
+| [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | Full documentation for JXL → JXL recompression |
+| [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+| [docs/version_history.md](docs/version_history.md) | Detailed notes for all superseded releases |
+| [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
+
+---
+
+## Notices for upgraders
+
+### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.0.3: check them before discarding the JPEGs
+
+Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
+
+```powershell
+py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd --dry-run   # audit only
+py jxl_jpeg_transcoder.py "F:\Photos" --repair-jbrd             # repair
+```
+
+A repaired file reconstructs a JPEG with **identical image data**; only its metadata bytes differ from the original. See [Repairing broken JPEG reconstruction](docs/README_jxl_jpeg_transcoder.md#repairing-broken-jpeg-reconstruction---repair-jbrd).
+
+### ⚠️ Coming from v1.9.1 or earlier? Two things changed under existing command lines in v2.0.0
+
+**1. `--delete-source` now works in every mode.** In v1.9.1 it was `if DELETE_SOURCE and mode == 8` — outside mode 8 the flag was silently ignored. A saved command or script with `--mode 3 --delete-source` deleted **nothing** then and deletes the originals **now**.
+
+**2. An archive made before this release can be refused.** Runs that delete sources in a folder-collapsing mode (2/4/5/6/7, and mode 0 with an output folder) now check that the existing output really came from the source about to replace it. Outputs written before v2.0.0 carry no such record, so they are refused rather than overwritten. For TIFF → JXL, `--provenance adopt` verifies and stamps them in a single pass; the decoder and the transcoder have no equivalent yet — use a structure-preserving mode (0/1/3/8) for those folders.
+
+Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before running anything destructive. Nothing about ordinary conversion changed: same pixels, same ICC, same metadata.
+
+---
+
+## Current version
+
+**v2.1.1_beta1** (2026-09-20) — beta of the first maintenance release on v2.1.0: ten fixes from the second audit of the recompressor release, all in the safety/reporting layer — the conversion core is untouched. Highlights: dry runs preview the provenance refusals instead of promising outputs the real run refuses; every output is written to a temp beside the final name and swapped in atomically after the integrity check; `checksums.md5` appends are serialized across manifest child processes; the wrapper stops dropping the recompressor policies; keep-smaller fallback copies must prove the MD5 match before any deletion. No command line and no file format changes. Full list: [bug tracking, round 37](docs/bug_tracking_since_v1.0.md). **1357 tests.**
+
+> **Beta:** these are delete-path and audit fixes, every one with a regression test proven to fail against the pre-fix code — but if you archive with `--delete-source`, the stable [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0) is the conservative choice until v2.1.1 final.
+
+[What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
 ---
 
@@ -685,34 +693,12 @@ Every fix has a regression test proven to fail against the pre-fix code (`tests/
 
 ---
 
-### What's new — v2.1.0 (current stable)
-
-**Released 2026-09-20.** A new script joins the toolkit: **`jxl_recompressor.py`** — and a new destination in the wrapper ("JXL (smaller)"). No existing command line changes; nothing about TIFF/JPEG conversion moved.
-
-#### Why
-
-Archives were written at `d=0.05–0.1` when disk was cheap. When storage runs short, the right move is a **single** generation of lossy re-encode to `d=1.0–2.0` — not several, and never blind. The recompressor is the batch tool for that move.
-
-#### What it guarantees
-
-- **Metadata survives.** cjxl carries nothing across a JXL→JXL re-encode, so the script copies EXIF/XMP/IPTC with exiftool, keeps the base64 ICC and every `jxlphoto-*` provenance marker verbatim, and restamps `cjxl d=/e=` with the **new** parameters (the old tag is replaced wherever it lived; unrelated text is kept).
-- **Counterproductive requests are caught.** Each file's recorded parameters are compared against the request: same distance, or a *lower* distance than an already-lossy source, cannot gain anything. The default policy asks once per batch (unattended runs fail closed to *skip*); `copy`/`skip`/`convert` are selectable per policy (`--on-downgrade`, `--on-unknown`).
-- **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and the MD5 binding the transcoder's delete gates rely on.
-- **Keep-smaller net.** A re-encode that comes out not-smaller than the source is replaced by the original bytes (in place: the original is simply kept).
-- **Same delete machinery as v2.0.x**: `--delete-source`, `--delete-skipped`, `--verify-roundtrip`, provenance checks, three confirmations — and in the wrapper, the same execution-time token gate.
-- **Also new in the encoder**: `--modular on|off` selects the lossy encoder (default off — cjxl's VarDCT decides). Measured on 7 real masters (camera TIFFs + film/IR/negative scans): quality a wash, VarDCT smaller in 14/14 and 20–100× faster — so this is for screenshots/graphics batches, and the wrapper only asks inside Step 6A (advanced options).
-- **Also new in the transcoder**: `--auto-repair-jbrd` decodes a marker-damaged jbrd JXL from a repaired copy without touching the archive, a failed reconstruction names both remedies, and the wrapper gets repair as main menu option 8.
-
-Verified against real files, end to end: Capture One ProPhoto 16-bit exports and film scans (including RGB+IR scans where the IR channel is its own grayscale page) encoded to `d=0.1`, recompressed to `d=1.0` (archive 264 MB → 44 MB), every marker (multi-page group, grayscale, provenance, ICC) carried over verbatim, the recompressed archive decoded back to multi-page TIFFs with page structure, dtype, photometric and ICC placement identical to the originals (33–53 dB PSNR, no brightness shift), and `--delete-source --verify-roundtrip` deleting only after per-file pixel verification passed. **1334 tests** in the suite.
-
----
-
 ### Release history
 
 | Version | Date | Highlights |
 |---------|------|------------|
 | **v2.1.1_beta1** | 2026-09-20 | Beta. Round-37 audit (10 fixes): dry runs preview the provenance refusals instead of promising them; outputs written via temp + atomic `os.replace` (a killed run no longer poisons smart sync); `checksums.md5` appends serialized across child processes; wrapper keeps the recompressor policies and emits `--on-unknown`/`--jbrd-policy`; encoder xmp mode merges the EXIF Software lineage chain; keep-smaller copies pass the MD5 gate; `--repair-jbrd` needs no cjxl |
-| **v2.1.0** | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 |
+| **v2.1.0** | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 — [full notes](docs/version_history.md#v210) |
 | v2.0.3 | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
 | v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
 | v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
@@ -742,17 +728,6 @@ Verified against real files, end to end: Capture One ProPhoto 16-bit exports and
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
 - [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code
-
----
-
-## Disclaimer
-
-These tools were made for my personal workflow. 
-Use at your own risk — I am not responsible for any issues you may encounter.
-
-However, If you find any bugs, feel free to report to me - I will gladly try my best to improve this project.
-
-Always test with a small batch before processing important archives.
 
 ---
 
@@ -786,6 +761,17 @@ If this toolkit's setup is more than you want to deal with, [tiff-workflow](http
 | **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~8 MB (~94% smaller) |
 
 **Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
+
+---
+
+## Disclaimer
+
+These tools were made for my personal workflow.
+Use at your own risk — I am not responsible for any issues you may encounter.
+
+However, If you find any bugs, feel free to report to me - I will gladly try my best to improve this project.
+
+Always test with a small batch before processing important archives.
 
 ---
 
