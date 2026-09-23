@@ -767,14 +767,16 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
             # a header-only open while its pixel data is missing, and this gate
             # stands in front of an irreversible delete.
             #
-            # asarray() decodes the WHOLE last page, not just its final strip
-            # (the comment here used to claim otherwise): budget ~187 MB and a
-            # full decode for a 93 MP scan page. That cost is accepted on
-            # purpose — the check runs once per output, serially, after the
-            # worker pool is done, and truncation always lands on the LAST page,
-            # which is the one being read.
-            last = tif.pages[-1].asarray()
-            _ = last.flat[-1]
+            # EVERY page is decoded, not just the last one: damage that lives in
+            # an EARLIER page of a multi-page reconstruction (edited externally,
+            # or media damage that is not a tail truncation) used to pass this
+            # gate — asarray() on the last page alone never touched it. Each
+            # asarray() decodes a WHOLE page (measure ~187 MB and a full decode
+            # for a 93 MP scan page); the extra cost is accepted on purpose —
+            # the check runs once per output, serially, after the worker pool
+            # is done.
+            for _page in tif.pages:
+                _ = _page.asarray().flat[-1]
 
         return True
     except Exception:
@@ -2317,13 +2319,23 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
 # PATH RESOLUTION (ALL MODES 0-8)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def resolve_output(jxl_path: Path, mode: int, input_root: Path) -> Path:
+def resolve_output(jxl_path: Path, mode: int, input_root: Path,
+                   single_file: bool = False) -> Path:
     """Resolve output TIFF path based on mode (0-8)"""
 
     def _warn_if_outside(result: Path) -> Path:
         # Modes 4/5 can land OUTSIDE the selected input tree for files at its
         # root — surface that instead of surprising the user later.
-        if result is not None and not _is_relative_to(result, input_root):
+        #
+        # Modes 4/5 also accept a single FILE as the input. The root the
+        # caller passes is then the file's own parent folder, and the output
+        # is a SIBLING of that folder BY DESIGN — anchoring on the parent
+        # flags every legitimate single-file run. The tree such a run must
+        # stay inside is the folder holding that sibling pair, one level up
+        # (same case the encoder already fixes with input_root.is_file();
+        # the decoder's caller passes a folder, so it flags it explicitly).
+        anchor = input_root.parent if single_file else input_root
+        if result is not None and not _is_relative_to(result, anchor):
             logger.warning(f"Output outside input tree: {jxl_path.name} -> {result}")
         return result
 
@@ -3691,9 +3703,20 @@ def collect_multipage_groups(jxls: list) -> dict:
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
             info = marker_map.get(str(j), _DEFAULT_INFO)
-            # Thumbnail role only counts when the file carries an internal
-            # marker — a third-party *_thumbnail.jxl is a REAL photo to us.
-            is_thumb = (info['thumb'] or _is_thumbnail_jxl(j)) and _has_internal_markers(info)
+            # The thumbnail ROLE must come from a marker, never the name suffix
+            # alone. _has_internal_markers used to be the guard here, but it is
+            # true for ANY jxlphoto-* marker — and jxlphoto-depth is written to
+            # every encoder output — so a normal single-page photo whose stem
+            # ends in `_thumbnail` was decoded as a reduced-resolution page
+            # (SubFileType=1, or skipped entirely under --thumbnail-handling
+            # ignore). The suffix only decides for a legacy split page, which
+            # carries jxlphoto-page/jxlphoto-group; a standalone with only
+            # depth/grayscale is an ordinary photo (mirrors the reconstruction
+            # branch below, which never lets the suffix decide for a standalone).
+            is_thumb = (info['thumb']
+                        or (_is_thumbnail_jxl(j)
+                            and (info['thumb'] or info['page'] is not None
+                                 or bool(info['group']))))
             groups[j] = [(j, 0, is_thumb, info['inherited'], info['subfiletype'], info['grayscale'], info['depth'])]
         return groups
 
@@ -4186,7 +4209,8 @@ Examples:
     logger.info(f"Input: {args.input}")
 
     # Collect files
-    if args.input.is_file():
+    single_file = args.input.is_file()
+    if single_file:
         jxls = [args.input]
         output_root = args.output or args.input.parent
     else:
@@ -4251,7 +4275,8 @@ Examples:
                 logger.warning(f"SKIP group with only thumbnails | {main_jxl.name}")
                 continue
 
-        tiff = resolve_output(_group_naming_path(main_jxl, entries, group_size > 1), args.mode, output_root)
+        tiff = resolve_output(_group_naming_path(main_jxl, entries, group_size > 1), args.mode, output_root,
+                              single_file=single_file)
         if tiff is None:
             continue
         tasks.append({
@@ -4505,9 +4530,32 @@ Examples:
                     logger.warning(f"  ... and {len(_would_delete) - 10} more group(s)")
                 for _j, _why, _n in _would_keep[:10]:
                     logger.info(f"  would KEEP {_n} source(s) ({_why}) | {_j}")
+        # Predict the skips the real run makes: an existing output means
+        # "SKIP (exists)" (or "SKIP (sync)" in smart mode). _would_skip_group
+        # is the same predicate the real convert_multipage_jxl_group uses,
+        # TOCTOU fallback and marker rule included. Groups the provenance gate
+        # predicts as REFUSED are already excluded from ok via
+        # provenance_failures; they must not also land in the skip count.
+        _refused_names = {_p for _p, _ in provenance_failures}
+        _sync_skips = sum(1 for _t in tasks
+                          if str(_t["main_jxl"]) not in _refused_names
+                          and _would_skip_group(_t["entries"], _t["final_tiff"]))
+        if _sync_skips:
+            logger.info(f"Dry run: {_sync_skips} output(s) already exist — "
+                        f"{'smart sync would SKIP them' if OVERWRITE == 'smart' else 'they would be SKIPPED'}.")
         emit_summary_json(
             args.summary_json,
-            ok=max(0, len(tasks) - len(provenance_failures)), overwritten=0, skipped=0,
+            # Up-to-date / existing outputs are SKIPs, not conversions: ok must
+            # exclude them and skipped must include them, exactly like the real
+            # run (which counts them at "skipped" and reports ok separately).
+            # Without this the dry-run topline reported ok=1, skipped=0 for a
+            # folder the real run reports ok=0, skipped=1 — and the wrapper
+            # sums these toplines across every manifest entry (#409's encoder
+            # twin, ported here). A group the provenance gate predicts as
+            # REFUSED is already subtracted via provenance_failures and must
+            # not also be counted as a skip.
+            ok=max(0, len(tasks) - len(provenance_failures) - _sync_skips),
+            overwritten=0, skipped=_sync_skips,
             # A refused merge is a real prediction: those groups will not be
             # rebuilt. Reporting errors:0 next to a non-empty failure list made
             # the wrapper's recap contradict itself (same rule as the encoder).

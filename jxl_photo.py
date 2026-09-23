@@ -5007,7 +5007,10 @@ class InteractiveMenu:
         # mode-3 manifest with delete_source would have deleted originals with
         # no confirmation anywhere in the chain.
         # Lossy + delete_skipped: the one combination with no provenance of any
-        # kind. execute_workflow asks this BEFORE dispatching mode 99, so the
+        # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`: the
+        # recompressor is not among them, and it now proves provenance on its
+        # skipped path via the jxlphoto-src markers.) execute_workflow asks this
+        # BEFORE dispatching mode 99, so the
         # manifest path never reached it and the extra confirmation vanished for
         # exactly the runs that touch the most files. The gate is idempotent
         # (_lossy_skip_confirmed), so asking here cannot double up.
@@ -6463,7 +6466,9 @@ class InteractiveMenu:
             return False
 
         # Lossy + delete_skipped: the one combination with no provenance of any
-        # kind. Applied here so repeats and presets are gated too, not just [D].
+        # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
+        # recompressor proves provenance on its skipped path now.) Applied here
+        # so repeats and presets are gated too, not just [D].
         self._confirm_lossy_delete_skipped(workflow)
 
         # Delete gate, at EXECUTION time (was Step 4): the user has already had

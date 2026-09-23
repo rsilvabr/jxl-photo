@@ -2646,7 +2646,16 @@ def reorder_jxl_boxes(jxl_path):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
             real_size = 8 + len(p)
-            h = real_size.to_bytes(4, "big") + h[4:8]
+            try:
+                h = real_size.to_bytes(4, "big") + h[4:8]
+            except OverflowError:
+                # A file just under 4 GiB whose trailing size-0 box spans
+                # most of it computes a real_size that no longer fits the
+                # 32-bit field — report it like the truncation guards above,
+                # not as an uncaught traceback.
+                raise RuntimeError(
+                    f"Cannot re-header size-0 box {name!r}: real size {real_size} "
+                    f"exceeds the 32-bit box size field") from None
         out += h + p
 
     jxl_path.write_bytes(out)
@@ -3674,12 +3683,22 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # multipage_group block, like the grayscale flag below. The page
             # marker is harmless for standalone files (the decoder only reads
             # it for marked groups) and records the real origin.
-            if not multipage_group and not STRIP_METADATA and page_idx > 0:
+            if not multipage_group and not STRIP_METADATA and (
+                    page_idx > 0 or subfiletype != (1 if is_thumbnail else 0)):
+                # The subfiletype marker is written for page 0 too when the
+                # page's role is not the default (0 for a real page, 1 for a
+                # thumbnail): a single-page TIFF whose only page is SubFileType=4
+                # (MASK) used to sail through both blocks above and the decoder
+                # then wrote SubfileType=0 back. Thumbnails are restored as 1
+                # regardless, so a thumbnail's own 1 stays unmarked — same rule
+                # the multi-page group block already follows.
                 try:
-                    solo_args = ["-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx)]
-                    if icc_inherited:
-                        solo_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
-                    if subfiletype != 0:
+                    solo_args = []
+                    if page_idx > 0:
+                        solo_args.append("-XMP-dc:Relation+=" + PAGE_XMP_PREFIX + str(page_idx))
+                        if icc_inherited:
+                            solo_args.append("-XMP-dc:Relation+=" + ICC_INHERITED_XMP_FLAG)
+                    if subfiletype != (1 if is_thumbnail else 0):
                         solo_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
                     r_solo = _run_exiftool_argfile(
                         ["-overwrite_original"] + solo_args + [str(write_path)],
@@ -3819,6 +3838,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     if mp_mode == "ignore":
         final_jxl = output_dir / _page_output_name(stem, 0, False)
         extra_pages = 0
+        samples, subfiletype = 3, 0
         try:
             with tifffile.TiffFile(str(tiff_path)) as tif:
                 if len(tif.pages) == 0:
@@ -3829,6 +3849,13 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                     # "Page index 0 out of range" — a per-file ERROR, exit 1.
                     raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
                 samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
+                # Same reason as samples: ignore encodes page 0 as a real page,
+                # so page 0's own SubfileType must travel with it or the decoder
+                # writes 0 back — a single-page MASK TIFF lost its role in
+                # exactly this branch (the split/skip/split_all planners below
+                # read the real value from _analyze_tiff_pages).
+                subfiletype = (int(tif.pages[0].subfiletype)
+                               if tif.pages[0].subfiletype else 0)
                 # Counting the IFD chain only follows offsets (no pixel decode),
                 # and this is the ONLY place that can tell the user pages are
                 # being dropped: "ignore" encodes page 0 and discards the rest,
@@ -3840,6 +3867,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
             # If we cannot read the page, let convert_one report the error later
             # and fall back to RGB to avoid a planning-time crash.
             samples = 3
+            subfiletype = 0
         if extra_pages:
             with _multipage_ignored_lock:
                 _multipage_ignored["files"] += 1
@@ -3852,7 +3880,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                     f"DISCARDING {extra_pages} extra page(s) | {tiff_path.name} | "
                     f"--multipage-mode ignore encodes page 0 only "
                     f"(use split / split_all to keep them)")
-        return [(tiff_path, final_jxl, 0, False, 0, samples)]
+        return [(tiff_path, final_jxl, 0, False, subfiletype, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
 
@@ -4870,6 +4898,29 @@ def main():
     if args.strip:
         STRIP_METADATA = True
     log_file = setup_logger()
+
+    # A second run in the SAME process (the test suite, or anything importing
+    # this module) inherited everything below: progress started at [N+1/total],
+    # the summary counters doubled, and a source TIFF refused for deletion in
+    # the previous run was still refused in this one. Reset every per-run
+    # counter where the first run begins (same treatment the decoder gives
+    # its equivalents). This lives here and not in _reset_abort: that helper
+    # is duplicated across the scripts and parity-checked.
+    _counter["done"] = 0
+    for _k in _d50_patch_count:
+        _d50_patch_count[_k] = 0
+    _d50_patched_hashes.clear()
+    with _multipage_ignored_lock:
+        _multipage_ignored["files"] = 0
+        _multipage_ignored["pages"] = 0
+        _thumbnails_dropped["files"] = 0
+        _thumbnails_dropped["pages"] = 0
+        _discarded_real_page_sources.clear()
+        _discarded_thumb_sources.clear()
+        _discard_warned["count"] = 0
+        _discard_warned["suppressed"] = 0
+    for _k in _delete_stats:
+        _delete_stats[_k] = 0
 
     # Everything below is logged AFTER setup_logger() on purpose: on the
     # module-level logger these have no handler at all, so INFO lines vanish

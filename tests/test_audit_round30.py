@@ -235,12 +235,35 @@ def test_decoder_readme_does_not_still_promise_mask_is_demoted():
     assert "including `SubfileType=4` (MASK)" in section
 
 
-def test_integrity_comment_does_not_claim_a_single_strip_is_read():
-    """asarray() decodes the whole page; the comment used to say otherwise."""
+def test_integrity_comment_does_not_claim_a_single_page_is_read():
+    """Every page is decoded now (#302 follow-up); the comment developed from
+    "one strip" (false) through "one page" to the current all-pages gate."""
     src = (REPO / "jxl_tiff_decoder.py").read_text(encoding="utf-8")
     body = src.split("def _verify_tiff_integrity")[1].split("\ndef ")[0]
     assert "Only the last strip/tile is decoded" not in body
-    assert "decodes the WHOLE last page" in body
+    assert "EVERY page is decoded" in body
+
+
+def test_integrity_check_decodes_all_pages(tmp_path):
+    """Damage in an EARLIER page of a multi-page TIFF must fail the gate —
+    reading the last page alone left non-tail corruption undetected."""
+    import tifffile as _tf
+    import numpy as _np
+    p = tmp_path / "two_pages.tif"
+    # Page 0 is DEFLATE-compressed so corrupted bytes break its decode; page 1
+    # stays uncompressed and readable (the shape the old last-page read trusted).
+    _tf.imwrite(p, _np.arange(64, dtype=_np.uint16).reshape(8, 8), compression="zlib")
+    _tf.imwrite(p, _np.ones((8, 8), dtype=_np.uint16), append=True)
+    with _tf.TiffFile(p) as tif:
+        assert len(tif.pages) == 2
+        p0 = tif.pages[0]
+        lo = min(p0.dataoffsets)
+        hi = max(o + n for o, n in zip(p0.dataoffsets, p0.databytecounts))
+    data = bytearray(p.read_bytes())
+    for i in range(lo, hi):
+        data[i] = 0xAA
+    p.write_bytes(bytes(data))
+    assert dec._verify_tiff_integrity(p) is False
 
 
 # ── #302 ──────────────────────────────────────────────────────────────────────

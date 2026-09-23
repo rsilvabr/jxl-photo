@@ -178,18 +178,27 @@ folders and ignore the output positional.
 
 1. written and verified at its **final** path (container box-chain walk), and
 2. for verbatim copies, **MD5-matched** against the source, and
-3. in collapsing modes, provenance-matched (`--provenance path|content` via
-   the `jxlphoto-src:`/`jxlphoto-srcsum:` markers).
+3. matched to its source by provenance in the folder-collapsing modes
+   (`--provenance path|content` via the `jxlphoto-src:`/`jxlphoto-srcsum:`
+   markers).
 
 `--verify-roundtrip` additionally decodes both sides and compares pixels
 before deleting — pixel-exact for lossless→lossless, brightness/PSNR sanity
 floors when a lossy step is involved (`VERIFY_LOSSY_MIN_MEAN_RATIO`,
 `VERIFY_LOSSY_MIN_PSNR`). `--delete-skipped` widens the deletion to sources
-whose output already existed (finishing an interrupted archive) — the
-existing output must pass every gate. Armed **without** `--delete-source` it
-does nothing (with a warning): it used to delete already-archived sources
-with no confirmation and no provenance check, and a same-named output from a
-different photo was enough to destroy the only copy of a source.
+whose output already existed (finishing an interrupted archive). The existing
+output must pass every gate — and for a skipped **re-encode** that includes the
+provenance proof, in **every** mode: its `jxlphoto-src`/`jxlphoto-srcsum`
+markers must match the source's. The folder-preserving modes (1/3) used to
+delete on the structural check alone, so a valid, newer, same-named output
+written by a different photo could destroy the only copy of the source. The
+recompressor copies the markers verbatim from the source, so a genuine previous
+re-encode passes for free; a missing or unreadable marker fails **CLOSED** and
+the source is KEPT (`KEEP (existing output carries no matching provenance
+marker)`). Armed **without** `--delete-source` it does nothing (with a
+warning): it used to delete already-archived sources with no confirmation and
+no provenance check, and a same-named output from a different photo was enough
+to destroy the only copy of a source.
 
 Multi-page documents delete as a **group**: every page sharing a
 `jxlphoto-mpg:` id in the same folder must pass its own gates, otherwise no

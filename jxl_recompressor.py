@@ -1277,26 +1277,6 @@ def _run_exiftool_argfile(args_lines, timeout=60):
 # classify the requested recompression against it, and restamp after encoding.
 # ---------------------------------------------------------------------------
 
-def _parse_encode_params(text: str):
-    """(distance, effort) from a metadata string, or None.
-
-    The chain is append-only (" | "-joined), so the LAST match in the string
-    is the current file's parameters. Only MACHINE-BLOCK segments count: a
-    caption merely containing "cjxl d=1 e=7" is user text, not an encode
-    record.
-    """
-    found = []
-    for block in _MACHINE_BLOCK_RE.findall(str(text)):
-        found.extend(_ENCODE_TAG_RE.findall(block))
-    if not found:
-        return None
-    d, e = found[-1]
-    try:
-        return float(d), int(e)
-    except (TypeError, ValueError):
-        return None
-
-
 def _strip_encode_params(text: str):
     """(cleaned_text, orphans) with the machine block removed.
 
@@ -2182,6 +2162,17 @@ def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity)
         pass
 
 
+def _disk_full_need(jxl_path: Path) -> int:
+    """Best-effort size estimate for _abort_if_disk_full: a source that
+    vanishes between the plan and the error handler must not raise a raw
+    OSError OUT of the worker's except block (that crashed before this was
+    guarded) — 0 simply means nothing new to blame on a full disk."""
+    try:
+        return jxl_path.stat().st_size
+    except OSError:
+        return 0
+
+
 def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 action: str, in_place: bool, desc: str, software: str,
                 src_distance):
@@ -2322,7 +2313,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         _error_details[str(jxl_path)] = str(e)
         logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
         _abort_if_disk_full(write_path.parent if write_path is not None else jxl_path.parent,
-                            jxl_path.stat().st_size if jxl_path.exists() else 0)
+                            _disk_full_need(jxl_path))
         return (str(jxl_path), "error", str(final_path))
 
 
@@ -2568,6 +2559,36 @@ def _delete_gate(items, results, promoted):
                      "failure and re-run; the outputs are already written.")
         return
 
+    # Cross-run provenance for the --delete-skipped path: a SKIPPED source is
+    # deleted on the strength of a PRE-EXISTING output this run never wrote.
+    # Verifying that output's structure alone would delete a source whose
+    # same-named "archive" is an unrelated photo's output (real data loss — the
+    # modes that collapse folder structure already refuse this at the plan
+    # stage, but modes 1/3 write beside the source and had no proof at all).
+    # The recompressor copies the source's jxlphoto-src/srcsum markers verbatim
+    # into its output, so marker equality is the proof. Only action "convert"
+    # needs it: a copy is proven byte-for-byte by the MD5 gate below. One
+    # batched exiftool pass for the whole run; an unreadable marker fails
+    # CLOSED (the source is kept).
+    _prov_needed = [it for it in deletables
+                    if DELETE_SKIPPED
+                    and results.get(str(it["src"]), ("error",))[0] == "skipped"
+                    and it["action"] == "convert"
+                    and Path(results.get(str(it["src"]),
+                                          ("error", str(it["final"])))[1]).exists()]
+    _prov_info = {}
+    if _prov_needed:
+        _prov_paths = []
+        for it in _prov_needed:
+            _prov_paths.append(it["final"])
+            _prov_paths.append(it["src"])
+        _prov_marks = _read_source_markers_batch(_prov_paths)
+        for it in _prov_needed:
+            _prov_info[id(it)] = (
+                _prov_marks.get(str(it["final"])) or {"src": None, "srcsum": None},
+                _prov_marks.get(str(it["src"])) or {"src": None, "srcsum": None},
+            )
+
     # Pass 1: decide per file, WITHOUT deleting yet. EVERY page is recorded,
     # including the ones that will never be deleted this run (conversion
     # failed, policy skip, refused, aborted): those are exactly the siblings
@@ -2608,11 +2629,27 @@ def _delete_gate(items, results, promoted):
                     ok, reason = False, "copy MD5 mismatch"
             except OSError as e:
                 ok, reason = False, f"copy MD5 could not be checked: {e}"
-        elif VERIFY_ROUNDTRIP and status == "skipped":
-            _rt_ok, detail = _verify_roundtrip_jxl(src, final_path, it["src_d"],
-                                                   CJXL_DISTANCE)
-            if not _rt_ok:
-                ok, reason = False, f"round-trip verification failed: {detail}"
+        elif status == "skipped":
+            # The source is deleted on the strength of a PRE-EXISTING output
+            # this run never wrote. For a skipped CONVERT that proof is the
+            # provenance marker pair the recompressor copies verbatim from the
+            # source: without it a valid, newer same-named output from an
+            # unrelated photo would certify the deletion. The modes that
+            # collapse folder structure already refuse this at the plan stage,
+            # but modes 1/3 write beside the source and had no check at all.
+            # A skipped COPY never reaches here (the MD5 branch above owns it).
+            out_info, src_info = _prov_info.get(id(it), (None, None))
+            if out_info is None:
+                ok, reason = False, ("existing output's provenance marker could "
+                                     "not be read")
+            elif not _markers_match(out_info, src_info, PROVENANCE_CHECK):
+                ok, reason = False, ("existing output carries no matching "
+                                     "provenance marker")
+            elif VERIFY_ROUNDTRIP:
+                _rt_ok, detail = _verify_roundtrip_jxl(src, final_path, it["src_d"],
+                                                       CJXL_DISTANCE)
+                if not _rt_ok:
+                    ok, reason = False, f"round-trip verification failed: {detail}"
         decisions.append((it, status, final_path, ok, reason, True))
 
     # Pass 2: a group is only as deletable as its weakest page. The veto is
@@ -2689,8 +2726,17 @@ def _preflight_space(items):
                            f"batch may need up to {_fmt_size(need)} there (worst case). "
                            f"The disk-full abort will stop the run if it actually fills.")
     if TEMP2_DIR is not None and items:
-        largest = sorted((it["src"].stat().st_size for it in items
-                          if it["src"].exists()), reverse=True)[:2]
+        # Same guard the first loop above has: a source can vanish between the
+        # plan and this estimate (another process, a concurrent --delete-source
+        # run). A raw OSError here escaped main() with a traceback, no summary
+        # and no documented exit code.
+        sizes = []
+        for it in items:
+            try:
+                sizes.append(it["src"].stat().st_size)
+            except OSError:
+                continue  # vanished between the plan and the preflight
+        largest = sorted(sizes, reverse=True)[:2]
         peak = sum(largest)
         try:
             free = shutil.disk_usage(TEMP2_DIR).free
@@ -2863,7 +2909,10 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
-    if args.export_marker:
+    if args.export_marker is not None:
+        # `is not None`, mirroring --export-subfolder: `if args.export_marker:`
+        # treated --export-marker "" (an explicit "export NOTHING here") as
+        # absent and silently kept the default marker instead.
         EXPORT_MARKER = args.export_marker
     if args.export_subfolder is not None:
         EXPORT_JXL_SUBFOLDER = args.export_subfolder
@@ -3180,10 +3229,52 @@ def main():
         # already printed), but it must not inflate the plan or the would-delete
         # count: the real run removes it and deletes nothing for it.
         _plan = [it for it in items if id(it) not in refused_ids]
-        n_convert = sum(1 for it in _plan if it["action"] == "convert")
-        n_copy = sum(1 for it in _plan if it["action"] == "copy")
+
+        def _dry_would_skip(it):
+            # Mirrors convert_one's SKIP decision (which never applies to an
+            # in-place item): an existing, up-to-date output means the real run
+            # reports SKIP, not a conversion.
+            return (not it["in_place"] and it["action"] in ("convert", "copy")
+                    and _would_skip(it["src"], it["final"]))
+
+        # A skipped CONVERT admitted by --delete-skipped is deleted only when
+        # its pre-existing output carries this source's markers (the real gate
+        # now requires it in every mode); the preview must not promise a
+        # deletion the run will KEEP. A skipped COPY is proven by the MD5.
+        _dry_prov_ok = {}
+        if DELETE_SOURCE and DELETE_SKIPPED:
+            _sk = [it for it in _plan if _dry_would_skip(it)
+                   and it["action"] == "convert" and it["final"].exists()]
+            if _sk:
+                _pm = _read_source_markers_batch(
+                    [it["final"] for it in _sk] + [it["src"] for it in _sk])
+                for it in _sk:
+                    _dry_prov_ok[id(it)] = _markers_match(
+                        _pm.get(str(it["final"])) or {"src": None, "srcsum": None},
+                        _pm.get(str(it["src"])) or {"src": None, "srcsum": None},
+                        PROVENANCE_CHECK)
+
+        def _dry_deletable(it):
+            # Mirrors the real _delete_gate for one item (multi-page veto is
+            # not previewed here, as before).
+            if it["in_place"] or it["action"] not in ("convert", "copy"):
+                return False
+            ws = _would_skip(it["src"], it["final"])
+            if not DELETE_SKIPPED and ws:
+                return False
+            if DELETE_SKIPPED and ws and it["action"] == "convert":
+                return _dry_prov_ok.get(id(it), False)
+            return True
+
+        n_convert = sum(1 for it in _plan if it["action"] == "convert"
+                        and not _dry_would_skip(it))
+        n_copy = sum(1 for it in _plan if it["action"] == "copy"
+                     and not _dry_would_skip(it))
         n_skip = len(_plan) - n_convert - n_copy
         for it in _plan:
+            if _dry_would_skip(it):
+                logger.info(f" DRY | SKIP (exists) | {it['src'].name}")
+                continue
             tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
             extra = f" ({it['reason']})" if it["action"] != "convert" else ""
             place = " (in place)" if it["in_place"] else ""
@@ -3191,14 +3282,10 @@ def main():
         if DELETE_SOURCE or DELETE_SKIPPED:
             # Mirror the real delete gate: an item whose output already exists
             # and would SKIP inside convert_one is deleted only when
-            # --delete-skipped widens the gate (without it the item settles as
-            # an unconditional skip and is never deleted). Counting those made
-            # the preview promise deletions the run would not perform.
-            n_del = sum(1 for it in _plan
-                        if not it["in_place"]
-                        and it["action"] in ("convert", "copy")
-                        and (DELETE_SKIPPED
-                             or not _would_skip(it["src"], it["final"])))
+            # --delete-skipped widens the gate, and a skipped CONVERT needs the
+            # provenance proof. Counting those made the preview promise
+            # deletions the run would not perform.
+            n_del = sum(1 for it in _plan if _dry_deletable(it))
             whose = "--delete-source" if DELETE_SOURCE else "--delete-skipped"
             logger.info(f" DRY | {whose} would delete {n_del} source(s) "
                         f"after verification; in-place items replace themselves")
@@ -3215,7 +3302,31 @@ def main():
     any_in_place_convert = any(it["in_place"] and it["action"] == "convert"
                                for it in items)
     destructive = DELETE_SOURCE or any_in_place_convert
-    if destructive and DELETE_CONFIRM:
+
+    def _plan_touches_sources():
+        """Would this plan actually WRITE into a source, or HAND a source to
+        the delete gate?
+
+        The old prompt ran BEFORE the plan was known: a no-TTY re-run of an
+        already-archived folder (--delete-source, no --delete-skipped) was
+        asked for a token it could not answer, exited 3, and would exit 3
+        FOREVER — all without a single deletion pending. Now the confirmation
+        runs only when the plan contains at least one item that converts in
+        place (replacing its source) or converts/copies for real, or one that
+        delete-skipped would try to delete. Fail closed: anything uncertain
+        counts as a reason to ask."""
+        for it in items:
+            if it["action"] not in ("convert", "copy"):
+                continue
+            if it["in_place"]:
+                return True
+            if not _would_skip(it["src"], it["final"]):
+                return True
+            if DELETE_SKIPPED and it["final"].exists():
+                return True
+        return False
+
+    if destructive and DELETE_CONFIRM and _plan_touches_sources():
         if any_in_place_convert and not DELETE_SOURCE:
             logger.warning("In-place recompression REPLACES the source JXLs — "
                            "the originals cannot be recovered afterwards")

@@ -355,3 +355,179 @@ def test_real_recompress_writes_plain_metadata_before_the_codestream(tmp_path):
     assert "brob" not in boxes, boxes
     first_code = min(i for i, b in enumerate(boxes) if b in ("jxlc", "jxlp"))
     assert boxes.index("Exif") < first_code and boxes.index("xml ") < first_code, boxes
+
+
+# ---------------------------------------------------------------------------
+# Round 40 real-codec tests (#1, #2, #3)
+# ---------------------------------------------------------------------------
+
+def _random_png(path: Path, seed: int, size=(64, 64)):
+    from PIL import Image
+    import numpy as np
+    Image.fromarray((np.random.default_rng(seed).random((*size, 3)) * 255)
+                    .astype("uint8")).save(path)
+
+
+@real
+def test_real_thumbnail_named_standalone_decodes_as_a_photo(tmp_path):
+    """#1: a normal single-page TIFF named `photo_thumbnail.tif` must encode
+    and then decode with --no-reconstruct-multipage + --thumbnail-handling
+    ignore as an ORDINARY TIFF, not be tagged SubFileType=1 or skipped."""
+    import numpy as np
+    import tifffile
+
+    tif = tmp_path / "photo_thumbnail.tif"
+    tifffile.imwrite(str(tif),
+                     (np.random.default_rng(7).random((48, 64, 3)) * 65535)
+                     .astype("uint16"), photometric="rgb")
+
+    r = subprocess.run([sys.executable, str(REPO / "jxl_tiff_encoder.py"),
+                        str(tif), "--mode", "0", "--multipage-mode", "split",
+                        "--delete-confirm-off"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    jxl = tmp_path / "photo_thumbnail.jxl"
+    assert jxl.exists(), r.stdout + r.stderr
+
+    r = subprocess.run([sys.executable, str(REPO / "jxl_tiff_decoder.py"),
+                        str(tmp_path), "--mode", "1",
+                        "--no-reconstruct-multipage",
+                        "--thumbnail-handling", "ignore",
+                        "--overwrite", "--delete-confirm-off"],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = tmp_path / "converted_tiff" / "photo_thumbnail.tif"
+    assert out.exists(), ("a standalone *_thumbnail photo produced no TIFF:\n"
+                          + r.stdout + r.stderr)
+    with tifffile.TiffFile(str(out)) as tf:
+        assert int(tf.pages[0].subfiletype or 0) == 0, \
+            "the standalone photo was written as a reduced-resolution thumbnail"
+
+
+@real
+def test_real_recompressor_delete_skipped_keeps_source_next_to_unrelated_output(tmp_path):
+    """#2: mode 1, an unrelated same-named output must NOT certify the deletion
+    of the source under --delete-skipped. Pre-fix the source was unlinked."""
+    src_dir = tmp_path / "in"
+    src_dir.mkdir()
+    src = src_dir / "photo.jxl"
+    _random_png(tmp_path / "own.png", seed=3)
+    subprocess.run(["cjxl", str(tmp_path / "own.png"), str(src),
+                    "-d", "0.1", "--container=1"], check=True, capture_output=True)
+    subprocess.run(["exiftool", "-q", "-overwrite_original",
+                    "-XMP-dc:Relation+=jxlphoto-src:AAAAAAAAAAAAAAAA",
+                    "-XMP-dc:Relation+=jxlphoto-srcsum:1111111111111111",
+                    str(src)], check=True, capture_output=True)
+
+    out_dir = src_dir / "recompressed_jxl"
+    out_dir.mkdir()
+    out = out_dir / "photo.jxl"
+    _random_png(tmp_path / "other.png", seed=4)
+    subprocess.run(["cjxl", str(tmp_path / "other.png"), str(out),
+                    "-d", "1.0", "--container=1"], check=True, capture_output=True)
+    subprocess.run(["exiftool", "-q", "-overwrite_original",
+                    "-XMP-dc:Relation+=jxlphoto-src:CCCCCCCCCCCCCCCC",
+                    "-XMP-dc:Relation+=jxlphoto-srcsum:3333333333333333",
+                    str(out)], check=True, capture_output=True)
+    # The output is NEWER, so the run reports SKIP (exists) and the gate acts.
+    import os
+    import time
+    future = time.time() + 100
+    os.utime(out, (future, future))
+
+    r = subprocess.run([sys.executable, str(REPO / "jxl_recompressor.py"),
+                        str(src_dir), "--mode", "1", "--on-unknown", "convert",
+                        "--delete-source", "--delete-skipped",
+                        "--delete-confirm-off", "--no-preflight"],
+                       capture_output=True, text=True, timeout=300,
+                       stdin=subprocess.DEVNULL)
+    assert src.exists(), ("the source was deleted on the strength of an unrelated "
+                          "same-named output:\n" + r.stdout + r.stderr)
+
+
+@real
+def test_real_repair_strips_multiple_marker_pairs(tmp_path):
+    """#3: a jbrd JXL with TWO marker pairs of DIFFERENT ids must be fully
+    stripped by --repair-jbrd (pre-fix only the last pair was removed, and the
+    file was reported STILL BROKEN though it was repairable)."""
+    jpg = tmp_path / "photo.jpg"
+    _jpeg_with_xmp(jpg)
+    jxl = tmp_path / "photo.jxl"
+    subprocess.run(["cjxl", str(jpg), str(jxl), "--lossless_jpeg=1"],
+                   check=True, capture_output=True)
+    subprocess.run(["exiftool", "-q", "-overwrite_original",
+                    "-XMP-dc:Relation+=jxlphoto-src:AAAAAAAAAAAAAAAA",
+                    "-XMP-dc:Relation+=jxlphoto-srcsum:1111111111111111",
+                    "-XMP-dc:Relation+=jxlphoto-src:BBBBBBBBBBBBBBBB",
+                    "-XMP-dc:Relation+=jxlphoto-srcsum:2222222222222222",
+                    str(jxl)], check=True, capture_output=True)
+    assert tr._jxl_reconstruct_md5(jxl) is None, \
+        "fixture no longer reproduces the multi-pair damage"
+    tr.setup_logger()
+    state, detail = tr._repair_one_jbrd(jxl, dry_run=False)
+    assert state == "repaired", detail
+    assert tr._jxl_reconstruct_md5(jxl) is not None
+    srcs, srcsums = tr._read_all_source_marker_values(jxl)
+    assert srcs == [] and srcsums == [], (srcs, srcsums)
+
+
+# ---------------------------------------------------------------------------
+# Round 40b real-codec test (#6): single-page MASK TIFF keeps SubFileType=4
+# ---------------------------------------------------------------------------
+
+@real
+def test_real_single_page_mask_tiff_keeps_subfiletype_4(tmp_path):
+    """#6: a ONE-page TIFF whose only page is SubFileType=4 (MASK — a film
+    scanner's IR page exported alone) encodes through ALL three paths (normal
+    split planning, --multipage-mode ignore, --multipage-mode skip) and the
+    decoder must write SubfileType=4 back. Pre-fix the JXL carried no
+    jxlphoto-subfiletype marker and the round trip wrote 0."""
+    import numpy as np
+    import tifffile
+
+    for mp_mode in ("split", "ignore", "skip"):
+        d = tmp_path / mp_mode
+        d.mkdir()
+        tif = d / "photo.tif"
+        tifffile.imwrite(str(tif),
+                         (np.random.default_rng(5).random((48, 64, 3)) * 65535)
+                         .astype("uint16"), photometric="rgb",
+                         extratags=[(254, 4, 1, 4, True)])  # SubfileType=4 as a raw tag
+
+        r = subprocess.run([sys.executable, str(REPO / "jxl_tiff_encoder.py"),
+                            str(tif), "--mode", "0", "--multipage-mode", mp_mode,
+                            "--delete-confirm-off"],
+                           capture_output=True, text=True, timeout=300)
+        assert r.returncode == 0, r.stdout + r.stderr
+        jxl = d / "photo.jxl"
+        assert jxl.exists(), r.stdout + r.stderr
+        # The JXL must carry the marker the docs promise.
+        probe = subprocess.run([enc._get_exiftool_cmd() or "exiftool", "-j",
+                                "-XMP-dc:Relation", str(jxl)],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=120)
+        marker = "jxlphoto-subfiletype:4"
+        assert f"{marker}" in probe.stdout.replace('"', ''), (
+            f"{mp_mode}: no subfiletype marker on the single-page MASK encode "
+            f"({probe.stdout} {probe.stderr})")
+
+        r2 = subprocess.run([sys.executable, str(REPO / "jxl_tiff_decoder.py"),
+                             str(jxl), "--mode", "1", "--thumbnail-handling",
+                             "ignore"],
+                            capture_output=True, text=True, timeout=300)
+        assert r2.returncode == 0, r2.stdout + r2.stderr
+        tif_out = d / "converted_tiff" / "photo.tif"
+        assert tif_out.exists(), r2.stdout + r2.stderr
+        with tifffile.TiffFile(str(tif_out)) as got:
+            assert len(got.pages) >= 1
+            sft = int(got.pages[0].subfiletype or 0)
+        assert sft == 4, (
+            f"{mp_mode}: a single-page MASK TIFF decoded back as SubfileType="
+            f"{sft} (docs promise 'restored exactly, including SubfileType=4')")
+
+        # Clean the outputs so the second/third iteration re-encodes fresh.
+        for p in (jxl, tif_out):
+            try:
+                p.unlink()
+            except OSError:
+                pass

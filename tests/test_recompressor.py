@@ -65,24 +65,65 @@ def _fake_jxl(path: Path, size: int = 1024, jbrd: bool = False) -> Path:
 # Encode-parameter record: parse / strip / restamp
 # ---------------------------------------------------------------------------
 
-class TestParseEncodeParams:
-    def test_simple_xmp_tag(self):
-        assert rec._parse_encode_params("cjxl d=0.1 e=7") == (0.1, 7)
+class _FakeExiftoolRun:
+    def __init__(self, stdout="", stderr=b"", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
 
-    def test_software_chain_last_match_wins(self):
+
+class TestReadEncodeParamsBatch:
+    """The batch reader is what replaced the old `_parse_encode_params`
+    helper (removed as dead code, #22 round 40): these keep the SAME parse
+    rules covered — the last entry of the append-only chain wins, and
+    unparseable or absent records stay None — but through the real reader."""
+
+    def _batch(self, monkeypatch, entries):
+        run = _FakeExiftoolRun(json.dumps(entries))
+        monkeypatch.setattr(rec, "subprocess", type(
+            "S", (), {"run": staticmethod(lambda *a, **k: run),
+                      "TimeoutExpired": subprocess.TimeoutExpired}))
+        monkeypatch.setattr(rec, "_get_exiftool_cmd", lambda: "exiftool")
+        return rec._read_encode_params_batch(["NOFILE.jxl"])
+
+    def test_simple_xmp_tag(self, monkeypatch):
+        info = self._batch(monkeypatch, [{
+            "SourceFile": "NOFILE.jxl",
+            "Description": "cjxl d=0.1 e=7",
+            "Software": "",
+        }])
+        assert info["NOFILE.jxl"]["params"] == (0.1, 7)
+
+    def test_software_chain_last_match_wins(self, monkeypatch):
         # Encoder concatenates "old | new"; the LAST tag describes the file.
-        assert rec._parse_encode_params(
-            "Capture One 23 | cjxl d=0.5 e=7") == (0.5, 7)
+        info = self._batch(monkeypatch, [{
+            "SourceFile": "NOFILE.jxl",
+            "Description": "Capture One 23 | cjxl d=0.5 e=7",
+            "Software": "",
+        }])
+        assert info["NOFILE.jxl"]["params"] == (0.5, 7)
 
-    def test_lossless_distance(self):
-        assert rec._parse_encode_params("cjxl d=0 e=9") == (0.0, 9)
+    def test_lossless_distance(self, monkeypatch):
+        info = self._batch(monkeypatch, [{
+            "SourceFile": "NOFILE.jxl",
+            "Description": "cjxl d=0 e=9",
+            "Software": "",
+        }])
+        assert info["NOFILE.jxl"]["params"] == (0.0, 9)
 
-    def test_no_tag_is_none(self):
-        assert rec._parse_encode_params("My summer vacation") is None
-        assert rec._parse_encode_params("") is None
+    def test_no_tag_is_none(self, monkeypatch):
+        for desc in ("My summer vacation", "", None):
+            entries = [{"SourceFile": "NOFILE.jxl", "Description": desc, "Software": ""}]
+            info = self._batch(monkeypatch, entries)
+            assert info["NOFILE.jxl"]["params"] is None
 
-    def test_garbage_is_none(self):
-        assert rec._parse_encode_params("cjxl d=abc e=7") is None
+    def test_garbage_is_none(self, monkeypatch):
+        info = self._batch(monkeypatch, [{
+            "SourceFile": "NOFILE.jxl",
+            "Description": "cjxl d=abc e=7",
+            "Software": "",
+        }])
+        assert info["NOFILE.jxl"]["params"] is None
 
 
 class TestStripEncodeParams:

@@ -21,6 +21,7 @@ Round 36 / 2026-09-19: Review of the round-35 fixes against the real fixtures �
 Round 37 / 2026-09-20: Second audit of v2.1.0 — 10 bugs, none in the conversion core: dry runs that promised what the real run refuses, outputs written under their final name, cross-process checksum races. Ships in v2.1.1 (see top section)
 Round 38 / 2026-09-21: Third audit of v2.1.0 (bug_report_260921.md) - 28 findings: TIFF Lab/YCbCr archived inverted, --matrix --delete-source dropping alpha, the recompressor multi-page group veto zeroed by a marker-read failure (see top section)
 Round 39 / 2026-09-21: Fourth audit of v2.1.1_beta1 (20260921_audit2.md + 20260921_audit3.md, consolidated) - 34 findings: --force-convert d=0 broke jbrd recovery AND deleted the original unverified (the v2.0.0 data-loss class again), >64 KiB JPEG trailers rejected by the toolkit own gate, smart-sync skips that admitted foreign masters to --delete-skipped (see top section)
+Round 40 / 2026-09-23: Fifth audit of v2.1.1_beta1 (bug_report_260923.md) - 16 findings fixed (5 high/medium + 11 low): the recompressor deleted an original on the strength of an unrelated same-named output in modes 1/3 (the only reproduced data loss), --repair-jbrd stripped only the last marker pair, the decoder treated a normal `*_thumbnail` photo as a thumbnail under --no-reconstruct-multipage, and the dry-run toplines still counted would-SKIP pairs as conversions (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -29,6 +30,62 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## Round-40 audit (2026-09-23)
+
+The fifth audit of v2.1.1_beta1, from `bug_report_260923.md`. Sixteen fixes in
+two batches: batch A below (419-423) covers the high/medium findings, batch B
+(424-434) the low-severity ones. Headline: the recompressor could delete
+an original JXL under `--delete-skipped` on the strength of a valid, newer,
+same-named output written by an UNRELATED photo — the only reproduced data loss
+of the audit, and it happened in the folder-preserving modes (1/3) that never
+had a provenance gate. The other three: `--repair-jbrd` gave up after stripping
+one marker pair, leaving repairable files reported STILL BROKEN; the decoder
+treated an ordinary photo whose stem ends in `_thumbnail` as a reduced-resolution
+thumbnail under `--no-reconstruct-multipage`; and the dry runs still labelled
+would-SKIP pairs as conversions (the encoder's #409 fix had not reached the
+decoder, and the transcoder/recompressor never applied it to the per-file tag and
+topline).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 419 | **`--delete-skipped` deleted a source on the strength of an unrelated same-named output (real data loss).** For `status == "skipped"` with `action == "convert"` the only gate in the non-collapsing modes was `exists() + _verify_jxl_integrity`; the provenance gate ran only when `_run_collapses_structure()` was true (modes 0-with-output/2/4-8). Modes 1/3 deleted the source even when the pre-existing output was a valid, newer archive of a DIFFERENT photo | recompressor | ✅ FIXED (the skipped-convert path in `_delete_gate` now batch-reads the `jxlphoto-src`/`jxlphoto-srcsum` markers of output and source — one exiftool call for the whole run — and requires `_markers_match(..., PROVENANCE_CHECK)`; an unreadable/absent marker fails CLOSED, keeping the source. A skipped COPY is still proven byte-for-byte by the MD5 gate. The dry-run `--delete-skipped` preview mirrors the new gate, so a refused delete is no longer counted as "would delete". The README documents the new proof and its fail-closed behaviour) |
+| 420 | **`--repair-jbrd` stripped only the last marker pair.** `_read_source_markers_batch` keeps only the LAST `jxlphoto-src`/`srcsum` value, and the strip routine removed exactly that pair and checked the same id — a second pair with a different id survived, the reconstruction still failed, and a repairable file was reported STILL BROKEN (defeating `--auto-repair-jbrd` too) | transcoder | ✅ FIXED (a local `_read_all_source_marker_values` returns EVERY marker value; `_strip_provenance_markers` removes one `-XMP-dc:Relation-=<token>` per distinct value and the post-check asserts NO `jxlphoto-src`/`srcsum` token remains. `_read_source_markers_batch` is untouched, so the pinned helper parity holds) |
+| 421 | **A normal photo named `*_thumbnail` decoded as a thumbnail under `--no-reconstruct-multipage`.** `_has_internal_markers` is true for ANY `jxlphoto-*` marker — and `jxlphoto-depth` is written to every encoder output — so the filename suffix decided the page role alone: `photo_thumbnail.jxl` became SubFileType=1, and with `--thumbnail-handling ignore` nothing was written at all | decoder | ✅ FIXED (the suffix is trusted only when the file also carries a `jxlphoto-page`/`jxlphoto-group` marker — a legacy split page; a standalone with only depth/grayscale decodes as an ordinary photo, mirroring the reconstruction branch. `_has_internal_markers` is left intact; docs updated) |
+| 422 | **Dry runs labelled would-SKIP pairs as conversions** (recompressor + transcoder `cmd_transcode`/`cmd_convert`/`cmd_auto`). The per-file tag and the `ok`/`skipped` topline counted the planned action, not the SKIP `should_process`/`_would_skip` would report, so a simulation over a folder with existing outputs was an upper bound the real run never reached — and the wrapper sums those toplines | recompressor, transcoder | ✅ FIXED (all four previews apply the same skip predicate the worker uses, log `DRY \| SKIP (exists/up to date)` and count the pair as skipped, not converted) |
+| 423 | **`cmd_auto` counted provenance-refused pairs in `ok`** — `ok=len(all_pairs)` used the pre-`_provenance_filter` list (bug #15); **and the decoder's dry-run topline ignored smart-sync / existing-output skips**, so `ok=1, skipped=0` where the real run reports `ok=0, skipped=1` (the encoder's #409 fix never reached the decoder). Contaminated the wrapper's manifest recap, which sums the toplines | transcoder, decoder | ✅ FIXED (cmd_auto reports the post-filter per-group tally; the decoder's dry run computes `_sync_skips` with the existing `_would_skip_group`, subtracts them from `ok` and adds them to `skipped`, excluding provenance-refused groups) |
+
+Batch B — the audit's LOW-severity items (report items #6–#22; #15 was folded
+into 423 above). Left for a later round by design: #8, #12, #13, #14, #20, #23
+and the wrapper minors W1–W3.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 424 | **A single-page TIFF whose only page is SubFileType=4 (MASK) lost the role on round-trip** — the `jxlphoto-subfiletype` writer was gated on `page_idx > 0` and the group block only ran for multi-output groups, so the JXL carried no marker and the decoder wrote SubfileType=0 back (also under `--multipage-mode ignore`) | encoder | ✅ FIXED (page 0's marker is written whenever the subfiletype differs from the role default; real-codec round-trip test proves SubFileType=4 survives) |
+| 425 | **Spurious `Output outside input tree` warning for a single-FILE run in decoder modes 4/5** — the anchor was the file's own parent, whose designed output IS a sibling; the encoder's item-29 fix never reached this copy | decoder | ✅ FIXED (single-file input anchors on the parent's parent, mirroring the encoder) |
+| 426 | **`_verify_tiff_integrity` only force-decoded the LAST page** — external damage in an earlier page of a multi-page TIFF passed the delete gate | decoder | ✅ FIXED (every page is decoded; decoder-only helper, no parity impact) |
+| 427 | **`_preflight_space` TOCTOU: `stat()` without a guard after `exists()`** — a source vanishing between the plan and the staging estimate escaped `main()` as a raw traceback; `convert_one`'s error handler re-`stat()`ed a vanished source out of its own except block | recompressor | ✅ FIXED (both sites guard OSError, mirroring the first preflight loop) |
+| 428 | **`--provenance` silently inert without `--delete-source` (transcoder)** — the recompressor's round-39 #413 warning never reached this copy | transcoder | ✅ FIXED (same explicit warning, same condition) |
+| 429 | **The output positional was silently discarded in transcoder modes 3-8** (mode 1 already warned) — parity gap with the recompressor, which warns in every non-0/2 mode | transcoder | ✅ FIXED (warning mirrored to every applicable mode) |
+| 430 | **The encoder's `reorder_jxl_boxes` lacked the `OverflowError` guard** its transcoder/recompressor copies carry for a re-headered size-0 box near 4 GiB | encoder | ✅ FIXED (guard ported; the three copies are identical again. The helper stays out of `SHARED_HELPERS` — the parity test's normalisation does not cover it) |
+| 431 | **The encoder never reset per-run module state** — a second run in the SAME process inherited the progress counter, discard counters and the discard source sets (fail-closed: KEEP, never a wrong delete) | encoder | ✅ FIXED (`main()` resets all per-run state, mirroring the decoder) |
+| 432 | **The delete confirmation was charged on an empty / all-skip plan** — a no-TTY re-run of an already-archived folder with `--delete-source` (without `--delete-skipped`) asked for a token it could not answer and exited 3 forever, deleting nothing | transcoder, recompressor | ✅ FIXED (the prompt only fires when the plan actually holds a deletion; fail-closed — any doubt still prompts; `--delete-confirm-off` behaviour unchanged, so the wrapper is unaffected) |
+| 433 | **`--export-marker ""` silently kept the default** — `if args.export_marker:` treated an explicit empty string (export NOTHING) as absent | recompressor, transcoder | ✅ FIXED (`is not None`, mirroring `--export-subfolder`; the empty marker then matches nothing, fail-closed via `_marker_matches`) |
+| 434 | **`_parse_encode_params` was dead code** — superseded by `_read_encode_params_batch`; only a test still called it | recompressor | ✅ FIXED (function removed; the test now exercises the batch reader) |
+
+Regression tests: `tests/test_audit_round40.py` (18 tests, all mocked) plus three
+real-codec tests in `tests/test_audit_round36.py` (#1 encode/decode,
+#2 recompressor delete-skip, #3 multi-pair repair; skipped without
+cjxl/djxl/exiftool). Proven against the pre-fix code (`git show HEAD:<script>`
+copies run from a temp dir): the four positive controls pass and all fourteen
+regression tests fail; the three real-codec tests fail as well (the #3 one with
+`assert 'broken' == 'repaired'`). Batch B: `tests/test_audit_round40b.py`
+(21 tests), two #9 tests in `tests/test_audit_round30.py` and one real-codec
+#6 test in `tests/test_audit_round36.py`; proven against the same HEAD
+extraction — 16 failed / 5 passed (positive controls), the #9 pair fails, and
+the #6 real-codec test fails.
 
 ---
 

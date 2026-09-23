@@ -1014,6 +1014,42 @@ def _read_source_markers_batch(outputs: list) -> dict:
     return markers
 
 
+def _read_all_source_marker_values(jxl_path: Path):
+    """EVERY jxlphoto-src / jxlphoto-srcsum VALUE in dc:Relation, in file order.
+
+    `_read_source_markers_batch` keeps only the LAST value of each (all that
+    provenance matching ever needs), so it cannot tell --repair-jbrd how many
+    marker pairs a damaged file carries. A file written by v2.0.0-v2.0.3 through
+    more than one pass can hold several ids; stripping only the last left the
+    reconstruction broken and the file reported STILL BROKEN though it was
+    repairable. Returns (src_values, srcsum_values); a read failure comes back
+    empty (the caller then falls back to whatever it already read, and the
+    post-repair reconstruction test is the real proof).
+    """
+    srcs, srcsums = [], []
+    try:
+        r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-dc:Relation",
+                                   str(jxl_path)], timeout=60)
+        data = json.loads(r.stdout) if r.stdout else []
+    except Exception:
+        return [], []
+    rel = None
+    for entry in data:
+        if isinstance(entry, dict) and "Relation" in entry:
+            rel = entry["Relation"]
+            break
+    if rel is None:
+        return [], []
+    values = rel if isinstance(rel, list) else [str(rel)]
+    for token in values:
+        token = str(token).strip()
+        if token.startswith(SRC_PREFIX):
+            srcs.append(token[len(SRC_PREFIX):])
+        elif token.startswith(SRCSUM_PREFIX):
+            srcsums.append(token[len(SRCSUM_PREFIX):])
+    return srcs, srcsums
+
+
 def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
     """Did `src_paths` make the output these markers came from?
 
@@ -2385,20 +2421,40 @@ def _strip_provenance_markers(jxl_path: Path, info: dict):
 
     These markers were appended with `+=`, so any values the source JPEG
     already had in dc:Relation survive; only our two tokens are removed.
-    exiftool refuses some files over a "[minor]" metadata oddity (seen on
-    JPEGs whose Exif references a Brotli directory): the edit is retried
-    with -m, and the exit code is CHECKED -- an edit that did not happen must
-    never be reported as "markers stripped". reorder_jxl_boxes runs
+    EVERY marker value is removed, not just the last one: a file written
+    through more than one pass can hold several pairs, and stripping only one
+    left the reconstruction broken and the file reported STILL BROKEN though
+    it was repairable. exiftool refuses some files over a "[minor]" metadata
+    oddity (seen on JPEGs whose Exif references a Brotli directory): the edit
+    is retried with -m, and the exit code is CHECKED -- an edit that did not
+    happen must never be reported as "markers stripped", and the post-check
+    asserts NO jxlphoto-src/srcsum token remains. reorder_jxl_boxes runs
     afterwards because every exiftool edit re-appends its boxes after the
     codestream (bug #134's class).
     """
-    lines = ["-overwrite_original"]
-    if info.get("src"):
-        lines.append("-XMP-dc:Relation-=" + SRC_PREFIX + info["src"])
-    if info.get("srcsum"):
-        lines.append("-XMP-dc:Relation-=" + SRCSUM_PREFIX + info["srcsum"])
-    if len(lines) == 1:
+    srcs, srcsums = [], []
+    if info.get("src") or info.get("srcsum"):
+        # `info` proves the file carries markers (read by _read_source_markers_batch,
+        # which keeps only the LAST of each); read EVERY value so a file with
+        # more than one pair is fully stripped.
+        srcs, srcsums = _read_all_source_marker_values(jxl_path)
+        if not (srcs or srcsums):
+            # A read failure (empty) falls back to the values the caller already
+            # read, so a strip attempt still happens; the reconstruction test in
+            # _strip_markers_proving_repair is the proof either way.
+            if info.get("src"):
+                srcs = [info["src"]]
+            if info.get("srcsum"):
+                srcsums = [info["srcsum"]]
+    if not (srcs or srcsums):
         return "no toolkit markers to remove"
+    lines = ["-overwrite_original"]
+    # One -= per DISTINCT value: -TAG-=VAL already removes every copy of the
+    # same value, but a second pair with a DIFFERENT id needs its own removal.
+    for value in dict.fromkeys(srcs):
+        lines.append("-XMP-dc:Relation-=" + SRC_PREFIX + value)
+    for value in dict.fromkeys(srcsums):
+        lines.append("-XMP-dc:Relation-=" + SRCSUM_PREFIX + value)
     last_err = ""
     for extra in ([], ["-m"]):
         try:
@@ -2411,10 +2467,8 @@ def _strip_provenance_markers(jxl_path: Path, info: dict):
         last_err = (r.stderr or r.stdout or f"rc={r.returncode}").strip()[:200]
     else:
         return f"exiftool could not edit the file ({last_err})"
-    after = (_read_source_markers_batch([jxl_path]).get(str(jxl_path))
-             or {"src": None, "srcsum": None})
-    if ((info.get("src") and after.get("src") == info["src"])
-            or (info.get("srcsum") and after.get("srcsum") == info["srcsum"])):
+    after_srcs, after_srcsums = _read_all_source_marker_values(jxl_path)
+    if after_srcs or after_srcsums:
         return "exiftool reported success but the markers are still there"
     reorder_jxl_boxes(jxl_path)
     return None
@@ -3012,6 +3066,25 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
     return kept, refused
 
 
+def _plan_would_delete_source(pairs, smart_mode, reconvert_explicit) -> bool:
+    """Would this plan even ATTEMPT a source deletion? The gates only delete
+    for real conversions — or, under --delete-skipped, for the already-
+    archived ones.
+
+    The old confirmation ran before the plan was known: a no-TTY re-run of an
+    already-archived folder (--delete-source, no --delete-skipped) was asked
+    for a token it could not answer, exited 3, and would exit 3 FOREVER — with
+    not a single deletion pending. Fail closed: any doubt (a file that would
+    be processed, or a deletion-eligible skip) keeps the prompt.
+    """
+    for src, out in pairs:
+        if should_process(src, out, smart_mode, reconvert_explicit):
+            return True
+        if DELETE_SKIPPED and out.exists():
+            return True
+    return False
+
+
 def _delete_extras() -> dict:
     """Deletion counts for the run summary, so the wrapper's manifest recap can
     report the most destructive thing the tool does instead of staying silent.
@@ -3164,16 +3237,29 @@ def cmd_transcode(args, auto_decode: bool = False):
         _counter["total"] = len(pairs)
 
     if args.dry_run:
-        for f, out in pairs:
-            logger.info(f" DRY | {f.name} -> {out}")
-        logger.info(f"Dry run: {len(pairs)} files would be processed.")
+        # An output that already exists means the real run reports SKIP, not a
+        # conversion (should_process is the same predicate the workers use).
+        # Counting them as conversions made the dry run an upper bound the run
+        # never reaches, and the wrapper sums these toplines (#409 family).
+        _dry_pairs = [(f, out, should_process(f, out, smart_mode, reconvert_explicit))
+                      for f, out in pairs]
+        _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
+        for f, out, _go in _dry_pairs:
+            if not _go:
+                _lbl = "SKIP (up to date)" if smart_mode else "SKIP (exists)"
+                logger.info(f" DRY | {_lbl} | {f.name}")
+            else:
+                logger.info(f" DRY | {f.name} -> {out}")
+        logger.info(f"Dry run: {len(pairs) - _n_skip} files would be processed"
+                    + (f"; {_n_skip} would be skipped (output already exists)."
+                       if _n_skip else "."))
         # A dry run of a DELETE run must say so: the flag that destroys
         # originals was the one thing the simulation never mentioned (bug #267
         # — the preview below only existed in _process_file_group, i.e. cmd_auto).
         if DELETE_SOURCE:
             logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
-                f"file(s) would be DELETED, each only after its output is "
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip} "
+                f"source file(s) would be DELETED, each only after its output is "
                 f"written and passes the integrity check.")
         # Returning without this left emit_summary_json printing the UNTOUCHED
         # default (dry_run=false, ok=0, log=""), so the wrapper's recap showed a
@@ -3183,7 +3269,7 @@ def cmd_transcode(args, auto_decode: bool = False):
             logger.warning(f"Dry run: {len(_refused)} pair(s) would be REFUSED by "
                            f"the provenance check (see above); the real run fails "
                            f"those files.")
-        record_summary(ok=len(pairs), overwritten=0, skipped=0,
+        record_summary(ok=len(pairs) - _n_skip, overwritten=0, skipped=_n_skip,
                        errors=len(_refused),
                        log_file=log_file, dry_run=True)
         return (0, False)
@@ -3197,8 +3283,11 @@ def cmd_transcode(args, auto_decode: bool = False):
     for f, out in pairs:
         groups.setdefault(out.parent, []).append((f, out))
 
-    # Charged for EVERY mode: deletion is a separate opt-in from the layout.
-    if DELETE_SOURCE:
+    # Charged for EVERY mode: deletion is a separate opt-in from the layout,
+    # but only when the plan would even attempt a deletion (a re-run of an
+    # already-archived folder with no TTY used to be asked a token it could
+    # not answer and exited 3 forever — see _plan_would_delete_source).
+    if DELETE_SOURCE and _plan_would_delete_source(pairs, smart_mode, reconvert_explicit):
         if DELETE_CONFIRM:
             # Transcode is lossless in both directions (decode requires the jbrd
             # box, checked per file in decode_one_transcode), so the simple
@@ -4049,16 +4138,27 @@ def cmd_convert(args, from_jxl: bool = True):
         _counter["total"] = len(pairs)
 
     if args.dry_run:
-        for f, out in pairs:
-            logger.info(f" DRY | {f.name} -> {out}")
-        logger.info(f"Dry run: {len(pairs)} files would be converted.")
+        # Same as cmd_transcode: an existing output is a SKIP in the real run
+        # (should_process), not a conversion.
+        _dry_pairs = [(f, out, should_process(f, out, smart_mode, reconvert_explicit))
+                      for f, out in pairs]
+        _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
+        for f, out, _go in _dry_pairs:
+            if not _go:
+                _lbl = "SKIP (up to date)" if smart_mode else "SKIP (exists)"
+                logger.info(f" DRY | {_lbl} | {f.name}")
+            else:
+                logger.info(f" DRY | {f.name} -> {out}")
+        logger.info(f"Dry run: {len(pairs) - _n_skip} files would be converted"
+                    + (f"; {_n_skip} would be skipped (output already exists)."
+                       if _n_skip else "."))
         # Same bug #267 as cmd_transcode: the ARMED preview only existed in
         # _process_file_group (cmd_auto), so a delete-armed convert dry run
         # never mentioned that sources would be destroyed.
         if DELETE_SOURCE:
             logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
-                f"file(s) would be DELETED, each only after its output is "
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip} "
+                f"source file(s) would be DELETED, each only after its output is "
                 f"written and passes the integrity check.")
         # Same rule as cmd_transcode: without this the wrapper reads the
         # untouched default and reports the simulation as a real run. The
@@ -4069,7 +4169,7 @@ def cmd_convert(args, from_jxl: bool = True):
             logger.warning(f"Dry run: {len(_refused)} pair(s) would be REFUSED by "
                            f"the provenance check (see above); the real run fails "
                            f"those files.")
-        record_summary(ok=len(pairs), overwritten=0, skipped=0,
+        record_summary(ok=len(pairs) - _n_skip, overwritten=0, skipped=_n_skip,
                        errors=len(_refused),
                        log_file=log_file, dry_run=True)
         return (0, False)
@@ -4084,9 +4184,10 @@ def cmd_convert(args, from_jxl: bool = True):
 
     logger.info(f"Output groups: {len(groups)}")
 
-    # Safety confirmation for DELETE_SOURCE, in every mode
+    # Safety confirmation for DELETE_SOURCE, in every mode, but only when the
+    # plan would even attempt a deletion (see _plan_would_delete_source)
     # Determine if operation is lossy based on direction and settings
-    if DELETE_SOURCE:
+    if DELETE_SOURCE and _plan_would_delete_source(pairs, smart_mode, reconvert_explicit):
         if DELETE_CONFIRM:
             if direction == "to_jxl":
                 # PNG/JPEG -> JXL: lossy if distance > 0
@@ -4389,7 +4490,10 @@ def cmd_auto(args):
     # Lossy conversion requires stricter confirmation than lossless transcode.
     # Skipped on dry runs (nothing is converted, so nothing would be deleted)
     # and when DELETE_CONFIRM is off. Charged in every mode.
-    if DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM:
+    if (DELETE_SOURCE and not args.dry_run and DELETE_CONFIRM
+            and _plan_would_delete_source(
+                [_p for _lst in planned.values() for _p in _lst],
+                smart_mode, reconvert_explicit)):
         # Lossiness from the PLANNED pairs (post mode-6/7 filter), not the raw
         # lists — otherwise a fully filtered-out group still asks for the token.
         # PNG -> JXL is lossy only at distance > 0 (distance 0 is lossless
@@ -4458,13 +4562,13 @@ def cmd_auto(args):
     _log_delete_summary()
     logger.info(f"Log: {log_file}")
     record_summary(
-        # A dry run converts nothing, so `totals` is all zeros — report the
-        # PLANNED output count instead, matching what the encoder/decoder put
-        # in their dry-run summaries. Otherwise the wrapper's recap shows a
-        # simulation of 5000 files as a row of zeros. `totals["err"]` now
-        # carries the dry-run provenance refusals too (item 25), so a
-        # simulated REFUSING N is no longer reported as a clean run.
-        ok=len(all_pairs) if args.dry_run else totals["ok"],
+        # A dry run's tallies now model the real run: planned conversions in
+        # `ok`, would-be-skips in `skipped` (the per-group tally above), with
+        # provenance refusals charged as errors. This used to be
+        # `len(all_pairs)` on a dry run — the pre-provenance-filter list — so
+        # a refused pair was counted as a conversion (bug #15). `totals["err"]`
+        # carries the refusals, so a simulated REFUSING N is never a clean run.
+        ok=totals["ok"],
         overwritten=totals["overwritten"], skipped=totals["skipped"],
         errors=totals["err"], log_file=log_file,
         failures=all_failures, dry_run=args.dry_run,
@@ -4556,20 +4660,38 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     }
 
     if args.dry_run:
-        for f, out in pairs:
-            logger.info(f" DRY | {f.name} -> {out}")
+        # An existing output means the real run reports SKIP, not a conversion
+        # (should_process — the same predicate the workers use), and the
+        # provenance REFUSALS were already dropped from `pairs`. The tally
+        # therefore carries the real plan, not `len(all_pairs)` (which counted
+        # refused pairs as conversions — bug #15). cmd_transcode and
+        # cmd_convert report their dry runs the same way.
+        _dry_pairs = [(f, out, should_process(f, out, args.sync, args.overwrite))
+                      for f, out in pairs]
+        _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
+        for f, out, _go in _dry_pairs:
+            if not _go:
+                _lbl = "SKIP (up to date)" if args.sync else "SKIP (exists)"
+                logger.info(f" DRY | {_lbl} | {f.name}")
+            else:
+                logger.info(f" DRY | {f.name} -> {out}")
+        logger.info(f"Dry run: {len(pairs) - _n_skip} file(s) would be processed"
+                    + (f"; {_n_skip} would be skipped (output already exists)."
+                       if _n_skip else "."))
         if DELETE_SOURCE:
             logger.warning(
-                f"Dry run: --delete-source is ARMED. Up to {len(pairs)} source "
-                f"file(s) in this group would be DELETED.")
-        # Zeros for the CONVERSION, like cmd_transcode's and cmd_convert's dry
-        # runs: a simulation does not fail. The provenance REFUSALS are
-        # different: the real run charges them as errors (the fix that
-        # reached cmd_transcode only), so the simulation reports the same
-        # tally instead of errors=0 right below a "REFUSING N" (item 25).
+                f"Dry run: --delete-source is ARMED. Up to {len(pairs) - _n_skip} "
+                f"source file(s) in this group would be DELETED.")
+        # Zeros for the CONVERSION were wrong (a dry run's topline must model
+        # the real run), but the provenance REFUSALS are separate: the real run
+        # charges them as errors, so the simulation reports the same tally
+        # instead of errors=0 right below a "REFUSING N" (item 25).
         # _provenance_filter has already logged each refusal, so they are
         # not invisible.
-        return dict(_refused_tally)
+        _dry_tally = dict(_refused_tally)
+        _dry_tally["ok"] = len(pairs) - _n_skip
+        _dry_tally["skipped"] = _n_skip
+        return _dry_tally
 
     if not pairs:
         # Everything in this group was refused. Returning zeros here was the
@@ -4926,7 +5048,10 @@ def main():
 
     # Apply configurable export marker before resolving outputs
     global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD
-    if args.export_marker:
+    if args.export_marker is not None:
+        # `is not None`, mirroring --export-subfolder: `if args.export_marker:`
+        # treated --export-marker "" (an explicit "export NOTHING here") as
+        # absent and silently kept the default marker instead.
         EXPORT_MARKER = args.export_marker
     if args.auto_repair_jbrd:
         AUTO_REPAIR_JBRD = True
@@ -4955,6 +5080,16 @@ def main():
               "ONLY. Nothing can prove")
         print("      that the existing output came from that source -- an unrelated file "
               "with the same name would pass.")
+
+    if args.provenance is not None and not DELETE_SOURCE:
+        # The --provenance flag is only READ by the provenance gate, which runs
+        # solely under --delete-source in a folder-collapsing mode (_provenance_filter
+        # short-circuits out of it). Armed alone it used to sit silently inert while
+        # the user believed their archive was guarded — same warning the recompressor
+        # has printed since round-39 #413.
+        print("WARNING: --provenance has no effect without --delete-source: it only "
+              "checks an existing output's provenance before that source is "
+              "deleted. Nothing will be checked.")
 
     # Handle --to-srgb shortcut
     if args.to_srgb:
@@ -5026,6 +5161,14 @@ def main():
         print(f"WARNING: --mode 1 ignores the output folder ({args.output}): outputs go "
               f"to <source folder>/{_folder}. Use --mode 2 to write everything into "
               f"one folder.")
+
+    # Modes 3-8 compute their destinations from each source's folder; only
+    # modes 0 and 2 honor an output positional (the recompressor's rule).
+    # Accepting it without a word made the flag look honored — a dry run
+    # showed a clean plan while every output went to the mode's own layout.
+    if args.mode not in (0, 1, 2) and args.output is not None:
+        print(f"WARNING: the output positional is only honored in modes 0 and 2 "
+              f"(mode {args.mode} computes its own folders) — ignoring it")
 
     # Modes 6/7 anchor on an EXPORT folder and scan recursively; over a single
     # FILE the scan yields nothing and the run exits 0 having done nothing.

@@ -506,7 +506,11 @@ Options:
                      Filename suffix that marks a thumbnail JXL (default: the
                      THUMBNAIL_SUFFIX setting, `_thumbnail`). Only a FALLBACK:
                      the encoder's `jxlphoto-thumb` marker wins when present, so
-                     a third-party `holiday_thumbnail.jxl` is treated as a photo
+                     a third-party `holiday_thumbnail.jxl` is treated as a photo.
+                     Under `--no-reconstruct-multipage` the suffix decides only
+                     for a file that ALSO carries a `jxlphoto-page`/`jxlphoto-group`
+                     marker (a legacy split page); a standalone output named
+                     `*_thumbnail` (which carries only `jxlphoto-depth`) is a photo
 ```
 
 ### Exit codes
@@ -744,7 +748,7 @@ Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new
 
 `jxl_tiff_decoder.py` reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder. Groups are keyed by `(folder, group-id)`, so two encodes of the same TIFF to different folders are never merged either.
 
-Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thumb` markers when present (v1.8.1+); the filename suffix is only a fallback for older JXLs. A third-party `portrait_thumbnail.jxl` without markers is treated as a normal photo, never as a thumbnail.
+Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thumb` markers when present (v1.8.1+); the filename suffix is only a fallback for older JXLs. A third-party `portrait_thumbnail.jxl` without markers is treated as a normal photo, never as a thumbnail. Under `--no-reconstruct-multipage` the suffix is trusted only for a file that also carries a `jxlphoto-page`/`jxlphoto-group` marker (a legacy split page): an ordinary encoder output whose stem ends in `_thumbnail`, which carries only `jxlphoto-depth`, decodes as a normal full-resolution photo rather than a reduced-resolution page.
 
 - `--thumbnail-handling ignore` — ignore `_thumbnail.jxl` files. Their pixels do
   not reach the reconstructed TIFF, so with `--mode 8 --delete-source` those
@@ -753,7 +757,10 @@ Page index and thumbnail role come from the `jxlphoto-page:<N>` / `jxlphoto-thum
   on later runs they form a thumbnail-only group that is skipped with a warning.
 - `--thumbnail-handling include` — include thumbnails in the reconstructed TIFF (default)
 - `--thumbnail-handling generate` — reserved for future use; currently falls back to `include`
-- `--no-reconstruct-multipage` — disable multi-page reconstruction entirely
+- `--no-reconstruct-multipage` — disable multi-page reconstruction entirely.
+  A `*_thumbnail` filename is a thumbnail here only when its `jxlphoto-page`/
+  `jxlphoto-group` marker says so; a standalone photo named like one is decoded
+  normally
 
 JPEG previews are automatically skipped when reconstructing multi-page TIFFs.
 
