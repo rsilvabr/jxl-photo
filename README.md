@@ -48,11 +48,13 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 | JXL 16-bit lossy `d=0.1` | ~34 MB |
 | JXL 16-bit lossy `d=1.0` (visually lossless) | ~8 MB |
 
-The measurements behind these settings are posted on r/jpegxl:
+The numbers behind these settings are measured and posted on r/jpegxl, on 16-bit ProPhoto exports from Capture One:
 
-- [Edit stress test](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) — how a lossy 16-bit JXL holds up under heavy editing.
-- [Distance and SNR, 16-bit vs 8-bit JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) — how much signal each `--distance` keeps, compared with an 8-bit JPEG.
-- [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/) — how badly lossy JXL degrades when re-encoded again and again, which is why the recompressor refuses counterproductive re-encodes.
+- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR across the distance range for 16-bit JXL. This is where the `d=0.05` archival setting comes from: 95.2% of the pixels stay above 50 dB, at ~7.5× the size of `d=1.0`.
+- [16-bit vs 8-bit, and JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/): for lossy JXL an 8-bit file is **not** smaller than a 16-bit one, and it keeps less signal, so there is no reason to go 8-bit. JPEG needs 5–15× the file size to get close to JXL.
+- [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/): one recompression from an archived `d=0.1` down to `d=1.0` costs 0.02 dB, but reaching the same file size in many small steps costs up to 9 dB. That is why the recompressor goes to the target in one shot, counts generations, and refuses counterproductive re-encodes.
+
+The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https://github.com/rsilvabr/jxl-quality-analyzer).
 
 ---
 
