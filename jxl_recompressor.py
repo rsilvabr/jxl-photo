@@ -804,13 +804,35 @@ _MACHINE_BLOCK_RE = re.compile(
 )
 
 _MIN_EFFECTIVE_DISTANCE = 0.05
-# cjxl clamps every lossy distance at or below this to the same value:
-# --distance 0.005 and 0.05 were measured producing BYTE-IDENTICAL output.
-# Same constant, and the same warning, as jxl_tiff_encoder.py.
+# cjxl >= 0.12 clamps every lossy distance below this to the same value:
+# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
+# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
+# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
+# the JPEG XL spec.
+_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
+# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
+# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
+# the size of d=0.05). Older builds share the pre-#4238 code.
 
 
-def _warn_distance_clamp(distance) -> None:
+def _min_effective_distance(exe: str) -> float:
+    """The lossy distance floor of the cjxl that `exe` names.
+
+    0.05 from libjxl 0.12 on, 0.01 before it. An unknown version reads as the
+    current behaviour (0.05): the only consequence is a warning that may be
+    one version too cautious, never a skipped encode.
+    """
+    v = _tool_version(exe)
+    if v is not None and v[:2] < (0, 12):
+        return _MIN_EFFECTIVE_DISTANCE_PRE_012
+    return _MIN_EFFECTIVE_DISTANCE
+
+
+def _warn_distance_clamp(distance, floor: float = _MIN_EFFECTIVE_DISTANCE) -> None:
     """Say so when a requested distance buys nothing.
+
+    `floor` is the installed cjxl's lossy floor (_min_effective_distance):
+    0.05 from libjxl 0.12 on, 0.01 before it.
 
     Call AFTER setup_logger(): on the module-level logger a warning falls
     through to logging.lastResort — unformatted on stderr, never in the log
@@ -820,9 +842,9 @@ def _warn_distance_clamp(distance) -> None:
         d = float(distance)
     except (TypeError, ValueError):
         return
-    if 0 < d < _MIN_EFFECTIVE_DISTANCE:
+    if 0 < d < floor:
         logger.warning(
-            f"--distance {d} behaves exactly like {_MIN_EFFECTIVE_DISTANCE}: cjxl "
+            f"--distance {d} behaves exactly like {floor}: this cjxl "
             f"clamps every lossy distance below that to the same output. "
             f"Use --distance 0 for true lossless.")
 
@@ -1622,7 +1644,8 @@ def _read_encode_params_batch(paths: list) -> dict:
     return info
 
 
-def _classify(src_params, new_d: float, new_e: int, gen: int = 0):
+def _classify(src_params, new_d: float, new_e: int, gen: int = 0,
+              floor: float = _MIN_EFFECTIVE_DISTANCE):
     """(category, reason) for recompressing a file whose recorded parameters
     are `src_params` ((d, e) or None) to the requested (new_d, new_e).
 
@@ -1663,16 +1686,20 @@ def _classify(src_params, new_d: float, new_e: int, gen: int = 0):
     # Comparing nominals classified a --distance 0.05 request over a d=0.02
     # source as "ok" and paid a lossy generation for byte-identical quality.
     # d=0 (lossless) is not clamped and stays 0.
-    d_old_eff = max(d_old, _MIN_EFFECTIVE_DISTANCE) if d_old > 0 else 0.0
-    new_d_eff = max(new_d, _MIN_EFFECTIVE_DISTANCE) if new_d > 0 else 0.0
+    # `floor` is the INSTALLED cjxl's (0.05 from libjxl 0.12, 0.01 before).
+    # The record does not say which cjxl wrote the source, so an old d=0.02
+    # file is compared as if this cjxl had written it: under 0.12 that reads
+    # as "same distance" and the policy copies — the conservative side.
+    d_old_eff = max(d_old, floor) if d_old > 0 else 0.0
+    new_d_eff = max(new_d, floor) if new_d > 0 else 0.0
     if new_d_eff > d_old_eff:
         return ("ok", f"smaller target: d={d_old} -> d={new_d} "
                       f"(one generation of lossy re-encode)")
     if new_d_eff == d_old_eff:
         clamp_note = ""
-        if 0 < d_old < _MIN_EFFECTIVE_DISTANCE or 0 < new_d < _MIN_EFFECTIVE_DISTANCE:
+        if 0 < d_old < floor or 0 < new_d < floor:
             clamp_note = (f" (cjxl clamps lossy distances below "
-                          f"{_MIN_EFFECTIVE_DISTANCE} to the same output)")
+                          f"{floor} to the same output)")
         if new_e < e_old:
             return ("downgrade", f"same distance d={d_old} with LOWER effort "
                                  f"{new_e} < {e_old}: bigger file, same quality, "
@@ -3450,7 +3477,8 @@ def main():
 
     log_file = setup_logger()
     _reset_abort()
-    _warn_distance_clamp(CJXL_DISTANCE)
+    _floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
+    _warn_distance_clamp(CJXL_DISTANCE, _floor)
 
     if args.export_jxl_folder is not None and args.mode not in (6, 7):
         logger.warning(f"--export-jxl-folder only applies to modes 6/7 — ignored in "
@@ -3688,7 +3716,7 @@ def main():
         it["gen"] = info["gen"]
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
-                                                 gen=it["gen"])
+                                                 gen=it["gen"], floor=_floor)
         it["jbrd"] = has_jbrd_box(it["src"])
         if it["jbrd"] and JBRD_POLICY != "convert":
             it["reason"] = ("jbrd box present: the original JPEG is bit-exact "

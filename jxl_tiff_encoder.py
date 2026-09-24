@@ -2741,10 +2741,32 @@ _SAMPLE_COUNT = 3
 # Below this a run cannot plausibly fill a disk, and a ~15s probe would be a
 # visible tax on a job that only takes a couple of minutes.
 _PREFLIGHT_MIN_BYTES = 5 * 1024 ** 3
-# cjxl clamps every distance at or below this to the same value: --distance
-# 0.005 and 0.05 were measured producing BYTE-IDENTICAL output. Projecting from
-# a requested 0.01 would therefore model a file that cjxl will never write.
+# Projecting the preflight from a distance below the installed cjxl's floor
+# would model a file that cjxl will never write — see the constants below.
 _MIN_EFFECTIVE_DISTANCE = 0.05
+# cjxl >= 0.12 clamps every lossy distance below this to the same value:
+# --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
+# (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
+# coefficients stay inside int16 — below it the bitstream leaves Level 5 of
+# the JPEG XL spec.
+_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
+# cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
+# 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
+# the size of d=0.05). Older builds share the pre-#4238 code.
+
+
+def _min_effective_distance(exe: str) -> float:
+    """The lossy distance floor of the cjxl that `exe` names.
+
+    0.05 from libjxl 0.12 on, 0.01 before it. An unknown version reads as the
+    current behaviour (0.05): the only consequence is a warning that may be
+    one version too cautious, never a skipped encode.
+    """
+    v = _tool_version(exe)
+    if v is not None and v[:2] < (0, 12):
+        return _MIN_EFFECTIVE_DISTANCE_PRE_012
+    return _MIN_EFFECTIVE_DISTANCE
+
 # TIFF compression tag -> what tifffile needs to reproduce it. The crop must be
 # stored the way the source is, because the ratio's denominator is a TIFF size:
 # the same pixels as Deflate vs uncompressed shift the ratio measurably.
@@ -2864,7 +2886,8 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
     if total_in < _PREFLIGHT_MIN_BYTES:
         return
 
-    effective = max(distance, _MIN_EFFECTIVE_DISTANCE) if distance > 0 else 0.0
+    floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
+    effective = max(distance, floor) if distance > 0 else 0.0
     logger.info(f"Preflight: measuring compression on {_SAMPLE_COUNT} sample crop(s)...")
     ratio, samples = _measure_batch_ratio(
         [t for items in groups.values() for t, *_ in items], effective, effort)
@@ -4959,10 +4982,11 @@ def main():
     # Everything below is logged AFTER setup_logger() on purpose: on the
     # module-level logger these have no handler at all, so INFO lines vanish
     # and warnings go to raw stderr instead of the log file.
-    if args.distance is not None and 0 < args.distance < _MIN_EFFECTIVE_DISTANCE:
+    _floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
+    if args.distance is not None and 0 < args.distance < _floor:
         logger.warning(
             f"--distance {args.distance} behaves exactly like "
-            f"{_MIN_EFFECTIVE_DISTANCE}: cjxl clamps every lossy distance below "
+            f"{_floor}: this cjxl clamps every lossy distance below "
             f"that to the same output. Use --distance 0 for true lossless.")
 
     # Sweep the EFFECTIVE staging dir — requiring --staging alongside made the

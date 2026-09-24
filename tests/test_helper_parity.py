@@ -91,6 +91,10 @@ SHARED_HELPERS = [
     # The distance dead-zone warning: the user must hear the SAME sentence from
     # every script that takes --distance.
     "_warn_distance_clamp",
+    # The lossy distance floor of the installed cjxl (0.05 from libjxl 0.12,
+    # 0.01 before): a copy drifting would warn — or classify — against the
+    # wrong floor in one script only.
+    "_min_effective_distance",
     # Skip decision and pixel-verification helpers, born in the encoder. The
     # recompressor verifies source-vs-output decodes with the same statistics.
     "_would_skip",

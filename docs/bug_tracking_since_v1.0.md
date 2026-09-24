@@ -22,7 +22,7 @@ Round 37 / 2026-09-20: Second audit of v2.1.0 — 10 bugs, none in the conversio
 Round 38 / 2026-09-21: Third audit of v2.1.0 (bug_report_260921.md) - 28 findings: TIFF Lab/YCbCr archived inverted, --matrix --delete-source dropping alpha, the recompressor multi-page group veto zeroed by a marker-read failure (see top section)
 Round 39 / 2026-09-21: Fourth audit of v2.1.1_beta1 (20260921_audit2.md + 20260921_audit3.md, consolidated) - 34 findings: --force-convert d=0 broke jbrd recovery AND deleted the original unverified (the v2.0.0 data-loss class again), >64 KiB JPEG trailers rejected by the toolkit own gate, smart-sync skips that admitted foreign masters to --delete-skipped (see top section)
 Round 40 / 2026-09-23: Fifth audit of v2.1.1_beta1 (bug_report_260923.md) - 16 findings fixed (5 high/medium + 11 low): the recompressor deleted an original on the strength of an unrelated same-named output in modes 1/3 (the only reproduced data loss), --repair-jbrd stripped only the last marker pair, the decoder treated a normal `*_thumbnail` photo as a thumbnail under --no-reconstruct-multipage, and the dry-run toplines still counted would-SKIP pairs as conversions (see top section)
-v2.2.0 / 2026-09-24: Rounds 37-40 released as v2.2.0 (the v2.1.1 beta line never got a final), together with the new colour-converted derivatives (`--output-icc`), `--export-jxl-folder` and the recompressor's `--rename-from/--rename-to` - see new_features_since_v1.0.md
+v2.2.0 / 2026-09-24: Rounds 37-40 released as v2.2.0 (the v2.1.1 beta line never got a final), together with the new colour-converted derivatives (`--output-icc`), `--export-jxl-folder` and the recompressor's `--rename-from/--rename-to` - see new_features_since_v1.0.md Also bug #435: the lossy distance floor follows the installed cjxl (0.05 from libjxl 0.12, 0.01 before) (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -31,6 +31,20 @@ and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+
+---
+
+## v2.2.0 — the distance floor is per cjxl version (2026-09-24)
+
+Re-measured at the user's request: the "floor at 0.05" documented since v1.9.0
+was measured on cjxl 0.12 only. libjxl 0.12 added it
+([PR #4238](https://github.com/libjxl/libjxl/pull/4238): below 0.05 the DC
+coefficients leave `int16` and the bitstream leaves Level 5); cjxl 0.11.2 clamps
+only below 0.01.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 435 | **The lossy distance floor was hard-coded at 0.05 for every cjxl.** Measured on two real 16-bit photos: cjxl 0.12.0 writes byte-identical files from `--distance 0.005` to `0.05`, but cjxl 0.11.2 only merges 0.005 and 0.01 — 0.02/0.03/0.04 are real steps (d=0.01: 60.4 dB PSNR vs 51.7 dB at 0.05, 1.75× the size). On 0.11 the encoder/recompressor/transcoder warned that 0.02 "behaves exactly like 0.05" (false), the encoder's space preflight modelled a 0.05 file for a 0.02 request, and the recompressor's `_classify` read a 0.05 request over a real d=0.02 source as "same distance" (policy copy/ask instead of a legitimate shrink) | encoder, recompressor, transcoder | ✅ FIXED (`_min_effective_distance(exe)`, parity-pinned in all three backends: 0.05 for cjxl ≥ 0.12 or an unknown version, `_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01` before it. `_warn_distance_clamp` takes the floor as a parameter; `_classify(..., floor=)` defaults to 0.05 and `main()` passes the installed cjxl's. The record does not say which cjxl wrote a source, so an old d=0.02 file under 0.12 still reads as "same distance" — the conservative side. Tests: `tests/test_distance_floor.py`, including a real-codec check that the detected floor matches the installed binary, run against cjxl 0.11.2 and 0.12.0) |
 
 ---
 

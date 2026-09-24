@@ -581,9 +581,21 @@ The encoder's default mode 0 leaves `photo.tif` and `photo.jxl` side by side, an
 
 The default is **near-lossless, not lossless**. At `d=0.1` a 45 MP file drops to roughly a tenth of the TIFF size, and a difference blend in Photoshop *will* show small deviations — that is the compression working as configured, not a bug. For a bit-exact archive use `--distance 0` (still ~40% smaller than an uncompressed TIFF). Note that `--mode` (0–8) only decides *where* output files go; quality is `--distance` alone.
 
-#### There is a floor at 0.05 (measured, v1.9.0)
+#### The distance floor depends on your cjxl: 0.05 on libjxl 0.12, 0.01 on 0.11
 
-**cjxl clamps every lossy distance at or below 0.05 to the same value.** On a real 16-bit photo, `--distance 0.005`, `0.01`, `0.02`, `0.03`, `0.04` and `0.05` all produced a **byte-identical** 20,188,082-byte file. The menu and the CLI accept anything from 0 to 15, so setting `0.02` looks like it buys you something — it does not. Either stay at `0.05`, or go to `--distance 0` for true lossless. Since v1.9.0 the encoder warns when you ask for a distance in the dead zone.
+**cjxl 0.12 clamps every lossy distance at or below 0.05 to the same value.** On two real 16-bit photos, `--distance 0.005` through `0.05` produced a **byte-identical** file. The menu and the CLI accept anything from 0 to 15, so setting `0.02` looks like it buys you something, but on 0.12 it does not: either stay at `0.05`, or go to `--distance 0` for true lossless. The floor was added in libjxl 0.12 ([PR #4238](https://github.com/libjxl/libjxl/pull/4238)): below it the DC coefficients leave the `int16` range, so the file no longer conforms to Level 5 of the JPEG XL spec. libjxl itself still decodes such files, but a decoder built for Level 5 may not.
+
+**cjxl 0.11.2 does not clamp at 0.05.** Its floor is 0.01, and the distances between 0.01 and 0.05 are real steps. Measured on the same photos (effort 7):
+
+| distance | cjxl 0.11.2 | cjxl 0.12.0 |
+|---|---|---|
+| 0.005 | same file as 0.01 | same file as 0.05 |
+| 0.01 | 30.5 MB, 60.4 dB PSNR | same file as 0.05 |
+| 0.02 | 24.4 MB, 56.2 dB | same file as 0.05 |
+| 0.05 | 17.4 MB, 51.7 dB | 17.7 MB, 51.9 dB |
+| 0.1 | 13.2 MB, 48.9 dB | 13.4 MB, 49.0 dB |
+
+At 0.05 and above both versions write nearly the same file (0.12 is ~1–2% bigger and ~0.2 dB better). Since v2.2.0 the scripts read the installed cjxl version: the dead-zone warning and the recompressor's "same distance" check use 0.05 on libjxl 0.12 and later, and 0.01 before it.
 
 Measured ratios on real 16-bit ProPhoto photos already stored as Deflate TIFF (output ÷ source), so you can see where the curve actually bends:
 
@@ -690,13 +702,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.2.0** (2026-09-24) — the stable release of the v2.1.1 beta line, plus colour-converted derivatives. Four audits of the v2.1 series (rounds 37–40, 88 fixes, almost all in the delete/provenance/dry-run safety layer) and three new options:
+**v2.2.0** (2026-09-24) — the stable release of the v2.1.1 beta line, plus colour-converted derivatives. Four audits of the v2.1 series (rounds 37–40, 88 fixes, almost all in the delete/provenance/dry-run safety layer), three new options and a version-aware distance floor:
 
 - **`--output-icc sRGB|AdobeRGB|<file.icc>`** (recompressor) — light **16-bit** derivatives of your masters in another colour space, e.g. a d=1.0 sRGB set in `_EXPORT/16B_JXL_sRGB` to replace the JPEG exports, converted from the master's own ICC with relative colorimetric + black point compensation. Built-in Adobe RGB (1998)-compatible profile, identical to Adobe's own. Never in place, never deletes, never overwrites a file that is not its own derivative, and it strips the provenance markers, so a derivative can never pass as proof that a TIFF is archived.
 - **`--rename-from/--rename-to`** (recompressor) — swap the profile token in the derivative names (`..._ProPhoto-g22_v1` → `..._sRGB_v1`) at planning time, so sync and every guard see the final name.
 - **`--export-jxl-folder NAME`** (encoder + recompressor) — choose the modes 6/7 output folder per run or per preset.
+- **The distance floor follows your cjxl** — 0.05 on libjxl 0.12, 0.01 on 0.11, where 0.02–0.04 are real quality steps. See [the distance floor](#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011).
 
-Existing command lines keep working, but some inputs that earlier releases archived wrongly are now **refused**. Read the [upgrade notice](#notices-for-upgraders) first. **1553 tests.**
+Existing command lines keep working, but some inputs that earlier releases archived wrongly are now **refused**. Read the [upgrade notice](#notices-for-upgraders) first. **1576 tests.**
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -726,6 +739,10 @@ The recompressor can write a light copy of a master in another colour space inst
 - **`--export-jxl-folder`** chooses the modes 6/7 output folder, also for the encoder (e.g. a separate `Print` export → `PRINT_JXL`).
 - **Wrapper:** all three options are in the wizard (Step 5: output folder; Step 6: colour space + rename), in presets and in manifests.
 
+#### Fixed: the distance floor follows the installed cjxl
+
+The "floor at 0.05" was measured on cjxl 0.12 only. libjxl 0.12 added it ([PR #4238](https://github.com/libjxl/libjxl/pull/4238), to stay within Level 5 of the spec); cjxl 0.11.2 only clamps below 0.01, and there `d=0.01` is 60.4 dB PSNR against 51.7 dB at `d=0.05`. The toolkit used 0.05 for every cjxl, so on 0.11 the dead-zone warning was false and the recompressor copied instead of shrinking a real `d=0.02` source. The floor is now read from `cjxl --version`: 0.05 from libjxl 0.12 on, 0.01 before it. See [the distance floor](#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011).
+
 #### Fixed: rounds 37–40 (88 fixes)
 
 Almost all in the safety layer (delete gates, provenance, dry runs, temp files). The conversion core changed only where it was wrong. The ones that lost or corrupted data:
@@ -750,7 +767,7 @@ Almost all in the safety layer (delete gates, provenance, dry runs, temp files).
   - log files carry the pid;
   - plus a long tail of warnings for flags that were silently inert.
 
-Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Every fix has a regression test proven to fail against the pre-fix code, many of them real-codec tests against real exports and film scans. **1553 tests** in the suite.
+Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Every fix has a regression test proven to fail against the pre-fix code, many of them real-codec tests against real exports and film scans. **1576 tests** in the suite.
 
 ---
 
@@ -758,7 +775,7 @@ Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Ever
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.2.0](#changelog)** | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`; audits 37–40 (88 fixes) |
+| **[v2.2.0](#changelog)** | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
 | [v2.1.1_beta1](docs/version_history.md#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
 | [v2.1.0](docs/version_history.md#v210) | 2026-09-20 | New `jxl_recompressor.py`: shrink a JXL archive, refusing counterproductive re-encodes |
 | [v2.0.3](docs/version_history.md#v203) | 2026-08-23 | JXL → JPEG delete gates bound to content, not names; 32 fixes |

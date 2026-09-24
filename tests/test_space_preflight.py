@@ -85,10 +85,11 @@ def _capture(monkeypatch):
 # --------------------------------------------------------------------------
 
 def test_min_effective_distance_matches_what_cjxl_does():
-    """cjxl was measured emitting BYTE-IDENTICAL output for --distance 0.005
-    through 0.05 (20,188,082 bytes on a real 16-bit photo at every one of
-    them). Projecting from a requested 0.01 would model a file cjxl will never
-    write."""
+    """cjxl 0.12 was measured emitting BYTE-IDENTICAL output for --distance
+    0.005 through 0.05 (20,188,082 bytes on a real 16-bit photo at every one
+    of them). Projecting from a requested 0.01 would model a file cjxl will
+    never write. Older cjxl floors at 0.01 instead — see
+    tests/test_distance_floor.py."""
     assert enc._MIN_EFFECTIVE_DISTANCE == 0.05
 
 
