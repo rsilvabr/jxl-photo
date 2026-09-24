@@ -44,6 +44,17 @@
   an atomic `os.replace`, never a cross-volume move onto the only copy.
   `_merge_lineage_blocks` (parity-pinned with the encoder) never dedupes
   inside one field — a repeated `cjxl d= e=` entry is a real generation.
+  `--output-icc` (sRGB/AdobeRGB/.icc) writes 16-bit colour-converted
+  DERIVATIVES, never in place, never deleting, and refuses to overwrite any
+  destination file that is not one of its own derivatives (even with
+  `--overwrite`); it re-derives when the recorded target changes, drops the
+  `jxlphoto-src`/`jxlphoto-srcsum` markers (a derivative must never prove the
+  TIFF is archived), writes `jxlphoto-derived:<label>` and replaces the
+  `ICC:<b64>` in CreatorTool with the target profile. The source profile is
+  always assigned explicitly before the ImageMagick conversion, and a converted
+  PNG without its `iCCP` refuses the encode (traps A1-A5 in the plan doc).
+  `--rename-from`/`--rename-to` (transcoder semantics) rename the output at
+  planning time, so sync/refusals/duplicate aborts see the final name.
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
@@ -59,7 +70,8 @@
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
 - Helper functions are deliberately duplicated across the scripts
-  (`_marker_matches`, `_replace_suffix_token`, `_is_relative_to`,
+  (`_marker_matches`, `_validate_export_folder_name`, `_replace_suffix_token`,
+  `_is_relative_to`,
   `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`,
   plus the verify/integrity family shared by the backends:
   `_verify_jxl_integrity`/`_verify_file_integrity`, `has_jbrd_box`,
@@ -70,10 +82,14 @@
   stays standalone. Fix bugs in ALL copies — `tests/test_helper_parity.py`
   pins the variants and fails the moment one copy drifts.
 - The recompressor's recursive finders skip its OWN output folder names
-  (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — but
+  (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — plus
+  the configured `EXPORT_JXL_FOLDER` (a custom `--export-jxl-folder` must not
+  be re-processed as a source on the next run) — but
   only BELOW the input root: pointing a run AT such a folder to compress it
   again is legitimate. The wrapper's `_manifest_output_collisions` mirror must
-  match this exactly (it takes the root into account too).
+  match this exactly (it takes the root into account too) and follows the
+  configured folder via `_with_child_marker`, which applies the global on the
+  imported child module and restores it afterwards.
 
 ## Verification
 - After editing any script, run `python -m py_compile` on the changed files.

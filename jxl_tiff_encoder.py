@@ -512,6 +512,26 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     return False
 
 
+def _validate_export_folder_name(name: str, marker: str, subfolder: str):
+    """None when `name` is usable as the modes 6/7 output folder, else the reason.
+
+    The output folder is created directly under the export marker, so it must be
+    ONE plain path component; a name that itself matches the marker would be
+    read as a second anchor by every later mode 6/7 scan; and a name equal to
+    the requested input subfolder would write the outputs among the sources.
+    """
+    n = (name or "").strip()
+    if not n:
+        return "the folder name is empty"
+    if n in (".", "..") or any(c in n for c in '/\\:*?"<>|'):
+        return f"'{n}' is not a single plain folder name"
+    if marker and _marker_matches(n.lower(), marker.lower()):
+        return f"'{n}' matches the export marker '{marker}' — it would become a new anchor"
+    if subfolder and n.lower() == subfolder.lower():
+        return f"'{n}' is the input subfolder itself — outputs would land among the sources"
+    return None
+
+
 # ExifTool detection - try multiple name variants
 _exiftool_cmd = None
 def _get_exiftool_cmd():
@@ -4725,6 +4745,10 @@ def main():
                         help="Staging directory for output JXLs (reduces HDD seek contention)")
     parser.add_argument("--export-marker",  type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
+    parser.add_argument("--export-jxl-folder", type=str, default=None,
+                        help="[Modes 6/7] Output folder created under the export marker "
+                             "(default: script setting EXPORT_JXL_FOLDER, '16B_JXL'). "
+                             "Overrides EXPORT_JXL_FOLDER.")
     parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
                         help="Where to record encoding params: xmp (default), software, or off. "
                              "'off' records nothing AND strips any existing gen=/cjxl d=/e= "
@@ -4835,6 +4859,10 @@ def main():
         global EXPORT_TIFF_SUBFOLDER
         EXPORT_TIFF_SUBFOLDER = args.export_subfolder
 
+    if args.export_jxl_folder is not None:
+        global EXPORT_JXL_FOLDER
+        EXPORT_JXL_FOLDER = args.export_jxl_folder.strip()
+
     if args.distance is not None:
         if not 0 <= args.distance <= 15:
             parser.error("--distance must be between 0 and 15")
@@ -4861,6 +4889,12 @@ def main():
     if args.export_marker:
         global EXPORT_MARKER
         EXPORT_MARKER = args.export_marker
+
+    if args.mode in (6, 7):
+        _why = _validate_export_folder_name(EXPORT_JXL_FOLDER, EXPORT_MARKER,
+                                            EXPORT_TIFF_SUBFOLDER if args.mode == 7 else "")
+        if _why:
+            parser.error(f"--export-jxl-folder: {_why}")
     if args.encode_tag is not None:
         ENCODE_TAG_MODE = args.encode_tag
     if args.d50_patch is not None:
@@ -4985,6 +5019,10 @@ def main():
     if args.no_adopt_scan and args.provenance != "adopt":
         logger.warning("--no-adopt-scan has no effect without --provenance adopt: it "
                        "only turns off the verification adoption performs.")
+
+    if args.export_jxl_folder is not None and args.mode not in (6, 7):
+        logger.warning(f"--export-jxl-folder only applies to modes 6/7 — ignored in "
+                       f"mode {args.mode}.")
 
     if STRIP_METADATA and (DELETE_SOURCE or _warn_collapses):
         logger.warning(

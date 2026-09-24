@@ -1367,7 +1367,9 @@ def test_step5_preserves_auto_mode_subfolder_seed():
     import jxl_photo
     orig_ask = jxl_photo.Prompt.ask if jxl_photo.RICH_AVAILABLE else None
     if orig_ask is not None:
-        answers = iter([jxl_photo.console and "_EXPORT", "16bit"])
+        # marker, subfolder, then the modes 6/7 output folder question (answer
+        # the script default so nothing extra is stored).
+        answers = iter([jxl_photo.console and "_EXPORT", "16bit", "16B_JXL"])
         jxl_photo.Prompt.ask = lambda *a, **k: next(answers)
         try:
             assert menu._wizard_mode_specific_config(workflow) is True

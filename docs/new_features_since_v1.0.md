@@ -1,5 +1,51 @@
 # New Features Since v1.0
 
+## Unreleased
+
+### `--export-jxl-folder`: choose the modes 6/7 output folder
+
+The folder created under the export marker was a fixed script setting
+(`16B_JXL` for the encoder, `16B_JXL_small` for the recompressor). The new flag
+overrides it per run, so different presets can write to different folders — the
+case it exists for is a separate "Print" TIFF export encoded at another
+distance into its own `PRINT_JXL` folder. The name is validated up front: it
+must be one plain path component, must not match the export marker (it would
+become a second anchor for later scans) and must not equal the input subfolder
+(outputs among the sources). The recompressor also treats its configured folder
+as one of its own outputs, so a later recursive scan never re-processes the
+derivatives it wrote.
+
+### Colour-converted derivatives: `--output-icc` on the recompressor
+
+`--output-icc sRGB|AdobeRGB|<path.icc>` writes a light **derivative** from a
+master JXL instead of a plain recompression: decoded at 16 bits, converted with
+ImageMagick (relative colorimetric + black point compensation) and re-encoded
+at the requested distance — still 16 bits, because 8-bit lossy JXL measured no
+smaller. Measured on a 16 MP ProPhoto photo, a sRGB derivative at d=1.0 from a
+d=0.05 master lands 0.017 dB from a direct encode of the TIFF, at the same
+size. The source profile is always assigned explicitly (a JXL decoded with an
+`sRGB` chunk and no `iCCP` would otherwise make magick *assign* the target
+instead of converting), and the converted PNG must still carry its `iCCP` when
+cjxl sees it — a missing profile refuses the encode instead of writing the
+wrong colour space.
+
+A derivative is disposable by construction: never in place (modes 0/8 are
+refused), never with `--delete-source`/`--delete-skipped`, and it refuses to
+overwrite any existing file that is not one of its own derivatives — pointing
+`--export-jxl-folder` at the master folder cannot destroy the masters. Each
+output records its target as `jxlphoto-derived:<label>`; a run with another
+target re-derives instead of trusting the old file, while an identical `--sync`
+re-run skips normally. The archive markers are rewritten: `jxlphoto-src`/
+`jxlphoto-srcsum` are removed (a derivative must never prove the original TIFF
+is archived) and the `ICC:<base64>` in CreatorTool is replaced by the target
+profile, so decoding it to TIFF labels the pixels with the colour space they
+are really in.
+
+`--rename-from`/`--rename-to` (same semantics as the transcoder: literal,
+case-sensitive, first occurrence, stem only) swap the profile token in the
+output names at planning time, so the sync, the non-derivative refusal and the
+duplicate-output guard all see the final name.
+
 ## v1.10.0
 
 Date: 2026-08-06

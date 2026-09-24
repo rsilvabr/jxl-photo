@@ -23,6 +23,7 @@ Requirements:
 """
 
 import subprocess, os, platform, tempfile, threading, logging, sys, shutil, uuid, hashlib, json
+import struct, base64, atexit
 import math
 import re
 import functools
@@ -138,6 +139,17 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
         if m.start() == 0 or name[m.start() - 1] in '_- ':
             return name[:m.start()] + suffix_to + name[m.end():]
     return name
+
+
+def _apply_rename(name: str, rename_from: str, rename_to: str) -> str:
+    """--rename-from/--rename-to on one output FILE name — same semantics as
+    the transcoder's resolve_output_convert: literal, case-sensitive, first
+    occurrence, stem only (the extension never changes). A missing token
+    leaves the name as it is."""
+    stem, ext = os.path.splitext(name)
+    if rename_from and rename_from in stem:
+        stem = stem.replace(rename_from, rename_to, 1)
+    return stem + ext
 
 
 # --- Disk-full abort ------------------------------------------------------
@@ -506,6 +518,26 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     return False
 
 
+def _validate_export_folder_name(name: str, marker: str, subfolder: str):
+    """None when `name` is usable as the modes 6/7 output folder, else the reason.
+
+    The output folder is created directly under the export marker, so it must be
+    ONE plain path component; a name that itself matches the marker would be
+    read as a second anchor by every later mode 6/7 scan; and a name equal to
+    the requested input subfolder would write the outputs among the sources.
+    """
+    n = (name or "").strip()
+    if not n:
+        return "the folder name is empty"
+    if n in (".", "..") or any(c in n for c in '/\\:*?"<>|'):
+        return f"'{n}' is not a single plain folder name"
+    if marker and _marker_matches(n.lower(), marker.lower()):
+        return f"'{n}' matches the export marker '{marker}' — it would become a new anchor"
+    if subfolder and n.lower() == subfolder.lower():
+        return f"'{n}' is the input subfolder itself — outputs would land among the sources"
+    return None
+
+
 # ExifTool detection - try multiple name variants
 _exiftool_cmd = None
 def _get_exiftool_cmd():
@@ -630,6 +662,18 @@ KEEP_SMALLER = True
 # generation loss). Protects photos that were already well compressed.
 # In-place runs keep the original file instead (nothing changes).
 
+OUTPUT_ICC = None
+# Colour-converted DERIVATIVE instead of a plain recompression. None = keep the
+# source colour space (the normal recompressor). Otherwise one of:
+#   "sRGB"      -> built-in sRGB (Pillow/LittleCMS)
+#   "AdobeRGB"  -> built-in Adobe RGB (1998)-compatible matrix/TRC profile
+#   <path>      -> any RGB .icc/.icm file
+# The pixels are decoded at 16 bits, converted with ImageMagick (relative
+# colorimetric + black point compensation) and re-encoded at CJXL_DISTANCE,
+# still 16 bits. A derivative is a separate, disposable copy: it is never
+# written in place, never deletes anything, and never proves that the
+# original TIFF is archived (its jxlphoto-src/srcsum markers are removed).
+
 ENCODE_TAG_MODE = "xmp"
 # Where to record the NEW encoding parameters, mirroring jxl_tiff_encoder.py:
 # "xmp"      -> XMP-dc:Description (default; the new cjxl d=/e= is APPENDED to
@@ -710,6 +754,14 @@ _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 # per-file log line, and the summary's failures list carried the status word).
 _error_details = {}
 
+# --output-icc runtime state, reset at the top of main() (the test suite runs
+# several main()s in one process).
+_OUTPUT_ICC_LABEL = None     # "sRGB" / "AdobeRGB" / "icc-<md5>"
+_OUTPUT_ICC_BYTES = None
+_OUTPUT_ICC_PATH = None      # the profile written once to a temp file for magick
+_SRGB_ICC_PATH = None        # assigned to sources that decode without any profile (A3)
+_FORCE_REDERIVE = set()      # final paths whose derived marker names another target
+
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
 # a recompressed archive stays provable by the DECODER's delete gates.
 SRC_PREFIX = "jxlphoto-src:"
@@ -719,6 +771,15 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # the whole group or nothing (a half-deleted group is spread across two
 # folders with a dangling master page).
 MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
+
+DERIVED_XMP_PREFIX = "jxlphoto-derived:"
+# dc:Relation token on every --output-icc output: "<prefix><label>", label =
+# sRGB / AdobeRGB / icc-<md5[:12]>. Marks the file as a colour-converted
+# derivative (NOT an archive of the original) and records its target, so a
+# run with a different target re-derives instead of trusting the old file.
+ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
+# Written by the encoder on pages that inherit IFD0's ICC. Meaningless on a
+# derivative (it carries its own converted profile) — removed there.
 
 # The encoder's encoding-parameters tag: "cjxl d=0.1 e=7", possibly several in
 # a " | "-separated chain (the LAST one is the current file's).
@@ -1195,6 +1256,69 @@ def _read_source_markers_batch(outputs: list) -> dict:
                                    f"matched | {src}")
         except Exception as e:
             logger.warning(f"Provenance: marker batch failed ({e}); "
+                           f"{len(chunk)} file(s) cannot be verified")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
+def _read_derived_markers_batch(paths: list) -> dict:
+    """{path str: label | None | False}: the jxlphoto-derived label, None when
+    the file has no such token (NOT a derivative), False when it could not be
+    read at all (unknown -> the caller must fail closed).
+
+    Same batched argfile scheme as _read_source_markers_batch: one exiftool
+    call per 400 files instead of one per file.
+    """
+    markers = {str(o): False for o in paths}
+    # normcase -> the exact key the caller will look up by.
+    index = {os.path.normcase(str(o)): str(o) for o in paths}
+    if not paths:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                logger.warning(f"Derivative check: could not read markers for a batch "
+                               f"of {len(chunk)} file(s) (rc={r.returncode})")
+                continue
+            data = json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                if src is None:
+                    continue
+                key = os.path.normcase(str(Path(src)))
+                if key not in index:
+                    continue
+                rel = entry.get("Relation")
+                label = None
+                if rel is not None:
+                    values = rel if isinstance(rel, list) else [str(rel)]
+                    for token in values:
+                        token = str(token).strip()
+                        if token.startswith(DERIVED_XMP_PREFIX):
+                            label = token[len(DERIVED_XMP_PREFIX):]
+                            break
+                markers[index[key]] = label
+        except Exception as e:
+            logger.warning(f"Derivative check: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
         finally:
             if argfile:
@@ -1923,12 +2047,16 @@ _RECOMPRESSOR_OUTPUT_FOLDERS = frozenset(
 
 def _is_own_output_path(parts_lower) -> bool:
     """True if any directory part is one of this tool's output folder names,
-    or carries this tool's output suffix: mode 4's fallback renames a folder
-    without the token to <name>_JXL_small (an exact-name set never matches
-    those), and a recursive re-run used to re-encode its own output there.
+    the configured EXPORT_JXL_FOLDER (modes 6/7 — a custom name would otherwise
+    be re-processed as a source by the next run), or carries this tool's output
+    suffix: mode 4's fallback renames a folder without the token to
+    <name>_JXL_small (an exact-name set never matches those), and a recursive
+    re-run used to re-encode its own output there.
     Callers pass only the parts BELOW the input root, so pointing a run AT
     such a folder to compress it again stays legitimate."""
+    own = EXPORT_JXL_FOLDER.lower()
     return any(p in _RECOMPRESSOR_OUTPUT_FOLDERS
+               or p == own
                or p.endswith("_" + JXL_SUFFIX_REPLACE.lower())
                for p in parts_lower)
 
@@ -1978,8 +2106,8 @@ def find_jxls_recursive(input_path: Path):
         # names below, and a user seeing only those names would not recognise
         # their folder in the message.
         logger.info(f"Ignored {skipped} JXL(s) inside recompressor output folders "
-                    f"({', '.join(sorted(_RECOMPRESSOR_OUTPUT_FOLDERS))}, or any "
-                    f"folder ending in _{JXL_SUFFIX_REPLACE}) — "
+                    f"({', '.join(sorted(_RECOMPRESSOR_OUTPUT_FOLDERS | {EXPORT_JXL_FOLDER.lower()}))}, "
+                    f"or any folder ending in _{JXL_SUFFIX_REPLACE}) — "
                     f"those are this tool's own outputs")
     return filtered
 
@@ -2173,6 +2301,289 @@ def _disk_full_need(jxl_path: Path) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Output colour space (--output-icc)
+#
+# A colour-converted derivative is decoded at 16 bits, converted with
+# ImageMagick (relative colorimetric + black point compensation) and re-encoded
+# at CJXL_DISTANCE, still 16 bits. The traps these helpers exist to avoid are
+# all verified behaviours of magick 7.1.2 / cjxl-djxl 0.12:
+#   A1/A2: -strip or png:exclude-chunk removes the iCCP from the converted PNG,
+#          and cjxl then tags the pixels as sRGB — silently wrong colours.
+#   A3:    a JXL encoded as sRGB decodes to a PNG with an sRGB chunk and NO
+#          iCCP; `magick in.png -profile target.icc` then ASSIGNS the target
+#          instead of converting. The source profile must always be assigned
+#          explicitly before the conversion.
+#   A4:    the master's XMP CreatorTool carries the ORIGINAL ICC in base64; the
+#          derivative must replace it with the TARGET profile, or a later decode
+#          to TIFF would label the converted pixels with the wrong space.
+#   A5:    cjxl 0.12 copies input PNG metadata as Brotli "brob" boxes; the
+#          derivative is encoded with `-x strip=exif -x strip=xmp` and gets the
+#          master's metadata copied with exiftool afterwards.
+# ---------------------------------------------------------------------------
+
+_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
+_BRADFORD = np.array([[0.8951, 0.2664, -0.1614],
+                      [-0.7502, 1.7135, 0.0367],
+                      [0.0389, -0.0685, 1.0296]])
+
+
+def _icc_s15f16(v) -> bytes:
+    return struct.pack(">i", int(round(float(v) * 65536.0)))
+
+
+def _icc_xyz_tag(xyz) -> bytes:
+    return b"XYZ " + b"\0" * 4 + b"".join(_icc_s15f16(c) for c in xyz)
+
+
+def _build_matrix_trc_icc(description: str, primaries_xy, white_xy, gamma: float) -> bytes:
+    """A minimal ICC v2.1 display profile: D50-adapted (Bradford) colorants,
+    one gamma curve shared by R/G/B, media white = the native white (the v2
+    convention Adobe's own AdobeRGB1998.icc uses — with a D50 wtpt cjxl stores
+    D50-adapted 'Custom' primaries instead of the real ones)."""
+    def xyz(x, y):
+        return np.array([x / y, 1.0, (1.0 - x - y) / y])
+    wp = xyz(*white_xy)
+    prim = np.column_stack([xyz(*p) for p in primaries_xy])
+    m = prim * np.linalg.solve(prim, wp)                      # RGB -> XYZ, native white
+    adapt = (np.linalg.inv(_BRADFORD)
+             @ np.diag((_BRADFORD @ _ICC_D50) / (_BRADFORD @ wp)) @ _BRADFORD)
+    m50 = adapt @ m
+    desc_ascii = description.encode("ascii") + b"\0"
+    desc = (b"desc" + b"\0" * 4 + struct.pack(">I", len(desc_ascii)) + desc_ascii
+            + struct.pack(">II", 0, 0) + struct.pack(">HB", 0, 0) + b"\0" * 67)
+    cprt = b"text" + b"\0" * 4 + b"No copyright, use freely\0"
+    trc = b"curv" + b"\0" * 4 + struct.pack(">I", 1) + struct.pack(">H", int(round(gamma * 256)))
+    tags = [(b"desc", desc), (b"cprt", cprt), (b"wtpt", _icc_xyz_tag(wp)),
+            (b"rXYZ", _icc_xyz_tag(m50[:, 0])), (b"gXYZ", _icc_xyz_tag(m50[:, 1])),
+            (b"bXYZ", _icc_xyz_tag(m50[:, 2])),
+            (b"rTRC", trc), (b"gTRC", trc), (b"bTRC", trc)]
+    offset = 128 + 4 + 12 * len(tags)
+    table, data, placed = b"", b"", {}
+    for sig, body in tags:
+        if body not in placed:                    # r/g/bTRC share one element
+            while (offset + len(data)) % 4:
+                data += b"\0"
+            placed[body] = (offset + len(data), len(body))
+            data += body
+        off, ln = placed[body]
+        table += sig + struct.pack(">II", off, ln)
+    body = struct.pack(">I", len(tags)) + table + data
+    while len(body) % 4:
+        body += b"\0"
+    header = (struct.pack(">I", 128 + len(body)) + b"lcms" + bytes([2, 0x10, 0, 0])
+              + b"mntr" + b"RGB " + b"XYZ " + b"\0" * 12 + b"acsp" + b"MSFT"
+              + b"\0" * 20 + struct.pack(">I", 0)
+              + b"".join(_icc_s15f16(c) for c in _ICC_D50) + b"\0" * 48)
+    if len(header) != 128:
+        raise RuntimeError("internal: ICC header is not 128 bytes")
+    return header + body
+
+
+def _adobe_rgb_icc_bytes() -> bytes:
+    return _build_matrix_trc_icc("AdobeRGB1998-compatible (jxl-photo)",
+                                 [(0.6400, 0.3300), (0.2100, 0.7100), (0.1500, 0.0600)],
+                                 (0.3127, 0.3290), 563 / 256)
+
+
+def _resolve_output_icc(value: str):
+    """(label, icc_bytes) for --output-icc, or raise ValueError with the reason.
+
+    Aliases are case-insensitive. A file must be a real RGB profile: a CMYK or
+    grey profile cannot be the target of an RGB->RGB conversion, and a random
+    file must be refused BEFORE a whole batch fails on it."""
+    key = value.strip().lower()
+    if key == "srgb":
+        try:
+            from PIL import ImageCms
+        except ImportError:
+            raise ValueError("--output-icc sRGB needs Pillow (pip install pillow)")
+        return "sRGB", ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    if key in ("adobergb", "adobe", "adobergb1998"):
+        return "AdobeRGB", _adobe_rgb_icc_bytes()
+    p = Path(value.strip().strip('"'))
+    if not p.is_file():
+        raise ValueError(f"--output-icc: not sRGB, AdobeRGB, or an existing file: {value}")
+    data = p.read_bytes()
+    if len(data) < 128 or data[36:40] != b"acsp":
+        raise ValueError(f"--output-icc: {p} is not an ICC profile")
+    if data[16:20] != b"RGB ":
+        raise ValueError(f"--output-icc: {p} is a {data[16:20].decode(errors='replace').strip()} "
+                         f"profile — the target must be an RGB profile")
+    return "icc-" + hashlib.md5(data).hexdigest()[:12], data
+
+
+def _png_chunk_types(png_path: Path) -> list:
+    """Chunk types before the first IDAT (iCCP/sRGB must precede it per the PNG
+    spec) — reads a few KB, not the whole 16-bit intermediate."""
+    types = []
+    with open(png_path, "rb") as f:
+        if f.read(8) != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError(f"not a PNG: {png_path.name}")
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            n = struct.unpack(">I", head[:4])[0]
+            t = head[4:8].decode("latin-1")
+            if t == "IDAT":
+                break
+            types.append(t)
+            f.seek(n + 4, 1)                         # data + CRC
+    return types
+
+
+def _png_is_grayscale(png_path: Path) -> bool:
+    """True when the PNG djxl just wrote is single-channel (colour type 0 or 4).
+
+    Only the 26-byte signature + IHDR is read: this runs per file, and the
+    decoded intermediate of a 93 MP scan is hundreds of MB.
+    """
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    return head[25] in (0, 4)          # 0 = grey, 4 = grey + alpha
+
+
+def _xmp_icc_from_creator_tool(text: str):
+    """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
+    rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
+    prefix, strict base64, >= 128 bytes, 'acsp' at 36)."""
+    for segment in (text or "").split("|"):
+        segment = segment.strip()
+        if not segment.startswith("ICC:"):
+            continue
+        try:
+            data = base64.b64decode(segment[4:].strip(), validate=True)
+        except Exception:
+            continue
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
+    return None
+
+
+def _creator_tool_without_icc(text: str) -> str:
+    """CreatorTool with every ICC:<base64> blob removed — same regexes as the
+    encoder's stale-blob strip (jxl_tiff_encoder.py, 'Strip any stale
+    ICC:<base64> blob'), so a trailing ' | Real App' segment is never eaten."""
+    s = text or ""
+    s = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', s, flags=re.MULTILINE).strip()
+    if 'ICC:' in s and '|' not in s:
+        s = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', s).strip()
+    s = re.sub(r'\s*\|\s*$', '', s).strip()
+    s = re.sub(r'^\s*\|\s*', '', s).strip()
+    s = re.sub(r'\s*\|\s*\|\s*', ' | ', s)
+    return s
+
+
+def _read_creator_and_relation(jxl_path: Path):
+    """(creator_tool str, [relation tokens]) of one file. Raises on failure:
+    a derivative whose source profile cannot be read must not be produced."""
+    r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
+                               "-XMP-dc:Relation", str(jxl_path)], timeout=60)
+    if not r.stdout:
+        raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
+    entry = json.loads(r.stdout)[0]
+    rel = entry.get("Relation")
+    tokens = [] if rel is None else [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
+    return str(entry.get("CreatorTool") or ""), tokens
+
+
+def _derive_pixels(jxl_path: Path, write_path: Path) -> bool:
+    """Decode at 16 bits, convert to the --output-icc profile, re-encode.
+
+    The SOURCE profile is always assigned explicitly (trap A3): the encoder's
+    original ICC from XMP CreatorTool when present — exactly what
+    jxl_tiff_decoder attaches to the same pixels — else the iCCP djxl wrote,
+    else sRGB (djxl writes an sRGB chunk, no iCCP, for sRGB-encoded files).
+    Grey images are re-encoded unconverted (no gamut to map; an RGB profile on
+    a single channel is invalid — same rule as the transcoder).
+
+    Returns True when the pixels were colour-converted, False for a grey image
+    left as it was. _derivative_metadata_args takes that answer instead of
+    guessing again from the jxlphoto-grayscale marker: a grey JXL that does not
+    carry the marker (not written by this toolkit) was left unconverted here
+    but got the RGB target profile stamped into its CreatorTool."""
+    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+        tmp = Path(tmp)
+        dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
+        r = subprocess.run(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"],
+                           capture_output=True, timeout=CJXL_TIMEOUT)
+        if r.returncode != 0 or not dec_png.exists():
+            raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+        if _png_is_grayscale(dec_png):
+            logger.info(f"  >Grayscale image: encoded without colour conversion | {jxl_path.name}")
+            enc_in = dec_png
+            converted = False
+        else:
+            creator, _tokens = _read_creator_and_relation(jxl_path)
+            src_icc = _xmp_icc_from_creator_tool(creator)
+            chunks = _png_chunk_types(dec_png)
+            if src_icc:
+                src_path = tmp / "src.icc"
+                src_path.write_bytes(src_icc)
+                assign = ["+profile", "*", "-profile", str(src_path)]
+            elif "iCCP" in chunks:
+                assign = []                               # convert from djxl's own iCCP
+            elif "sRGB" in chunks:
+                assign = ["+profile", "*", "-profile", str(_SRGB_ICC_PATH)]
+            else:
+                raise RuntimeError("cannot tell the source colour space (no XMP ICC, "
+                                   "no iCCP, no sRGB chunk) — refusing to guess")
+            cmd = (["magick", str(dec_png)] + assign
+                   + ["-intent", "Relative", "-black-point-compensation",
+                      "-profile", str(_OUTPUT_ICC_PATH), "-depth", "16",
+                      "png:" + str(conv_png)])
+            r = subprocess.run(cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+            if r.returncode != 0 or not conv_png.exists():
+                raise RuntimeError(f"magick: {(r.stderr or b'').decode(errors='replace')[:200]}")
+            if "iCCP" not in _png_chunk_types(conv_png):
+                # Traps A1/A2: without the profile cjxl would silently tag the
+                # converted pixels as sRGB. Never let that reach the archive.
+                raise RuntimeError("ImageMagick wrote the converted image without its ICC "
+                                   "profile — refusing to encode it as the wrong colour space")
+            enc_in = conv_png
+            converted = True
+        cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(enc_in), str(write_path),
+                     "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
+                     "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
+                    + _cjxl_buffering_flag())
+        r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+        if r.returncode != 0:
+            raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+    return converted
+
+
+def _derivative_metadata_args(jxl_path: Path, converted: bool = True) -> list:
+    """exiftool lines that turn the copied master metadata into a derivative's:
+    - dc:Relation: drop jxlphoto-src/srcsum (a derivative must never prove the
+      original is archived — trap A7), drop any old jxlphoto-derived and the
+      page-level icc:inherited flag, add jxlphoto-derived:<label>;
+    - CreatorTool: replace the ICC:<b64> blob by the TARGET profile, so the
+      decoder labels a decoded TIFF with the colour space the pixels are really
+      in (trap A4). When the pixels were NOT converted (`converted` False: a
+      grey image, as _derive_pixels reports it) the CreatorTool is kept — the
+      source profile still describes them.
+    """
+    creator, tokens = _read_creator_and_relation(jxl_path)
+    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
+    keep = [t for t in tokens
+            if t and not t.startswith(drop) and t != ICC_INHERITED_XMP_FLAG]
+    lines = ["-XMP-dc:Relation="]
+    lines += ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
+    lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + _OUTPUT_ICC_LABEL)
+    if converted:
+        base = _creator_tool_without_icc(creator)
+        b64 = base64.b64encode(_OUTPUT_ICC_BYTES).decode("ascii")
+        new_ct = f"{base} | ICC:{b64}" if base else f"ICC:{b64}"
+        lines.append("-XMP-xmp:CreatorTool=" + _argfile_safe(new_ct))
+    return lines
+
+
 def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 action: str, in_place: bool, desc: str, software: str,
                 src_distance):
@@ -2200,7 +2611,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         if _aborted():
             return (str(jxl_path), "aborted", str(final_path))
 
-        if not in_place and _would_skip(jxl_path, final_path):
+        if (not in_place
+                and os.path.normcase(str(final_path)) not in _FORCE_REDERIVE
+                and _would_skip(jxl_path, final_path)):
             logger.info(f"[{n}/{total}] SKIP (exists) | {jxl_path.name}")
             return (str(jxl_path), "skipped", str(final_path))
 
@@ -2223,18 +2636,21 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # action == "convert"
         write_path.parent.mkdir(parents=True, exist_ok=True)
         output_dirty = True
-        # --container=1 UNCONDITIONALLY: at d=0 the gate used to omit it, so a
-        # bare-codestream source (any third-party JXL) produced a bare output
-        # that the exiftool restamp below refuses to edit ("Will wrap JXL
-        # codestream in ISO BMFF container for writing") — a guaranteed ERROR
-        # per file. Wrapping an already-container input costs nothing.
-        container_flag = ["--container=1"]
-        cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
-                     "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
-                    + container_flag + _cjxl_buffering_flag())
-        r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
-        if r.returncode != 0:
-            raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+        if OUTPUT_ICC:
+            converted = _derive_pixels(jxl_path, write_path)   # djxl -> magick -> cjxl
+        else:
+            # --container=1 UNCONDITIONALLY: at d=0 the gate used to omit it, so a
+            # bare-codestream source (any third-party JXL) produced a bare output
+            # that the exiftool restamp below refuses to edit ("Will wrap JXL
+            # codestream in ISO BMFF container for writing") — a guaranteed ERROR
+            # per file. Wrapping an already-container input costs nothing.
+            container_flag = ["--container=1"]
+            cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
+                         "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
+                        + container_flag + _cjxl_buffering_flag())
+            r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+            if r.returncode != 0:
+                raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
 
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
         # in CreatorTool, jxlphoto-* provenance and multi-page group markers)
@@ -2245,11 +2661,14 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # that form. IrfanView cannot read brob (README: "Viewer quirks"), so
         # without this the recompressed archive lost its visible EXIF even
         # with the boxes reordered — the encoder's outputs use plain boxes.
+        _extra = (_derivative_metadata_args(jxl_path, converted)
+                  if OUTPUT_ICC else [])
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
              "-tagsfromfile", str(jxl_path),
              "-exif:all", "-xmp:all", "-iptc:all"]
             + _restamp_args(desc, software, label=jxl_path.name)
+            + _extra
             + [str(write_path)], timeout=120)
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
@@ -2296,7 +2715,10 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             logger.debug(f" >Round-trip verified ({detail})")
 
         overwritten = existed_before and not in_place
-        label = ("RECOMPRESS" if status == "ok" else "COPY")
+        if OUTPUT_ICC and status == "ok":
+            label = f"DERIVE ({_OUTPUT_ICC_LABEL})"
+        else:
+            label = ("RECOMPRESS" if status == "ok" else "COPY")
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path.name}")
         return (str(jxl_path), "overwrite" if overwritten and status == "ok" else status,
                 str(final_path))
@@ -2791,10 +3213,18 @@ def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
-    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER
+    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
+    global OUTPUT_ICC
     global _gen_divergence_logged, _error_details
+    global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
+    global _FORCE_REDERIVE
     _gen_divergence_logged = False
     _error_details = {}
+    _OUTPUT_ICC_LABEL = None
+    _OUTPUT_ICC_BYTES = None
+    _OUTPUT_ICC_PATH = None
+    _SRGB_ICC_PATH = None
+    _FORCE_REDERIVE = set()
 
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
@@ -2840,6 +3270,16 @@ def main():
     parser.add_argument("--no-keep-smaller", dest="no_keep_smaller", action="store_true",
                         help="Keep the re-encoded file even when it is not smaller "
                              "than the source (default: fall back to a verbatim copy)")
+    parser.add_argument("--output-icc", type=str, default=None,
+                        help="Write a colour-converted DERIVATIVE: sRGB, AdobeRGB, or a "
+                             "path to an RGB .icc file. 16-bit, converted from the "
+                             "source's own profile (relative colorimetric + BPC). "
+                             "Never in place, never with --delete-source.")
+    parser.add_argument("--rename-from", type=str, default="",
+                        help="Replace this text in each output file name (literal, "
+                             "case-sensitive, first occurrence, extension untouched)")
+    parser.add_argument("--rename-to", type=str, default="",
+                        help="Replacement for --rename-from (may be empty)")
     parser.add_argument("--encode-tag", dest="encode_tag", default=None,
                         choices=["xmp", "software", "off"],
                         help="Where to record the new cjxl d=/e= (default: ENCODE_TAG_MODE, 'xmp')")
@@ -2868,6 +3308,10 @@ def main():
                         help="Export marker folder name for modes 6/7 (default: _EXPORT)")
     parser.add_argument("--export-subfolder", type=str, default=None,
                         help="Mode 7: only files under EXPORT_MARKER/<subfolder>")
+    parser.add_argument("--export-jxl-folder", type=str, default=None,
+                        help="[Modes 6/7] Output folder created under the export marker "
+                             "(default: script setting EXPORT_JXL_FOLDER, '16B_JXL_small'). "
+                             "Overrides EXPORT_JXL_FOLDER.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate: no files written, copied, replaced or deleted")
     parser.add_argument("--summary-json", action="store_true", help=argparse.SUPPRESS)
@@ -2905,6 +3349,8 @@ def main():
         JBRD_POLICY = args.jbrd_policy
     if args.no_keep_smaller:
         KEEP_SMALLER = False
+    if args.output_icc is not None:
+        OUTPUT_ICC = args.output_icc.strip() or None
     if args.encode_tag is not None:
         ENCODE_TAG_MODE = args.encode_tag
     if args.provenance is not None:
@@ -2916,6 +3362,14 @@ def main():
         EXPORT_MARKER = args.export_marker
     if args.export_subfolder is not None:
         EXPORT_JXL_SUBFOLDER = args.export_subfolder
+    if args.export_jxl_folder is not None:
+        EXPORT_JXL_FOLDER = args.export_jxl_folder.strip()
+
+    if args.mode in (6, 7):
+        _why = _validate_export_folder_name(EXPORT_JXL_FOLDER, EXPORT_MARKER,
+                                            EXPORT_JXL_SUBFOLDER if args.mode == 7 else "")
+        if _why:
+            parser.error(f"--export-jxl-folder: {_why}")
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -2946,6 +3400,26 @@ def main():
         print("WARNING: --provenance has no effect without --delete-source: it only "
               "checks an existing output's provenance before that source is "
               "deleted. Nothing will be checked.")
+
+    if OUTPUT_ICC and (DELETE_SOURCE or args.delete_skipped):
+        parser.error("--output-icc writes a derivative, it never replaces or deletes "
+                     "the source: drop --delete-source")
+    if OUTPUT_ICC and VERIFY_ROUNDTRIP:
+        parser.error("--verify-roundtrip compares pixels with the source and cannot "
+                     "apply to a colour-converted derivative")
+    if OUTPUT_ICC and args.mode == 8:
+        parser.error("--output-icc cannot run in mode 8 (in place): pick a mode that "
+                     "writes to another folder (1-7)")
+    if OUTPUT_ICC:
+        try:
+            _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES = _resolve_output_icc(OUTPUT_ICC)
+        except ValueError as e:
+            parser.error(str(e))
+
+    if args.rename_to and not args.rename_from:
+        parser.error("--rename-to needs --rename-from")
+    if any(c in (args.rename_from + args.rename_to) for c in '/\\:*?"<>|'):
+        parser.error("--rename-from/--rename-to must not contain path characters")
 
     # A DRY RUN validates without CREATING: a simulation that leaves two new
     # folders on disk is not a simulation. It never writes into either one, so
@@ -2978,6 +3452,10 @@ def main():
     _reset_abort()
     _warn_distance_clamp(CJXL_DISTANCE)
 
+    if args.export_jxl_folder is not None and args.mode not in (6, 7):
+        logger.warning(f"--export-jxl-folder only applies to modes 6/7 — ignored in "
+                       f"mode {args.mode}.")
+
     if args.staging:
         TEMP2_DIR = Path(args.staging)
 
@@ -3007,13 +3485,51 @@ def main():
             except ImportError as e:
                 logger.error(f"--verify-roundtrip needs numpy and imagecodecs ({e})")
                 sys.exit(1)
+        if OUTPUT_ICC:
+            missing_icc = [t for t in ("djxl", "magick") if shutil.which(t) is None]
+            if missing_icc:
+                logger.error(f"--output-icc needs {', '.join(missing_icc)} on PATH "
+                             f"(djxl decodes the master, ImageMagick converts it)")
+                sys.exit(1)
+            # The target profile and the sRGB fallback of A3 live in files for
+            # magick; written once per run, removed at exit.
+            _icc_dir = Path(tempfile.mkdtemp(prefix="jxlrec_icc_", dir=TEMP_DIR))
+            atexit.register(shutil.rmtree, str(_icc_dir), True)
+            _OUTPUT_ICC_PATH = _icc_dir / f"target_{_OUTPUT_ICC_LABEL}.icc"
+            _OUTPUT_ICC_PATH.write_bytes(_OUTPUT_ICC_BYTES)
+            try:
+                from PIL import ImageCms
+            except ImportError:
+                logger.error("--output-icc needs Pillow even for AdobeRGB: the sRGB "
+                             "profile assigned to sources that decode without one "
+                             "comes from Pillow (pip install pillow)")
+                sys.exit(1)
+            _SRGB_ICC_PATH = _icc_dir / "srgb.icc"
+            _SRGB_ICC_PATH.write_bytes(
+                ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+
+    if OUTPUT_ICC:
+        KEEP_SMALLER = False
+        logger.info("keep-smaller disabled: a verbatim copy would keep the source "
+                    "colour space")
+        if args.workers > 4:
+            logger.warning(f"--output-icc with --workers {args.workers}: each worker "
+                           f"holds two 16-bit PNGs plus an ImageMagick process in "
+                           f"memory (~1 GB per worker on a 45 MP photo). Consider "
+                           f"--workers 4.")
 
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
-                f"workers: {args.workers}")
+                f"workers: {args.workers} | output ICC: {_OUTPUT_ICC_LABEL or 'keep source'}")
     logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
+    if (OUTPUT_ICC and args.mode == 7 and EXPORT_JXL_FOLDER == "16B_JXL_small"
+            and _OUTPUT_ICC_LABEL.lower() not in EXPORT_JXL_FOLDER.lower()):
+        logger.info(f"--output-icc target '{_OUTPUT_ICC_LABEL}' is not part of the "
+                    f"output folder name '{EXPORT_JXL_FOLDER}': consider "
+                    f"--export-jxl-folder 16B_JXL_{_OUTPUT_ICC_LABEL} so the "
+                    f"derivative folder says what colour space it holds")
     if DELETE_SOURCE:
         logger.warning("--delete-source is ARMED: source JXLs will be deleted after "
                        "their outputs are verified")
@@ -3093,6 +3609,7 @@ def main():
 
     items = []
     failures = []
+    n_rename_missing = 0
     for f in files:
         if args.mode == 0:
             if output_root is not None:
@@ -3114,12 +3631,46 @@ def main():
                 sys.exit(2)
             if final_path is None:
                 continue                             # outside the marker/subfolder
+        if args.rename_from:
+            if _same_dir(final_path, f):
+                # In place (mode 8, mode 0 without an output folder): a renamed
+                # "replacement" is a NEW file beside the source — the recursive
+                # scan would pick it up as a fresh input next run, and the
+                # source would never be replaced. Refuse the whole run.
+                logger.error("--rename-from cannot be used in place (mode 8, or mode 0 "
+                             "without an output folder): the renamed file would sit "
+                             "beside its source and be re-processed as a new input.")
+                sys.exit(2)
+            new_name = _apply_rename(final_path.name, args.rename_from, args.rename_to)
+            if not os.path.splitext(new_name)[0].strip():
+                logger.error(f"--rename-from/--rename-to would leave an empty file name "
+                             f"for {f.name}")
+                sys.exit(2)
+            if new_name == final_path.name:
+                n_rename_missing += 1
+            final_path = final_path.with_name(new_name)
         # abspath on both sides: an absolute output next to a relative input
         # (or the reverse) names the SAME file, and missing that made the run
         # write the re-encode straight over its own input instead of taking
         # the atomic in-place path.
         in_place = _same_dir(final_path, f)
         items.append({"src": f, "final": final_path, "in_place": in_place})
+
+    if args.rename_from:
+        logger.info(f"Filename rename: '{args.rename_from}' -> '{args.rename_to}'")
+        if n_rename_missing:
+            logger.warning(f"'{args.rename_from}' not found in {n_rename_missing} file "
+                           f"name(s) — those keep their names")
+
+    # --output-icc writes a derivative NEXT TO the master, never over it: an
+    # in-place item (mode 8, or mode 0 without an output folder) would replace
+    # the source with the converted file and destroy the master.
+    if OUTPUT_ICC and any(it["in_place"] for it in items):
+        logger.error("--output-icc cannot run in place (mode 8, or mode 0 without an "
+                     "output folder): it writes a derivative, and replacing the "
+                     "source would destroy the master. Pick a mode that writes to "
+                     "another folder (1-7).")
+        sys.exit(2)
 
     if not items:
         logger.warning("Nothing to process after folder-mode filtering.")
@@ -3175,6 +3726,17 @@ def main():
     else:
         _ask_batch_resolution(asks)
 
+    # In --output-icc mode a verbatim copy would carry the SOURCE colour space
+    # into a folder that promises the target's: the policy answer "copy" (from
+    # --on-downgrade/--on-regeneration/--jbrd-policy, or an interactive answer)
+    # becomes a skip. Keep-smaller is off too (main() above), same reason.
+    if OUTPUT_ICC:
+        for it in items:
+            if it["action"] == "copy":
+                it["action"] = "skip"
+                it["reason"] += (" | --output-icc: a verbatim copy would keep the "
+                                 "source colour space")
+
     # Duplicates abort: two WRITING actions onto one destination is never allowed.
     _abort_on_duplicate_outputs(
         [(it["src"], it["final"]) for it in items
@@ -3189,6 +3751,36 @@ def main():
     # a refused page vetoes the deletion of its multi-page siblings.
     provenance_refused = []
     refused_ids = set()
+
+    # --output-icc never overwrites a file that is not one of its own
+    # derivatives — even with --overwrite. Pointing --export-jxl-folder at the
+    # master folder would otherwise destroy the masters in place.
+    derived_refused = []
+    if OUTPUT_ICC:
+        existing = [it for it in items
+                    if it["action"] in ("convert",) and it["final"].exists()]
+        if existing:
+            labels = _read_derived_markers_batch([it["final"] for it in existing])
+            for it in existing:
+                lab = labels.get(str(it["final"]), False)
+                if lab is False or lab is None:
+                    reason = ("an existing file at the destination is not a --output-icc "
+                              "derivative (or its markers cannot be read) — refusing to "
+                              "overwrite what may be an archive")
+                    failures.append((str(it["src"]), reason))
+                    derived_refused.append(it)
+                    if args.dry_run:
+                        logger.info(f" DRY | would REFUSE | {it['src'].name} | {reason}")
+                    else:
+                        logger.error(f"REFUSED | {it['src'].name} | {reason}")
+                        _log_rejected_file(str(it["src"]), f"derivative: {reason}")
+                elif lab != _OUTPUT_ICC_LABEL:
+                    _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
+                    logger.info(f" colour target changed ({lab} -> {_OUTPUT_ICC_LABEL}): "
+                                f"re-deriving | {it['src'].name}")
+            if derived_refused:
+                _ids = {id(it) for it in derived_refused}
+                items = [it for it in items if id(it) not in _ids]
     # Also runs in a dry run — as a PREVIEW: the refusals are reported (and
     # counted in the summary's errors) but no item leaves the plan. Gating this
     # on `not args.dry_run` made the simulation promise outputs the real run
@@ -3233,8 +3825,10 @@ def main():
         def _dry_would_skip(it):
             # Mirrors convert_one's SKIP decision (which never applies to an
             # in-place item): an existing, up-to-date output means the real run
-            # reports SKIP, not a conversion.
+            # reports SKIP, not a conversion. A --output-icc item whose existing
+            # output names ANOTHER colour target is re-derived, not skipped.
             return (not it["in_place"] and it["action"] in ("convert", "copy")
+                    and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
                     and _would_skip(it["src"], it["final"]))
 
         # A skipped CONVERT admitted by --delete-skipped is deleted only when
@@ -3276,6 +3870,8 @@ def main():
                 logger.info(f" DRY | SKIP (exists) | {it['src'].name}")
                 continue
             tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
+            if OUTPUT_ICC and it["action"] == "convert":
+                tag = f"DERIVE ({_OUTPUT_ICC_LABEL})"
             extra = f" ({it['reason']})" if it["action"] != "convert" else ""
             place = " (in place)" if it["in_place"] else ""
             logger.info(f" DRY | {tag} | {it['src'].name} -> {it['final']}{place}{extra}")

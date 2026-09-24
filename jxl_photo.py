@@ -522,13 +522,16 @@ _CHILD_SUBFOLDER_GLOBALS = ('EXPORT_TIFF_SUBFOLDER', 'EXPORT_JXL_SUBFOLDER',
 
 
 @contextmanager
-def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = None):
-    """Run a child's own finder/resolver under THIS run's marker and subfolder.
+def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = None,
+                       jxl_folder: Optional[str] = None):
+    """Run a child's own finder/resolver under THIS run's marker, subfolder and
+    modes 6/7 output folder.
 
-    The children read `EXPORT_MARKER` and `EXPORT_*_SUBFOLDER` as module
-    globals, set from CLI flags. The wrapper imports those modules in-process to
-    reuse their path logic, so it has to mirror the flags by assignment — and
-    then put them back, because this process outlives the call.
+    The children read `EXPORT_MARKER`, `EXPORT_*_SUBFOLDER` and
+    `EXPORT_JXL_FOLDER` as module globals, set from CLI flags. The wrapper
+    imports those modules in-process to reuse their path logic, so it has to
+    mirror the flags by assignment — and then put them back, because this
+    process outlives the call.
 
     One context manager instead of two hand-written blocks, because the two had
     already drifted in both directions:
@@ -539,6 +542,10 @@ def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = 
         count is what catches a wrong folder before the HHMM token;
       * `_manifest_output_collisions` applied both and restored NEITHER, leaking
         them into every later use in the same menu session.
+
+    `jxl_folder` matters for the same reason: a custom `--export-jxl-folder`
+    moves the outputs, so the collision mirror and the origin count must see
+    the same destination the child will write.
 
     Restores through `finally`, so a resolver that raises cannot leave the
     module rewritten either.
@@ -553,6 +560,9 @@ def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = 
                 if hasattr(child, name):
                     saved[name] = getattr(child, name)
                     setattr(child, name, subfolder)
+        if jxl_folder and hasattr(child, 'EXPORT_JXL_FOLDER'):
+            saved['EXPORT_JXL_FOLDER'] = child.EXPORT_JXL_FOLDER
+            child.EXPORT_JXL_FOLDER = jxl_folder
         yield child
     finally:
         for name, value in saved.items():
@@ -1622,7 +1632,38 @@ def _dest_folder_names(origin: str, dest: str) -> tuple:
     return ('recovered_jpeg', 'recovered_jpeg')
 
 
-def _export_folder_name(origin: str, dest: str) -> str:
+def _drop_derivative_options(advanced: Dict) -> None:
+    """Forget the recompressor's derivative answers (--output-icc and the
+    --rename-from/--rename-to that the wizard only asks alongside it). Used
+    whenever Step 6 does not offer or does not take the derivative, so an
+    answer from an earlier pass through the step cannot reach the command."""
+    for _k in ('output_icc', 'rename_from', 'rename_to'):
+        advanced.pop(_k, None)
+
+
+def _derivative_in_place_rows(entries: List) -> List:
+    """Manifest rows (source, destination, mode) that would run the
+    recompressor IN PLACE: mode 8, or mode 0 whose Destination is empty or the
+    Source itself (the builder then sends no output, or the same folder).
+    --output-icc and --rename-from refuse those (exit 2 per row)."""
+    rows = []
+    for src, dst, mode in entries:
+        if mode == 8:
+            rows.append((src, dst, mode))
+        elif mode == 0:
+            same = not dst
+            if not same:
+                try:
+                    same = (os.path.normcase(os.path.abspath(str(dst)))
+                            == os.path.normcase(os.path.abspath(str(src))))
+                except (OSError, ValueError):
+                    same = True
+            if same:
+                rows.append((src, dst, mode))
+    return rows
+
+
+def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) -> str:
     """The folder modes 6/7 create under the export marker, by direction.
 
     Keep in sync with EXPORT_*_FOLDER in the scripts. The delete gate used to
@@ -1630,7 +1671,13 @@ def _export_folder_name(origin: str, dest: str) -> str:
     originals was told they would land somewhere they never do (16B_TIFF), and
     a JPEG run was told the same about JXL_jpeg. The whole point of that gate is
     that a wrong destination is visible before the user types the token.
+
+    `override` is the run's `--export-jxl-folder` (the wrapper's
+    `mode_config['export_jxl_folder']`): it only means something for the two
+    directions whose child accepts the flag (TIFF -> JXL and JXL -> JXL).
     """
+    if override and dest == 'jxl' and origin in ('tiff', 'jxl'):
+        return override
     if dest == 'tiff':
         return '16B_TIFF'                       # jxl_tiff_decoder.EXPORT_TIFF_FOLDER
     if dest == 'jxl':
@@ -3097,12 +3144,16 @@ class InteractiveMenu:
             # the panel whose visible count is the thing that catches a wrong
             # folder. The cmd builder passes it as --export-subfolder; mirror it.
             subfolder = _mc.get('export_subfolder')
+            # The modes 6/7 output folder moves the destination (and, for the
+            # recompressor, the folder its recursive scans must skip): the
+            # child's own finders read it as a module global.
+            jxl_folder = _mc.get('export_jxl_folder')
 
             if child is not None:
                 _was_disabled = child.logger.disabled
                 child.logger.disabled = True        # its finders log; this is a preview
                 try:
-                    with _with_child_marker(child, marker, subfolder):
+                    with _with_child_marker(child, marker, subfolder, jxl_folder):
                         fn = getattr(child, finders.get(mode, recursive))
                         return len(fn(root))
                 finally:
@@ -3132,7 +3183,7 @@ class InteractiveMenu:
                 # Same marker AND subfolder the encoder/decoder branch uses: the
                 # transcoder filters modes 6/7 inside its resolver rather than in
                 # a finder, but it reads the same globals.
-                with _with_child_marker(_tr, marker, subfolder):
+                with _with_child_marker(_tr, marker, subfolder, jxl_folder):
                     _decode = (origin == 'jxl')
                     return sum(1 for f in files
                                if _tr.resolve_output_transcode(f, mode, root, _decode)
@@ -3200,6 +3251,7 @@ class InteractiveMenu:
 
         # --- Gate 2: the concrete consequence -----------------------------
         m1_name, m3_name = _dest_folder_names(origin, dest)
+        _jf = (workflow.get('mode_config') or {}).get('export_jxl_folder')
         where = {
             0: "the same folder as each source file",
             1: f"a '{m1_name}' subfolder in each source folder",
@@ -3207,8 +3259,8 @@ class InteractiveMenu:
             3: f"a '{m3_name}' subfolder in each source folder",
             4: "a renamed sibling folder (suffix swap)",
             5: "a sibling folder next to each source folder",
-            6: f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest)}/",
-            7: (f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest)}/"
+            6: f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest, _jf)}/",
+            7: (f"<{self.config.config.export_marker}>/{_export_folder_name(origin, dest, _jf)}/"
                 f" (one subfolder only)"),
             8: "the same folder as each source file (recursive)",
         }.get(mode, "the mode's destination")
@@ -3720,6 +3772,27 @@ class InteractiveMenu:
                     # the intent is explicit, not inherited.
                     mode_config.pop('export_subfolder', None)
 
+            # The modes 6/7 output folder. Only the two directions whose child
+            # accepts --export-jxl-folder offer it; the child validates the
+            # name itself (one plain component, not the marker, not the input
+            # subfolder) and exits 2 with a clear message the wrapper shows.
+            if dest == 'jxl' and origin in ('tiff', 'jxl'):
+                _script_default = _export_folder_name(origin, dest)
+                _folder_default = (mode_config.get('export_jxl_folder')
+                                   or (self.config.config.last_mode_config or {}).get('export_jxl_folder')
+                                   or _script_default)
+                if RICH_AVAILABLE and console:
+                    _folder = Prompt.ask("Output folder name under the marker",
+                                         default=_folder_default)
+                else:
+                    _folder = input(f"Output folder name under the marker "
+                                    f"[{_folder_default}]: ").strip() or _folder_default
+                _folder = _strip_surrounding_quotes(_folder).strip().strip('/\\')
+                if _folder == _script_default:
+                    mode_config.pop('export_jxl_folder', None)
+                else:
+                    mode_config['export_jxl_folder'] = _folder
+
         elif mode == 2:
             default_out = Path(workflow['input_dir']).parent / "output"
             if RICH_AVAILABLE and console:
@@ -3861,6 +3934,36 @@ class InteractiveMenu:
                 rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
                                 choices=["copy", "skip", "convert"], default="convert")
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
+                if workflow['mode'] in (0, 8):
+                    console.print("[dim]Colour conversion needs a separate output folder — "
+                                  "not offered in modes 0/8 (in place).[/dim]")
+                    # Nothing from an earlier pass through this step may
+                    # survive: the guard in execute_workflow would refuse the
+                    # run for an option the user was never offered here.
+                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+                else:
+                    console.print("[dim]A colour-converted derivative (16-bit, from the source's "
+                                  "own profile) instead of a plain recompression?[/dim]")
+                    icc_target = Prompt.ask(
+                        "Output colour space: keep / sRGB / AdobeRGB / path to .icc",
+                        default="keep").strip()
+                    _adv = workflow.setdefault('advanced_options', {})
+                    if icc_target and icc_target.lower() != "keep":
+                        _adv['output_icc'] = icc_target
+                        _rename_from = Prompt.ask(
+                            "Rename text in the output file names (e.g. ProPhoto) — "
+                            "empty = keep names", default="").strip()
+                        if _rename_from:
+                            _adv['rename_from'] = _rename_from
+                            _adv['rename_to'] = Prompt.ask("Replace it with", default="").strip()
+                        else:
+                            _adv.pop('rename_from', None)
+                            _adv.pop('rename_to', None)
+                    else:
+                        # "keep": the rename belongs to the derivative question,
+                        # so an earlier answer must not ride along into a plain
+                        # recompression.
+                        _drop_derivative_options(_adv)
             elif 'lossy' in conv_type:
                 # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
                 # (convert_lossy is the only conversion type containing 'lossy')
@@ -3980,6 +4083,25 @@ class InteractiveMenu:
                 rg_input = input("would add another generation (each adds ~0.2-0.6 dB of loss on top of the byte savings): copy/skip/convert [convert]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = (
                     rg_input if rg_input in ("copy", "skip", "convert") else "convert")
+                if workflow['mode'] in (0, 8):
+                    print("Colour conversion needs a separate output folder — not offered "
+                          "in modes 0/8 (in place).")
+                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+                else:
+                    icc_input = input("Output colour space: keep / sRGB / AdobeRGB / path to .icc [keep]: ").strip()
+                    _adv = workflow.setdefault('advanced_options', {})
+                    if icc_input and icc_input.lower() != "keep":
+                        _adv['output_icc'] = icc_input
+                        _rename_from = input("Rename text in the output file names (e.g. ProPhoto) — "
+                                             "empty = keep names: ").strip()
+                        if _rename_from:
+                            _adv['rename_from'] = _rename_from
+                            _adv['rename_to'] = input("Replace it with: ").strip()
+                        else:
+                            _adv.pop('rename_from', None)
+                            _adv.pop('rename_to', None)
+                    else:
+                        _drop_derivative_options(_adv)
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -4080,7 +4202,8 @@ class InteractiveMenu:
 
         def _carry_recompress_policies(target: Dict) -> None:
             for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
-                       'jbrd_policy', 'no_keep_smaller'):
+                       'jbrd_policy', 'no_keep_smaller',
+                       'output_icc', 'rename_from', 'rename_to'):
                 if _k in _prev_adv:
                     target[_k] = _prev_adv[_k]
 
@@ -4645,6 +4768,8 @@ class InteractiveMenu:
                 table.add_row("Export marker:", _mc.get('export_marker') or self.config.config.export_marker)
                 if workflow['mode'] == 7:
                     table.add_row("Export subfolder:", _mc.get('export_subfolder') or "(all)")
+                if _mc.get('export_jxl_folder'):
+                    table.add_row("Output folder:", _mc['export_jxl_folder'])
             elif workflow['mode'] == 2 and _mc.get('output_dir'):
                 table.add_row("Output dir:", _mc['output_dir'])
 
@@ -4674,6 +4799,11 @@ class InteractiveMenu:
                 table.add_row("If no gain possible:", _dg or "copy (child default: ask)")
                 _rg = workflow.get('advanced_options', {}).get('on_regeneration')
                 table.add_row("If already re-encoded:", _rg or "copy (child default: ask)")
+                _adv = workflow.get('advanced_options', {})
+                table.add_row("Output colour space:", _adv.get('output_icc') or "keep source")
+                if _adv.get('rename_from'):
+                    table.add_row("Rename:",
+                                  f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 table.add_row("Effort:", str(workflow['effort']))
@@ -4706,6 +4836,8 @@ class InteractiveMenu:
                 print(f"Export marker: {_mc.get('export_marker') or self.config.config.export_marker}")
                 if workflow['mode'] == 7:
                     print(f"Export subfolder: {_mc.get('export_subfolder') or '(all)'}")
+                if _mc.get('export_jxl_folder'):
+                    print(f"Output folder: {_mc['export_jxl_folder']}")
             elif workflow['mode'] == 2 and _mc.get('output_dir'):
                 print(f"Output dir: {_mc['output_dir']}")
             print(f"If exists: {ow_label}")
@@ -4736,6 +4868,10 @@ class InteractiveMenu:
                 print(f"If no gain possible: {_dg or 'copy (child default: ask)'}")
                 _rg = workflow.get('advanced_options', {}).get('on_regeneration')
                 print(f"If already re-encoded: {_rg or 'copy (child default: ask)'}")
+                _adv = workflow.get('advanced_options', {})
+                print(f"Output colour space: {_adv.get('output_icc') or 'keep source'}")
+                if _adv.get('rename_from'):
+                    print(f"Rename: '{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 print(f"Effort: {workflow['effort']}")
@@ -4795,6 +4931,31 @@ class InteractiveMenu:
             self._print_error(f"Script not found: {script_path}")
             return False
         script = str(script_path)
+
+        # The derivative options have no in-place form and never delete (same
+        # rules as the direct-run guard in execute_workflow). Every manifest row
+        # gets the same options, so an in-place row would only fail with exit 2
+        # after the run had started: refuse the whole manifest up front, naming
+        # the rows, before anything is charged or written.
+        if origin == 'jxl' and dest == 'jxl' and (advanced.get('output_icc')
+                                                  or advanced.get('rename_from')):
+            if advanced.get('output_icc') and advanced.get('delete_source'):
+                self._print_error("--output-icc writes a derivative and never deletes "
+                                  "the source — drop the delete option.")
+                return False
+            _bad = _derivative_in_place_rows(manifest_entries)
+            if _bad:
+                _what = ("Colour-converted derivatives" if advanced.get('output_icc')
+                         else "--rename-from")
+                self._print_error(f"{_what} cannot run in place, and {len(_bad)} manifest "
+                                  f"row(s) would (mode 8, or mode 0 with Destination = "
+                                  f"Source). Give them another mode (1-7) or a different "
+                                  f"Destination:")
+                for s_, d_, m_ in _bad[:5]:
+                    print(f"  mode {m_}: {s_}")
+                if len(_bad) > 5:
+                    print(f"  ... and {len(_bad) - 5} more")
+                return False
 
         # Create the analyzer once — prefer the workflow's mode_config marker (a
         # manifest run with a custom marker must detect modes with the same
@@ -4937,6 +5098,9 @@ class InteractiveMenu:
                 origin=origin, dest=dest,
                 export_marker=_marker,
                 export_subfolder=workflow.get('mode_config', {}).get('export_subfolder'),
+                export_jxl_folder=workflow.get('mode_config', {}).get('export_jxl_folder'),
+                rename_from=(workflow.get('advanced_options') or {}).get('rename_from', ''),
+                rename_to=(workflow.get('advanced_options') or {}).get('rename_to', ''),
                 cross_sink=cross_out_folders,
             )
         if collisions:
@@ -5564,6 +5728,9 @@ class InteractiveMenu:
                                     origin: str = None, dest: str = None,
                                     export_marker: str = None,
                                     export_subfolder: str = None,
+                                    export_jxl_folder: str = None,
+                                    rename_from: str = '',
+                                    rename_to: str = '',
                                     cross_sink: Optional[Dict[int, Set[str]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
@@ -5625,6 +5792,16 @@ class InteractiveMenu:
             except ImportError:
                 _child = None
             if _child is not None:
+                def _rename_out(p: Optional[Path]) -> Optional[Path]:
+                    """--rename-from changes the output NAME at planning time
+                    (all modes, 0/1/2 included): mirror it, so a collision the
+                    rename creates is caught here too (folders are unchanged)."""
+                    if (p is not None and rename_from
+                            and _child.__name__ == 'jxl_recompressor'):
+                        return p.with_name(
+                            _child._apply_rename(p.name, rename_from, rename_to))
+                    return p
+
                 def resolver(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
                     # Mode 0 HONORS the Destination column: the cmd builder
                     # always passes it as the child's output positional, and
@@ -5636,11 +5813,11 @@ class InteractiveMenu:
                     # src_root and a Destination equal to the Source resolves
                     # identically: one branch covers both.
                     if mode in (0, 2):
-                        return Path(dest_cell) / (f.stem + out_ext)
+                        return _rename_out(Path(dest_cell) / (f.stem + out_ext))
                     if mode == 8:
-                        return f.parent / (f.stem + out_ext)
+                        return _rename_out(f.parent / (f.stem + out_ext))
                     if mode == 1:
-                        return src_root / conv_folder / (f.stem + out_ext)
+                        return _rename_out(src_root / conv_folder / (f.stem + out_ext))
                     if _child.__name__ == 'jxl_jpeg_transcoder':
                         # The transcoder has TWO resolvers and this used
                         # resolve_output_transcode for every direction — the
@@ -5663,7 +5840,16 @@ class InteractiveMenu:
                                 (dest if dest != 'jpg' else 'jpeg'),
                                 output_root=src_root, decode=True)
                         return _child.resolve_output_transcode(f, mode, src_root, _dec)
-                    return _child.resolve_output(f, mode, src_root)
+                    return _rename_out(_child.resolve_output(f, mode, src_root))
+
+                def _stem_key(f: Path) -> str:
+                    """The output stem this source will land under — renamed when
+                    the recompressor's --rename-from applies, exactly like the
+                    child plans it."""
+                    if rename_from and _child.__name__ == 'jxl_recompressor':
+                        name = _child._apply_rename(f.name, rename_from, rename_to)
+                        return os.path.normcase(os.path.splitext(name)[0])
+                    return os.path.normcase(f.stem)
 
                 # Which files would the child itself skip on its scan? Mirror
                 # EXACTLY that — a wrong skip set works both ways: it reports
@@ -5736,7 +5922,7 @@ class InteractiveMenu:
                 return
             key = os.path.normcase(str(out_folder))
             seen = by_dest.setdefault(key, {})
-            stem = os.path.normcase(f.stem)
+            stem = _stem_key(f) if _child is not None else os.path.normcase(f.stem)
             prev = seen.get(stem)
             if prev is None:
                 seen[stem] = f
@@ -5757,7 +5943,8 @@ class InteractiveMenu:
             _child_logger_was_disabled = _child.logger.disabled
             _child.logger.disabled = True
             _marker_stack.enter_context(
-                _with_child_marker(_child, export_marker, export_subfolder))
+                _with_child_marker(_child, export_marker, export_subfolder,
+                                   export_jxl_folder))
         try:
             for ei, (source, dest_path, mode) in enumerate(manifest_entries):
                 if not dest_path:
@@ -5844,8 +6031,10 @@ class InteractiveMenu:
                     # Outputs are named from the stem, so a stem clash is a clash
                     # whatever the target extension is. normcase (not .lower()):
                     # case-sensitive filesystems treat Foto.tif/foto.tif as
-                    # distinct files and must NOT collide.
-                    stem = os.path.normcase(f.stem)
+                    # distinct files and must NOT collide. The recompressor's
+                    # --rename-from renames that stem at planning time.
+                    stem = (_stem_key(f) if _child is not None
+                            else os.path.normcase(f.stem))
                     prev = seen.get(stem)
                     if prev is None:
                         seen[stem] = f
@@ -6027,6 +6216,12 @@ class InteractiveMenu:
         export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
         if export_subfolder:
             cmd.extend(['--export-subfolder', export_subfolder])
+        # Only the TIFF->JXL and JXL->JXL children accept --export-jxl-folder;
+        # emitting it for the decoder or the transcoder is argparse exit 2.
+        if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'jxl')):
+            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
+            if export_jxl_folder:
+                cmd.extend(['--export-jxl-folder', export_jxl_folder])
 
         if origin == 'tiff' and dest == 'jxl':
             distance = workflow.get('distance', 0.1)
@@ -6135,6 +6330,11 @@ class InteractiveMenu:
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
                 cmd.append('--no-keep-smaller')
+            if advanced.get('output_icc'):
+                cmd.extend(['--output-icc', advanced['output_icc']])
+            if advanced.get('rename_from'):
+                cmd.extend(['--rename-from', advanced['rename_from'],
+                            '--rename-to', advanced.get('rename_to') or ''])
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('overwrite'):
@@ -6465,6 +6665,26 @@ class InteractiveMenu:
             self._print_error("Ensure scripts are in the same folder as jxl_photo_v2.py")
             return False
 
+        # Colour-converted derivatives and output renaming have no in-place
+        # form, and a derivative never deletes. Refused here, BEFORE the HHMM
+        # token is charged for a run the child would reject with exit 2.
+        _adv_pre = workflow.get('advanced_options') or {}
+        if origin == 'jxl' and dest == 'jxl':
+            if _adv_pre.get('output_icc'):
+                if workflow.get('mode') in (0, 8):
+                    self._print_error("Colour-converted derivatives cannot run in place "
+                                      "(modes 0/8) — pick mode 1-7.")
+                    return False
+                if _adv_pre.get('delete_source'):
+                    self._print_error("--output-icc writes a derivative and never deletes "
+                                      "the source — drop the delete option.")
+                    return False
+            if _adv_pre.get('rename_from') and workflow.get('mode') in (0, 8):
+                self._print_error("--rename-from cannot be used in place (modes 0/8): the "
+                                  "renamed file would sit beside its source and be "
+                                  "re-processed as a new input.")
+                return False
+
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
         # recompressor proves provenance on its skipped path now.) Applied here
@@ -6520,6 +6740,9 @@ class InteractiveMenu:
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
                 cmd.extend(['--export-subfolder', export_subfolder])
+            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
+            if export_jxl_folder:
+                cmd.extend(['--export-jxl-folder', export_jxl_folder])
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -6671,6 +6894,9 @@ class InteractiveMenu:
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
                 cmd.extend(['--export-subfolder', export_subfolder])
+            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
+            if export_jxl_folder:
+                cmd.extend(['--export-jxl-folder', export_jxl_folder])
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -6702,6 +6928,11 @@ class InteractiveMenu:
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
                 cmd.append('--no-keep-smaller')
+            if advanced.get('output_icc'):
+                cmd.extend(['--output-icc', advanced['output_icc']])
+            if advanced.get('rename_from'):
+                cmd.extend(['--rename-from', advanced['rename_from'],
+                            '--rename-to', advanced.get('rename_to') or ''])
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('overwrite'):
@@ -7299,8 +7530,8 @@ class InteractiveMenu:
             # mode_config is mode-SPECIFIC: a stale export_subfolder from a
             # previous mode-7 run must not leak into mode 0/3/6 repeats
             # (it changes child behavior, e.g. the decoder-output filter).
-            _keep = {6: ('export_marker',),
-                     7: ('export_marker', 'export_subfolder'),
+            _keep = {6: ('export_marker', 'export_jxl_folder'),
+                     7: ('export_marker', 'export_subfolder', 'export_jxl_folder'),
                      # Manifest repeat (99): the analyzer and the cmd builder
                      # take the marker from mode_config FIRST and only fall
                      # back to the global — so an empty mode_config made a
@@ -7312,7 +7543,7 @@ class InteractiveMenu:
                      # mode's fields pass through the _session_number_error
                      # validation up top instead of being discarded, and
                      # markers are strings, so preservation is the guard here.
-                     99: ('export_marker', 'export_subfolder')}
+                     99: ('export_marker', 'export_subfolder', 'export_jxl_folder')}
             _src = session.get('last_mode_config') or {}
             workflow['mode_config'] = {k: _src[k] for k in _keep.get(workflow['mode'], ()) if k in _src}
 

@@ -493,6 +493,12 @@ _EXPORT/
 
 ### Step 5 — Mode-specific configuration
 - Modes 6/7: Confirm or change the `_EXPORT` marker name
+- Modes 6/7, TIFF→JXL and JXL→JXL: the **output folder name under the marker**
+  (default `16B_JXL` for TIFF→JXL, `16B_JXL_small` for JXL→JXL; passed as
+  `--export-jxl-folder`). This is what lets one preset write masters to
+  `_EXPORT/16B_JXL` and another write derivatives to `_EXPORT/16B_JXL_sRGB`.
+  The child validates the name (one plain component, not the marker, not the
+  input subfolder) and exits 2 with a clear message if it is unusable
 - Mode 2: Specify the output directory for merged files
 
 ### Step 6 — Parameters
@@ -503,6 +509,17 @@ Basic parameters always shown:
   anything (same or lower distance than the file already is): ask / copy / skip /
   convert. The wizard decides it up front and passes `--on-downgrade` to the
   child, which never prompts on an invisible stdin
+- **Output colour space** — JXL→JXL only: `keep` (a normal recompression),
+  `sRGB`, `AdobeRGB`, or a path to an `.icc` file. Anything but `keep` writes a
+  **colour-converted 16-bit derivative** (passed as `--output-icc`), and then
+  asks for the **rename text** (`--rename-from`/`--rename-to`, e.g.
+  `ProPhoto-g22` → `sRGB`) so the file name follows the colour space. Not
+  offered in modes 0/8: a derivative can never replace its own master, and the
+  child refuses those runs. Answering `keep` (or picking mode 0/8) also clears
+  a rename answered on an earlier pass through the step. A **manifest** run
+  with a colour space or a rename is refused up front, before any child
+  starts, when a row would run in place (mode 8, or mode 0 with Destination =
+  Source) — the rows are listed
 - **Staging directory** — SSD staging for HDD collections
 - **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
 - **TIFF compression** — zip / lzw / none
@@ -588,6 +605,9 @@ Some options are available directly in the wizard, others must be edited in the 
 | Skip validation | 6A | JPEG↔JXL (risky) |
 | Output suffix | 6A | JPEG↔JXL |
 | Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
+| Output folder under the marker | Step 5 | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
+| Output colour space (derivative) | Step 6 | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
+| Rename in output file names | Step 6 | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
 | Expert flags | 6B | Custom CLI args |
 
 ### ⚙️ Available in option 4 (Edit default settings)

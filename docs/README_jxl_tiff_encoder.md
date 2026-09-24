@@ -283,6 +283,16 @@ requested via `EXPORT_TIFF_SUBFOLDER`; mode 6 has no requested subfolder, so it
 skips **all** of them — a leftover `EXPORT_TIFF_SUBFOLDER` value does not
 exempt one there.
 
+The output folder is `EXPORT_MARKER/EXPORT_JXL_FOLDER` (default `_EXPORT/16B_JXL`).
+`--export-jxl-folder` overrides it per run, so different presets can write to
+different folders — e.g. a separate "Print" TIFF export encoded at a lower
+distance, with its own output folder:
+
+```
+py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder TIFF16 --distance 0.05
+py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder Print --export-jxl-folder PRINT_JXL --distance 0.5
+```
+
 ---
 
 ## Output modes
@@ -405,6 +415,14 @@ Options:
                   Folder name marker for modes 6/7 (default: the EXPORT_MARKER
                   setting in the script). Matched case-insensitively on
                   folder names that START or END with it.
+  --export-jxl-folder NAME
+                  [Modes 6/7] Output folder created under the export marker
+                  (default: the EXPORT_JXL_FOLDER setting, '16B_JXL'). Overrides
+                  EXPORT_JXL_FOLDER. Must be ONE plain folder name: not empty,
+                  not '.'/'..', no path characters, must not itself match the
+                  export marker (it would become a second anchor) and must not
+                  equal the --export-subfolder (outputs would land among the
+                  sources). Ignored, with a warning, outside modes 6/7.
   --icc-cache-dir D  Where the ICC round-trip test caches its verdicts (default:
                   the ICC_CACHE_DIR_OVERRIDE setting, else a folder beside the
                   script). One entry per profile; see "ICC strategy" below

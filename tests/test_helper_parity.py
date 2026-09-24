@@ -45,6 +45,9 @@ SHARED_HELPERS = [
     # deleting sources in a layout another one guards.
     "_run_collapses_structure",
     "_marker_matches",
+    # --export-jxl-folder: the same name rules must reject the same values in
+    # the encoder and the recompressor.
+    "_validate_export_folder_name",
     "_replace_suffix_token",
     "_is_relative_to",
     "_abort_on_duplicate_outputs",

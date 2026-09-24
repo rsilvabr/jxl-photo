@@ -155,12 +155,14 @@ Same semantics as the other scripts in the toolkit:
 | 3 | Recursive → mirror tree, `JXL_recompressed/` inside each source folder |
 | 4 | Recursive → folder token replace (`16B_JXL` → `16B_JXL_small`; `_JXL_small` appended if no token) |
 | 5 | Recursive → sibling `JXL_recompressed/` next to each source folder |
-| 6 | Capture One `_EXPORT` workflow: files under marker folders → `<_EXPORT>/16B_JXL_small/` |
+| 6 | Capture One `_EXPORT` workflow: files under marker folders → `<_EXPORT>/16B_JXL_small/` (folder name configurable with `--export-jxl-folder`) |
 | 7 | Mode 6 restricted to one export subfolder (`--export-subfolder`) |
 | 8 | Recursive **in place**: each JXL is replaced next to itself (confirmation required) |
 
 Recursive scans skip this tool's **own output folders** below the input root
-(`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`), so a
+(`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — plus
+the modes 6/7 output folder configured via `EXPORT_JXL_FOLDER` /
+`--export-jxl-folder` (e.g. a derivative folder such as `16B_JXL_sRGB`), so a
 re-run never eats its own output. Pointing the input **at** such a folder to
 compress it again is legitimate and works — only descendants are filtered.
 
@@ -218,6 +220,110 @@ Three interactive confirmations guard the deletion unless
 own confirmation and passes this flag so the child never prompts on an
 invisible stdin.
 
+## Colour-converted derivatives (`--output-icc`)
+
+`--output-icc sRGB|AdobeRGB|<path to .icc>` writes a **colour-converted
+derivative** instead of a plain recompression: the master is decoded at 16
+bits, converted with ImageMagick from its own profile (fixed **relative
+colorimetric + black point compensation**) and re-encoded at the requested
+`--distance` — still **16 bits** (8-bit lossy JXL was measured to be no
+smaller, so there is no 8-bit option). Use it to make light delivery copies
+from the masters, e.g. a ~4 MB sRGB file to replace a JPEG:
+
+```
+Capture One  ->  _EXPORT/TIFF16/*.tif   (16-bit ProPhoto)
+
+# master (as usual)
+py jxl_tiff_encoder.py "F:\Fotos\2025" --mode 7 --export-subfolder TIFF16 --distance 0.05
+    ->  _EXPORT/16B_JXL/*.jxl
+
+# light 16-bit sRGB derivative (replaces the JPEG), profile swapped in the name
+py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL ^
+     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync ^
+     --rename-from ProPhoto-g22 --rename-to sRGB
+    ->  _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
+```
+
+| Target | What it is |
+|---|---|
+| `sRGB` | built-in sRGB (Pillow/LittleCMS); needs Pillow |
+| `AdobeRGB` (also `adobe`, `adobergb1998`) | built-in Adobe RGB (1998)-compatible matrix/TRC profile (verified: 0 difference from Adobe's own profile in 8 bits at intents 0 and 1, and cjxl records D65 / 0.64, 0.33 · 0.21, 0.71 · 0.15, 0.06) |
+| any path to `.icc`/`.icm` | a real **RGB** profile; CMYK/grey files are refused before the batch starts |
+
+The derivative is built **from the master JXL**, not from the TIFF: measured
+on a 16 MP ProPhoto photo, master d=0.05 → sRGB d=1.0 gave 38.086 dB against a
+direct encode of the TIFF at 38.102 dB — a 0.017 dB difference, at the same
+size. "Keep the original colour space" is simply not passing `--output-icc`.
+
+Guarantees, all fail-closed:
+
+- **Never in place.** Modes 8 and 0-without-output are refused (exit 2): the
+  converted file would replace the master. Pick a mode that writes to another
+  folder (1–7).
+- **Never deletes.** `--delete-source`/`--delete-skipped` with `--output-icc`
+  are refused (exit 2), and `--verify-roundtrip` too (it compares against the
+  source, which a converted derivative no longer matches).
+- **Never overwrites what is not its own derivative**, even with
+  `--overwrite`: an existing file at the destination without a
+  `jxlphoto-derived:` token (or whose markers cannot be read) is REFUSED, so
+  pointing `--export-jxl-folder` at the master folder cannot destroy the
+  masters.
+- **Re-derives when the target changes.** Each output records its target as
+  `jxlphoto-derived:<label>` (`sRGB` / `AdobeRGB` / `icc-<md5[:12]>`); a run
+  with another target re-derives instead of trusting (and skipping) the old
+  file. An identical re-run with `--sync` SKIPs normally.
+- **Removes the archive provenance**: `jxlphoto-src:`/`jxlphoto-srcsum:` are
+  dropped (a derivative must never prove the original TIFF is archived — the
+  encoder would otherwise accept it under `--delete-skipped`), and the
+  `ICC:<base64>` blob in `CreatorTool` is replaced by the target profile, so
+  decoding the derivative to TIFF labels it with the colour space its pixels
+  are really in.
+- `copy` policies (downgrade/regeneration/jbrd) become **skip** and
+  keep-smaller is turned **off**: a verbatim copy would carry the source
+  colour space into a folder that promises the target's.
+
+Costs and notes:
+
+- Each worker holds two 16-bit PNGs plus an ImageMagick process in memory
+  (≈1 GB per worker on a 45 MP photo); above `--workers 4` the run logs a
+  warning. The intermediates live in `TEMP_DIR` and are removed per file.
+- `--output-icc` needs `djxl` and `magick` on PATH, plus Pillow (even for
+  AdobeRGB: the sRGB profile assigned to sources that decode without one comes
+  from Pillow).
+- The usual classification still applies: a derivative at the **same**
+  distance as the master (master d=0.05 → sRGB d=0.05) reads as a
+  "downgrade" and the default policy would skip it — pass
+  `--on-downgrade convert` for that.
+- To decode only the masters to TIFF later, use the decoder in mode 7 with
+  `--export-subfolder 16B_JXL` (mode 6 would also pick the derivative folder).
+
+## Renaming the outputs (`--rename-from` / `--rename-to`)
+
+`--rename-from TEXT --rename-to TEXT` swaps a piece of the output **file name**
+at planning time — the semantics are exactly the transcoder's: literal,
+case-sensitive, only the **first** occurrence, only in the stem (the extension
+never changes). A name without the token is kept, with a warning naming how
+many files were left alone. The rename applies to any run, with or without
+`--output-icc` — this is how the profile in the name follows the derivative:
+
+```
+py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL ^
+     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync ^
+     --rename-from ProPhoto-g22 --rename-to sRGB
+    master:    _EXPORT/16B_JXL/_DSC0013_ProPhoto-g22_v1.jxl
+    derivative: _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
+```
+
+The name is changed **before** the run plans, so the sync finds the renamed
+output on the next run, the non-derivative refusal and the duplicate-output
+abort see the real destination, and two sources collapsing onto one renamed
+name abort the run (exit 2) instead of overwriting each other.
+
+In-place runs (mode 8, or mode 0 without an output folder) are **refused**
+(exit 2): a renamed "replacement" is a new file beside its source, which the
+next recursive scan would pick up as a fresh input while the source is never
+replaced.
+
 ## All flags
 
 ```
@@ -238,6 +344,14 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --on-unknown POL      ask/copy/skip/convert for files with no d=/e= record (default: convert)
 --jbrd-policy POL     copy/skip/convert for JPEG-recoverable JXLs (default: copy)
 --no-keep-smaller     Keep the re-encoded file even when it is not smaller
+--output-icc TARGET   sRGB / AdobeRGB / path to an RGB .icc: write a
+                      16-bit colour-converted derivative instead of a plain
+                      recompression. Never in place, never with --delete-source.
+                      See "Colour-converted derivatives" above
+--rename-from TEXT    Replace this text in each output file name (literal,
+                      case-sensitive, first occurrence, extension untouched;
+                      same semantics as the transcoder's flag)
+--rename-to TEXT      Replacement for --rename-from (may be empty)
 --encode-tag MODE     xmp/software/off — where to record the new d=/e= (default: xmp)
 --delete-source       Delete each source JXL after its output is verified
 --delete-skipped      Also delete sources whose output already existed
@@ -249,6 +363,12 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --no-preflight        Skip the advisory free-space check
 --export-marker NAME  Marker folder name for modes 6/7 (default: _EXPORT)
 --export-subfolder N  Mode 7: only files under EXPORT_MARKER/<name>
+--export-jxl-folder NAME
+                      [Modes 6/7] Output folder under the marker (default:
+                      EXPORT_JXL_FOLDER, '16B_JXL_small'). Must be one plain
+                      folder name that is not the marker and not the input
+                      subfolder. The configured folder is skipped as a source
+                      by later recursive scans
 --dry-run             Simulate: nothing written, copied, replaced or deleted
 --summary-json        Machine-readable ##JXLSUM## line consumed by jxl_photo.py
                       (hidden from the help text; not a user-facing flag)
