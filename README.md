@@ -48,7 +48,11 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 | JXL 16-bit lossy `d=0.1` | ~34 MB |
 | JXL 16-bit lossy `d=1.0` (visually lossless) | ~8 MB |
 
-I have tested with different settings and posted on reddit, [click here](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/), [here](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) and [here](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/) — the third measures how badly lossy JXL degrades when re-encoded again and again, which is why the recompressor refuses counterproductive re-encodes.
+The measurements behind these settings are posted on r/jpegxl:
+
+- [Edit stress test](https://www.reddit.com/r/jpegxl/comments/1s6k718/edit_stress_test_lossy_jxl_under_heavy_editing/) — how a lossy 16-bit JXL holds up under heavy editing.
+- [Distance and SNR, 16-bit vs 8-bit JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) — how much signal each `--distance` keeps, compared with an 8-bit JPEG.
+- [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/) — how badly lossy JXL degrades when re-encoded again and again, which is why the recompressor refuses counterproductive re-encodes.
 
 ---
 
@@ -76,6 +80,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - **JPEG-recoverable JXLs (jbrd) are copied verbatim by default** — recompressing would destroy the bit-exact JPEG recovery and its MD5 binding
 - **Keep-smaller net**: a re-encode that is not smaller than the source is replaced by the original bytes, so a run can never grow the archive
 - `--delete-source` with the same gates as the other scripts (integrity at the final path, MD5 match for copies, optional `--verify-roundtrip`)
+- **Colour-converted derivatives** *(v2.2.0)*: `--output-icc sRGB|AdobeRGB|<file.icc>` makes a light **16-bit** copy of a master in another colour space (e.g. a d=1.0 sRGB set that replaces the JPEG exports), with `--rename-from/--rename-to` to swap the profile name in the file names. A derivative is never written in place, never deletes, never overwrites anything that is not its own derivative, and never counts as proof that the original TIFF is archived
 
 ### 5. **Professional Workflow Support**
 - Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
@@ -83,6 +88,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 - Sync mode (reconvert only changed files)
 - Staging SSD support for large collections
 - Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`)
+- Choose the Capture One / Lightroom export output folder per run (`--export-jxl-folder`, *v2.2.0*) — e.g. masters in `_EXPORT/16B_JXL`, a separate print export in `_EXPORT/PRINT_JXL`, sRGB derivatives in `_EXPORT/16B_JXL_sRGB`
 
 ### 6. **Archive and replace** *(v2.0.0)*
 - `--delete-source` in **every** mode — convert into a separate tree and drop the originals
@@ -107,7 +113,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 
 ---
 
-> **⚠️ Upgrading from v1.9.1–v2.0.3?** Read the [notices for upgraders](#notices-for-upgraders) before running anything destructive: saved command lines changed behavior in v2.0.0, and JPEG → JXL archives made with v2.0.0–v2.0.3 may need the jbrd repair.
+> **⚠️ Upgrading from an earlier release?** Read the [notices for upgraders](#notices-for-upgraders) before running anything destructive: v2.2.0 refuses some TIFFs earlier releases archived wrongly, saved command lines changed behavior in v2.0.0, and JPEG → JXL archives made with v2.0.0–v2.0.3 may need the jbrd repair.
 
 ---
 
@@ -119,7 +125,7 @@ I have tested with different settings and posted on reddit, [click here](https:/
 | [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation; multi-page TIFF splitting |
 | [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode; reconstructs multi-page TIFFs |
 | [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
-| [`jxl_recompressor.py`](jxl_recompressor.py) | JXL → JXL recompressor | Shrinks an existing archive to a new distance/effort; refuses counterproductive re-encodes (copy/skip/ask), keeps metadata and provenance |
+| [`jxl_recompressor.py`](jxl_recompressor.py) | JXL → JXL recompressor | Shrinks an existing archive to a new distance/effort; refuses counterproductive re-encodes (copy/skip/ask), keeps metadata and provenance; colour-converted 16-bit derivatives (sRGB/AdobeRGB/any RGB ICC) |
 
 ---
 
@@ -419,7 +425,13 @@ py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run
 
 # Replace the archive in place, deleting nothing until verified
 py jxl_recompressor.py "F:\Photos\Archive" --mode 8 --distance 1.0 --verify-roundtrip
+
+# Light 16-bit sRGB derivatives of the Capture One masters, profile swapped in the name
+#   _EXPORT/16B_JXL/_DSC0013_ProPhoto-g22_v1.jxl -> _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
+py jxl_recompressor.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync --rename-from ProPhoto-g22 --rename-to sRGB
 ```
+
+A derivative is built from the master JXL, not the TIFF — measured on a real ProPhoto export, the extra generation costs 0.017 dB against a direct encode of the TIFF, at the same size. See [Colour-converted derivatives](docs/README_jxl_recompressor.md#colour-converted-derivatives---output-icc).
 
 ### After conversion
 Depending on your needs, three common approaches:
@@ -644,6 +656,15 @@ See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical det
 
 ## Notices for upgraders
 
+### ⚠️ Upgrading to v2.2.0 from any earlier release: four things to check
+
+The audits behind v2.2.0 found paths where earlier releases produced a wrong archive or deleted a source they should not have. v2.2.0 refuses or keeps in every one of them; what it cannot do is repair what an earlier run already did:
+
+- **TIFFs in CIELAB, YCbCr or MINISWHITE photometric** were archived by the encoder as if they were RGB/MINISBLACK — wrong colours, or inverted tones — and reported as a clean encode. v2.2.0 refuses them with a per-file reason. Capture One / Lightroom / NX Studio exports are RGB and unaffected; if you archived scans or files from other tools, spot-check them before discarding the TIFFs.
+- **`jxl_tiff_decoder.py --matrix --delete-source`** dropped the alpha channel and deleted the JXL anyway. Under `--matrix` the sources are now always kept.
+- **`jxl_jpeg_transcoder.py --force-convert --distance 0 --delete-source`** broke the JPEG reconstruction data and deleted the original JPEG without testing it. The JXLs are still valid images; the bit-exact JPEG is not recoverable from them. `--repair-jbrd --dry-run` tests the reconstruction of every JXL in a folder and reports the ones that fail.
+- **`jxl_recompressor.py --delete-source --delete-skipped` in modes 1/3** could delete a source JXL when a same-named output written from a *different* photo already existed. It now requires the provenance proof in every mode.
+
 ### ⚠️ JPEG → JXL archives made with v2.0.0 – v2.0.3: check them before discarding the JPEGs
 
 Those versions wrote their provenance marker into the XMP of every JXL — including the lossless JPEG transcodes (`jbrd`). For a JPEG that already carried XMP (typical of Lightroom / Capture One exports) that makes `djxl --reconstruct_jpeg` **fail**: the original JPEG is no longer recoverable bit-exactly, and `--delete-source` deleted those JPEGs anyway. JPEGs without XMP were not affected. The fix stops writing markers into `jbrd` containers and proves the reconstruction before any JPEG is deleted. For existing archives:
@@ -667,9 +688,13 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.1.1_beta1** (2026-09-20) — beta of the first maintenance release on v2.1.0: ten fixes from the second audit of the recompressor release, all in the safety/reporting layer — the conversion core is untouched. Highlights: dry runs preview the provenance refusals instead of promising outputs the real run refuses; every output is written to a temp beside the final name and swapped in atomically after the integrity check; `checksums.md5` appends are serialized across manifest child processes; the wrapper stops dropping the recompressor policies; keep-smaller fallback copies must prove the MD5 match before any deletion. No command line and no file format changes. Full list: [bug tracking, round 37](docs/bug_tracking_since_v1.0.md). **1357 tests.**
+**v2.2.0** (2026-09-24) — the stable release of the v2.1.1 beta line, plus colour-converted derivatives. Four audits of the v2.1 series (rounds 37–40, 88 fixes, almost all in the delete/provenance/dry-run safety layer) and three new options:
 
-> **Beta:** these are delete-path and audit fixes, every one with a regression test proven to fail against the pre-fix code — but if you archive with `--delete-source`, the stable [v2.1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v2.1.0) is the conservative choice until v2.1.1 final.
+- **`--output-icc sRGB|AdobeRGB|<file.icc>`** (recompressor) — light **16-bit** derivatives of your masters in another colour space, e.g. a d=1.0 sRGB set in `_EXPORT/16B_JXL_sRGB` to replace the JPEG exports, converted from the master's own ICC with relative colorimetric + black point compensation. Built-in Adobe RGB (1998)-compatible profile, identical to Adobe's own. Never in place, never deletes, never overwrites a file that is not its own derivative, and it strips the provenance markers, so a derivative can never pass as proof that a TIFF is archived.
+- **`--rename-from/--rename-to`** (recompressor) — swap the profile token in the derivative names (`..._ProPhoto-g22_v1` → `..._sRGB_v1`) at planning time, so sync and every guard see the final name.
+- **`--export-jxl-folder NAME`** (encoder + recompressor) — choose the modes 6/7 output folder per run or per preset.
+
+Existing command lines keep working, but some inputs that earlier releases archived wrongly are now **refused**. Read the [upgrade notice](#notices-for-upgraders) first. **1553 tests.**
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -677,19 +702,53 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Changelog
 
-### What's new — v2.1.1_beta1 (current beta)
+### What's new — v2.2.0 (current stable)
 
-**Released 2026-09-20.** Maintenance beta on top of v2.1.0 — ten fixes from the second audit of the recompressor release (round 37, bugs #347–#356), all in the safety/reporting layer. No command line and no file format changes.
+**Released 2026-09-24.** Supersedes v2.1.0 and the v2.1.1_beta1 pre-release (whose notes are in [version history](docs/version_history.md#v211_beta1)). Rounds 37–40 of auditing (bugs #347–#434), plus colour-converted derivatives.
 
-- **Dry runs no longer lie.** The decoder and recompressor skipped the provenance refusal gate in dry runs — the simulation promised outputs the real run refuses, with `errors: 0` in the summary. Both now preview the refusals (`DRY | would REFUSE`, counted as predicted errors), and the recompressor dry run exits 0.
-- **Outputs are never written under their final name.** A run killed externally used to leave a truncated file at the final path with a fresh mtime — which the next smart-sync run then treated as up to date forever. All four scripts now write a uuid temp beside the final and swap it in with an atomic same-folder `os.replace` only after the integrity check.
-- **`checksums.md5` appends are serialized across processes.** Two manifest entries targeting one folder are two child processes; the thread lock only serialized one, and appends interleaved mid-line. A sibling `.lock` file (fail-closed: an untaken lock skips the line, never a torn write).
-- **Wrapper: recompressor policies survive the wizard.** Step 6A rebuilt the advanced options from scratch and dropped `on_downgrade`/`on_regeneration`/`on_unknown`/`jbrd_policy`/`no_keep_smaller` (the child fell back to `ask` — a silent skip on the wrapper's pipe); the manifest builder never emitted `--on-unknown`/`--jbrd-policy` at all. The wizard now asks both on the recompressor path and carries the rest through every branch.
-- **Encoder: `--encode-tag xmp` merges the EXIF Software chain.** A TIFF recovered from a `--encode-tag software` JXL carries the lineage chain in EXIF Software; the xmp branch left it there beside the new dc:Description record, and the recompressor trusted the stale one. Both fields are now merged into dc:Description and the machine block is stripped from Software (unrelated text kept).
-- **Recompressor: keep-smaller fallback passes the MD5 gate.** The verbatim-copy proof keyed on `action == "copy"`, but the keep-smaller fallback reports status `"copied"` with action still `"convert"` — a corrupt copy certified the deletion of its source.
-- Smaller: log filenames carry the pid (two runs in the same second shared one log); the decoder counts a missing final output as a KEEP instead of leaving the gate silently; jbrd repair temps no longer wear a `.jxl` name (a crash left a fake input for the next scan) and honor `TEMP_DIR`; `--repair-jbrd` no longer requires cjxl (repair only needs djxl ≥ 0.12 + exiftool); the wrapper's mode-6 collision mirror matches the real finder's decoder-output skip.
+#### New: colour-converted derivatives (`--output-icc`)
 
-Every fix has a regression test proven to fail against the pre-fix code (`tests/test_audit_round37.py`, 23 tests). **1357 tests** in the suite.
+The recompressor can write a light copy of a master in another colour space instead of a plain recompression, e.g. the Capture One ProPhoto masters → a d=1.0 **sRGB** set that replaces the JPEG exports. The master is decoded at 16 bits, converted with ImageMagick from its **own** original ICC (the one the encoder keeps in XMP, the same profile the decoder restores) with relative colorimetric + black point compensation, and re-encoded at `--distance`, **still 16 bits**. There is no 8-bit option: an 8-bit lossy JXL measured no smaller.
+
+- **Targets:** `sRGB`, `AdobeRGB` (a built-in Adobe RGB (1998)-compatible profile, identical to Adobe's own), or any RGB `.icc`.
+- **Quality:** measured on a real 16 MP ProPhoto export, a d=1.0 sRGB derivative from a d=0.05 master lands **0.017 dB** from a direct encode of the TIFF, at the same size (4.1 MB vs a 17.8 MB master).
+- **A derivative is disposable by construction:**
+  - never written in place (modes 0/8 are refused);
+  - never combined with `--delete-source`;
+  - never overwrites a file that is not its own derivative, even with `--overwrite`, so pointing it at the master folder cannot hurt the masters;
+  - re-derived when you change the target colour space;
+  - `jxlphoto-src`/`srcsum` are removed, so a derivative can never pass as the archive of a TIFF (verified: the encoder with `--delete-source --delete-skipped` pointed at a derivative folder deletes nothing);
+  - the ICC in its XMP is the **target** profile, so decoding a derivative to TIFF labels it correctly.
+- **Guarded against silent colour errors:** the source profile is always assigned explicitly, and a converted image that has lost its ICC is refused instead of being encoded as sRGB.
+- **`--rename-from/--rename-to`** swap the profile token in the output names, with the transcoder's semantics.
+- **`--export-jxl-folder`** chooses the modes 6/7 output folder, also for the encoder (e.g. a separate `Print` export → `PRINT_JXL`).
+- **Wrapper:** all three options are in the wizard (Step 5: output folder; Step 6: colour space + rename), in presets and in manifests.
+
+#### Fixed: rounds 37–40 (88 fixes)
+
+Almost all in the safety layer (delete gates, provenance, dry runs, temp files). The conversion core changed only where it was wrong. The ones that lost or corrupted data:
+
+- **Wrong archives, reported as clean:** TIFF CIELAB/YCbCr was archived as inverted RGB and MINISWHITE with inverted tones. All are refused now, along with the other unsupported photometrics.
+- **Sources deleted without proof:**
+  - `--force-convert --distance 0` broke jbrd JPEG recovery **and** its delete gate never tested it. Now the full reconstruction proof runs.
+  - The recompressor's `--delete-skipped` in modes 1/3 deleted a source on the strength of an unrelated same-named output.
+  - `--matrix --delete-source` dropped the alpha and deleted anyway.
+  - The decoder's smart sync admitted a foreign master TIFF to `--delete-skipped`.
+  - A multi-page marker-read failure zeroed the group veto (decoder and recompressor).
+  - A keep-smaller copy skipped the MD5 proof.
+  - A metadata-failed decode was promoted before its verdict.
+- **Dry runs that lied:** they promised conversions and deletions the real run refuses or skips. Every preview now applies the same predicates as the real run.
+- **Killed runs that poisoned sync:** outputs are written to a `.tmp` beside the final name and swapped in atomically after the integrity check. `checksums.md5` appends are locked across processes, and the wrapper's config is saved atomically.
+- **Also fixed:**
+  - `--repair-jbrd` now strips every marker pair;
+  - JPEGs with > 64 KiB trailers are accepted by the toolkit's own gate;
+  - manifests anchor relative paths on the CSV's folder and stop after a killed child;
+  - the wrapper keeps the recompressor policies;
+  - the lineage `gen=` never counts down;
+  - log files carry the pid;
+  - plus a long tail of warnings for flags that were silently inert.
+
+Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Every fix has a regression test proven to fail against the pre-fix code, many of them real-codec tests against real exports and film scans. **1553 tests** in the suite.
 
 ---
 
@@ -697,8 +756,9 @@ Every fix has a regression test proven to fail against the pre-fix code (`tests/
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.1.1_beta1** | 2026-09-20 | Beta. Round-37 audit (10 fixes): dry runs preview the provenance refusals instead of promising them; outputs written via temp + atomic `os.replace` (a killed run no longer poisons smart sync); `checksums.md5` appends serialized across child processes; wrapper keeps the recompressor policies and emits `--on-unknown`/`--jbrd-policy`; encoder xmp mode merges the EXIF Software lineage chain; keep-smaller copies pass the MD5 gate; `--repair-jbrd` needs no cjxl |
-| **v2.1.0** | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 — [full notes](docs/version_history.md#v210) |
+| **v2.2.0** | 2026-09-24 | Stable release of the v2.1.1 beta line + colour-converted derivatives: `--output-icc sRGB/AdobeRGB/.icc` (16-bit, never in place, never deletes, never passes as an archive), `--rename-from/--rename-to` (recompressor), `--export-jxl-folder` (encoder + recompressor). Rounds 37–40, 88 fixes: TIFF Lab/YCbCr/MINISWHITE refused instead of archived wrong, the delete-without-proof paths closed, dry runs that match the real run, atomic outputs |
+| v2.1.1_beta1 | 2026-09-20 | Pre-release, superseded by v2.2.0. Round-37 audit (10 fixes): dry runs preview the provenance refusals instead of promising them; outputs written via temp + atomic `os.replace` (a killed run no longer poisons smart sync); `checksums.md5` appends serialized across child processes; wrapper keeps the recompressor policies and emits `--on-unknown`/`--jbrd-policy`; encoder xmp mode merges the EXIF Software lineage chain; keep-smaller copies pass the MD5 gate; `--repair-jbrd` needs no cjxl |
+| v2.1.0 | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 — [full notes](docs/version_history.md#v210) |
 | v2.0.3 | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
 | v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
 | v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |

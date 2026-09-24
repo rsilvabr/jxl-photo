@@ -1,6 +1,6 @@
 # New Features Since v1.0
 
-## Unreleased
+## v2.2.0 (2026-09-24)
 
 ### `--export-jxl-folder`: choose the modes 6/7 output folder
 

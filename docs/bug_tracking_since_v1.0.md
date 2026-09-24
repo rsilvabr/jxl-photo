@@ -18,10 +18,11 @@ Round 33 / 2026-08-23: Full-repo audit — 5 mediums, all in the archive/delete 
 Round 34 / 2026-08-23: The low-severity sweep that follows every audit — 4 batches, one per script; none destroys data, each makes a tool lie a little or die ugly (see top section)
 Round 35 / 2026-09-18: First audit of v2.1.0 — 16 bugs, 4 critical: JPEG → JXL was no longer bit-exact recoverable for JPEGs with XMP (since v2.0.0), and three data-loss paths in the new recompressor/decoder (see top section)
 Round 36 / 2026-09-19: Review of the round-35 fixes against the real fixtures — 7 regressions they introduced (2 data-losing) plus the tracker renumbering (see top section)
-Round 37 / 2026-09-20: Second audit of v2.1.0 — 10 bugs, none in the conversion core: dry runs that promised what the real run refuses, outputs written under their final name, cross-process checksum races. Ships in v2.1.1 (see top section)
+Round 37 / 2026-09-20: Second audit of v2.1.0 — 10 bugs, none in the conversion core: dry runs that promised what the real run refuses, outputs written under their final name, cross-process checksum races. Shipped in the v2.1.1_beta1 pre-release, then in v2.2.0 (see top section)
 Round 38 / 2026-09-21: Third audit of v2.1.0 (bug_report_260921.md) - 28 findings: TIFF Lab/YCbCr archived inverted, --matrix --delete-source dropping alpha, the recompressor multi-page group veto zeroed by a marker-read failure (see top section)
 Round 39 / 2026-09-21: Fourth audit of v2.1.1_beta1 (20260921_audit2.md + 20260921_audit3.md, consolidated) - 34 findings: --force-convert d=0 broke jbrd recovery AND deleted the original unverified (the v2.0.0 data-loss class again), >64 KiB JPEG trailers rejected by the toolkit own gate, smart-sync skips that admitted foreign masters to --delete-skipped (see top section)
 Round 40 / 2026-09-23: Fifth audit of v2.1.1_beta1 (bug_report_260923.md) - 16 findings fixed (5 high/medium + 11 low): the recompressor deleted an original on the strength of an unrelated same-named output in modes 1/3 (the only reproduced data loss), --repair-jbrd stripped only the last marker pair, the decoder treated a normal `*_thumbnail` photo as a thumbnail under --no-reconstruct-multipage, and the dry-run toplines still counted would-SKIP pairs as conversions (see top section)
+v2.2.0 / 2026-09-24: Rounds 37-40 released as v2.2.0 (the v2.1.1 beta line never got a final), together with the new colour-converted derivatives (`--output-icc`), `--export-jxl-folder` and the recompressor's `--rename-from/--rename-to` - see new_features_since_v1.0.md
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -127,7 +128,7 @@ Third audit of v2.1.0, from `bug_report_260921.md` — 28 findings across all
 four scripts plus the wrapper, several reproduced by execution against the
 real fixtures. Headline: the encoder archived TIFF Lab/YCbCr as silently
 inverted RGB, and the decoder's `--matrix --delete-source` discarded the alpha
-channel and then deleted the source. All fixes shipped with the v2.1.1 line.
+channel and then deleted the source. All fixes ship in v2.2.0 (the v2.1.1 beta line).
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
