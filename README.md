@@ -756,30 +756,30 @@ Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Ever
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.2.0** | 2026-09-24 | Stable release of the v2.1.1 beta line + colour-converted derivatives: `--output-icc sRGB/AdobeRGB/.icc` (16-bit, never in place, never deletes, never passes as an archive), `--rename-from/--rename-to` (recompressor), `--export-jxl-folder` (encoder + recompressor). Rounds 37–40, 88 fixes: TIFF Lab/YCbCr/MINISWHITE refused instead of archived wrong, the delete-without-proof paths closed, dry runs that match the real run, atomic outputs |
-| v2.1.1_beta1 | 2026-09-20 | Pre-release, superseded by v2.2.0. Round-37 audit (10 fixes): dry runs preview the provenance refusals instead of promising them; outputs written via temp + atomic `os.replace` (a killed run no longer poisons smart sync); `checksums.md5` appends serialized across child processes; wrapper keeps the recompressor policies and emits `--on-unknown`/`--jbrd-policy`; encoder xmp mode merges the EXIF Software lineage chain; keep-smaller copies pass the MD5 gate; `--repair-jbrd` needs no cjxl |
-| v2.1.0 | 2026-09-20 | New script `jxl_recompressor.py` + wrapper destination "JXL (smaller)": shrink an existing JXL archive to a new distance/effort with ICC/metadata/provenance carried over. Counterproductive requests (same or lower distance) fall back to verbatim copy or ask first; jbrd JXLs copied by default; a re-encode that is not smaller keeps the original bytes; `--delete-source` behind the usual gates. Also `--modular on|off` for the encoder (advanced, off by default — measured: no photo use case), `--auto-repair-jbrd` (decode a marker-damaged jbrd from a repaired copy, archive untouched) and jbrd repair as wrapper menu option 8 — [full notes](docs/version_history.md#v210) |
-| v2.0.3 | 2026-08-23 | Maintenance. The JXL → JPEG lossless delete gates trusted the JXL's **name**, not its bytes — a swapped same-named JXL could be deleted unarchived; the gates now bind content (own-MD5 + `reconstruct_jpeg` fallback, fail closed). An RGB ICC reached grayscale output (film-scan IR pages) on the `--to-srgb`/`--icc-profile` paths. A failed staging move could delete a good destination; a pre-v2.0.2 multi-page archive split in two when a lost page was re-encoded (it heals now). 32 fixes across rounds 32–34 |
-| v2.0.2 | 2026-08-19 | Maintenance. Re-archiving a multi-page scan a **second** time left a page of the previous split behind, and the next decode merged it back in — a TIFF with a page repeated, reported as a clean run. The group id identified only the source, not the split; fixed on both sides, and the decoder now repairs archives already in that state. Plus: manifest deletions get the same gates as the `[D]` menu, mode-6 manifests skip a collision scan that cannot find anything, and seven smaller fixes |
-| v2.0.1 | 2026-08-13 | Maintenance. v2.0.0's delete machinery audited against the real film scans and Capture One exports — the conversion path came out clean (every lossless round trip pixel-identical), and the six fixes are all around it: the mode-7 delete preview counted the wrong files, a manifest run leaked its export marker into the session, `split_all` mis-reported its thumbnail policy, and the dependency bar was unreadable in a redirected log |
-| v2.0.0 | 2026-08-09 | Archive and replace: `--delete-source` in every mode, `--verify-roundtrip`, `--delete-skipped`. Provenance markers tie every output to the source that made it, so a delete run cannot overwrite one archive with an unrelated photo (**breaking**: pre-v2.0.0 archives are refused until adopted). Incomplete multi-page splits detected and their sources kept. Staging, dry-run and refusal-reporting hardening across all four scripts |
-| v1.9.1 | 2026-08-02 | Manifest collision check skipped for the per-source output modes (0/1/3/6/7/8), where a cross-entry collision is impossible — mode 6/7 manifests over large libraries start immediately; a progress line when the scan does run (modes 2/4/5) |
-| v1.9.0 | 2026-08-01 | Measured space estimate before a batch starts; a full output volume aborts the run (**exit 2**) instead of failing every remaining file; progress during slow folder scans; staging leftovers reported and sweepable (`--clean-staging`); distances ≤ 0.05 documented as identical; three delete-gate bypasses closed; corrupt saved workflows refused instead of crashing |
-| v1.8.4 | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended (Task Scheduler / cron): sync by default, dry-run never inherited, destructive presets refused |
-| v1.8.3 | 2026-07-28 | Configurable default distance in the menu, repeatable manifest runs, named presets, settings that reach the next run; manifest run summary: per-folder table, file-level totals, failed paths listed; corrupt files split out of the `skipped` count; combined log in `Logs/jxl_photo/` |
-| v1.8.2 | 2026-07-27 | Independent audit + real-batch fixes: ignored thumbnails no longer deleted, missing tools fail fast, multi-page default is now `split`, thread pool no longer stalls across folders |
-| v1.8.1 | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2, integrity gates, manifest coverage guards |
-| v1.8.0 | 2026-07-18 | libjxl v0.12 support, output integrity verification, direction-restriction flags, transcoder modes 4/5 swapped |
-| v1.7.2 | 2026-07-18 | Wrapper delete-source confirmation unstuck; lossy convert keeps Exif/XMP before the codestream |
-| v1.7.1 | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
-| v1.7.0 | 2026-07-12 | Multi-page TIFF support: split/skip/ignore, thumbnail handling, per-page ICC, marker-based reconstruction |
-| v1.6.0 | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, manifest Mode column, CMYK rejection |
-| v1.5.3 | 2026-04-15 | Full Auto Mode, PNG bit depth, EXIF preservation, 8-bit TIFF black-image fix, stable |
-| v1.4 | 2026-04-11 | JXL → JPEG workflow: lossy/lossless conversion modes |
-| v1.3 | 2026-04-11 | Auto Mode (beta), manifest system, embedded JPEG thumbnail |
-| v1.2 | 2026-04-05 | Basic/None decode modes, ICC mode selector |
-| v1.1 | 2026-04-05 | D50 patch modes, metadata strip, race-condition fixes |
-| v1.0 | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
+| **[v2.2.0](#changelog)** | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`; audits 37–40 (88 fixes) |
+| [v2.1.1_beta1](docs/version_history.md#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
+| [v2.1.0](docs/version_history.md#v210) | 2026-09-20 | New `jxl_recompressor.py`: shrink a JXL archive, refusing counterproductive re-encodes |
+| [v2.0.3](docs/version_history.md#v203) | 2026-08-23 | JXL → JPEG delete gates bound to content, not names; 32 fixes |
+| [v2.0.2](docs/version_history.md#v202) | 2026-08-19 | Re-archiving a multi-page scan no longer repeats a page |
+| [v2.0.1](docs/version_history.md#v201) | 2026-08-13 | Delete machinery audited against real scans; 6 fixes |
+| [v2.0.0](docs/version_history.md#v200) | 2026-08-09 | Archive and replace: `--delete-source` in every mode, provenance markers |
+| [v1.9.1](docs/version_history.md#v191) | 2026-08-02 | Mode 6/7 manifests start immediately (collision scan skipped where it cannot find anything) |
+| [v1.9.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0) | 2026-08-01 | Disk-space preflight, full-disk abort, scan progress, staging cleanup |
+| [v1.8.4](docs/version_history.md#v184) | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended |
+| [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) | 2026-07-28 | Named presets, repeatable manifests, configurable default distance, run summary |
+| [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) | 2026-07-27 | Audit + real-batch fixes; multi-page default is now `split` |
+| [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2 |
+| [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) | 2026-07-18 | libjxl v0.12 support, output integrity verification |
+| [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) | 2026-07-18 | Wrapper delete confirmation unstuck; Exif/XMP before the codestream |
+| [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
+| [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0) | 2026-07-12 | Multi-page TIFF support |
+| [v1.6.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.6.0) | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, CMYK rejection |
+| [v1.5.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.5.3) | 2026-04-15 | Full Auto Mode, PNG bit depth, 8-bit TIFF black-image fix |
+| [v1.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.4) | 2026-04-11 | JXL → JPEG workflow |
+| [v1.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.3) | 2026-04-11 | Auto Mode (beta), manifests, embedded JPEG thumbnail |
+| [v1.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.2) | 2026-04-05 | Basic/None decode modes, ICC mode selector |
+| [v1.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.1) | 2026-04-05 | D50 patch modes, metadata strip |
+| [v1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.0) | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
 
 ### Older history
 
