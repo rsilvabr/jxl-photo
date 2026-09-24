@@ -22,7 +22,7 @@ exiftool → https://exiftool.org
 magick → https://imagemagick.org (optional, for ICC conversion only)
 ```
 
-Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagick is only required if using `--icc-profile`.
+Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagick is required for colour conversion (`--icc-profile`/`--to-srgb`) and for `--resize-long/-short/-percent`/`--sharpen`.
 
 ### Download the Correct Files
 
@@ -87,6 +87,11 @@ py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --format png
 
 # JXL → sRGB JPEG (color space conversion using ImageMagick built-in)
 py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --to-srgb --quality 95
+
+# JXL master → 2048 px sRGB JPEG with output sharpening (a DERIVATIVE:
+# it never deletes the source and never claims the master is archived)
+py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --force-convert --to-srgb ^
+     --resize-long 2048 --sharpen screen --quality 92
 
 # PNG → JXL (convert to JXL format)
 py jxl_jpeg_transcoder.py "F:\Photos\photo.png"
@@ -334,6 +339,22 @@ Options:
                      sRGB is wrong the same way). Each one is named in the log.
   --to-srgb          Shortcut: convert to sRGB using ImageMagick built-in
                      (shorthand for --icc-profile sRGB)
+
+  --resize-long PX   Output long edge in pixels (JPEG/PNG decode only).
+  --resize-short PX  Output short edge in pixels. Aspect ratio is always kept;
+  --resize-percent P Output size as a percentage of the source. The three are
+                     mutually exclusive. Without --allow-upscale the image is
+                     never enlarged (an image already smaller than the target is
+                     kept as is, with a log line)
+  --allow-upscale    Let --resize-long/-short/-percent enlarge an image smaller than the target
+  --sharpen MODE     Output sharpening after the resize: none (default),
+                     screen, print. Colour images are sharpened on the Lab L
+                     channel only; a greyscale image is sharpened directly
+  --sharpen-sigma N  Expert overrides of the preset (px, gain, 0-1 threshold).
+  --sharpen-gain N   They apply only with --sharpen screen|print and are NOT
+  --sharpen-threshold N  part of the output's recipe label: when you change one,
+                     re-derive with --overwrite (see "Resized and sharpened
+                     derivatives")
 
   --force-transcode  Override auto-detect, force lossless transcoding
   --force-convert    Override auto-detect, force lossy conversion
@@ -611,6 +632,95 @@ py jxl_jpeg_transcoder.py photo.jxl --icc-profile "C:\ICC\sRGB.icc"
 
 * * *
 
+## Resized and sharpened derivatives (`--resize-long/-short/-percent`, `--sharpen`)
+
+On the JXL → JPEG/PNG direction the transcoder can deliver a master at any
+size, with output sharpening tuned for the destination:
+
+```powershell
+# JPEG of 2048 px for WhatsApp, from the master, with screen sharpening
+py jxl_jpeg_transcoder.py "<16B_JXL>" --decode --force-convert --to-srgb --resize-long 2048 --sharpen screen --quality 92
+
+# 3840 px for a TV
+py jxl_jpeg_transcoder.py "<16B_JXL>" --decode --force-convert --to-srgb --resize-long 3840 --sharpen screen
+```
+
+The JPEG size is controlled by `--quality` alone (ImageMagick's
+`-define jpeg:extent=` was measured to fall back to q=2 on large JPEGs and is
+never used). Note that ImageMagick's "q92" is not Capture One's: at the same
+file size IM needs q≈82–83, and at the same q its file comes out ~50% larger
+(and better).
+
+### A resized/sharpened file is a DERIVATIVE
+
+Any run with `--resize-long/-short/-percent` and/or `--sharpen` writes a **derivative**. It is
+disposable by construction:
+
+- **It never deletes its source.** `--delete-source`/`--delete-skipped` are
+  refused (exit 2).
+- **It never replaces its source.** The bit-exact JPEG recovery
+  (`--force-transcode`, `--decode` in auto mode) reproduces the original bytes
+  and cannot shape pixels; combining it with the shaping flags is refused
+  (exit 2). In auto mode every JXL is instead decoded and re-encoded, and a
+  single log line says how many carried a JPEG reconstruction.
+- **It never proves the master is archived.** The `jxlphoto-src:`/
+  `jxlphoto-srcsum:` markers are removed from the copied metadata and replaced
+  by `jxlphoto-derived:<recipe>` (e.g. `sRGB@long2048+screen`). A 2048 px JPEG
+  can never make a later `--delete-source --delete-skipped` run unlink the JXL
+  master.
+- **It refuses to overwrite what is not its own derivative** (even with
+  `--overwrite`): an existing file without a `jxlphoto-derived:` marker may be
+  a JPEG you exported yourself, so it is left untouched and reported
+  `REFUSED`. An existing derivative whose recorded recipe differs is
+  re-derived; an identical recipe is left to the normal SKIP logic.
+- **EXIF/XMP pixel dimensions are corrected** to the output's own size after a
+  resize.
+
+### The no-upscale rule
+
+Without `--allow-upscale` an image smaller than the target is **never
+enlarged** — it keeps its size and the run logs
+`Already smaller than the target — kept at W×H`. `--resize-percent` above 100
+is an error without `--allow-upscale`; when the upscale is allowed the recipe
+label records it (`+up`, e.g. `keep@pct150+up`), so changing the flag
+re-derives on the next run.
+
+### Sharpening presets
+
+The presets keep their numbers in one table (`SHARPEN_PRESETS`) calibrated
+against Capture One's own output sharpening:
+
+| Preset | sigma (px) | gain | threshold |
+|---|---|---|---|
+| `screen` | 0.5 | 0.6 | 0.02 |
+| `print` | 1.0 | 1.0 | 0.02 |
+
+The units are **output pixels**, so one preset works at any output size.
+`sigma` is the gaussian sigma, `gain` the unsharp amount (1.0 = 100%) and
+`threshold` leaves small differences alone (protects sky, skin and noise).
+The values are provisional until a calibration session against real Capture
+One exports lands; the README will record which Capture One preset they came
+from.
+
+The `--sharpen-sigma`/`--sharpen-gain`/`--sharpen-threshold` overrides are for
+expert use. They are deliberately **outside** the recipe label, so after
+changing one the output does not look stale to the sync: re-derive with
+`--overwrite`. Without `--sharpen screen|print` they print an inert-flag
+warning and do nothing.
+
+### Resize is done in the image's gamma space
+
+The Lanczos resize runs in the image's own (gamma-encoded) space — the
+ImageMagick default — not in linear light. This matches what the eye expects
+from a downscale and what the 58 dB pipeline measurement used (master ProPhoto
+16-bit → sRGB 2048 px, no sharpening, versus the TIFF resized with the same
+toolchain). Sharpening is applied to the Lab **L** channel only: no colour
+fringes, and the ICC profile is re-assigned right after (the `-colorspace Lab
+… -colorspace sRGB` pass drops it, and a derivative labelled with the wrong
+profile is rejected before the write).
+
+* * *
+
 ## MD5 Verification (Transcode only)
 
 For lossless transcoding (JPEG → JXL → JPEG), the script maintains a `checksums.md5` database in each output folder:
@@ -728,6 +838,7 @@ File progress examples:
 [14:23:01] | INFO | [3/100] SKIP (exists) | photo.jpg
 [14:23:01] | INFO | [4/100] SKIP (up to date) | photo.jpg  # --sync mode only
 [14:23:01] | INFO | [5/100] OK ✓ MD5 PASS | photo.jxl
+[14:23:01] | INFO | [6/100] DERIVE (sRGB@long2048+screen) | photo.jxl -> photo.jpg
 ```
 
 * * *

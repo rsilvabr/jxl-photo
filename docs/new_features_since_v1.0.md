@@ -1,5 +1,62 @@
 # New Features Since v1.0
 
+## Unreleased
+
+### Resize and output sharpening: derivatives on the transcoder and the recompressor
+
+`--resize-long PX`, `--resize-short PX` and `--resize-percent P` (mutually
+exclusive) deliver an output at another size, aspect ratio always kept, and
+`--sharpen none|screen|print` applies output sharpening after the resize.
+They work in two places:
+
+- **jxl_jpeg_transcoder.py**, JXL → JPEG/PNG: a delivery JPEG at any size from
+  the master (`--resize-long 2048 --sharpen screen --quality 92`);
+- **jxl_recompressor.py**, JXL → JXL: `--output-icc` **or** resize **or**
+  sharpen make the run a derivative (the recipes combine).
+
+Without `--allow-upscale` an image already smaller than the target is never
+enlarged — it keeps its size and the run says so; `--resize-percent` above 100
+is an error without the flag. Sharpening works on the Lab **L** channel only
+(no colour fringes) and the output profile is re-assigned after it, because
+the `-colorspace Lab … -colorspace sRGB` pass drops the ICC profile. The
+Lanczos resize runs in the image's gamma-encoded space (the ImageMagick
+default), not in linear light.
+
+A resized/sharpened file is a **derivative**, with the same fail-closed
+guarantees the `--output-icc` round introduced: it never deletes its source
+(the delete flags are refused), never has an in-place form (the recompressor's
+modes 0/8 are refused), never overwrites a file that is not one of its own
+derivatives, and never carries `jxlphoto-src`/`jxlphoto-srcsum` — the markers
+are replaced by `jxlphoto-derived:<recipe>` (`sRGB@long2048+screen`,
+`keep@long320`, `icc-<md5[:12]>@short1080+up+print`, …), so changing the recipe
+re-derives on the next sync. EXIF/XMP pixel dimensions are corrected to the
+output's own after a resize.
+
+The sharpening numbers live in one table (`SHARPEN_PRESETS`) in **output
+pixels**, provisionally calibrated against Capture One (`screen`:
+sigma 0.5/gain 0.6/threshold 0.02; `print`: 1.0/1.0/0.02) until a calibration
+session against real exports lands. The expert overrides
+(`--sharpen-sigma`, `--sharpen-gain`, `--sharpen-threshold`) are deliberately
+**outside** the recipe label: after changing one, re-derive with
+`--overwrite`. In auto mode a JXL with a `jbrd` box is decoded and re-encoded
+when shaping is requested (the bit-exact recovery cannot take pixels), with a
+single log line naming how many files that affected.
+
+The wizard asks for the recipe in Step 6 wherever it applies and shows
+`Resize:`/`Sharpening:` lines in the Step 7 summary.
+
+### Bug fix: a colour conversion could silently re-tag instead of converting (B1)
+
+For a JXL encoded as sRGB, `djxl` writes a PNG with an `sRGB` chunk and no
+`iCCP`; `magick -profile <target>` then **assigns** the target to pixels that
+are already sRGB instead of converting from sRGB. The output matched a plain
+re-tag (PSNR 120) and sat 35.7 dB from the correct conversion — every
+`--to-srgb`/`--icc-profile` delivery of an sRGB-encoded master was wrong in
+silence. The transcoder now assigns the source profile explicitly (XMP
+CreatorTool ICC > the decoded PNG's `iCCP` > its `sRGB` chunk > refuse to
+guess) before the target, and fails the file if the output loses its profile.
+Bug #436 in `bug_tracking_since_v1.0.md`.
+
 ## v2.2.0 (2026-09-24)
 
 ### `--export-jxl-folder`: choose the modes 6/7 output folder

@@ -117,6 +117,7 @@ def test_derivative_metadata_args_rewrite(tmp_path, monkeypatch):
     prof = rec._adobe_rgb_icc_bytes()
     monkeypatch.setattr(rec, "_OUTPUT_ICC_LABEL", "sRGB")
     monkeypatch.setattr(rec, "_OUTPUT_ICC_BYTES", prof)
+    monkeypatch.setattr(rec, "_DERIVED_LABEL", "sRGB")
     tokens = ["jxlphoto-depth:16", "jxlphoto-src:aa", "jxlphoto-srcsum:bb",
               "jxlphoto-icc:inherited", "jxlphoto-mpg:cc"]
     b64 = base64.b64encode(rec._adobe_rgb_icc_bytes()).decode("ascii")
@@ -142,6 +143,7 @@ def test_derivative_metadata_args_keeps_creator_tool_when_not_converted(tmp_path
     marker was left unconverted but used to get the RGB target stamped in."""
     monkeypatch.setattr(rec, "_OUTPUT_ICC_LABEL", "sRGB")
     monkeypatch.setattr(rec, "_OUTPUT_ICC_BYTES", rec._adobe_rgb_icc_bytes())
+    monkeypatch.setattr(rec, "_DERIVED_LABEL", "sRGB")
     for tokens in (["jxlphoto-grayscale"], []):          # with and WITHOUT the marker
         monkeypatch.setattr(rec, "_read_creator_and_relation",
                             lambda p, t=tokens: ("App", t))

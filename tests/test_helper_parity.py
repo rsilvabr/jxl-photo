@@ -115,6 +115,20 @@ SHARED_HELPERS = [
     # stored gen= identically or one of them undercounts generations when the
     # field changes.
     "_merge_lineage_blocks",
+    # Source-profile detection for colour conversion (B1): the transcoder and
+    # the recompressor must read XMP ICC / iCCP / sRGB chunk the same way.
+    "_png_chunk_types",
+    "_xmp_icc_from_creator_tool",
+    "_read_creator_and_relation",
+    "_png_is_grayscale",
+    # Resize/sharpening geometry and the derivative label: a copy drifting
+    # would derive a DIFFERENT label for the same recipe, so one backend would
+    # re-derive in a loop what the other considers up to date.
+    "_png_size",
+    "_resize_geometry",
+    "_sharpen_args",
+    "_resize_label",
+    "_derived_label",
 ]
 
 # Two helpers are semantically equivalent across their copies but structurally

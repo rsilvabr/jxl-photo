@@ -520,6 +520,19 @@ Basic parameters always shown:
   with a colour space or a rename is refused up front, before any child
   starts, when a row would run in place (mode 8, or mode 0 with Destination =
   Source) — the rows are listed
+- **Resize** — JXL→JXL (modes 1–7) and JXL→JPEG/PNG: `none` (default), `long
+  edge`, `short edge` or `percent`, then the value and "Allow upscale?"
+  (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`).
+  A resized output is a **derivative** of its own: not offered in modes 0/8
+  for JXL→JXL, and not offered for the bit-exact JPEG recovery (which has no
+  pixels to shape). `none` clears an answer from an earlier pass
+- **Output sharpening** — the same directions: `none` (default), `screen` or
+  `print` (`--sharpen`), applied after the resize on the output pixels' size.
+  The expert overrides (`--sharpen-sigma`/`--sharpen-gain`/
+  `--sharpen-threshold`) have no wizard question — use Expert flags in Step 6B.
+  A run with resize and/or sharpening plus a delete option is refused up front
+  (a derivative never deletes its source), and the Step 7 summary shows a
+  `Resize:` and a `Sharpening:` line
 - **Staging directory** — SSD staging for HDD collections
 - **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
 - **TIFF compression** — zip / lzw / none
@@ -608,6 +621,8 @@ Some options are available directly in the wizard, others must be edited in the 
 | Output folder under the marker | Step 5 | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
 | Output colour space (derivative) | Step 6 | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
 | Rename in output file names | Step 6 | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
+| Resize (derivative) | Step 6 | JXL→JXL (modes 1–7) and JXL→JPEG/PNG: none/long/short/percent (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`) |
+| Output sharpening | Step 6 | Same directions: none/screen/print after the resize (`--sharpen`); sigma/gain/threshold only via Expert flags |
 | Expert flags | 6B | Custom CLI args |
 
 ### ⚙️ Available in option 4 (Edit default settings)

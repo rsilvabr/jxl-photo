@@ -24,6 +24,7 @@ import subprocess
 import os
 import sys
 import shutil
+import base64
 import logging
 import tempfile
 import threading
@@ -32,6 +33,7 @@ import argparse
 import functools
 import json
 import re
+import struct
 import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1036,6 +1038,69 @@ def _read_source_markers_batch(outputs: list) -> dict:
     return markers
 
 
+def _read_derived_markers_batch(paths: list) -> dict:
+    """{path str: label | None | False}: the jxlphoto-derived label, None when
+    the file has no such token (NOT a derivative), False when it could not be
+    read at all (unknown -> the caller must fail closed).
+
+    Same batched argfile scheme as _read_source_markers_batch: one exiftool
+    call per 400 files instead of one per file.
+    """
+    markers = {str(o): False for o in paths}
+    # normcase -> the exact key the caller will look up by.
+    index = {os.path.normcase(str(o)): str(o) for o in paths}
+    if not paths:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=180)
+            if not r.stdout:
+                logger.warning(f"Derivative check: could not read markers for a batch "
+                               f"of {len(chunk)} file(s) (rc={r.returncode})")
+                continue
+            data = json.loads(r.stdout)
+            for entry in data:
+                src = entry.get("SourceFile")
+                if src is None:
+                    continue
+                key = os.path.normcase(str(Path(src)))
+                if key not in index:
+                    continue
+                rel = entry.get("Relation")
+                label = None
+                if rel is not None:
+                    values = rel if isinstance(rel, list) else [str(rel)]
+                    for token in values:
+                        token = str(token).strip()
+                        if token.startswith(DERIVED_XMP_PREFIX):
+                            label = token[len(DERIVED_XMP_PREFIX):]
+                            break
+                markers[index[key]] = label
+        except Exception as e:
+            logger.warning(f"Derivative check: marker batch failed ({e}); "
+                           f"{len(chunk)} file(s) cannot be verified")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
 def _read_all_source_marker_values(jxl_path: Path):
     """EVERY jxlphoto-src / jxlphoto-srcsum VALUE in dc:Relation, in file order.
 
@@ -1222,6 +1287,23 @@ _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 # run never proved THIS JXL can recover the original JPEG. Workers only add;
 # the gate runs after every future has completed.
 _auto_repaired = set()
+
+# --resize-*/--sharpen runtime state, reset at the top of main() (the test
+# suite runs several commands in one process). Only the JXL -> JPEG/PNG decode
+# direction honors them; the encode direction ignores them with a warning.
+RESIZE_MODE = None           # "long" / "short" / "percent" / None
+RESIZE_VALUE = None
+ALLOW_UPSCALE = False
+SHARPEN = "none"             # none / screen / print
+SHARPEN_SIGMA = None         # expert overrides (deliberately OUTSIDE the label)
+SHARPEN_GAIN = None
+SHARPEN_THRESHOLD = None
+# Written into dc:Relation on every resized/sharpened output: it marks the file
+# as a DERIVATIVE — never an archive of its source.
+DERIVED_XMP_PREFIX = "jxlphoto-derived:"
+# Final paths (normcase) whose existing jxlphoto-derived label names another
+# recipe: the skip logic must re-derive them instead of keeping them.
+_FORCE_REDERIVE = set()
 
 # Machine-readable run summary for the jxl_photo.py wrapper.
 #
@@ -3618,6 +3700,57 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         _abort_if_disk_full(write_path.parent, _need)
         return (str(src_path), "error", str(e), None)
 
+
+def _png_chunk_types(png_path: Path) -> list:
+    """Chunk types before the first IDAT (iCCP/sRGB must precede it per the PNG
+    spec) — reads a few KB, not the whole 16-bit intermediate."""
+    types = []
+    with open(png_path, "rb") as f:
+        if f.read(8) != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError(f"not a PNG: {png_path.name}")
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            n = struct.unpack(">I", head[:4])[0]
+            t = head[4:8].decode("latin-1")
+            if t == "IDAT":
+                break
+            types.append(t)
+            f.seek(n + 4, 1)                         # data + CRC
+    return types
+
+
+def _xmp_icc_from_creator_tool(text: str):
+    """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
+    rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
+    prefix, strict base64, >= 128 bytes, 'acsp' at 36)."""
+    for segment in (text or "").split("|"):
+        segment = segment.strip()
+        if not segment.startswith("ICC:"):
+            continue
+        try:
+            data = base64.b64decode(segment[4:].strip(), validate=True)
+        except Exception:
+            continue
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
+    return None
+
+
+def _read_creator_and_relation(jxl_path: Path):
+    """(creator_tool str, [relation tokens]) of one file. Raises on failure:
+    a derivative whose source profile cannot be read must not be produced."""
+    r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
+                               "-XMP-dc:Relation", str(jxl_path)], timeout=60)
+    if not r.stdout:
+        raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
+    entry = json.loads(r.stdout)[0]
+    rel = entry.get("Relation")
+    tokens = [] if rel is None else [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
+    return str(entry.get("CreatorTool") or ""), tokens
+
+
 _srgb_icc_cache = None
 _srgb_icc_lock = threading.Lock()
 
@@ -3663,6 +3796,70 @@ def _get_srgb_icc_path() -> Optional[str]:
     return _srgb_icc_cache or None
 
 
+def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple:
+    """(magick args, source profile path) describing the decoded pixels.
+
+    djxl writes a PNG with an sRGB CHUNK and no iCCP for an sRGB-encoded JXL,
+    and `magick -profile X` then ASSIGNS X instead of converting from sRGB:
+    the colours shift silently (trap B1, measured 2026-09-25 — output
+    identical to a plain assignment, 35.7 dB away from the correct
+    conversion). The source profile is therefore assigned EXPLICITLY before
+    any target profile, with the same precedence the recompressor uses:
+    XMP CreatorTool ICC > the decoded PNG's own iCCP > an sRGB chunk >
+    refuse to guess.
+
+    Returns the path of the profile that describes the pixels; a caller that
+    sharpens in Lab loses it (trap B2) and must re-assign this one.
+    """
+    creator, _tokens = _read_creator_and_relation(jxl_path)
+    icc = _xmp_icc_from_creator_tool(creator)
+    if icc:
+        path = tmp_dir / "src.icc"
+        path.write_bytes(icc)
+        return (["+profile", "*", "-profile", str(path)], path)
+    chunks = _png_chunk_types(png_path)
+    if "iCCP" in chunks:
+        # magick converts from the profile djxl wrote, no explicit assign.
+        path = tmp_dir / "src_iccp.icc"
+        r = subprocess.run(["magick", str(png_path), str(path)],
+                           capture_output=True, timeout=CODEC_TIMEOUT)
+        if r.returncode != 0 or not path.exists():
+            raise RuntimeError(f"magick could not extract the source ICC profile: "
+                               f"{(r.stderr or b'').decode(errors='replace')[:200]}")
+        return ([], path)
+    if "sRGB" in chunks:
+        path = _get_srgb_icc_path()
+        if not path:
+            raise RuntimeError("the decoded PNG says sRGB but no sRGB profile is "
+                               "available (Pillow missing?) — refusing to guess")
+        return (["+profile", "*", "-profile", str(path)], Path(path))
+    raise RuntimeError("cannot tell the source colour space (no XMP ICC, no iCCP, "
+                       "no sRGB chunk) — refusing to guess")
+
+
+def _verify_profile_in_output(path: Path, is_png: bool) -> None:
+    """Fail closed when a colour-converted output lost its ICC profile.
+
+    ImageMagick can write the converted image without the profile (the
+    Lab-sharpening and -strip traps A1/A2/B2), and without it the file is
+    silently labelled as sRGB by every reader.
+    """
+    if is_png:
+        if "iCCP" not in _png_chunk_types(path):
+            # Same wording as the recompressor's _derive_pixels.
+            raise RuntimeError("ImageMagick wrote the converted image without its ICC "
+                               "profile — refusing to encode it as the wrong colour space")
+        return
+    r = _run_exiftool_argfile(
+        ["-j", "-s", "-s", "-ICC_Profile:ProfileDescription", str(path)], timeout=60)
+    if not r.stdout:
+        raise RuntimeError(f"exiftool could not read the output profile (rc={r.returncode})")
+    entry = json.loads(r.stdout)[0]
+    if not entry.get("ProfileDescription"):
+        raise RuntimeError("ImageMagick wrote the converted image without its ICC "
+                           "profile — refusing to deliver it as the wrong colour space")
+
+
 def _magick_icc_args(output_icc: str, extra: list, tmp_dir: Path = None) -> list:
     """Build the ImageMagick color args for an output ICC.
 
@@ -3693,6 +3890,242 @@ def _png_is_grayscale(png_path: Path) -> bool:
     if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
         return False
     return head[25] in (0, 4)          # 0 = grey, 4 = grey + alpha
+
+
+SHARPEN_PRESETS = {
+    "screen": {"sigma": 0.5, "gain": 0.6, "threshold": 0.02},   # CALIBRATE vs C1 "screen"
+    "print":  {"sigma": 1.0, "gain": 1.0, "threshold": 0.02},   # CALIBRATE vs C1 "print"
+}
+# The ONLY place the sharpening numbers live, calibrated against Capture One's
+# own output sharpening. Units are OUTPUT pixels, so one preset works at any
+# output size. sigma = gaussian sigma (px), gain = unsharp amount (1.0 = 100%),
+# threshold = fraction of full scale below which a difference is left alone
+# (protects sky, skin and noise).
+
+
+def _png_size(png_path: Path):
+    """(width, height) from the IHDR of a PNG djxl just wrote."""
+    with open(png_path, "rb") as f:
+        head = f.read(24)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise RuntimeError(f"not a PNG: {png_path}")
+    return struct.unpack(">II", head[16:24])
+
+
+def _resize_geometry(w: int, h: int, mode, value, allow_upscale: bool = False):
+    """(new_w, new_h) for --resize-long/--resize-short/--resize-percent, or None
+    when the image keeps its size (no resize requested, same size, or a
+    would-be upscale without --allow-upscale). Aspect ratio always kept."""
+    if not mode:
+        return None
+    if mode == "long":
+        scale = float(value) / max(w, h)
+    elif mode == "short":
+        scale = float(value) / min(w, h)
+    elif mode == "percent":
+        scale = float(value) / 100.0
+    else:
+        raise ValueError(f"unknown resize mode: {mode}")
+    if scale <= 0:
+        raise ValueError("resize value must be positive")
+    if scale > 1.0 and not allow_upscale:
+        return None
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    if (nw, nh) == (w, h):
+        return None
+    return nw, nh
+
+
+def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
+    """ImageMagick args for output sharpening, or [] for none. Colour images are
+    sharpened on the Lab L channel only (no colour fringes); a grey image has a
+    single channel and is sharpened directly. `-colorspace Lab ... -colorspace
+    sRGB` DROPS the ICC profile — the caller must re-assign the output profile
+    right after these args (verified: pixels stay identical)."""
+    if not preset or preset == "none":
+        return []
+    p = dict(SHARPEN_PRESETS[preset])
+    if sigma is not None:
+        p["sigma"] = float(sigma)
+    if gain is not None:
+        p["gain"] = float(gain)
+    if threshold is not None:
+        p["threshold"] = float(threshold)
+    op = f"0x{p['sigma']}+{p['gain']}+{p['threshold']}"
+    if grey:
+        return ["-unsharp", op]
+    return ["-colorspace", "Lab", "-channel", "R", "-unsharp", op, "+channel",
+            "-colorspace", "sRGB"]
+
+
+def _resize_label(mode, value, allow_upscale=False):
+    if not mode:
+        return ""
+    tag = {"long": "long", "short": "short", "percent": "pct"}[mode]
+    v = int(value) if float(value).is_integer() else value
+    return f"@{tag}{v}" + ("+up" if allow_upscale else "")
+
+
+def _derived_label(icc_label, resize_mode=None, resize_value=None,
+                   allow_upscale=False, sharpen=None):
+    """jxlphoto-derived:<label>. Changing any part re-derives on the next sync."""
+    return ((icc_label or "keep")
+            + _resize_label(resize_mode, resize_value, allow_upscale)
+            + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
+
+
+def _is_derivative() -> bool:
+    """True when this run shapes output pixels: resize and/or sharpen.
+
+    Such an output is a DERIVATIVE: it never replaces or deletes its source,
+    never proves the master is archived, and carries
+    jxlphoto-derived:<recipe> instead of the jxlphoto-src pair.
+    """
+    return bool(RESIZE_MODE or SHARPEN != "none")
+
+
+def _output_icc_label(output_icc):
+    """The label of an --icc-profile target: sRGB, icc-<md5[:12]>, or None.
+
+    Same spelling the recompressor's _resolve_output_icc produces, so a label
+    written by one script is recognized by the other.
+    """
+    if not output_icc:
+        return None
+    if output_icc == "sRGB":
+        return "sRGB"
+    try:
+        data = Path(output_icc).read_bytes()
+        return "icc-" + hashlib.md5(data).hexdigest()[:12]
+    except OSError:
+        return "icc-" + Path(output_icc).stem
+
+
+def _current_derived_label(output_icc) -> str:
+    return _derived_label(_output_icc_label(output_icc), RESIZE_MODE,
+                          RESIZE_VALUE, ALLOW_UPSCALE, SHARPEN)
+
+
+def _check_derivative_targets(pairs, output_icc, dry_run=False):
+    """(kept_pairs, refused) for a resize/sharpened run.
+
+    An existing output that is one of our derivatives with the CURRENT recipe
+    is left to the skip logic; a derivative with a DIFFERENT recipe is
+    re-derived; an existing file that is NOT a derivative (or whose markers
+    cannot be read) is refused — a JPEG the user exported themselves must
+    never be silently overwritten, and a derived output must never be used to
+    prove the master is archived. Returns refused as [(src, out, why)] like
+    _provenance_filter.
+    """
+    if not _is_derivative():
+        return pairs, []
+    existing = [(s, o) for s, o in pairs if o.exists()]
+    if not existing:
+        return pairs, []
+    labels = _read_derived_markers_batch([o for _s, o in existing])
+    wanted = _current_derived_label(output_icc)
+    refused, refused_keys = [], set()
+    for s, o in existing:
+        lab = labels.get(str(o), False)
+        if lab is False or lab is None:
+            why = (f"an existing file at the destination is not a derivative of "
+                   f"this run (wanted jxlphoto-derived:{wanted}) — refusing to "
+                   f"overwrite what may be a user export")
+            refused.append((s, o, why))
+            refused_keys.add(os.path.normcase(str(o)))
+            if dry_run:
+                logger.info(f" DRY | would REFUSE | {s.name} | {why}")
+            else:
+                logger.error(f"REFUSED | {s.name} | {why}")
+        elif lab != wanted:
+            _FORCE_REDERIVE.add(os.path.normcase(str(o)))
+            logger.info(f" derivative recipe changed ({lab} -> {wanted}): "
+                        f"re-deriving | {s.name}")
+    if refused_keys:
+        pairs = [(s, o) for s, o in pairs
+                 if os.path.normcase(str(o)) not in refused_keys]
+    return pairs, refused
+
+
+def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
+    """exiftool lines that turn the copied metadata into a derivative's.
+
+    dc:Relation: drop jxlphoto-src/srcsum (trap A7: a resized JPEG must never
+    prove the master is archived) and any old jxlphoto-derived, keep everything
+    else, add the current recipe's label. When the output was resized, the
+    EXIF/XMP pixel dimensions copied from the master are corrected to the
+    output's own (the XMP pair only when the source carried it).
+
+    The dc:Relation CLEAR is a separate invocation on purpose: with `=` and
+    `+=` for the same list tag in ONE exiftool call, exiftool 13.59 ignores
+    the clear when the target already carries a dc:Relation (verified
+    2026-09-25) — the master's jxlphoto-src survived onto the derivative.
+    """
+    _creator, tokens = _read_creator_and_relation(jxl_path)
+    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
+    keep = [t for t in tokens if t and not t.startswith(drop)]
+    lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
+    lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
+    if size:
+        nw, nh = size
+        lines.append(f"-ExifImageWidth={nw}")
+        lines.append(f"-ExifImageHeight={nh}")
+        r = _run_exiftool_argfile(
+            ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
+             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=60)
+        if r is not None and r.stdout:
+            entry = json.loads(r.stdout)[0]
+            if entry.get("PixelXDimension") is not None:
+                lines.append(f"-XMP-exif:PixelXDimension={nw}")
+            if entry.get("PixelYDimension") is not None:
+                lines.append(f"-XMP-exif:PixelYDimension={nh}")
+    return lines
+
+
+def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
+                        output_icc, bit_depth: int, quality: int,
+                        is_png: bool) -> tuple:
+    """(magick args, size|None, grey, converted) for the derivative/ICC pass.
+
+    Order validated in the plan: source profile -> target conversion ->
+    Lanczos resize -> Lab sharpening -> output-profile re-assign (B2) ->
+    depth/quality.
+    """
+    grey = _png_is_grayscale(tmp_png)
+    derivative = _is_derivative()
+    args = []
+    converted = bool(output_icc) and not grey
+    src_profile = None
+    if not grey:
+        src_args, src_profile = _source_profile_args(jxl_path, tmp_png, tmp_dir)
+        args += src_args
+        if output_icc:
+            args += _magick_icc_args(output_icc, [])
+    size = None
+    if derivative and RESIZE_MODE:
+        w, h = _png_size(tmp_png)
+        geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
+        if geom:
+            args += ["-filter", "Lanczos", "-resize", f"{geom[0]}x{geom[1]}!"]
+            size = geom
+        else:
+            logger.info(f"  Already smaller than the target — kept at "
+                        f"{w}×{h} | {jxl_path.name}")
+    if derivative:
+        sharp = _sharpen_args(SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN,
+                              SHARPEN_THRESHOLD, grey=grey)
+        args += sharp
+        if sharp and not grey:
+            # B2: `-colorspace Lab ... -colorspace sRGB` drops the ICC profile;
+            # re-assign the profile that describes the (converted) pixels.
+            if output_icc:
+                args += _magick_icc_args(output_icc, [])
+            elif src_profile is not None:
+                args += ["-profile", str(src_profile)]
+    args += ["-depth", str(bit_depth)]
+    if not is_png:
+        args += ["-quality", str(quality)]
+    return args, size, grey, converted
 
 
 def _icc_args_for(png_path: Path, output_icc: str, extra: list) -> list:
@@ -3729,8 +4162,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
     if _why:
         return (str(jxl_path), "aborted", _why, None)
 
-    # Use should_process for consistent logic
-    if not should_process(jxl_path, final_path, smart, reconvert_val):
+    # Use should_process for consistent logic. An existing derivative whose
+    # recorded recipe names another one is re-derived even without
+    # --overwrite (the planner put it in _FORCE_REDERIVE).
+    _forced = os.path.normcase(str(final_path)) in _FORCE_REDERIVE
+    if not _forced and not should_process(jxl_path, final_path, smart, reconvert_val):
         n, total = next_count()
         if smart:
             logger.info(f"[{n}/{total}] SKIP (up to date) | {jxl_path.name}")
@@ -3776,6 +4212,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         _fmt_flag = "--output_format=png" if is_png else "--output_format=jpeg"
         _magick_out = ("png:" if is_png else "jpg:") + str(actual_out)
 
+        derivative = _is_derivative()
         if output_icc and not MAGICK_AVAILABLE:
             # Fail loudly: silently keeping the embedded ICC would deliver
             # files in the wrong color space while the log says "converting".
@@ -3783,80 +4220,76 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             raise RuntimeError(
                 "ICC conversion requested but ImageMagick (magick) is not in PATH. "
                 "Install ImageMagick or drop --icc-profile/--to-srgb.")
+        if derivative and not MAGICK_AVAILABLE:
+            raise RuntimeError(
+                "--resize-*/--sharpen need ImageMagick (magick) in PATH. "
+                "Install ImageMagick or drop the resize/sharpening flags.")
 
         # From here on, a tool writes to actual_out; on failure the partial
         # output must be removed (see except below).
         output_dirty = True
 
-        if is_png:
-            # PNG output
-            if output_icc and MAGICK_AVAILABLE:
-                # Color conversion: real ICC profile via -profile when possible
-                # (proper ICC transform, not a color-model reinterpretation).
-                # djxl does not support --output_format; write a temporary PNG (format by
-                # extension) and then convert with ImageMagick. Same as the --no-ram path.
-                # capture_output keeps worker logs clean and preserves stderr for errors.
-                with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-                    tmp_png = Path(tmp) / "tmp.png"
-                    try:
-                        # Decode at the REQUESTED bit depth, exactly like the
-                        # direct path below: without --bits_per_sample djxl
-                        # picks its own default and a 16-bit request relied on
-                        # `magick -depth 16` upscaling an 8-bit intermediate.
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={bit_depth}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                        # Decided AFTER the decode: only the intermediate says
-                        # whether this image is single-channel (see
-                        # _icc_args_for).
-                        magick_output = _icc_args_for(tmp_png, output_icc, ["-depth", str(bit_depth)])
-                        logger.debug(f"Using ICC conversion: {magick_output[:2]}")
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                    except subprocess.CalledProcessError as cpe:
-                        err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
-                        raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
-            else:
-                # Direct djxl to PNG (explicit format: the temp may end in .tmp)
-                r = subprocess.run(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
-                if r.returncode != 0:
-                    raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+        # Resize/sharpening (and every ICC conversion) needs pixels in an
+        # intermediate: ONE magick branch for PNG and JPEG. The intermediate is
+        # decoded at 16 bits whenever the pixels will be resized or sharpened —
+        # the final --bit-depth is applied at the end of the chain.
+        size = None
+        if (output_icc and MAGICK_AVAILABLE) or derivative:
+            with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+                tmp_png = Path(tmp) / "tmp.png"
+                try:
+                    _decode_bits = 16 if derivative else bit_depth
+                    subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                    magick_output, size, grey, _converted = _output_magick_args(
+                        jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
+                        quality, is_png)
+                    logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
+                    subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                    if not grey:
+                        _verify_profile_in_output(actual_out, is_png=is_png)
+                except subprocess.CalledProcessError as cpe:
+                    err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
+                    raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
+        elif is_png:
+            # Direct djxl to PNG (explicit format: the temp may end in .tmp)
+            r = subprocess.run(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
+            if r.returncode != 0:
+                raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
         else:
-            # JPEG output via djxl directly (no magick needed unless ICC conversion)
-            if output_icc and MAGICK_AVAILABLE:
-                # Color conversion: real ICC profile via -profile when possible
-                # (proper ICC transform, not a color-model reinterpretation).
-                # djxl does not support --output_format; decode to a temporary PNG (format by
-                # extension) and let ImageMagick convert to the final JPEG.
-                with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
-                    tmp_png = Path(tmp) / "tmp.png"
-                    try:
-                        # Decode at the REQUESTED bit depth, exactly like the
-                        # direct path below: without --bits_per_sample djxl
-                        # picks its own default and a 16-bit request relied on
-                        # `magick -depth 16` upscaling an 8-bit intermediate.
-                        subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={bit_depth}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                        # Decided AFTER the decode: a 1-component JPEG carrying
-                        # an sRGB profile is as wrong as the PNG case above.
-                        magick_output = _icc_args_for(tmp_png, output_icc, ["-quality", str(quality)])
-                        logger.debug(f"Using ICC conversion: {magick_output[:2]}")
-                        subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                    except subprocess.CalledProcessError as cpe:
-                        err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
-                        raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
-            else:
-                # Direct djxl to JPG (preserves embedded ICC; explicit format:
-                # the temp may end in .tmp)
-                quality_flag = f"--jpeg_quality={quality}"
-                r = subprocess.run(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
-                if r.returncode != 0:
-                    raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+            # Direct djxl to JPG (preserves embedded ICC; explicit format:
+            # the temp may end in .tmp)
+            quality_flag = f"--jpeg_quality={quality}"
+            r = subprocess.run(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
+            if r.returncode != 0:
+                raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
 
-        # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop
+        # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop. A
+        # derivative gets the provenance markers REMOVED in the same breath
+        # (trap A7: a 2048 px JPEG must never prove the master is archived, or
+        # a later --delete-source --delete-skipped run would unlink the master).
         _copy_metadata(jxl_path, actual_out)
-        try:
-            _run_exiftool_argfile(
-                ["-overwrite_original"] + _provenance_marker_args(jxl_path)
-                + [str(actual_out)], timeout=60)
-        except Exception as _e_prov:
-            logger.debug(f"Provenance marker skipped: {_e_prov}")
+        if derivative:
+            _dlabel = _current_derived_label(output_icc)
+            # Separate CLEAR invocation (see _derivative_metadata_args): the
+            # copied jxlphoto-src must not survive `=` + `+=` in one call.
+            rc = _run_exiftool_argfile(
+                ["-overwrite_original", "-XMP-dc:Relation=", str(actual_out)],
+                timeout=60)
+            if rc.returncode != 0:
+                raise RuntimeError(f"derivative metadata clear: {(rc.stderr or '')[:200]}")
+            r2 = _run_exiftool_argfile(
+                ["-overwrite_original"]
+                + _derivative_metadata_args(jxl_path, _dlabel, size)
+                + [str(actual_out)], timeout=120)
+            if r2.returncode != 0:
+                raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
+        else:
+            try:
+                _run_exiftool_argfile(
+                    ["-overwrite_original"] + _provenance_marker_args(jxl_path)
+                    + [str(actual_out)], timeout=60)
+            except Exception as _e_prov:
+                logger.debug(f"Provenance marker skipped: {_e_prov}")
 
         # Validate EVERY successful output (rc=0 does not guarantee a
         # well-formed file).
@@ -3867,7 +4300,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             os.replace(str(actual_out), str(final_path))
 
         n, total = next_count()
-        label = "RECONVERT" if overwritten else "OK"
+        if derivative:
+            label = f"DERIVE ({_current_derived_label(output_icc)})"
+        else:
+            label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path.name}")
         return (str(jxl_path), "reconvert" if overwritten else "ok", str(final_path), None)
 
@@ -3987,6 +4423,7 @@ def cmd_convert(args, from_jxl: bool = True):
     """Returns (errors, cancelled)."""
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
+    _FORCE_REDERIVE.clear()
 
     # NOTE: the --icc-profile guards live AFTER direction auto-detection
     # below (a --force-convert on a JXL folder flips from_jxl at file
@@ -4079,9 +4516,16 @@ def cmd_convert(args, from_jxl: bool = True):
     if direction == "from_jxl" and args.icc_profile and not MAGICK_AVAILABLE:
         logger.error("--icc-profile/--to-srgb requires ImageMagick (magick) in PATH.")
         sys.exit(1)
+    if direction == "from_jxl" and _is_derivative() and not MAGICK_AVAILABLE:
+        logger.error("--resize-*/--sharpen require ImageMagick (magick) in PATH.")
+        sys.exit(1)
     if direction == "to_jxl" and args.icc_profile:
         logger.warning("--icc-profile/--to-srgb is ignored for JPEG/PNG -> JXL encodes "
                        "(no ICC-conversion step on that pipeline).")
+    if direction == "to_jxl" and _is_derivative():
+        logger.warning("--resize-*/--sharpen only apply when decoding JXL "
+                       "(no pixel-shaping step on the JPEG/PNG -> JXL pipeline) — "
+                       "ignored for this run.")
 
     # JPEG does not support 16-bit. Switch format to PNG before building output
     # pairs so that staging files and final paths use the correct extension.
@@ -4156,21 +4600,32 @@ def cmd_convert(args, from_jxl: bool = True):
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         output_arg=args.output, source_root=_prov_src_root(args))
+    if _is_derivative():
+        # A resize/sharpened output is a derivative: never overwrite a file
+        # that is not one of ours, re-derive when the recipe changed.
+        pairs, _der_refused = _check_derivative_targets(
+            pairs, args.icc_profile, dry_run=args.dry_run)
+        if _der_refused:
+            _refused = _refused + _der_refused
     if _refused:
         _counter["total"] = len(pairs)
 
     if args.dry_run:
         # Same as cmd_transcode: an existing output is a SKIP in the real run
-        # (should_process), not a conversion.
-        _dry_pairs = [(f, out, should_process(f, out, smart_mode, reconvert_explicit))
+        # (should_process), not a conversion — except a derivative whose
+        # recorded recipe changed, which the planner forces.
+        _dry_pairs = [(f, out, (os.path.normcase(str(out)) in _FORCE_REDERIVE
+                                or should_process(f, out, smart_mode, reconvert_explicit)))
                       for f, out in pairs]
         _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
+        _dlabel = _current_derived_label(args.icc_profile) if _is_derivative() else None
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if smart_mode else "SKIP (exists)"
                 logger.info(f" DRY | {_lbl} | {f.name}")
             else:
-                logger.info(f" DRY | {f.name} -> {out}")
+                _tag = f" [DERIVE: {_dlabel}]" if _dlabel else ""
+                logger.info(f" DRY | {f.name} -> {out}{_tag}")
         logger.info(f"Dry run: {len(pairs) - _n_skip} files would be converted"
                     + (f"; {_n_skip} would be skipped (output already exists)."
                        if _n_skip else "."))
@@ -4358,6 +4813,7 @@ def cmd_auto(args):
     """
     global _counter, TEMP2_DIR, DELETE_SOURCE, STORE_MD5
     _counter = {"done": 0, "total": 0}
+    _FORCE_REDERIVE.clear()
 
     if args.icc_profile and not MAGICK_AVAILABLE:
         # Same guard as cmd_convert: without ImageMagick the ICC conversion
@@ -4424,6 +4880,12 @@ def cmd_auto(args):
                        log_file=log_file, dry_run=args.dry_run)
         return (0, False)
 
+    if _is_derivative() and (jpeg_files or png_files):
+        # Resize/sharpening shape decoded pixels; the encode direction has no
+        # such step (cjxl eats the source pixels). Say so rather than ignore.
+        logger.warning("--resize-*/--sharpen only apply when decoding JXL: the "
+                       "JPEG/PNG -> JXL groups in this run ignore them.")
+
     # Separate JXL files by jbrd presence
     jxl_transcode_files = []  # Have jbrd - can decode losslessly to JPEG
     jxl_convert_files = []    # No jbrd - must do lossy convert
@@ -4433,6 +4895,14 @@ def cmd_auto(args):
             jxl_transcode_files.append(f)
         else:
             jxl_convert_files.append(f)
+
+    if _is_derivative() and jxl_transcode_files:
+        # Resize/sharpening needs PIXELS: the bit-exact reconstruction cannot
+        # shape them, so every jbrd file is decoded and re-encoded instead.
+        logger.info(f"{len(jxl_transcode_files)} JXL(s) with a JPEG reconstruction are "
+                    f"decoded and re-encoded instead (resize/sharpen needs pixels)")
+        jxl_convert_files.extend(jxl_transcode_files)
+        jxl_transcode_files = []
 
     total_files = len(jpeg_files) + len(png_files) + len(jxl_transcode_files) + len(jxl_convert_files)
     _counter["total"] = total_files
@@ -4667,6 +5137,13 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         decode_lossless=(use_transcode and all(
             s.suffix.lower() == '.jxl' for s, _o in pairs)),
         output_arg=args.output, source_root=_prov_src_root(args))
+    if _is_derivative():
+        # A resize/sharpened output is a derivative: never overwrite a file
+        # that is not one of ours, re-derive when the recipe changed.
+        pairs, _der_refused = _check_derivative_targets(
+            pairs, args.icc_profile, dry_run=args.dry_run)
+        if _der_refused:
+            _refused = _refused + _der_refused
     if _refused:
         _counter["total"] = max(0, _counter.get("total", 0) - len(_refused))
     # A refusal is a FAILURE, not a quiet skip: the file was not converted and
@@ -4688,15 +5165,18 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         # therefore carries the real plan, not `len(all_pairs)` (which counted
         # refused pairs as conversions — bug #15). cmd_transcode and
         # cmd_convert report their dry runs the same way.
-        _dry_pairs = [(f, out, should_process(f, out, args.sync, args.overwrite))
+        _dry_pairs = [(f, out, (os.path.normcase(str(out)) in _FORCE_REDERIVE
+                                or should_process(f, out, args.sync, args.overwrite)))
                       for f, out in pairs]
         _n_skip = sum(1 for _f, _o, _go in _dry_pairs if not _go)
+        _dlabel = _current_derived_label(args.icc_profile) if _is_derivative() else None
         for f, out, _go in _dry_pairs:
             if not _go:
                 _lbl = "SKIP (up to date)" if args.sync else "SKIP (exists)"
                 logger.info(f" DRY | {_lbl} | {f.name}")
             else:
-                logger.info(f" DRY | {f.name} -> {out}")
+                _tag = f" [DERIVE: {_dlabel}]" if _dlabel else ""
+                logger.info(f" DRY | {f.name} -> {out}{_tag}")
         logger.info(f"Dry run: {len(pairs) - _n_skip} file(s) would be processed"
                     + (f"; {_n_skip} would be skipped (output already exists)."
                        if _n_skip else "."))
@@ -4922,6 +5402,26 @@ Examples:
     parser.add_argument("--to-srgb", action="store_true",
                         help="Shortcut: convert to sRGB using ImageMagick built-in color space")
 
+    # Output shaping (JXL -> JPEG/PNG only; ignored with a warning when encoding)
+    _resize_group = parser.add_mutually_exclusive_group()
+    _resize_group.add_argument("--resize-long", type=int, default=None, metavar="PX",
+                               help="Output long edge in pixels (aspect kept; never "
+                                    "upscales without --allow-upscale)")
+    _resize_group.add_argument("--resize-short", type=int, default=None, metavar="PX",
+                               help="Output short edge in pixels")
+    _resize_group.add_argument("--resize-percent", type=float, default=None, metavar="P",
+                               help="Output size as a percentage of the source")
+    parser.add_argument("--allow-upscale", action="store_true",
+                        help="Let --resize-* enlarge an image smaller than the target")
+    parser.add_argument("--sharpen", choices=["none", "screen", "print"], default="none",
+                        help="Output sharpening after the resize (Lab L channel only)")
+    parser.add_argument("--sharpen-sigma", type=float, default=None,
+                        help="Override the preset sigma (px)")
+    parser.add_argument("--sharpen-gain", type=float, default=None,
+                        help="Override the preset gain (1.0 = 100%%)")
+    parser.add_argument("--sharpen-threshold", type=float, default=None,
+                        help="Override the preset threshold (0-1)")
+
     # Transcode specific
     parser.add_argument("--decode", action="store_true", help="Force decode direction")
     parser.add_argument("--no-md5", action="store_true", help="Skip MD5 storage")
@@ -5014,6 +5514,49 @@ Examples:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
+    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
+    RESIZE_MODE = None
+    RESIZE_VALUE = None
+    ALLOW_UPSCALE = False
+    SHARPEN = "none"
+    SHARPEN_SIGMA = None
+    SHARPEN_GAIN = None
+    SHARPEN_THRESHOLD = None
+    _FORCE_REDERIVE.clear()
+
+    # --resize-*/--sharpen: resolve to module globals (mutual exclusion is
+    # charged by argparse itself; the positivity checks exit 2 like the other
+    # argument errors).
+    if args.resize_long is not None:
+        if args.resize_long <= 0:
+            parser.error("--resize-long must be a positive number of pixels")
+        RESIZE_MODE, RESIZE_VALUE = "long", args.resize_long
+    elif args.resize_short is not None:
+        if args.resize_short <= 0:
+            parser.error("--resize-short must be a positive number of pixels")
+        RESIZE_MODE, RESIZE_VALUE = "short", args.resize_short
+    elif args.resize_percent is not None:
+        if args.resize_percent <= 0:
+            parser.error("--resize-percent must be positive")
+        if args.resize_percent > 100 and not args.allow_upscale:
+            parser.error("--resize-percent > 100 would upscale; add --allow-upscale "
+                         "to allow it")
+        RESIZE_MODE, RESIZE_VALUE = "percent", args.resize_percent
+    ALLOW_UPSCALE = bool(args.allow_upscale)
+    if args.allow_upscale and RESIZE_MODE is None:
+        print("WARNING: --allow-upscale has no effect without --resize-long/"
+              "--resize-short/--resize-percent: nothing to enlarge.")
+    SHARPEN = args.sharpen
+    SHARPEN_SIGMA = args.sharpen_sigma
+    SHARPEN_GAIN = args.sharpen_gain
+    SHARPEN_THRESHOLD = args.sharpen_threshold
+    if SHARPEN == "none" and any(v is not None for v in
+                                 (args.sharpen_sigma, args.sharpen_gain,
+                                  args.sharpen_threshold)):
+        print("WARNING: --sharpen-sigma/--sharpen-gain/--sharpen-threshold have no "
+              "effect without --sharpen screen|print.")
 
     if not args.input.exists():
         print(f"ERROR: input path does not exist: {args.input}")
@@ -5213,7 +5756,17 @@ def main():
             sys.exit(1)
         sys.exit(cmd_repair_jbrd(args))
 
-    # Required tools, once, before any cmd_* runs. Without this a missing
+    # Resize/sharpening write a DERIVATIVE: it never replaces or deletes its
+    # source, and the lossless JPEG recovery cannot shape pixels (the original
+    # bytes are reproduced verbatim).
+    if _is_derivative() and (DELETE_SOURCE or args.delete_skipped):
+        parser.error("--resize-*/--sharpen write a DERIVATIVE: it never replaces "
+                     "or deletes its source — drop --delete-source/--delete-skipped")
+    if _is_derivative() and (cmd == "transcode" or (cmd == "auto" and args.decode)):
+        parser.error("a bit-exact JPEG reconstruction cannot be resized/sharpened — "
+                     "drop --force-transcode/--decode (or the resize/sharpening flags)")
+
+    # Required tools, once, before any cmd_* runs. Without it a missing
     # cjxl/djxl/exiftool turns into N cryptic per-file FileNotFoundError
     # instead of one clear message. (setup_logger() runs inside each cmd_*,
     # so print() is the right channel here.)

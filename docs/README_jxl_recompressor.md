@@ -15,6 +15,7 @@ generation of lossy re-encode, not several.
 - **cjxl / djxl** — [libjxl releases](https://github.com/libjxl/libjxl/releases), on PATH
 - **exiftool** — [exiftool.org](https://exiftool.org), on PATH (metadata never round-trips through cjxl; it is copied with exiftool)
 - **numpy + imagecodecs** — only needed for `--verify-roundtrip`
+- **ImageMagick + Pillow** — only needed for derivatives (`--output-icc`, `--resize-long/-short/-percent`, `--sharpen`)
 
 ## Quick start
 
@@ -220,11 +221,15 @@ Three interactive confirmations guard the deletion unless
 own confirmation and passes this flag so the child never prompts on an
 invisible stdin.
 
-## Colour-converted derivatives (`--output-icc`)
+## Derivatives: colour conversion, resize and sharpening
 
-`--output-icc sRGB|AdobeRGB|<path to .icc>` writes a **colour-converted
-derivative** instead of a plain recompression: the master is decoded at 16
-bits, converted with ImageMagick from its own profile (fixed **relative
+A **derivative** is any run that shapes output pixels instead of plainly
+recompressing the master: `--output-icc` (colour conversion), `--resize-long/-short/-percent`
+(Lanczos resize) and/or `--sharpen` (output sharpening). The recipes combine,
+and every guarantee below applies to all of them.
+
+`--output-icc sRGB|AdobeRGB|<path to .icc>` converts the master: it is decoded
+at 16 bits, converted with ImageMagick from its own profile (fixed **relative
 colorimetric + black point compensation**) and re-encoded at the requested
 `--distance` — still **16 bits** (8-bit lossy JXL was measured to be no
 smaller, so there is no 8-bit option). Use it to make light delivery copies
@@ -242,6 +247,11 @@ py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL ^
      --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync ^
      --rename-from ProPhoto-g22 --rename-to sRGB
     ->  _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
+
+# light JXL derivative, 4000 px on the long edge, with screen sharpening
+py jxl_recompressor.py "<pasta>" --mode 7 --export-subfolder 16B_JXL ^
+     --export-jxl-folder 16B_JXL_4k --output-icc sRGB --resize-long 4000 ^
+     --sharpen screen --distance 1.0
 ```
 
 | Target | What it is |
@@ -260,18 +270,20 @@ Guarantees, all fail-closed:
 - **Never in place.** Modes 8 and 0-without-output are refused (exit 2): the
   converted file would replace the master. Pick a mode that writes to another
   folder (1–7).
-- **Never deletes.** `--delete-source`/`--delete-skipped` with `--output-icc`
-  are refused (exit 2), and `--verify-roundtrip` too (it compares against the
+- **Never deletes.** `--delete-source`/`--delete-skipped` with a derivative are
+  refused (exit 2), and `--verify-roundtrip` too (it compares against the
   source, which a converted derivative no longer matches).
 - **Never overwrites what is not its own derivative**, even with
   `--overwrite`: an existing file at the destination without a
   `jxlphoto-derived:` token (or whose markers cannot be read) is REFUSED, so
   pointing `--export-jxl-folder` at the master folder cannot destroy the
   masters.
-- **Re-derives when the target changes.** Each output records its target as
-  `jxlphoto-derived:<label>` (`sRGB` / `AdobeRGB` / `icc-<md5[:12]>`); a run
-  with another target re-derives instead of trusting (and skipping) the old
-  file. An identical re-run with `--sync` SKIPs normally.
+- **Re-derives when the recipe changes.** Each output records
+  `jxlphoto-derived:<recipe>` (`sRGB` / `AdobeRGB` / `icc-<md5[:12]>` / `keep`
+  for no conversion, plus `@long2048`/`@short1080`/`@pct50` (`+up` when an
+  upscale was allowed) and `+screen`/`+print`). A run with another recipe
+  re-derives instead of trusting (and skipping) the old file. An identical
+  re-run with `--sync` SKIPs normally.
 - **Removes the archive provenance**: `jxlphoto-src:`/`jxlphoto-srcsum:` are
   dropped (a derivative must never prove the original TIFF is archived — the
   encoder would otherwise accept it under `--delete-skipped`), and the
@@ -287,7 +299,7 @@ Costs and notes:
 - Each worker holds two 16-bit PNGs plus an ImageMagick process in memory
   (≈1 GB per worker on a 45 MP photo); above `--workers 4` the run logs a
   warning. The intermediates live in `TEMP_DIR` and are removed per file.
-- `--output-icc` needs `djxl` and `magick` on PATH, plus Pillow (even for
+- A derivative needs `djxl` and `magick` on PATH, plus Pillow (even for
   AdobeRGB: the sRGB profile assigned to sources that decode without one comes
   from Pillow).
 - The usual classification still applies: a derivative at the **same**
@@ -296,6 +308,42 @@ Costs and notes:
   `--on-downgrade convert` for that.
 - To decode only the masters to TIFF later, use the decoder in mode 7 with
   `--export-subfolder 16B_JXL` (mode 6 would also pick the derivative folder).
+
+### Resize and sharpening
+
+`--resize-long PX`, `--resize-short PX` and `--resize-percent P` (mutually
+exclusive) write the derivative at another size; the aspect ratio is always
+kept. Without `--allow-upscale` an image already smaller than the target is
+**never enlarged** — it keeps its size and the run logs
+`Already smaller than the target — kept at W×H`; `--resize-percent` above 100
+is an error without the flag, and when an upscale is allowed the label records
+it (`+up`).
+
+`--sharpen none|screen|print` (default `none`) applies output sharpening after
+the resize. Colour images are sharpened on the Lab **L** channel only (no
+colour fringes); a grey image is sharpened directly. The preset numbers live
+in one table (`SHARPEN_PRESETS`), in **output pixels** so one preset works at
+any size, calibrated against Capture One:
+
+| Preset | sigma (px) | gain | threshold |
+|---|---|---|---|
+| `screen` | 0.5 | 0.6 | 0.02 |
+| `print` | 1.0 | 1.0 | 0.02 |
+
+The values are provisional until a calibration session against real Capture
+One exports lands. The `--sharpen-sigma`/`--sharpen-gain`/
+`--sharpen-threshold` expert overrides are deliberately **outside** the recipe
+label: after changing one, re-derive with `--overwrite` (the sync would
+otherwise see the old label as current). Without `--sharpen screen|print` they
+are inert (a warning is printed). The Lanczos resize runs in the image's own
+gamma-encoded space (the ImageMagick default), not in linear light.
+
+Resize and sharpening work with or without `--output-icc`: without it the
+source colour space is kept — the source profile is assigned explicitly before
+the shaping pass and re-assigned after the Lab sharpening drops it, so the
+output's `CreatorTool` ICC still describes its pixels. A greyscale image is
+never colour-converted (an RGB profile on a single channel is invalid), but it
+is still resized and sharpened.
 
 ## Renaming the outputs (`--rename-from` / `--rename-to`)
 
@@ -347,7 +395,20 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --output-icc TARGET   sRGB / AdobeRGB / path to an RGB .icc: write a
                       16-bit colour-converted derivative instead of a plain
                       recompression. Never in place, never with --delete-source.
-                      See "Colour-converted derivatives" above
+                      See "Derivatives: colour conversion, resize and
+                      sharpening" above
+--resize-long PX      Output long edge in pixels (derivative; aspect kept).
+--resize-short PX     Output short edge in pixels. Mutually exclusive with the
+--resize-percent P    other two; P is a percentage. Without --allow-upscale the
+                      image is never enlarged
+--allow-upscale       Let --resize-long/-short/-percent enlarge an image smaller than the target
+                      (recorded in the recipe as +up)
+--sharpen MODE        none (default) / screen / print: output sharpening after
+                      the resize (Lab L channel only)
+--sharpen-sigma N     Expert overrides of the sharpening preset (px, gain,
+--sharpen-gain N      0-1 threshold). Only with --sharpen screen|print; NOT in
+--sharpen-threshold N the recipe label — re-derive with --overwrite after
+                      changing one
 --rename-from TEXT    Replace this text in each output file name (literal,
                       case-sensitive, first occurrence, extension untouched;
                       same semantics as the transcoder's flag)
@@ -395,6 +456,14 @@ DELETE_SOURCE = False        # Delete sources after verification
 DELETE_SKIPPED = False       # Also delete already-archived sources
 PROVENANCE_CHECK = "path"    # path | content
 DELETE_CONFIRM = True        # Interactive confirmations before deleting
+
+RESIZE_MODE = None           # None | "long" | "short" | "percent" (--resize-long/-short/-percent)
+RESIZE_VALUE = None          # px, or percent for RESIZE_MODE == "percent"
+ALLOW_UPSCALE = False        # Let --resize-long/-short/-percent enlarge smaller images
+SHARPEN = "none"             # none | screen | print (--sharpen)
+SHARPEN_SIGMA = None         # Expert overrides, OUTSIDE the recipe label
+SHARPEN_GAIN = None
+SHARPEN_THRESHOLD = None
 
 CONVERTED_JXL_FOLDER = "recompressed_jxl"   # mode 1/2 default
 JXL_FOLDER_NAME = "JXL_recompressed"        # modes 3/5

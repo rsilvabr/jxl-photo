@@ -762,6 +762,19 @@ _OUTPUT_ICC_PATH = None      # the profile written once to a temp file for magic
 _SRGB_ICC_PATH = None        # assigned to sources that decode without any profile (A3)
 _FORCE_REDERIVE = set()      # final paths whose derived marker names another target
 
+# --resize-*/--sharpen runtime state, reset at the top of main() like the
+# --output-icc trio above (the test suite runs several main()s in one process).
+RESIZE_MODE = None           # "long" / "short" / "percent" / None
+RESIZE_VALUE = None
+ALLOW_UPSCALE = False
+SHARPEN = "none"             # none / screen / print
+SHARPEN_SIGMA = None         # expert overrides (deliberately OUTSIDE the label)
+SHARPEN_GAIN = None
+SHARPEN_THRESHOLD = None
+
+DERIVATIVE = False           # --output-icc OR resize OR sharpen
+_DERIVED_LABEL = None        # jxlphoto-derived:<recipe> for this run
+
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
 # a recompressed archive stays provable by the DECODER's delete gates.
 SRC_PREFIX = "jxlphoto-src:"
@@ -2476,6 +2489,88 @@ def _png_is_grayscale(png_path: Path) -> bool:
     return head[25] in (0, 4)          # 0 = grey, 4 = grey + alpha
 
 
+SHARPEN_PRESETS = {
+    "screen": {"sigma": 0.5, "gain": 0.6, "threshold": 0.02},   # CALIBRATE vs C1 "screen"
+    "print":  {"sigma": 1.0, "gain": 1.0, "threshold": 0.02},   # CALIBRATE vs C1 "print"
+}
+# The ONLY place the sharpening numbers live, calibrated against Capture One's
+# own output sharpening. Units are OUTPUT pixels, so one preset works at any
+# output size. sigma = gaussian sigma (px), gain = unsharp amount (1.0 = 100%),
+# threshold = fraction of full scale below which a difference is left alone
+# (protects sky, skin and noise).
+
+
+def _png_size(png_path: Path):
+    """(width, height) from the IHDR of a PNG djxl just wrote."""
+    with open(png_path, "rb") as f:
+        head = f.read(24)
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise RuntimeError(f"not a PNG: {png_path}")
+    return struct.unpack(">II", head[16:24])
+
+
+def _resize_geometry(w: int, h: int, mode, value, allow_upscale: bool = False):
+    """(new_w, new_h) for --resize-long/--resize-short/--resize-percent, or None
+    when the image keeps its size (no resize requested, same size, or a
+    would-be upscale without --allow-upscale). Aspect ratio always kept."""
+    if not mode:
+        return None
+    if mode == "long":
+        scale = float(value) / max(w, h)
+    elif mode == "short":
+        scale = float(value) / min(w, h)
+    elif mode == "percent":
+        scale = float(value) / 100.0
+    else:
+        raise ValueError(f"unknown resize mode: {mode}")
+    if scale <= 0:
+        raise ValueError("resize value must be positive")
+    if scale > 1.0 and not allow_upscale:
+        return None
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    if (nw, nh) == (w, h):
+        return None
+    return nw, nh
+
+
+def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
+    """ImageMagick args for output sharpening, or [] for none. Colour images are
+    sharpened on the Lab L channel only (no colour fringes); a grey image has a
+    single channel and is sharpened directly. `-colorspace Lab ... -colorspace
+    sRGB` DROPS the ICC profile — the caller must re-assign the output profile
+    right after these args (verified: pixels stay identical)."""
+    if not preset or preset == "none":
+        return []
+    p = dict(SHARPEN_PRESETS[preset])
+    if sigma is not None:
+        p["sigma"] = float(sigma)
+    if gain is not None:
+        p["gain"] = float(gain)
+    if threshold is not None:
+        p["threshold"] = float(threshold)
+    op = f"0x{p['sigma']}+{p['gain']}+{p['threshold']}"
+    if grey:
+        return ["-unsharp", op]
+    return ["-colorspace", "Lab", "-channel", "R", "-unsharp", op, "+channel",
+            "-colorspace", "sRGB"]
+
+
+def _resize_label(mode, value, allow_upscale=False):
+    if not mode:
+        return ""
+    tag = {"long": "long", "short": "short", "percent": "pct"}[mode]
+    v = int(value) if float(value).is_integer() else value
+    return f"@{tag}{v}" + ("+up" if allow_upscale else "")
+
+
+def _derived_label(icc_label, resize_mode=None, resize_value=None,
+                   allow_upscale=False, sharpen=None):
+    """jxlphoto-derived:<label>. Changing any part re-derives on the next sync."""
+    return ((icc_label or "keep")
+            + _resize_label(resize_mode, resize_value, allow_upscale)
+            + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
+
+
 def _xmp_icc_from_creator_tool(text: str):
     """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
     rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
@@ -2520,21 +2615,27 @@ def _read_creator_and_relation(jxl_path: Path):
     return str(entry.get("CreatorTool") or ""), tokens
 
 
-def _derive_pixels(jxl_path: Path, write_path: Path) -> bool:
-    """Decode at 16 bits, convert to the --output-icc profile, re-encode.
+def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
+    """Decode at 16 bits, apply the derivative recipe, re-encode.
 
-    The SOURCE profile is always assigned explicitly (trap A3): the encoder's
-    original ICC from XMP CreatorTool when present — exactly what
-    jxl_tiff_decoder attaches to the same pixels — else the iCCP djxl wrote,
-    else sRGB (djxl writes an sRGB chunk, no iCCP, for sRGB-encoded files).
-    Grey images are re-encoded unconverted (no gamut to map; an RGB profile on
-    a single channel is invalid — same rule as the transcoder).
+    The recipe is any of: colour conversion to --output-icc, a Lanczos resize,
+    Lab-L sharpening. The SOURCE profile is always assigned explicitly (trap
+    A3): the encoder's original ICC from XMP CreatorTool when present — exactly
+    what jxl_tiff_decoder attaches to the same pixels — else the iCCP djxl
+    wrote (extracted to a file for magick), else sRGB (djxl writes an sRGB
+    chunk, no iCCP, for sRGB-encoded files). Without --output-icc there is no
+    conversion: the source profile is re-assigned after the Lab sharpening pass
+    (trap B2), which drops it. Grey images are never colour-converted (no gamut
+    to map; an RGB profile on a single channel is invalid — same rule as the
+    transcoder), but resize and sharpening still apply.
 
-    Returns True when the pixels were colour-converted, False for a grey image
-    left as it was. _derivative_metadata_args takes that answer instead of
-    guessing again from the jxlphoto-grayscale marker: a grey JXL that does not
-    carry the marker (not written by this toolkit) was left unconverted here
-    but got the RGB target profile stamped into its CreatorTool."""
+    Returns (converted, size): converted True only for a colour conversion
+    (CreatorTool then carries the TARGET profile); size is the resized (w, h)
+    or None. _derivative_metadata_args takes both instead of guessing again
+    from the jxlphoto-grayscale marker: a grey JXL that does not carry the
+    marker (not written by this toolkit) was left unconverted here but got the
+    RGB target profile stamped into its CreatorTool.
+    """
     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
         tmp = Path(tmp)
         dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
@@ -2542,39 +2643,72 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> bool:
                            capture_output=True, timeout=CJXL_TIMEOUT)
         if r.returncode != 0 or not dec_png.exists():
             raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
-        if _png_is_grayscale(dec_png):
+        grey = _png_is_grayscale(dec_png)
+        converted = False
+        size = None
+        if grey and not (RESIZE_MODE or SHARPEN != "none"):
             logger.info(f"  >Grayscale image: encoded without colour conversion | {jxl_path.name}")
             enc_in = dec_png
-            converted = False
         else:
-            creator, _tokens = _read_creator_and_relation(jxl_path)
-            src_icc = _xmp_icc_from_creator_tool(creator)
-            chunks = _png_chunk_types(dec_png)
-            if src_icc:
-                src_path = tmp / "src.icc"
-                src_path.write_bytes(src_icc)
-                assign = ["+profile", "*", "-profile", str(src_path)]
-            elif "iCCP" in chunks:
-                assign = []                               # convert from djxl's own iCCP
-            elif "sRGB" in chunks:
-                assign = ["+profile", "*", "-profile", str(_SRGB_ICC_PATH)]
-            else:
-                raise RuntimeError("cannot tell the source colour space (no XMP ICC, "
-                                   "no iCCP, no sRGB chunk) — refusing to guess")
-            cmd = (["magick", str(dec_png)] + assign
-                   + ["-intent", "Relative", "-black-point-compensation",
-                      "-profile", str(_OUTPUT_ICC_PATH), "-depth", "16",
-                      "png:" + str(conv_png)])
+            args = []
+            out_profile = None
+            if not grey:
+                creator, _tokens = _read_creator_and_relation(jxl_path)
+                src_icc = _xmp_icc_from_creator_tool(creator)
+                chunks = _png_chunk_types(dec_png)
+                if src_icc:
+                    src_path = tmp / "src.icc"
+                    src_path.write_bytes(src_icc)
+                    args += ["+profile", "*", "-profile", str(src_path)]
+                elif "iCCP" in chunks:
+                    src_path = tmp / "src_iccp.icc"
+                    _r = subprocess.run(["magick", str(dec_png), str(src_path)],
+                                        capture_output=True, timeout=CJXL_TIMEOUT)
+                    if _r.returncode != 0 or not src_path.exists():
+                        raise RuntimeError(
+                            f"magick could not extract the source ICC: "
+                            f"{(_r.stderr or b'').decode(errors='replace')[:200]}")
+                    # convert from djxl's own iCCP, no explicit assign
+                elif "sRGB" in chunks:
+                    src_path = _SRGB_ICC_PATH
+                    args += ["+profile", "*", "-profile", str(src_path)]
+                else:
+                    raise RuntimeError("cannot tell the source colour space (no XMP ICC, "
+                                       "no iCCP, no sRGB chunk) — refusing to guess")
+                if OUTPUT_ICC:
+                    args += ["-intent", "Relative", "-black-point-compensation",
+                             "-profile", str(_OUTPUT_ICC_PATH)]
+                    converted = True
+                    out_profile = _OUTPUT_ICC_PATH
+                else:
+                    out_profile = src_path
+            if RESIZE_MODE:
+                w, h = _png_size(dec_png)
+                geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
+                if geom:
+                    args += ["-filter", "Lanczos", "-resize", f"{geom[0]}x{geom[1]}!"]
+                    size = geom
+                else:
+                    logger.info(f"  Already smaller than the target — kept at "
+                                f"{w}×{h} | {jxl_path.name}")
+            sharp = _sharpen_args(SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN,
+                                  SHARPEN_THRESHOLD, grey=grey)
+            args += sharp
+            if sharp and not grey:
+                # B2: `-colorspace Lab ... -colorspace sRGB` drops the ICC
+                # profile; re-assign the one that describes the pixels now.
+                args += ["-profile", str(out_profile)]
+            cmd = (["magick", str(dec_png)] + args
+                   + ["-depth", "16", "png:" + str(conv_png)])
             r = subprocess.run(cmd, capture_output=True, timeout=CJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
                 raise RuntimeError(f"magick: {(r.stderr or b'').decode(errors='replace')[:200]}")
-            if "iCCP" not in _png_chunk_types(conv_png):
+            if not grey and "iCCP" not in _png_chunk_types(conv_png):
                 # Traps A1/A2: without the profile cjxl would silently tag the
                 # converted pixels as sRGB. Never let that reach the archive.
                 raise RuntimeError("ImageMagick wrote the converted image without its ICC "
                                    "profile — refusing to encode it as the wrong colour space")
             enc_in = conv_png
-            converted = True
         cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(enc_in), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
@@ -2582,19 +2716,22 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> bool:
         r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
-    return converted
+    return converted, size
 
 
-def _derivative_metadata_args(jxl_path: Path, converted: bool = True) -> list:
+def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
+                              size=None) -> list:
     """exiftool lines that turn the copied master metadata into a derivative's:
     - dc:Relation: drop jxlphoto-src/srcsum (a derivative must never prove the
       original is archived — trap A7), drop any old jxlphoto-derived and the
-      page-level icc:inherited flag, add jxlphoto-derived:<label>;
-    - CreatorTool: replace the ICC:<b64> blob by the TARGET profile, so the
-      decoder labels a decoded TIFF with the colour space the pixels are really
-      in (trap A4). When the pixels were NOT converted (`converted` False: a
-      grey image, as _derive_pixels reports it) the CreatorTool is kept — the
-      source profile still describes them.
+      page-level icc:inherited flag, add jxlphoto-derived:<recipe>;
+    - CreatorTool: replace the ICC:<b64> blob by the TARGET profile when the
+      pixels were colour-converted, so the decoder labels a decoded TIFF with
+      the colour space the pixels are really in (trap A4). When they were not
+      (`converted` False: a grey image or a resize/sharpening-only recipe) the
+      copied CreatorTool is kept — its ICC still describes the pixels;
+    - pixel dimensions: corrected to the resized output's own (the XMP pair
+      only when the source already carried it).
     """
     creator, tokens = _read_creator_and_relation(jxl_path)
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
@@ -2602,12 +2739,25 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True) -> list:
             if t and not t.startswith(drop) and t != ICC_INHERITED_XMP_FLAG]
     lines = ["-XMP-dc:Relation="]
     lines += ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
-    lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + _OUTPUT_ICC_LABEL)
+    lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + _DERIVED_LABEL)
     if converted:
         base = _creator_tool_without_icc(creator)
         b64 = base64.b64encode(_OUTPUT_ICC_BYTES).decode("ascii")
         new_ct = f"{base} | ICC:{b64}" if base else f"ICC:{b64}"
         lines.append("-XMP-xmp:CreatorTool=" + _argfile_safe(new_ct))
+    if size:
+        nw, nh = size
+        lines.append(f"-ExifImageWidth={nw}")
+        lines.append(f"-ExifImageHeight={nh}")
+        r = _run_exiftool_argfile(
+            ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
+             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=60)
+        if r is not None and r.stdout:
+            entry = json.loads(r.stdout)[0]
+            if entry.get("PixelXDimension") is not None:
+                lines.append(f"-XMP-exif:PixelXDimension={nw}")
+            if entry.get("PixelYDimension") is not None:
+                lines.append(f"-XMP-exif:PixelYDimension={nh}")
     return lines
 
 
@@ -2663,9 +2813,11 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # action == "convert"
         write_path.parent.mkdir(parents=True, exist_ok=True)
         output_dirty = True
-        if OUTPUT_ICC:
-            converted = _derive_pixels(jxl_path, write_path)   # djxl -> magick -> cjxl
+        if DERIVATIVE:
+            # djxl -> magick (recipe) -> cjxl; returns (converted, size|None)
+            converted, size = _derive_pixels(jxl_path, write_path)
         else:
+            converted, size = True, None
             # --container=1 UNCONDITIONALLY: at d=0 the gate used to omit it, so a
             # bare-codestream source (any third-party JXL) produced a bare output
             # that the exiftool restamp below refuses to edit ("Will wrap JXL
@@ -2688,8 +2840,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # that form. IrfanView cannot read brob (README: "Viewer quirks"), so
         # without this the recompressed archive lost its visible EXIF even
         # with the boxes reordered — the encoder's outputs use plain boxes.
-        _extra = (_derivative_metadata_args(jxl_path, converted)
-                  if OUTPUT_ICC else [])
+        _extra = (_derivative_metadata_args(jxl_path, converted, size)
+                  if DERIVATIVE else [])
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
              "-tagsfromfile", str(jxl_path),
@@ -2742,8 +2894,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             logger.debug(f" >Round-trip verified ({detail})")
 
         overwritten = existed_before and not in_place
-        if OUTPUT_ICC and status == "ok":
-            label = f"DERIVE ({_OUTPUT_ICC_LABEL})"
+        if DERIVATIVE and status == "ok":
+            label = f"DERIVE ({_DERIVED_LABEL})"
         else:
             label = ("RECOMPRESS" if status == "ok" else "COPY")
         logger.info(f"[{n}/{total}] {label} | {jxl_path.name} -> {final_path.name}")
@@ -3245,6 +3397,9 @@ def main():
     global _gen_divergence_logged, _error_details
     global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
     global _FORCE_REDERIVE
+    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
+    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
+    global DERIVATIVE, _DERIVED_LABEL
     _gen_divergence_logged = False
     _error_details = {}
     _OUTPUT_ICC_LABEL = None
@@ -3252,6 +3407,15 @@ def main():
     _OUTPUT_ICC_PATH = None
     _SRGB_ICC_PATH = None
     _FORCE_REDERIVE = set()
+    RESIZE_MODE = None
+    RESIZE_VALUE = None
+    ALLOW_UPSCALE = False
+    SHARPEN = "none"
+    SHARPEN_SIGMA = None
+    SHARPEN_GAIN = None
+    SHARPEN_THRESHOLD = None
+    DERIVATIVE = False
+    _DERIVED_LABEL = None
 
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
@@ -3302,6 +3466,24 @@ def main():
                              "path to an RGB .icc file. 16-bit, converted from the "
                              "source's own profile (relative colorimetric + BPC). "
                              "Never in place, never with --delete-source.")
+    _resize_group = parser.add_mutually_exclusive_group()
+    _resize_group.add_argument("--resize-long", type=int, default=None, metavar="PX",
+                               help="Output long edge in pixels (aspect kept; never "
+                                    "upscales without --allow-upscale)")
+    _resize_group.add_argument("--resize-short", type=int, default=None, metavar="PX",
+                               help="Output short edge in pixels")
+    _resize_group.add_argument("--resize-percent", type=float, default=None, metavar="P",
+                               help="Output size as a percentage of the source")
+    parser.add_argument("--allow-upscale", action="store_true",
+                        help="Let --resize-* enlarge an image smaller than the target")
+    parser.add_argument("--sharpen", choices=["none", "screen", "print"], default="none",
+                        help="Output sharpening after the resize (Lab L channel only)")
+    parser.add_argument("--sharpen-sigma", type=float, default=None,
+                        help="Override the preset sigma (px)")
+    parser.add_argument("--sharpen-gain", type=float, default=None,
+                        help="Override the preset gain (1.0 = 100%%)")
+    parser.add_argument("--sharpen-threshold", type=float, default=None,
+                        help="Override the preset threshold (0-1)")
     parser.add_argument("--rename-from", type=str, default="",
                         help="Replace this text in each output file name (literal, "
                              "case-sensitive, first occurrence, extension untouched)")
@@ -3428,20 +3610,60 @@ def main():
               "checks an existing output's provenance before that source is "
               "deleted. Nothing will be checked.")
 
-    if OUTPUT_ICC and (DELETE_SOURCE or args.delete_skipped):
-        parser.error("--output-icc writes a derivative, it never replaces or deletes "
-                     "the source: drop --delete-source")
-    if OUTPUT_ICC and VERIFY_ROUNDTRIP:
-        parser.error("--verify-roundtrip compares pixels with the source and cannot "
-                     "apply to a colour-converted derivative")
-    if OUTPUT_ICC and args.mode == 8:
-        parser.error("--output-icc cannot run in mode 8 (in place): pick a mode that "
-                     "writes to another folder (1-7)")
     if OUTPUT_ICC:
         try:
             _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES = _resolve_output_icc(OUTPUT_ICC)
         except ValueError as e:
             parser.error(str(e))
+
+    # --resize-*/--sharpen: resolve to module globals (mutual exclusion is
+    # charged by argparse itself; the positivity checks exit 2 like the other
+    # argument errors).
+    if args.resize_long is not None:
+        if args.resize_long <= 0:
+            parser.error("--resize-long must be a positive number of pixels")
+        RESIZE_MODE, RESIZE_VALUE = "long", args.resize_long
+    elif args.resize_short is not None:
+        if args.resize_short <= 0:
+            parser.error("--resize-short must be a positive number of pixels")
+        RESIZE_MODE, RESIZE_VALUE = "short", args.resize_short
+    elif args.resize_percent is not None:
+        if args.resize_percent <= 0:
+            parser.error("--resize-percent must be positive")
+        if args.resize_percent > 100 and not args.allow_upscale:
+            parser.error("--resize-percent > 100 would upscale; add --allow-upscale "
+                         "to allow it")
+        RESIZE_MODE, RESIZE_VALUE = "percent", args.resize_percent
+    ALLOW_UPSCALE = bool(args.allow_upscale)
+    if args.allow_upscale and RESIZE_MODE is None:
+        print("WARNING: --allow-upscale has no effect without --resize-long/"
+              "--resize-short/--resize-percent: nothing to enlarge.")
+    SHARPEN = args.sharpen
+    SHARPEN_SIGMA = args.sharpen_sigma
+    SHARPEN_GAIN = args.sharpen_gain
+    SHARPEN_THRESHOLD = args.sharpen_threshold
+    if SHARPEN == "none" and any(v is not None for v in
+                                 (args.sharpen_sigma, args.sharpen_gain,
+                                  args.sharpen_threshold)):
+        print("WARNING: --sharpen-sigma/--sharpen-gain/--sharpen-threshold have no "
+              "effect without --sharpen screen|print.")
+
+    # A derivative is any pixel-shaping output: colour conversion, resize or
+    # sharpening. Every invariant below keys off this, not off --output-icc.
+    DERIVATIVE = bool(OUTPUT_ICC or RESIZE_MODE or SHARPEN != "none")
+    _DERIVED_LABEL = _derived_label(_OUTPUT_ICC_LABEL, RESIZE_MODE, RESIZE_VALUE,
+                                    ALLOW_UPSCALE, SHARPEN)
+    _der_what = "--output-icc" if OUTPUT_ICC else "--resize-*/--sharpen"
+
+    if DERIVATIVE and (DELETE_SOURCE or args.delete_skipped):
+        parser.error(f"{_der_what} writes a derivative, it never replaces or deletes "
+                     f"the source: drop --delete-source")
+    if DERIVATIVE and VERIFY_ROUNDTRIP:
+        parser.error("--verify-roundtrip compares pixels with the source and cannot "
+                     "apply to a derivative")
+    if DERIVATIVE and args.mode == 8:
+        parser.error(f"{_der_what} cannot run in mode 8 (in place): pick a mode that "
+                     f"writes to another folder (1-7)")
 
     if args.rename_to and not args.rename_from:
         parser.error("--rename-to needs --rename-from")
@@ -3513,35 +3735,36 @@ def main():
             except ImportError as e:
                 logger.error(f"--verify-roundtrip needs numpy and imagecodecs ({e})")
                 sys.exit(1)
-        if OUTPUT_ICC:
+        if DERIVATIVE:
             missing_icc = [t for t in ("djxl", "magick") if shutil.which(t) is None]
             if missing_icc:
-                logger.error(f"--output-icc needs {', '.join(missing_icc)} on PATH "
-                             f"(djxl decodes the master, ImageMagick converts it)")
+                logger.error(f"{_der_what} needs {', '.join(missing_icc)} on PATH "
+                             f"(djxl decodes the master, ImageMagick shapes it)")
                 sys.exit(1)
             # The target profile and the sRGB fallback of A3 live in files for
             # magick; written once per run, removed at exit.
             _icc_dir = Path(tempfile.mkdtemp(prefix="jxlrec_icc_", dir=TEMP_DIR))
             atexit.register(shutil.rmtree, str(_icc_dir), True)
-            _OUTPUT_ICC_PATH = _icc_dir / f"target_{_OUTPUT_ICC_LABEL}.icc"
-            _OUTPUT_ICC_PATH.write_bytes(_OUTPUT_ICC_BYTES)
+            if OUTPUT_ICC:
+                _OUTPUT_ICC_PATH = _icc_dir / f"target_{_OUTPUT_ICC_LABEL}.icc"
+                _OUTPUT_ICC_PATH.write_bytes(_OUTPUT_ICC_BYTES)
             try:
                 from PIL import ImageCms
             except ImportError:
-                logger.error("--output-icc needs Pillow even for AdobeRGB: the sRGB "
-                             "profile assigned to sources that decode without one "
-                             "comes from Pillow (pip install pillow)")
+                logger.error("derivatives need Pillow: the sRGB profile assigned to "
+                             "sources that decode without one comes from Pillow "
+                             "(pip install pillow)")
                 sys.exit(1)
             _SRGB_ICC_PATH = _icc_dir / "srgb.icc"
             _SRGB_ICC_PATH.write_bytes(
                 ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
 
-    if OUTPUT_ICC:
+    if DERIVATIVE:
         KEEP_SMALLER = False
-        logger.info("keep-smaller disabled: a verbatim copy would keep the source "
-                    "colour space")
+        logger.info("keep-smaller disabled: a verbatim copy would not be the "
+                    "requested derivative")
         if args.workers > 4:
-            logger.warning(f"--output-icc with --workers {args.workers}: each worker "
+            logger.warning(f"Derivatives with --workers {args.workers}: each worker "
                            f"holds two 16-bit PNGs plus an ImageMagick process in "
                            f"memory (~1 GB per worker on a 45 MP photo). Consider "
                            f"--workers 4.")
@@ -3549,6 +3772,10 @@ def main():
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
                 f"workers: {args.workers} | output ICC: {_OUTPUT_ICC_LABEL or 'keep source'}")
+    if DERIVATIVE:
+        logger.info(f"Derivative: {_DERIVED_LABEL} | resize: "
+                    f"{_resize_label(RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE) or 'none'}"
+                    f" | sharpen: {SHARPEN}")
     logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
@@ -3690,14 +3917,14 @@ def main():
             logger.warning(f"'{args.rename_from}' not found in {n_rename_missing} file "
                            f"name(s) — those keep their names")
 
-    # --output-icc writes a derivative NEXT TO the master, never over it: an
-    # in-place item (mode 8, or mode 0 without an output folder) would replace
-    # the source with the converted file and destroy the master.
-    if OUTPUT_ICC and any(it["in_place"] for it in items):
-        logger.error("--output-icc cannot run in place (mode 8, or mode 0 without an "
-                     "output folder): it writes a derivative, and replacing the "
-                     "source would destroy the master. Pick a mode that writes to "
-                     "another folder (1-7).")
+    # A derivative is written NEXT TO the master, never over it: an in-place
+    # item (mode 8, or mode 0 without an output folder) would replace the
+    # source with the shaped file and destroy the master.
+    if DERIVATIVE and any(it["in_place"] for it in items):
+        logger.error(f"{_der_what} cannot run in place (mode 8, or mode 0 without an "
+                     f"output folder): it writes a derivative, and replacing the "
+                     f"source would destroy the master. Pick a mode that writes to "
+                     f"another folder (1-7).")
         sys.exit(2)
 
     if not items:
@@ -3754,16 +3981,16 @@ def main():
     else:
         _ask_batch_resolution(asks)
 
-    # In --output-icc mode a verbatim copy would carry the SOURCE colour space
-    # into a folder that promises the target's: the policy answer "copy" (from
-    # --on-downgrade/--on-regeneration/--jbrd-policy, or an interactive answer)
-    # becomes a skip. Keep-smaller is off too (main() above), same reason.
-    if OUTPUT_ICC:
+    # In a derivative run a verbatim copy would NOT be the requested recipe:
+    # the policy answer "copy" (from --on-downgrade/--on-regeneration/
+    # --jbrd-policy, or an interactive answer) becomes a skip. Keep-smaller is
+    # off too (main() above), same reason.
+    if DERIVATIVE:
         for it in items:
             if it["action"] == "copy":
                 it["action"] = "skip"
-                it["reason"] += (" | --output-icc: a verbatim copy would keep the "
-                                 "source colour space")
+                it["reason"] += (f" | {_der_what}: a verbatim copy would not be "
+                                 f"the requested derivative")
 
     # Duplicates abort: two WRITING actions onto one destination is never allowed.
     _abort_on_duplicate_outputs(
@@ -3780,11 +4007,11 @@ def main():
     provenance_refused = []
     refused_ids = set()
 
-    # --output-icc never overwrites a file that is not one of its own
+    # A derivative run never overwrites a file that is not one of its own
     # derivatives — even with --overwrite. Pointing --export-jxl-folder at the
     # master folder would otherwise destroy the masters in place.
     derived_refused = []
-    if OUTPUT_ICC:
+    if DERIVATIVE:
         existing = [it for it in items
                     if it["action"] in ("convert",) and it["final"].exists()]
         if existing:
@@ -3792,9 +4019,10 @@ def main():
             for it in existing:
                 lab = labels.get(str(it["final"]), False)
                 if lab is False or lab is None:
-                    reason = ("an existing file at the destination is not a --output-icc "
-                              "derivative (or its markers cannot be read) — refusing to "
-                              "overwrite what may be an archive")
+                    reason = (f"an existing file at the destination is not a derivative "
+                              f"of this run (wanted jxlphoto-derived:{_DERIVED_LABEL}, or "
+                              f"its markers cannot be read) — refusing to overwrite what "
+                              f"may be an archive")
                     failures.append((str(it["src"]), reason))
                     derived_refused.append(it)
                     if args.dry_run:
@@ -3802,9 +4030,9 @@ def main():
                     else:
                         logger.error(f"REFUSED | {it['src'].name} | {reason}")
                         _log_rejected_file(str(it["src"]), f"derivative: {reason}")
-                elif lab != _OUTPUT_ICC_LABEL:
+                elif lab != _DERIVED_LABEL:
                     _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
-                    logger.info(f" colour target changed ({lab} -> {_OUTPUT_ICC_LABEL}): "
+                    logger.info(f" derivative recipe changed ({lab} -> {_DERIVED_LABEL}): "
                                 f"re-deriving | {it['src'].name}")
             if derived_refused:
                 _ids = {id(it) for it in derived_refused}
@@ -3853,8 +4081,8 @@ def main():
         def _dry_would_skip(it):
             # Mirrors convert_one's SKIP decision (which never applies to an
             # in-place item): an existing, up-to-date output means the real run
-            # reports SKIP, not a conversion. A --output-icc item whose existing
-            # output names ANOTHER colour target is re-derived, not skipped.
+            # reports SKIP, not a conversion. A derivative item whose existing
+            # output names ANOTHER recipe is re-derived, not skipped.
             return (not it["in_place"] and it["action"] in ("convert", "copy")
                     and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
                     and _would_skip(it["src"], it["final"]))
@@ -3898,8 +4126,8 @@ def main():
                 logger.info(f" DRY | SKIP (exists) | {it['src'].name}")
                 continue
             tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
-            if OUTPUT_ICC and it["action"] == "convert":
-                tag = f"DERIVE ({_OUTPUT_ICC_LABEL})"
+            if DERIVATIVE and it["action"] == "convert":
+                tag = f"DERIVE ({_DERIVED_LABEL})"
             extra = f" ({it['reason']})" if it["action"] != "convert" else ""
             place = " (in place)" if it["in_place"] else ""
             logger.info(f" DRY | {tag} | {it['src'].name} -> {it['final']}{place}{extra}")

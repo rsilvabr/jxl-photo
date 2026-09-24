@@ -1633,12 +1633,125 @@ def _dest_folder_names(origin: str, dest: str) -> tuple:
 
 
 def _drop_derivative_options(advanced: Dict) -> None:
-    """Forget the recompressor's derivative answers (--output-icc and the
-    --rename-from/--rename-to that the wizard only asks alongside it). Used
-    whenever Step 6 does not offer or does not take the derivative, so an
-    answer from an earlier pass through the step cannot reach the command."""
-    for _k in ('output_icc', 'rename_from', 'rename_to'):
+    """Forget the derivative answers (--output-icc, the rename the wizard only
+    asks alongside it, and the resize/sharpening recipe). Used whenever Step 6
+    does not offer or does not take the derivative, so an answer from an
+    earlier pass through the step cannot reach the command."""
+    for _k in ('output_icc', 'rename_from', 'rename_to',
+               'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
         advanced.pop(_k, None)
+
+
+def _has_derivative_options(advanced: Dict) -> bool:
+    """True when the options produce a DERIVATIVE: colour conversion, resize
+    or sharpening. These never delete, never run in place and carry a
+    jxlphoto-derived recipe marker."""
+    return bool(advanced.get('output_icc') or advanced.get('resize_mode')
+                or (advanced.get('sharpen') or 'none') != 'none')
+
+
+def _append_derivative_flags(cmd: List, advanced: Dict) -> None:
+    """Append the resize/sharpening flags the two sources read.
+
+    Emitted only for the transcoder's decode direction and the recompressor
+    (their callers); the encoder/decoder have no such flags."""
+    _mode = advanced.get('resize_mode')
+    _value = advanced.get('resize_value')
+    if _mode == 'long' and _value:
+        cmd.extend(['--resize-long', str(_value)])
+    elif _mode == 'short' and _value:
+        cmd.extend(['--resize-short', str(_value)])
+    elif _mode == 'percent' and _value:
+        cmd.extend(['--resize-percent', str(_value)])
+    if advanced.get('allow_upscale'):
+        cmd.append('--allow-upscale')
+    if (advanced.get('sharpen') or 'none') != 'none':
+        cmd.extend(['--sharpen', advanced['sharpen']])
+
+
+def _resize_display(advanced: Dict) -> str:
+    """One-line description of the resize recipe for the Step 7 summary."""
+    _mode = advanced.get('resize_mode')
+    if not _mode:
+        return "none"
+    _label = {"long": "long edge", "short": "short edge",
+              "percent": "percent"}.get(_mode, _mode)
+    _value = advanced.get('resize_value')
+    _unit = "%" if _mode == "percent" else " px"
+    return (f"{_label} {_value}{_unit}"
+            + (" (upscale allowed)" if advanced.get('allow_upscale') else ""))
+
+
+def _ask_output_shaping(workflow: Dict) -> None:
+    """Step 6 helper: the resize/sharpening questions.
+
+    Fills advanced_options['resize_mode'/'resize_value'/'allow_upscale'/
+    'sharpen']; "none" CLEARS all of them, so an answer from an earlier pass
+    through the step can never ride along into the command."""
+    _adv = workflow.setdefault('advanced_options', {})
+    _rich = RICH_AVAILABLE and console
+
+    if _rich:
+        _mode = Prompt.ask("Resize", choices=["none", "long", "short", "percent"],
+                           default="none")
+    else:
+        _mode = input("Resize (none/long/short/percent) [none]: ").strip().lower() or "none"
+        if _mode not in ("none", "long", "short", "percent"):
+            _mode = "none"
+
+    if _mode == "none":
+        for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
+            _adv.pop(_k, None)
+    else:
+        if _rich:
+            _what = {"long": "Long edge in pixels",
+                     "short": "Short edge in pixels",
+                     "percent": "Scale in percent"}[_mode]
+            if _mode == "percent":
+                _value = float(Prompt.ask(_what, default="100"))
+            else:
+                _value = int(IntPrompt.ask(_what))
+        else:
+            _what = {"long": "Long edge in pixels",
+                     "short": "Short edge in pixels",
+                     "percent": "Scale in percent"}[_mode]
+            _raw = input(f"{_what}: ").strip()
+            try:
+                _value = float(_raw) if _mode == "percent" else int(_raw)
+            except ValueError:
+                # Never guess a size: a typo must not become a 1 px output.
+                print("Invalid value — resize disabled for this run.")
+                _mode, _value = "none", None
+        if _mode == "none":
+            for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
+                _adv.pop(_k, None)
+        else:
+            _adv['resize_mode'] = _mode
+            _adv['resize_value'] = _value
+            if _rich:
+                _up = Confirm.ask("Allow upscale (enlarge images smaller than the "
+                                  "target)?", default=False)
+            else:
+                _up = input("Allow upscale? [y/N]: ").strip().lower().startswith("y")
+            if _up:
+                _adv['allow_upscale'] = True
+            else:
+                _adv.pop('allow_upscale', None)
+            if _mode == "percent" and _value > 100 and not _adv.get('allow_upscale'):
+                print("WARNING: a percentage above 100 upscales; the child refuses it "
+                      "without --allow-upscale.")
+
+    if _rich:
+        _sharpen = Prompt.ask("Output sharpening", choices=["none", "screen", "print"],
+                              default="none")
+    else:
+        _sharpen = input("Output sharpening (none/screen/print) [none]: ").strip().lower() or "none"
+        if _sharpen not in ("none", "screen", "print"):
+            _sharpen = "none"
+    if _sharpen == "none":
+        _adv.pop('sharpen', None)
+    else:
+        _adv['sharpen'] = _sharpen
 
 
 def _derivative_in_place_rows(entries: List) -> List:
@@ -3964,6 +4077,9 @@ class InteractiveMenu:
                         # so an earlier answer must not ride along into a plain
                         # recompression.
                         _drop_derivative_options(_adv)
+                    # Resize/sharpening are a derivative of their own: offered
+                    # wherever a separate output folder exists (not modes 0/8).
+                    _ask_output_shaping(workflow)
             elif 'lossy' in conv_type:
                 # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
                 # (convert_lossy is the only conversion type containing 'lossy')
@@ -4000,6 +4116,16 @@ class InteractiveMenu:
                     convert_icc = Confirm.ask("Convert to sRGB?", default=False)
                     if convert_icc:
                         workflow['icc_profile'] = 'sRGB'
+                # Resize/sharpening (a derivative) apply to the decode
+                # direction; the lossless recovery reproduces the original
+                # JPEG and cannot shape pixels, so it is not offered there.
+                if conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                 'jxl_to_png'):
+                    if status.get('magick'):
+                        _ask_output_shaping(workflow)
+                    else:
+                        _drop_derivative_options(
+                            workflow.setdefault('advanced_options', {}))
 
             if dest == 'png':
                 depth = IntPrompt.ask("PNG bit depth", choices=["8", "16"], default=str(workflow['bit_depth']))
@@ -4102,6 +4228,9 @@ class InteractiveMenu:
                             _adv.pop('rename_to', None)
                     else:
                         _drop_derivative_options(_adv)
+                    # Resize/sharpening are a derivative of their own: offered
+                    # wherever a separate output folder exists (not modes 0/8).
+                    _ask_output_shaping(workflow)
             elif 'lossy' in conv_type:
                 if conv_type == 'convert_lossy':
                     # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
@@ -4141,6 +4270,16 @@ class InteractiveMenu:
                     icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
                     if icc_input.startswith('y'):
                         workflow['icc_profile'] = 'sRGB'
+                # Resize/sharpening (a derivative) apply to the decode
+                # direction; the lossless recovery reproduces the original
+                # JPEG and cannot shape pixels, so it is not offered there.
+                if conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                 'jxl_to_png'):
+                    if status.get('magick'):
+                        _ask_output_shaping(workflow)
+                    else:
+                        _drop_derivative_options(
+                            workflow.setdefault('advanced_options', {}))
 
             if dest == 'png':
                 depth_input = input(f"PNG bit depth (8/16) [{workflow['bit_depth']}]: ").strip()
@@ -4203,7 +4342,8 @@ class InteractiveMenu:
         def _carry_recompress_policies(target: Dict) -> None:
             for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
                        'jbrd_policy', 'no_keep_smaller',
-                       'output_icc', 'rename_from', 'rename_to'):
+                       'output_icc', 'rename_from', 'rename_to',
+                       'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
                 if _k in _prev_adv:
                     target[_k] = _prev_adv[_k]
 
@@ -4804,6 +4944,12 @@ class InteractiveMenu:
                 if _adv.get('rename_from'):
                     table.add_row("Rename:",
                                   f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
+            # Resize/sharpening are a derivative recipe the user must see before
+            # typing YES (JXL -> JXL and the transcoder's decode direction).
+            _shape_adv = workflow.get('advanced_options', {})
+            if _has_derivative_options(_shape_adv):
+                table.add_row("Resize:", _resize_display(_shape_adv))
+                table.add_row("Sharpening:", _shape_adv.get('sharpen') or "none")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 table.add_row("Effort:", str(workflow['effort']))
@@ -4872,6 +5018,12 @@ class InteractiveMenu:
                 print(f"Output colour space: {_adv.get('output_icc') or 'keep source'}")
                 if _adv.get('rename_from'):
                     print(f"Rename: '{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
+            # Resize/sharpening are a derivative recipe the user must see before
+            # typing YES (JXL -> JXL and the transcoder's decode direction).
+            _shape_adv = workflow.get('advanced_options', {})
+            if _has_derivative_options(_shape_adv):
+                print(f"Resize: {_resize_display(_shape_adv)}")
+                print(f"Sharpening: {_shape_adv.get('sharpen') or 'none'}")
             # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
             if not (origin == 'jxl' and dest == 'tiff'):
                 print(f"Effort: {workflow['effort']}")
@@ -4937,16 +5089,19 @@ class InteractiveMenu:
         # gets the same options, so an in-place row would only fail with exit 2
         # after the run had started: refuse the whole manifest up front, naming
         # the rows, before anything is charged or written.
-        if origin == 'jxl' and dest == 'jxl' and (advanced.get('output_icc')
+        _shaping = _has_derivative_options(advanced)
+        _manifest_delete = bool(advanced.get('delete_source')
+                                or _flags_request_delete(workflow.get('expert_flags')))
+        if origin == 'jxl' and dest == 'jxl' and (_shaping
                                                   or advanced.get('rename_from')):
-            if advanced.get('output_icc') and advanced.get('delete_source'):
-                self._print_error("--output-icc writes a derivative and never deletes "
-                                  "the source — drop the delete option.")
+            if _shaping and _manifest_delete:
+                self._print_error("A derivative (colour conversion/resize/sharpening) "
+                                  "never deletes its source — drop the delete option.")
                 return False
             _bad = _derivative_in_place_rows(manifest_entries)
             if _bad:
-                _what = ("Colour-converted derivatives" if advanced.get('output_icc')
-                         else "--rename-from")
+                _what = ("Derivatives (colour conversion/resize/sharpening)"
+                         if _shaping else "--rename-from")
                 self._print_error(f"{_what} cannot run in place, and {len(_bad)} manifest "
                                   f"row(s) would (mode 8, or mode 0 with Destination = "
                                   f"Source). Give them another mode (1-7) or a different "
@@ -4956,6 +5111,15 @@ class InteractiveMenu:
                 if len(_bad) > 5:
                     print(f"  ... and {len(_bad) - 5} more")
                 return False
+        if (origin == 'jxl' and dest in ('jpeg', 'png') and _shaping
+                and workflow.get('conversion_type') in
+                    ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
+                and _manifest_delete):
+            # The transcoder's decode direction: the child refuses a delete
+            # flag together with the resize/sharpening ones.
+            self._print_error("Resize/sharpening write a derivative that never deletes "
+                              "its source — drop the delete option.")
+            return False
 
         # Create the analyzer once — prefer the workflow's mode_config marker (a
         # manifest run with a custom marker must detect modes with the same
@@ -6332,6 +6496,8 @@ class InteractiveMenu:
                 cmd.append('--no-keep-smaller')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
+            # resize/sharpening: the recompressor's other derivative recipes
+            _append_derivative_flags(cmd, advanced)
             if advanced.get('rename_from'):
                 cmd.extend(['--rename-from', advanced['rename_from'],
                             '--rename-to', advanced.get('rename_to') or ''])
@@ -6393,6 +6559,12 @@ class InteractiveMenu:
 
             if workflow.get('icc_profile'):
                 cmd.extend(['--icc-profile', workflow['icc_profile']])
+            if (origin == 'jxl' and dest in ('jpeg', 'png')
+                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                      'jxl_to_png')):
+                # resize/sharpening shape decoded pixels: the lossless recovery
+                # reproduces the original JPEG byte-for-byte and cannot take them.
+                _append_derivative_flags(cmd, advanced)
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('no_md5'):
@@ -6665,25 +6837,40 @@ class InteractiveMenu:
             self._print_error("Ensure scripts are in the same folder as jxl_photo_v2.py")
             return False
 
-        # Colour-converted derivatives and output renaming have no in-place
-        # form, and a derivative never deletes. Refused here, BEFORE the HHMM
-        # token is charged for a run the child would reject with exit 2.
+        # Derivatives (colour conversion, resize, sharpening) and output
+        # renaming have no in-place form, and a derivative never deletes.
+        # Refused here, BEFORE the HHMM token is charged for a run the child
+        # would reject with exit 2.
         _adv_pre = workflow.get('advanced_options') or {}
+        _shaping_pre = _has_derivative_options(_adv_pre)
+        _delete_pre = bool(_adv_pre.get('delete_source')
+                           or _flags_request_delete(workflow.get('expert_flags')))
+        _conv_pre = workflow.get('conversion_type', '')
         if origin == 'jxl' and dest == 'jxl':
-            if _adv_pre.get('output_icc'):
+            if _shaping_pre:
                 if workflow.get('mode') in (0, 8):
-                    self._print_error("Colour-converted derivatives cannot run in place "
-                                      "(modes 0/8) — pick mode 1-7.")
+                    self._print_error("Derivatives (colour conversion/resize/sharpening) "
+                                      "cannot run in place (modes 0/8) — pick mode 1-7.")
                     return False
-                if _adv_pre.get('delete_source'):
-                    self._print_error("--output-icc writes a derivative and never deletes "
-                                      "the source — drop the delete option.")
+                if _delete_pre:
+                    self._print_error("A derivative never deletes its source — drop the "
+                                      "delete option.")
                     return False
             if _adv_pre.get('rename_from') and workflow.get('mode') in (0, 8):
                 self._print_error("--rename-from cannot be used in place (modes 0/8): the "
                                   "renamed file would sit beside its source and be "
                                   "re-processed as a new input.")
                 return False
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                  'jxl_to_png')
+                and _shaping_pre and _delete_pre):
+            # Same rule for the transcoder's decode direction: a resized or
+            # sharpened JPEG/PNG is a derivative, and the child refuses
+            # --delete-source with the resize/sharpening flags.
+            self._print_error("Resize/sharpening write a derivative that never deletes "
+                              "its source — drop the delete option.")
+            return False
 
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
@@ -6930,6 +7117,8 @@ class InteractiveMenu:
                 cmd.append('--no-keep-smaller')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
+            # resize/sharpening: the recompressor's other derivative recipes
+            _append_derivative_flags(cmd, advanced)
             if advanced.get('rename_from'):
                 cmd.extend(['--rename-from', advanced['rename_from'],
                             '--rename-to', advanced.get('rename_to') or ''])
@@ -7034,6 +7223,13 @@ class InteractiveMenu:
 
             if workflow.get('icc_profile'):
                 cmd.extend(['--icc-profile', workflow['icc_profile']])
+
+            if (origin == 'jxl' and dest in ('jpeg', 'png')
+                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                      'jxl_to_png')):
+                # resize/sharpening shape decoded pixels: the lossless recovery
+                # reproduces the original JPEG byte-for-byte and cannot take them.
+                _append_derivative_flags(cmd, advanced)
 
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])

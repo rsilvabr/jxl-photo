@@ -1,5 +1,27 @@
 # jxl-photo — agent notes
 
+## ⚠️ Pending work (check first)
+
+- **Calibrate the output-sharpening presets** (added 2026-09-25, not done yet).
+  `SHARPEN_PRESETS` in `jxl_jpeg_transcoder.py` and `jxl_recompressor.py`
+  (parity-pinned, keep both identical) still hold PLACEHOLDER numbers
+  (`screen` sigma 0.5 / gain 0.6 / threshold 0.02, `print` sigma 1.0 / gain
+  1.0 / threshold 0.02), marked `# CALIBRATE vs C1`. They must match Capture
+  One's own output sharpening. Procedure:
+  1. The user exports ONE photo from Capture One three times, all at the SAME
+     size, as 16-bit sRGB TIFF, no date stamp: `A` = output sharpening off,
+     `B` = C1's *screen* preset, `C` = C1's *print* preset (at their usual
+     print size/DPI).
+  2. Grid-search `sigma`/`gain`/`threshold` of `_sharpen_args(...)` applied to
+     `A` to minimise the difference to `B` (then to `C`) — PSNR + SSIMULACRA2,
+     edges excluded. A, B and C share C1's own resize, so the difference is the
+     sharpening alone.
+  3. Change ONLY the numbers in `SHARPEN_PRESETS` (both scripts), note in the
+     transcoder/recompressor READMEs which C1 preset they reproduce, re-run
+     `tests/test_helper_parity.py` and the suite. Print can only be validated
+     on paper: trust C1's preset first; fine-tune later from minilab test prints.
+  Remove this entry when done.
+
 ## Do NOT touch (dead code)
 - `jxl_jpeg_transcoder_HDR.py` and `hdr/` — abandoned HDR side project, kept
   untracked at the repo root (gitignored). Do not read, edit, analyze, or
@@ -27,7 +49,13 @@
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
   recovery with a real reconstruction before unlinking a JPEG; ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
-  v2.0.0–v2.0.3 versions
+  v2.0.0–v2.0.3 versions. On the decode direction `--resize-*/--sharpen`
+  write DERIVATIVES (`jxlphoto-derived:<recipe>`) — never deleting, refused
+  with the bit-exact recovery, `jxlphoto-src`/`srcsum` stripped from the
+  copied metadata (a 2048 px JPEG must never prove the master is archived),
+  and an existing non-derivative destination is refused. Derivative = resize
+  or sharpen here (`--output-icc`, resize or sharpen in the recompressor); a
+  derivative never carries `jxlphoto-src`/`srcsum`
 - `jxl_recompressor.py` — JXL → JXL recompressor (v2.1.0): reads the recorded
   lineage chain (`gen=N | cjxl d=/e= | …`, append-only — the encoder and the
   recompressor both append one entry per encode and reconcile `gen` as
@@ -44,15 +72,18 @@
   an atomic `os.replace`, never a cross-volume move onto the only copy.
   `_merge_lineage_blocks` (parity-pinned with the encoder) never dedupes
   inside one field — a repeated `cjxl d= e=` entry is a real generation.
-  `--output-icc` (sRGB/AdobeRGB/.icc) writes 16-bit colour-converted
-  DERIVATIVES, never in place, never deleting, and refuses to overwrite any
-  destination file that is not one of its own derivatives (even with
-  `--overwrite`); it re-derives when the recorded target changes, drops the
-  `jxlphoto-src`/`jxlphoto-srcsum` markers (a derivative must never prove the
-  TIFF is archived), writes `jxlphoto-derived:<label>` and replaces the
-  `ICC:<b64>` in CreatorTool with the target profile. The source profile is
-  always assigned explicitly before the ImageMagick conversion, and a converted
-  PNG without its `iCCP` refuses the encode (traps A1-A5 in the plan doc).
+  A DERIVATIVE is `--output-icc` (16-bit colour conversion), `--resize-*` or
+  `--sharpen`. All of them: never in place, never deleting, refuse to
+  overwrite any destination file that is not one of their own derivatives
+  (even with `--overwrite`), re-derive when the recorded recipe
+  (`_DERIVED_LABEL`) changes, and drop the `jxlphoto-src`/`jxlphoto-srcsum`
+  markers (a derivative must never prove the TIFF is archived). `--output-icc`
+  replaces the `ICC:<b64>` in CreatorTool with the target profile; resize/
+  sharpen without it keep the source profile and CreatorTool ICC (assigned
+  explicitly before the ImageMagick pass, re-assigned after the Lab sharpening
+  drops it). The source profile is always assigned explicitly before the
+  ImageMagick conversion, and a converted PNG without its `iCCP` refuses the
+  encode (traps A1-A5 in the plan doc).
   `--rename-from`/`--rename-to` (transcoder semantics) rename the output at
   planning time, so sync/refusals/duplicate aborts see the final name.
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess

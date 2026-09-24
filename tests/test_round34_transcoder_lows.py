@@ -154,6 +154,13 @@ def test_icc_intermediate_decode_requests_bit_depth(monkeypatch, tmp_path, fmt, 
     monkeypatch.setattr(tr, "_copy_metadata", lambda *a, **k: None)
     monkeypatch.setattr(tr, "_run_exiftool_argfile", lambda *a, **k: None)
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
+    # The stub PNG carries no iCCP/sRGB chunk, so the real source-profile
+    # detection (B1 fix) would refuse it; the profile layer is exercised by
+    # tests/test_transcoder_source_profile.py against real codecs. This test
+    # only pins the --bits_per_sample flag reaching djxl.
+    monkeypatch.setattr(tr, "_source_profile_args",
+                        lambda *a, **k: ([], tmp_path / "fake_src.icc"))
+    monkeypatch.setattr(tr, "_verify_profile_in_output", lambda *a, **k: None)
     tr.setup_logger()
 
     status = tr.decode_to_image(jxl, final, final, 90, fmt, bit_depth,

@@ -48,6 +48,20 @@ only below 0.01.
 
 ---
 
+## Round-41 — resize/sharpen round (2026-09-25)
+
+The output-shaping round: `--resize-long/-short/-percent` and `--sharpen
+none|screen|print` on the transcoder's JXL → JPEG/PNG direction and on the
+recompressor's derivatives. The first fix below is an independent colour bug
+found while measuring the new pipeline against real photos.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 436 | **A colour conversion could silently re-tag instead of converting (trap B1).** For a JXL encoded as sRGB, djxl writes a PNG with an `sRGB` chunk and NO `iCCP`; `magick -profile <target>` then ATTRIBUTES the target profile to already-sRGB pixels instead of converting from them. Measured on a synthetic saturated gradient (IM 7.1.2 Q16-HDRI): the output was identical to a plain assignment (PSNR 120) and 35.7 dB away from the correct conversion — every `--to-srgb`/`--icc-profile` delivery of an sRGB-encoded master was wrong in silence. The recompressor already assigned the source profile explicitly; the transcoder had only ever been exercised against ProPhoto/XMP masters, where `_copy_metadata`'s CreatorTool blob masked the hole | transcoder | ✅ FIXED (`_source_profile_args()` ported from the recompressor's rule — XMP CreatorTool ICC > the decoded PNG's `iCCP` > its `sRGB` chunk > refuse to guess — and prepended to the target profile in both magick branches; the output must now carry its profile (`iCCP` for PNG, `ICC_Profile:ProfileDescription` for JPEG) or the file is an error. The three helpers were added to `SHARED_HELPERS`. Test: `tests/test_transcoder_source_profile.py`, real codec — PSNR ≥ 60 dB against the correct conversion, < 50 dB against a plain re-tag; verified failing against the pre-fix script) |
+
+---
+
+
 ## Round-40 audit (2026-09-23)
 
 The fifth audit of v2.1.1_beta1, from `bug_report_260923.md`. Sixteen fixes in
