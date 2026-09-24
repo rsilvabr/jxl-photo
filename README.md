@@ -50,7 +50,7 @@ Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
 
 The numbers behind these settings are measured and posted on r/jpegxl, on 16-bit ProPhoto exports from Capture One:
 
-- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR across the distance range for 16-bit JXL. This is where the `d=0.05` archival setting comes from: 95.2% of the pixels stay above 50 dB, at ~7.5× the size of `d=1.0`.
+- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR from `d=0.01` to `d=10` on a 45 MP photo. `d=1.0` is the sweet spot for pixels above 30 dB, `d=0.3–0.5` for 40 dB, and `d=0.05` for 50 dB: over 90% of the pixels stay above 50 dB, and not one pixel falls below 20 dB. That is where the archival setting comes from. A stress test in the same post pushed Shadows +100 and Blacks +100 in Capture One on decoded files, and showed no visible difference between lossless and `d=0.1`.
 - [16-bit vs 8-bit, and JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/): for lossy JXL an 8-bit file is **not** smaller than a 16-bit one, and it keeps less signal, so there is no reason to go 8-bit. JPEG needs 5–15× the file size to get close to JXL.
 - [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/): one recompression from an archived `d=0.1` down to `d=1.0` costs 0.02 dB, but reaching the same file size in many small steps costs up to 9 dB. That is why the recompressor goes to the target in one shot, counts generations, and refuses counterproductive re-encodes.
 
