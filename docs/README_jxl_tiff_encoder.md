@@ -679,6 +679,39 @@ py jxl_tiff_decoder.py "photo.jxl" --mode 0
 
 ---
 
+## Why the encoder never converts colour or resizes (design decision)
+
+The encoder has **no** colour-space conversion, resize or output sharpening,
+and it should not get any. It writes the **master**: a faithful JXL of the TIFF,
+same pixels (up to the chosen distance), same ICC, same metadata. Two things
+depend on that:
+
+1. **The delete gates.** Every output carries `jxlphoto-src`/`jxlphoto-srcsum`,
+   the proof that "this JXL IS this TIFF". `--delete-source`, `--delete-skipped`
+   and `--provenance` unlink a TIFF on the strength of that proof. An encoder
+   that could also convert or shrink would write JXLs that carry the proof but
+   are *not* the TIFF — a 2048 px sRGB file could then justify deleting the
+   16-bit ProPhoto original.
+2. **The round trip.** `jxl_tiff_decoder.py` restores the original TIFF (ICC,
+   bit depth, page structure) from the master. That only holds if the master is
+   the TIFF.
+
+Light copies are **derivatives**, and derivatives are made **from the master**,
+by the scripts built for them:
+
+| You want | Use |
+|---|---|
+| A lighter JXL in another colour space / size | `jxl_recompressor.py --output-icc … --resize-long … --sharpen …` |
+| A JPEG/PNG to share or print | `jxl_jpeg_transcoder.py --icc-profile … --resize-long … --sharpen …` |
+| A TIFF in another colour space | `jxl_tiff_decoder.py --matrix --target-icc …` (8-bit internal precision) |
+
+Derivatives never carry the provenance proof, never delete anything and never
+run in place. Going through the master costs nothing measurable: a d=1.0 sRGB
+derivative made from a d=0.05 master landed **0.017 dB** from a direct encode of
+the TIFF (real 16 MP ProPhoto export, 2026-09-24).
+
+---
+
 ## XMP Preservation (Fixed in this version)
 
 ### The XMP Overwrite Bug (Fixed)

@@ -2,6 +2,18 @@
 
 ## ⚠️ Pending work (check first)
 
+- **Open bug — lossy JXL with an ICC blob decodes wrong** (found 2026-09-25).
+  Profiles with a table tone curve (ROMM with its linear toe; eciRGB v2 and
+  scanner LUT profiles when they are embedded) have no native JXL form, so a
+  lossy cjxl stores the whole ICC and djxl returns LINEAR sRGB. The decoder's
+  Roundtrip mode pastes the original ICC on those pixels (colours wrong, log
+  OK), and the recompressor/transcoder derivative paths assign the XMP ICC the
+  same way. The encoder's cautious test only checks brightness, so a profile
+  can slip through as "embed". Detect with djxl `--icc_out` vs
+  `--orig_icc_out` (different = this case); fix = float decode + convert.
+  Measurements: `docs/jxl_color_internals.md`, "Lossy JXL with an ICC blob".
+  Remove this entry when fixed.
+
 - **Calibrate the output-sharpening presets** (added 2026-09-25, not done yet).
   `SHARPEN_PRESETS` in `jxl_jpeg_transcoder.py` and `jxl_recompressor.py`
   (parity-pinned, keep both identical) still hold PLACEHOLDER numbers
@@ -89,6 +101,12 @@
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
+- **The encoder never converts colour, resizes or sharpens — by design.** It
+  writes the MASTER, and its outputs carry the `jxlphoto-src`/`srcsum` proof
+  that the delete gates trust. Derivatives (colour/size/sharpening) come from
+  the master via the recompressor/transcoder and never carry that proof. Do
+  not add such options to the encoder; see "Why the encoder never converts
+  colour or resizes" in `docs/README_jxl_tiff_encoder.md`.
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have

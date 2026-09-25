@@ -85,7 +85,7 @@ py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl"
 # JXL → PNG 16-bit (preserves full bit depth, archival quality)
 py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --format png
 
-# JXL → sRGB JPEG (color space conversion using ImageMagick built-in)
+# JXL → sRGB JPEG (ICC-managed conversion from the source's own profile)
 py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --to-srgb --quality 95
 
 # JXL master → 2048 px sRGB JPEG with output sharpening (a DERIVATIVE:
@@ -110,7 +110,10 @@ py jxl_jpeg_transcoder.py "F:\2024\Export_JPEG" --mode 1
 # Force convert even if jbrd present (e.g., for web delivery with ICC change)
 py jxl_jpeg_transcoder.py "F:\2024\JXL_ProPhoto" --force-convert --to-srgb
 
-# Convert with external ICC profile (professional print workflow)
+# Convert to Adobe RGB (built-in profile, no .icc file needed)
+py jxl_jpeg_transcoder.py "F:\2024\JXL_Archive" --force-convert --icc-profile AdobeRGB
+
+# Convert with an external ICC profile (any RGB profile)
 py jxl_jpeg_transcoder.py "F:\2024\JXL_Archive" --icc-profile "C:\ICC\AdobeRGB1998.icc"
 
 # 16 parallel workers for batch processing
@@ -331,8 +334,12 @@ Options:
   --bit-depth 8|16   Output bit depth (PNG only, default: 16)
 
   --icc-profile PATH Path to ICC profile for color conversion.
-                     Can be a file path (e.g., "C:\icc\AdobeRGB.icc") or the
-                     built-in name: "sRGB".
+                     Can be a file path (e.g., "C:\icc\AdobeRGB.icc") or a
+                     built-in name, any case: "sRGB", or "AdobeRGB" (also
+                     "adobe", "adobergb1998") - an Adobe RGB (1998)-compatible
+                     profile, byte-identical to the recompressor's (0 difference
+                     from Adobe's own in 8 bits). A path that does not exist is
+                     refused up front (exit 2).
                      GRAYSCALE images are left alone: a single-channel file has
                      no gamut to map, and an RGB profile on one is invalid (PNG
                      rejects a mismatched iCCP, and a 1-component JPEG carrying
@@ -625,10 +632,10 @@ py jxl_jpeg_transcoder.py photo.jxl --icc-profile "C:\ICC\sRGB.icc"
 | --- | --- | --- |
 | Archival recovery | `--force-transcode` (if jbrd) | Original preserved |
 | Web delivery | `--to-srgb` | Convert to sRGB |
-| Print workflow | `--icc-profile AdobeRGB.icc` | Convert to target profile |
+| Print workflow | `--icc-profile AdobeRGB` (built-in) or a lab's `.icc` | Convert to target profile |
 | Client delivery (generic) | No ICC flags | Preserve original |
 
-**Important:** `--to-srgb` uses ImageMagick's built-in sRGB color space (mathematical approximation). For critical color work, use `--icc-profile` with a specific ICC file.
+**Note:** `--to-srgb` and `--icc-profile sRGB` convert through a real sRGB ICC profile (LittleCMS via Pillow), relative colorimetric, from the source's own profile — not ImageMagick's mathematical `-colorspace sRGB` (that is only the fallback when Pillow is missing). `AdobeRGB` works the same way with the built-in profile.
 
 * * *
 

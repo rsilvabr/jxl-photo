@@ -3796,6 +3796,57 @@ def _get_srgb_icc_path() -> Optional[str]:
     return _srgb_icc_cache or None
 
 
+# Adobe RGB (1998)-compatible matrix/TRC profile: the SAME 500 bytes
+# jxl_recompressor._adobe_rgb_icc_bytes() generates (0 difference from Adobe's
+# own AdobeRGB1998.icc in 8 bits, intents 0 and 1; D65 media white, so cjxl
+# records the real primaries). Stored as bytes rather than regenerated because
+# the generator needs numpy, which this script does not otherwise require;
+# tests/test_transcoder_adobergb.py pins it byte-for-byte to the recompressor.
+_ADOBE_RGB_ICC_B64 = (
+    "AAAB9GxjbXMCEAAAbW50clJHQiBYWVogAAAAAAAAAAAAAAAAYWNzcE1TRlQAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAPbWAAEAAAAA0y0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAJZGVzYwAAAPAAAAB+Y3BydAAAAXAAAAAhd3RwdAAAAZQAAAAUclhZ"
+    "WgAAAagAAAAUZ1hZWgAAAbwAAAAUYlhZWgAAAdAAAAAUclRSQwAAAeQAAAAOZ1RSQwAAAeQAAAAO"
+    "YlRSQwAAAeQAAAAOZGVzYwAAAAAAAAAkQWRvYmVSR0IxOTk4LWNvbXBhdGlibGUgKGp4bC1waG90"
+    "bykAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB0ZXh0AAAAAE5vIGNvcHlyaWdodCwgdXNlIGZyZWVs"
+    "eQAAAABYWVogAAAAAAAA81EAAQAAAAEWzFhZWiAAAAAAAACcGAAAT6UAAAT8WFlaIAAAAAAAADSN"
+    "AACgLAAAD5VYWVogAAAAAAAAJjEAABAvAAC+m2N1cnYAAAAAAAAAAQIzAAA="
+)
+_adobergb_icc_cache = None
+_adobergb_icc_lock = threading.Lock()
+
+# --icc-profile spellings that mean a built-in profile (case-insensitive).
+_ICC_ALIASES = {"srgb": "sRGB", "adobergb": "AdobeRGB", "adobe": "AdobeRGB",
+                "adobergb1998": "AdobeRGB"}
+
+
+def _get_adobergb_icc_path() -> str:
+    """Stable path of the built-in Adobe RGB (1998)-compatible profile, written
+    once (atomically, under a lock) like the sRGB one."""
+    global _adobergb_icc_cache
+    if _adobergb_icc_cache is not None:
+        return _adobergb_icc_cache
+    with _adobergb_icc_lock:
+        if _adobergb_icc_cache is not None:
+            return _adobergb_icc_cache
+        data = base64.b64decode("".join(_ADOBE_RGB_ICC_B64))
+        base = Path(tempfile.gettempdir()) if TEMP_DIR is None else Path(TEMP_DIR)
+        icc_path = base / "jxl_photo_AdobeRGB1998-compatible.icc"
+        if not icc_path.exists() or icc_path.read_bytes() != data:
+            _part = icc_path.with_name(icc_path.name + f".{os.getpid()}.part")
+            try:
+                _part.write_bytes(data)
+                os.replace(str(_part), str(icc_path))
+            finally:
+                try:
+                    _part.unlink()
+                except OSError:
+                    pass
+        _adobergb_icc_cache = str(icc_path)
+    return _adobergb_icc_cache
+
+
 def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple:
     """(magick args, source profile path) describing the decoded pixels.
 
@@ -3873,6 +3924,8 @@ def _magick_icc_args(output_icc: str, extra: list, tmp_dir: Path = None) -> list
             return ["-profile", icc_path] + extra
         logger.debug("Pillow/ImageCms unavailable for sRGB profile; using -colorspace fallback")
         return ["-colorspace", "sRGB"] + extra
+    if output_icc == "AdobeRGB":
+        return ["-profile", _get_adobergb_icc_path()] + extra
     return ["-profile", output_icc] + extra
 
 
@@ -3992,8 +4045,8 @@ def _output_icc_label(output_icc):
     """
     if not output_icc:
         return None
-    if output_icc == "sRGB":
-        return "sRGB"
+    if output_icc in ("sRGB", "AdobeRGB"):
+        return output_icc
     try:
         data = Path(output_icc).read_bytes()
         return "icc-" + hashlib.md5(data).hexdigest()[:12]
@@ -5398,7 +5451,8 @@ Examples:
                         help="Output bit depth (PNG only, default: 16)")
     parser.add_argument("--icc-profile", type=str, default=None,
                         help="ICC profile for color conversion (requires ImageMagick). "
-                             "Can be a file path or the built-in name: sRGB")
+                             "A file path, or a built-in name: sRGB, AdobeRGB "
+                             "(Adobe RGB (1998)-compatible)")
     parser.add_argument("--to-srgb", action="store_true",
                         help="Shortcut: convert to sRGB using ImageMagick built-in color space")
 
@@ -5659,6 +5713,13 @@ def main():
     # Handle --to-srgb shortcut
     if args.to_srgb:
         args.icc_profile = 'sRGB'
+    # Built-in profile names, any case ("srgb", "AdobeRGB", "adobe"...). A
+    # lower-case "srgb" used to reach magick as a FILE name and fail per file.
+    if args.icc_profile and args.icc_profile.strip().lower() in _ICC_ALIASES:
+        args.icc_profile = _ICC_ALIASES[args.icc_profile.strip().lower()]
+    elif args.icc_profile and not Path(args.icc_profile).is_file():
+        parser.error(f"--icc-profile: not sRGB, AdobeRGB, or an existing file: "
+                     f"{args.icc_profile}")
 
     # Determine command
     cmd, auto_decode, reason = determine_command(args.input, args.force_transcode, 

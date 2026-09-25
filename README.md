@@ -636,20 +636,11 @@ For reliable EXIF and color, use **XnView MP** or **digiKam**. If an image looks
 
 The decoder's Matrix mode (`--matrix`, for color-space conversion via LittleCMS) quantizes pixels to 8-bit for the transform and scales the result back to 16-bit. Effective precision is 8 bits in that mode only — use **Roundtrip mode** (the default) for full 16-bit fidelity.
 
-### eciRGB v2 and Special ICC Profiles
+### eciRGB v2, scanner profiles and other table-curve ICC profiles
 
-The cjxl/djxl converters were optimized for:
-- sRGB (gamma ~2.2)
-- Rec.2020 (standard gamma)
-- Linear spaces
+Most profiles have a native JPEG XL form (a pure gamma, sRGB, Rec.2020, DCI-P3…), and those round-trip correctly — ProPhoto, Elle's LargeRGB g2.2, Adobe RGB and Wide Gamut included, wide gamut intact. Profiles whose tone curve is a **table** (eciRGB v2's L* curve, scanner LUT profiles, ROMM RGB with its linear toe) have none: in lossy mode cjxl then stores the whole ICC, and djxl decodes such a file to **linear sRGB**, not to the original space.
 
-Profiles with special transfer curves like **eciRGB v2** (L* curve) may have slight color shifts during conversion because cjxl/djxl assumes standard gamma when encoding to XYB.
-
-**Recommendation**: For critical work with eciRGB v2 or similar profiles, either:
-- Keep originals in TIFF format, or
-- Convert to Rec.2020 before JXL encoding
-
-See [docs/jxl_color_internals.md](docs/jxl_color_internals.md) for technical details.
+The encoder's default `cautious` ICC strategy detects most of these and encodes them "skip" (verified correct round trips for eciRGB v2 and Epson scanner profiles; the JXL itself then shows wrong colours in viewers, because it is tagged sRGB). A table-curve profile that passes the cautious check is a **known open bug**: the decoded TIFF comes back with wrong colours. Measurements, the exact mechanism and the planned fix: [Lossy JXL with an ICC blob](docs/jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
 
 ---
 

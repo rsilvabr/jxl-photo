@@ -36,7 +36,7 @@ Color space: RGB, Custom,
 **Pros:** Compact, efficient, mathematically precise
 **Cons:** Loses ICC-specific metadata (TRC curves, copyright, device calibration)
 
-### Method 2: ICC Blob (used by lossless or `--keep_icc`)
+### Method 2: ICC Blob (lossless — and LOSSY when the profile has no native form)
 
 ```
 Color space: 940-byte ICC profile, CMM type: "KCMS"
@@ -44,6 +44,13 @@ Color space: 940-byte ICC profile, CMM type: "KCMS"
 
 **Pros:** Preserves exact original ICC with all metadata
 **Cons:** Larger, ICC blob must be stored separately from image data
+
+cjxl picks Method 1 only when the profile can be described natively (primaries +
+white point + a standard transfer function: a pure gamma, sRGB, linear, PQ, HLG,
+709, DCI). A profile whose curve is a table — eciRGB v2 (L* curve), ROMM RGB
+with its linear toe, scanner LUT profiles — has no native form, so cjxl stores
+the whole ICC **even in lossy mode**. What djxl then returns is very different;
+see [Lossy JXL with an ICC blob](#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
 
 ---
 
@@ -132,6 +139,84 @@ For professional editing:
 - Color grading curves interact differently
 - Print profiles may have slight color shifts
 - Multi-conversion workflows accumulate drift
+
+---
+
+## Lossy JXL with an ICC blob: what djxl returns (measured 2026-09-25)
+
+**Short version:** for the common profiles (any pure gamma — ProPhoto, Elle's
+LargeRGB g2.2, Adobe RGB, Wide Gamut, Melissa — plus sRGB, Rec.2020, DCI-P3)
+nothing below applies: djxl returns the pixels in the original space, wide
+gamut intact, and pasting the original ICC back onto the TIFF is correct. It is
+only for profiles WITHOUT a native form (a table curve) that the lossy decode
+changes space.
+
+### What djxl does, per case
+
+| JXL | djxl integer output (PNG/PPM) is in | Pasting the original ICC on it is |
+|---|---|---|
+| Lossy, native colour (Method 1) | the original space (djxl writes a synthetic ICC describing it) | **correct** |
+| Lossless, ICC blob | the original space, pixels identical (0 differing pixels) | **correct** |
+| Lossy, ICC blob | **linear sRGB** (`RGB_D65_SRG_Rel_Lin`) | **wrong** — colours completely off |
+
+Same behaviour in libjxl 0.11.2 and 0.12.0. The case is detectable from djxl
+itself: `djxl in.jxl out.png --icc_out=out.icc --orig_icc_out=orig.icc` — the two
+files are identical in the first two rows and different in the third.
+
+### Wide gamut is kept in the JXL, but an integer decode clips it
+
+Linear sRGB cannot hold colours outside sRGB without negative values, and an
+integer PNG/TIFF has none. Measured on a 16 MP Capture One ProPhoto export
+(9.6% of its pixels outside sRGB), encoded with a ROMM-with-toe profile at
+d=0.05 and converted back correctly from djxl's integer output: **52.9 dB** on the
+in-gamut pixels, **40.7 dB** on the out-of-gamut ones. The JXL itself lost
+nothing: `djxl … out.pfm` (32-bit float) returns the negative values (9.4% of the
+pixels). A correct decode of this case is therefore *float output + a colour
+conversion from `--icc_out` to the original profile*, never an assignment.
+
+### Real profiles, measured (1024 px crop of the same photo, d=0.05)
+
+Error back in the photo's own Elle g2.2 space. "Assign" = paste the original ICC
+on djxl's integer output (the toolkit's roundtrip decode); "convert" = float
+output converted from `--icc_out` to the original.
+
+| Profile | JXL stores | Assign | Convert |
+|---|---|---|---|
+| LargeRGB-elle-V4-g22, ProPhoto (Windows/Adobe, pure γ1.8) | native | 47.8 dB | 47.8 dB |
+| Adobe RGB (1998), Wide Gamut RGB, Melissa RGB | native | 50.9 / 51.1 / 47.8 dB | same |
+| sRGB (two profiles), Rec.2020, DCI-P3 | native | 49.0 / 50.4 / 51.0 dB | same |
+| eciRGB v2 (v2 and v4 profiles) | **ICC blob** | **23.6 dB** | 51.2 / 48.0 dB |
+| Epson Perfection V800 scanner (SFprofR/SFprofT) | **ICC blob** | **20.8 / 20.4 dB** | 30.3 / 28.5 dB¹ |
+| ROMM RGB with the linear toe (test profile) | **ICC blob** | **15.4 dB** | 48.9 dB |
+
+¹ Converting a camera photo *into* a scanner input profile is lossy on its own;
+the absolute number says little, the gap between the columns is the point.
+
+Pure gamma or table curve also does **not** matter for compression: the same
+photo as Elle g2.2 and as ProPhoto γ1.8 gave byte-for-byte the same size and the
+same PSNR at d=0.05, 0.1 and 1.0 (XYB linearises the input first). There is no
+quality reason to convert a pure-gamma ProPhoto TIFF to a g2.2 profile before
+encoding.
+
+### How the toolkit copes today
+
+`jxl_tiff_encoder.py`'s default `ICC_PNG_STRATEGY = "cautious"` test-encodes
+each new profile. For eciRGB v2 and the Epson scanner profiles it decides
+**skip**: the pixels are encoded as if they were sRGB, so the JXL is native
+(sRGB-tagged), the decode returns the original numbers, and the roundtrip is
+correct (measured 57.3 / 56.4 dB, same-space numbers). The price is that the
+JXL itself displays with wrong colours in viewers, because it says sRGB.
+
+**Known bug (open):** the cautious test only checks that the image did not get
+much darker (mean ratio ≥ 0.7). A table-curve profile that passes that check —
+the ROMM-with-toe test profile does — is embedded, the JXL stores the ICC blob,
+and the toolkit's decoder pastes the original ICC on linear-sRGB pixels: the
+TIFF comes back with wrong colours and the log says OK. The same "use the XMP
+ICC first" rule sits in the recompressor's and the transcoder's derivative
+paths. A fix is planned (detect the case with `--icc_out`/`--orig_icc_out`,
+decode to float, convert instead of assign; make the cautious test check the
+same thing). Until it lands, keep the TIFFs of any archive made with a
+table-curve profile that the encoder logged as `Cautious ICC: embed`.
 
 ---
 
