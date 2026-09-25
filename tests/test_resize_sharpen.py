@@ -63,10 +63,10 @@ def test_derived_label(mod):
 def test_sharpen_args(mod):
     assert mod._sharpen_args("none") == []
     assert mod._sharpen_args(None) == []
-    assert mod._sharpen_args("screen", grey=True) == ["-unsharp", "0x0.5+0.6+0.02"]
-    assert mod._sharpen_args("print", grey=True) == ["-unsharp", "0x1.0+1.0+0.02"]
+    assert mod._sharpen_args("screen", grey=True) == ["-unsharp", "0x0.8+0.6+0.0"]
+    assert mod._sharpen_args("print", grey=True) == ["-unsharp", "0x3.24+0.77+0.0"]
     assert mod._sharpen_args("screen") == [
-        "-colorspace", "Lab", "-channel", "R", "-unsharp", "0x0.5+0.6+0.02",
+        "-colorspace", "Lab", "-channel", "R", "-unsharp", "0x0.8+0.6+0.0",
         "+channel", "-colorspace", "sRGB"]
     assert mod._sharpen_args("screen", grey=True, sigma=2, gain=3,
                              threshold=0.1) == ["-unsharp", "0x2.0+3.0+0.1"]

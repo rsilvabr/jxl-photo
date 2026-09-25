@@ -14,26 +14,6 @@
   Measurements: `docs/jxl_color_internals.md`, "Lossy JXL with an ICC blob".
   Remove this entry when fixed.
 
-- **Calibrate the output-sharpening presets** (added 2026-09-25, not done yet).
-  `SHARPEN_PRESETS` in `jxl_jpeg_transcoder.py` and `jxl_recompressor.py`
-  (parity-pinned, keep both identical) still hold PLACEHOLDER numbers
-  (`screen` sigma 0.5 / gain 0.6 / threshold 0.02, `print` sigma 1.0 / gain
-  1.0 / threshold 0.02), marked `# CALIBRATE vs C1`. They must match Capture
-  One's own output sharpening. Procedure:
-  1. The user exports ONE photo from Capture One three times, all at the SAME
-     size, as 16-bit sRGB TIFF, no date stamp: `A` = output sharpening off,
-     `B` = C1's *screen* preset, `C` = C1's *print* preset (at their usual
-     print size/DPI).
-  2. Grid-search `sigma`/`gain`/`threshold` of `_sharpen_args(...)` applied to
-     `A` to minimise the difference to `B` (then to `C`) — PSNR + SSIMULACRA2,
-     edges excluded. A, B and C share C1's own resize, so the difference is the
-     sharpening alone.
-  3. Change ONLY the numbers in `SHARPEN_PRESETS` (both scripts), note in the
-     transcoder/recompressor READMEs which C1 preset they reproduce, re-run
-     `tests/test_helper_parity.py` and the suite. Print can only be validated
-     on paper: trust C1's preset first; fine-tune later from minilab test prints.
-  Remove this entry when done.
-
 ## Do NOT touch (dead code)
 - `jxl_jpeg_transcoder_HDR.py` and `hdr/` — abandoned HDR side project, kept
   untracked at the repo root (gitignored). Do not read, edit, analyze, or

@@ -2490,9 +2490,18 @@ def _png_is_grayscale(png_path: Path) -> bool:
 
 
 SHARPEN_PRESETS = {
-    "screen": {"sigma": 0.5, "gain": 0.6, "threshold": 0.02},   # CALIBRATE vs C1 "screen"
-    "print":  {"sigma": 1.0, "gain": 1.0, "threshold": 0.02},   # CALIBRATE vs C1 "print"
+    "screen": {"sigma": 0.8, "gain": 0.6, "threshold": 0.0},    # ~ Capture One "screen"
+    "print":  {"sigma": 3.24, "gain": 0.77, "threshold": 0.0},  # = Capture One "print"
 }
+# Calibrated 2026-09-25/26 against Capture One's DEFAULT output-sharpening
+# presets: the same 4 Nikon Z7 photos (16-bit Elle V2 g2.2) exported with
+# sharpening off / screen / print at 1000, 2000, 3000 px and full resolution
+# (8256 px), and a grid search of this Lab-L unsharp on the "off" export.
+# C1 keeps the RADIUS nearly constant in output pixels (print ~3 px at every
+# size); only the screen AMOUNT falls with size (best 0.8 at 1000 px -> 0.4 at
+# 8256 px). print (3.24, 0.77) is within 0.1 dB of the per-size best at every
+# size; screen (0.8, 0.6) is the best fixed compromise: <= 1.6 dB from the
+# per-size best (1000: -1.3, 2000: -0.7, 3000: -0.2, full: -1.6 dB).
 # The ONLY place the sharpening numbers live, calibrated against Capture One's
 # own output sharpening. Units are OUTPUT pixels, so one preset works at any
 # output size. sigma = gaussian sigma (px), gain = unsharp amount (1.0 = 100%),

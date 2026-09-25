@@ -327,11 +327,22 @@ any size, calibrated against Capture One:
 
 | Preset | sigma (px) | gain | threshold |
 |---|---|---|---|
-| `screen` | 0.5 | 0.6 | 0.02 |
-| `print` | 1.0 | 1.0 | 0.02 |
+| `screen` | 0.80 | 0.60 | 0 |
+| `print` | 3.24 | 0.77 | 0 |
 
-The values are provisional until a calibration session against real Capture
-One exports lands. The `--sharpen-sigma`/`--sharpen-gain`/
+Calibrated 2026-09-25/26 against Capture One's **default** "screen" and "print"
+output-sharpening presets: the same 4 photos (Nikon Z7, 16-bit) exported with
+sharpening off, screen and print at 1000, 2000 and 3000 px long edge and at full
+resolution (8256 px), and a grid search of this operation on the "off" export.
+Capture One keeps the **radius** nearly constant in output pixels (print ≈ 3 px
+at every size); only the screen **amount** falls as the image grows. So:
+
+| Preset | Distance from Capture One's per-size best (1000 / 2000 / 3000 / 8256 px) |
+|---|---|
+| `print` 3.24 · 0.77 | ≤ 0.1 dB at every size (visually the same halos) |
+| `screen` 0.80 · 0.60 | −1.3 / −0.7 / −0.2 / −1.6 dB — the best single value |
+
+The `--sharpen-sigma`/`--sharpen-gain`/
 `--sharpen-threshold` expert overrides are deliberately **outside** the recipe
 label: after changing one, re-derive with `--overwrite` (the sync would
 otherwise see the old label as current). Without `--sharpen screen|print` they
