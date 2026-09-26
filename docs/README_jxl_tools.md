@@ -268,6 +268,35 @@ G:\2026,,3,tiff2jxl
 | `Mode` | 0–8, per row. Different folders can use different modes. Mode **7** in a hand-written manifest means "only `<marker>/<subfolder>`", so write the Source as that path — the wrapper derives the subfolder from it and passes it to the children as `--export-subfolder`. A mode-7 row whose Source sits **above** the marker cannot derive one, and the child would then process every subfolder (i.e. run as mode 6): attended runs warn and can be declined, unattended presets are refused. Use mode 6 if every subfolder is intended. |
 | `Direction` | `tiff2jxl`, `jpeg2jxl`, `jxl2tiff`, ... Must match the workflow you start, so a TIFF→JXL manifest can never be replayed by a JXL→TIFF session. |
 
+### Per-row output options (optional columns)
+
+Manifests for **`jxl2jxl`, `jxl2jpeg` and `jxl2png`** carry five extra columns
+after `Direction` (the generated CSV already includes them; hand-written ones
+may omit them entirely):
+
+| Column | Values | Effect on that row |
+|--------|--------|--------------------|
+| `OutputICC` | empty, `sRGB`, `AdobeRGB`, or a path to a `.icc`/`.icm` | Convert the output to that profile (a derivative — 16-bit, from the source's own profile). |
+| `Resize` | empty, `long:2048`, `short:1024`, `50%` (add `+up` to allow upscaling) | Resize the output. |
+| `Sharpen` | empty, `none`, `screen`, `print` | Output sharpening after the resize. |
+| `RenameFrom` / `RenameTo` | text (no path characters, no `..`) | Rename the output files: the first occurrence of `RenameFrom` in the name becomes `RenameTo` (literal, case-sensitive). `RenameTo` requires `RenameFrom` on the same row. |
+
+A **filled cell overrides the wizard's answer for that option on that row
+only**; an empty cell means "not applied on this row" (it also *clears* the
+wizard's answer — the row runs plain). Any invalid value refuses the whole
+manifest before anything runs, with the row and column named — a typo must
+never become a silent "option not applied". The confirmation preview lists
+each row's recipe next to it (`sRGB · long:2048 · screen`).
+
+The safety rules of the direct run apply per row: a row with a **resize or
+sharpening** recipe cannot run in place (mode 8, or mode 0 with
+Destination = Source) and never deletes its sources — combined with a delete
+answer the whole manifest is refused up front; a row with only `OutputICC`
+keeps its conversion but simply receives no `--delete-source` while the
+plain rows keep it. The duplicate-output guard sees the **renamed** names,
+so a rename that would land two rows on the same file aborts before
+anything is written.
+
 Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
 **`[M] Run from manifest`**. The encoding settings you pick in Step 6/6A
 (distance, effort, multi-page policy, ...) apply to every entry.

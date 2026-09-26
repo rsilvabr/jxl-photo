@@ -427,6 +427,99 @@ def _is_manifest_header_row(row) -> bool:
                for cell, expected in zip(row[1:4], ("destination", "mode", "direction")))
 
 
+# Optional per-row columns after Direction. Empty cell = the option is NOT
+# applied on that row; an ABSENT column falls back to the wizard's answer.
+_MANIFEST_OPTION_COLUMNS = ("outputicc", "resize", "sharpen", "renamefrom", "renameto")
+_MANIFEST_OPTION_DIRECTIONS = {"jxl2jxl", "jxl2jpeg", "jxl2png"}
+_MANIFEST_OPTION_DISPLAY = {"outputicc": "OutputICC", "resize": "Resize",
+                            "sharpen": "Sharpen", "renamefrom": "RenameFrom",
+                            "renameto": "RenameTo"}
+_MANIFEST_RESIZE_RE = re.compile(r"^(?:(long|short):(\d+)|(\d+(?:\.\d+)?)%)(\+up)?$",
+                                 re.IGNORECASE)
+_MANIFEST_RENAME_BAD = re.compile(r'[,;/\\:*?"<>|]')
+
+
+def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
+                                anchor) -> Tuple[Optional[Dict], Optional[str]]:
+    """(options, None) or (None, reason). `cells` maps the lower-case column
+    name to the raw cell text, for the columns PRESENT in the CSV only.
+    Returned keys, only for present columns: output_icc (str|None),
+    resize_mode/resize_value/allow_upscale, sharpen, rename_from, rename_to —
+    None / 'none' / '' meaning 'not applied'."""
+    opts: Dict = {}
+    for name, raw in cells.items():
+        value = (raw or "").strip()
+        if direction not in _MANIFEST_OPTION_DIRECTIONS:
+            if value:
+                return None, (f"column {_MANIFEST_OPTION_DISPLAY[name]} is not "
+                              f"supported for {direction} manifests")
+            continue
+        if name == "outputicc":
+            if not value:
+                opts["output_icc"] = None
+                continue
+            key = value.lower()
+            if key == "srgb":
+                opts["output_icc"] = "sRGB"
+            elif key in ("adobergb", "adobe", "adobergb1998"):
+                opts["output_icc"] = "AdobeRGB"
+            else:
+                p = value.strip('"')
+                if ".." in Path(p).parts:
+                    return None, f"column OutputICC: '..' is not allowed ({value!r})"
+                resolved = anchor(p)
+                if not Path(resolved).is_file():
+                    return None, (f"column OutputICC: not sRGB, AdobeRGB, or an "
+                                  f"existing file: {value!r}")
+                opts["output_icc"] = resolved
+        elif name == "resize":
+            if not value:
+                opts["resize_mode"] = None
+                opts["resize_value"] = None
+                opts["allow_upscale"] = False
+                continue
+            m = _MANIFEST_RESIZE_RE.match(value)
+            if not m:
+                return None, (f"column Resize: {value!r} is not long:N, short:N "
+                              f"or P% (optional +up suffix)")
+            allow_up = bool(m.group(4))
+            if m.group(1):
+                resize_mode, resize_value = m.group(1).lower(), int(m.group(2))
+                if resize_value <= 0:
+                    return None, f"column Resize: {value!r} — N must be > 0"
+            else:
+                resize_mode, resize_value = "percent", float(m.group(3))
+                if resize_value <= 0:
+                    return None, f"column Resize: {value!r} — P must be > 0"
+                if resize_value > 100 and not allow_up:
+                    return None, (f"column Resize: {value!r} would upscale — "
+                                  f"add +up")
+            opts["resize_mode"] = resize_mode
+            opts["resize_value"] = resize_value
+            opts["allow_upscale"] = allow_up
+        elif name == "sharpen":
+            v = value.lower()
+            if not v or v == "none":
+                opts["sharpen"] = "none"
+            elif v in ("screen", "print"):
+                opts["sharpen"] = v
+            else:
+                return None, f"column Sharpen: {value!r} is not none/screen/print"
+        elif name == "renamefrom":
+            if _MANIFEST_RENAME_BAD.search(value) or ".." in value:
+                return None, (f"column RenameFrom: path characters are not "
+                              f"allowed ({value!r})")
+            opts["rename_from"] = value
+        elif name == "renameto":
+            if _MANIFEST_RENAME_BAD.search(value) or ".." in value:
+                return None, (f"column RenameTo: path characters are not "
+                              f"allowed ({value!r})")
+            opts["rename_to"] = value
+    if opts.get("rename_to") and not opts.get("rename_from"):
+        return None, "column RenameTo is set but RenameFrom is empty on the same row"
+    return opts, None
+
+
 # Manifest modes whose child walks the WHOLE tree under the Source. Modes 0 and
 # 1 are flat in all three children (find_files_mode0 / find_jxls_flat /
 # find_jpegs_flat), so a Source nested inside another Source there can never
@@ -1632,6 +1725,81 @@ def _dest_folder_names(origin: str, dest: str) -> tuple:
     return ('recovered_jpeg', 'recovered_jpeg')
 
 
+def _row_effective_options(workflow: Dict, advanced: Dict, row_opts: Optional[Dict],
+                           origin: str, dest: str) -> Tuple[Dict, Dict]:
+    """(workflow_row, advanced_row): shallow copies with this row's manifest
+    columns applied. A key PRESENT in row_opts overrides (None/''/'none'
+    removes the option); an absent key keeps the wizard's value."""
+    wf = dict(workflow)
+    adv = dict(advanced)
+    if not row_opts:
+        return wf, adv
+    if 'output_icc' in row_opts:
+        val = row_opts['output_icc']
+        if origin == 'jxl' and dest == 'jxl':
+            if val:
+                adv['output_icc'] = val
+            else:
+                adv.pop('output_icc', None)
+        elif origin == 'jxl' and dest in ('jpeg', 'png'):
+            # The transcoder receives the ICC via workflow['icc_profile'];
+            # see the transcoder branch of _build_manifest_entry_cmd. The
+            # value is mirrored into advanced['output_icc'] as well so the
+            # derivative guards (_has_derivative_options: a converted row
+            # never deletes its source) see it.
+            wf['icc_profile'] = val or None
+            if val:
+                adv['output_icc'] = val
+            else:
+                adv.pop('output_icc', None)
+    if 'resize_mode' in row_opts:
+        if row_opts['resize_mode']:
+            adv['resize_mode'] = row_opts['resize_mode']
+            adv['resize_value'] = row_opts['resize_value']
+            if row_opts.get('allow_upscale'):
+                adv['allow_upscale'] = True
+            else:
+                adv.pop('allow_upscale', None)
+        else:
+            for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
+                adv.pop(_k, None)
+    if 'sharpen' in row_opts:
+        if row_opts['sharpen'] and row_opts['sharpen'] != 'none':
+            adv['sharpen'] = row_opts['sharpen']
+        else:
+            adv.pop('sharpen', None)
+    if 'rename_from' in row_opts or 'rename_to' in row_opts:
+        rf = row_opts.get('rename_from') or ''
+        rt = row_opts.get('rename_to') or ''
+        if rf:
+            adv['rename_from'] = rf
+            adv['rename_to'] = rt
+        else:
+            adv.pop('rename_from', None)
+            adv.pop('rename_to', None)
+    return wf, adv
+
+
+def _row_options_summary(row_opts: Optional[Dict]) -> str:
+    """One short 'sRGB · long:2048 · screen · ProPhoto→sRGB' label for the
+    manifest confirmation panel — '' when the row applies nothing."""
+    if not row_opts:
+        return ""
+    parts = []
+    if row_opts.get('output_icc'):
+        parts.append(str(row_opts['output_icc']))
+    if row_opts.get('resize_mode'):
+        _unit = "%" if row_opts['resize_mode'] == "percent" else ""
+        _v = row_opts.get('resize_value')
+        _lbl = f"{_v}{_unit}" if _unit else f"{row_opts['resize_mode']}:{_v}"
+        parts.append(_lbl + ("+up" if row_opts.get('allow_upscale') else ""))
+    if row_opts.get('sharpen') and row_opts['sharpen'] != 'none':
+        parts.append(row_opts['sharpen'])
+    if row_opts.get('rename_from'):
+        parts.append(f"{row_opts['rename_from']}→{row_opts.get('rename_to') or ''}")
+    return " · ".join(parts)
+
+
 def _drop_derivative_options(advanced: Dict) -> None:
     """Forget the derivative answers (--output-icc, the rename the wizard only
     asks alongside it, and the resize/sharpening recipe). Used whenever Step 6
@@ -2564,10 +2732,21 @@ class InteractiveMenu:
             # The Direction column binds the manifest to the workflow that
             # generated it, so a TIFF->JXL manifest is never accidentally
             # replayed by a JXL->TIFF session (which would run the wrong script).
-            writer.writerow(["Source", "Destination", "Mode", "Direction"])
+            # The five optional columns follow for the directions that accept
+            # them (empty cell = the option is NOT applied on that row): the
+            # user opens the CSV in Excel and only fills in what differs.
             direction = f"{analyzer.origin}2{analyzer.dest}"
+            with_options = direction in _MANIFEST_OPTION_DIRECTIONS
+            header = ["Source", "Destination", "Mode", "Direction"]
+            if with_options:
+                header += ["OutputICC", "Resize", "Sharpen", "RenameFrom",
+                           "RenameTo"]
+            writer.writerow(header)
             for src, dst, count, entry_mode in mappings:
-                writer.writerow([src, dst, entry_mode, direction])
+                row = [src, dst, entry_mode, direction]
+                if with_options:
+                    row += ["", "", "", "", ""]
+                writer.writerow(row)
 
         return str(manifest_path)
 
@@ -2697,7 +2876,8 @@ class InteractiveMenu:
                 print()
 
     def _load_manifest_entries(self, manifest_path: str,
-                               origin_format: str, dest_format: str) -> Optional[List[Tuple]]:
+                               origin_format: str, dest_format: str,
+                               row_options: Optional[List] = None) -> Optional[List[Tuple]]:
         """Parse and validate a manifest CSV. Returns the entries, or None (with
         an explanation already printed) when the file cannot be trusted.
 
@@ -2712,6 +2892,14 @@ class InteractiveMenu:
         carried relative paths used to scan, convert and delete inside the
         scheduler's working directory. Absolute paths pass through untouched;
         '..' is refused outright either way.
+
+        `row_options` (optional): when a list is passed, it is filled with one
+        dict per entry, aligned with the returned list — the parsed values of
+        the optional columns after Direction (OutputICC/Resize/Sharpen/
+        RenameFrom/RenameTo). A column PRESENT in the CSV overrides the
+        wizard's answer for that option on that row (empty cell = not applied);
+        absent columns never appear in the dicts. Any invalid value refuses the
+        whole manifest.
         """
         entries = []
         directions = set()
@@ -2744,12 +2932,30 @@ class InteractiveMenu:
             # Only skip the first row if it really is the header; a manifest
             # whose header line was deleted must not silently lose entry #1.
             rows = []
+            opt_index: Dict[str, int] = {}
             if first_row is not None:
                 if _is_manifest_header_row(first_row):
                     rows = list(reader)
+                    # Optional columns live AFTER Direction (index 4+). A name
+                    # outside the known set refuses the manifest: a typo like
+                    # "Resise" must not be silently ignored, or the user would
+                    # believe the resize happened.
+                    for ci, cell in enumerate(first_row[4:], 4):
+                        cname = cell.strip().lower()
+                        if not cname:
+                            continue
+                        if cname not in _MANIFEST_OPTION_COLUMNS:
+                            accepted = ", ".join(_MANIFEST_OPTION_DISPLAY[c]
+                                                 for c in _MANIFEST_OPTION_COLUMNS)
+                            self._print_error(
+                                f"Unknown manifest column {cell.strip()!r} — the "
+                                f"optional columns after Direction are: {accepted}.")
+                            return None
+                        opt_index[cname] = ci
                 else:
                     rows = [first_row] + list(reader)
-            for row in rows:
+            current_direction_pre = f"{origin_format}2{dest_format}"
+            for _row_n, row in enumerate(rows, 1):
                 if row and len(row) >= 1:
                     source = row[0].strip()
                     is_comment = not source or source.startswith('#')
@@ -2805,6 +3011,16 @@ class InteractiveMenu:
                         # cmd builder and the children all see the same
                         # location regardless of the wrapper's CWD.
                         entries.append((_anchor(source), _anchor(dest), entry_mode))
+                        if row_options is not None:
+                            cells = {name: (row[i] if i < len(row) else "")
+                                     for name, i in opt_index.items()}
+                            opts, reason = _parse_manifest_row_options(
+                                cells, current_direction_pre, _anchor)
+                            if reason:
+                                self._print_error(
+                                    f"Manifest row {_row_n} ({source}): {reason}")
+                                return None
+                            row_options.append(opts)
 
         # Say the anchoring out loud ONCE per load: a relative path that used to
         # mean "relative to wherever the wrapper happened to start" now means
@@ -2846,12 +3062,37 @@ class InteractiveMenu:
             else:
                 print(f"WARNING: {warn}")
 
+        if opt_index:
+            names = ", ".join(_MANIFEST_OPTION_DISPLAY[c] for c in opt_index)
+            note = (f"Manifest option columns: {names} (these override the "
+                    f"wizard's answers for those options; an empty cell means "
+                    f"'not applied')")
+            if RICH_AVAILABLE and console:
+                console.print(f"[dim]{note}[/dim]")
+            else:
+                print(note)
+
+        # Invariant: one options dict per entry. Catches a desync between the
+        # entries list and row_options on the spot instead of misaligning
+        # recipes with rows at execution time.
+        assert row_options is None or len(row_options) == len(entries), (
+            f"manifest row options out of sync: {len(entries)} entries, "
+            f"{len(row_options)} option rows")
+
         return entries
 
-    def _confirm_manifest_entries(self, manifest_path: str, entries: List[Tuple]) -> bool:
+    def _confirm_manifest_entries(self, manifest_path: str, entries: List[Tuple],
+                                  row_options: Optional[List] = None) -> bool:
         """Preview the entries and ask for a go-ahead. Used by the wizard; the
         attended repeat ("Repeat last workflow") re-reads the CSV with the same
-        loader guards but shows only the manifest name and entry count."""
+        loader guards but shows only the manifest name and entry count.
+
+        When the manifest carries option columns, each row shows a short recipe
+        summary (sRGB · long:2048 · screen · ProPhoto→sRGB) so the user sees
+        what differs from the wizard's answers BEFORE confirming."""
+        _summaries = ([_row_options_summary(o) for o in row_options]
+                      if row_options else None)
+        _show_opts = bool(_summaries) and any(_summaries)
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Manifest:[/bold cyan] {manifest_path}")
             console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
@@ -2860,8 +3101,14 @@ class InteractiveMenu:
             table.add_column("Source", style="red")
             table.add_column("Destination", style="green")
             table.add_column("Mode", style="magenta")
+            if _show_opts:
+                table.add_column("Options", style="cyan")
             for i, (src, dst, mode) in enumerate(entries[:15], 1):
-                table.add_row(str(i), self._truncate_path(src), self._truncate_path(dst), str(mode))
+                row = [str(i), self._truncate_path(src), self._truncate_path(dst),
+                       str(mode)]
+                if _show_opts:
+                    row.append(_summaries[i - 1])
+                table.add_row(*row)
             console.print(table)
             if len(entries) > 15:
                 console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
@@ -2873,7 +3120,9 @@ class InteractiveMenu:
             print(f"Entries to process: {len(entries)}\n")
             for i, (src, dst, mode) in enumerate(entries[:15], 1):
                 print(f"  {i}. {src}")
-                print(f"     -> {dst} (mode {mode})")
+                _opt = (f"   [{_summaries[i - 1]}]"
+                        if _show_opts and _summaries[i - 1] else "")
+                print(f"     -> {dst} (mode {mode}){_opt}")
             if len(entries) > 15:
                 print(f"  ... and {len(entries) - 15} more entries")
             print()
@@ -2892,12 +3141,15 @@ class InteractiveMenu:
                 print("No manifest found!")
             return False
 
+        row_options: List = []
         entries = self._load_manifest_entries(
-            manifest_path, workflow['origin_format'], workflow['dest_format'])
+            manifest_path, workflow['origin_format'], workflow['dest_format'],
+            row_options=row_options)
         if entries is None:
             return False
 
-        if not self._confirm_manifest_entries(manifest_path, entries):
+        if not self._confirm_manifest_entries(manifest_path, entries,
+                                              row_options=row_options):
             return False
 
         # A manifest with mode-8 rows promises "DELETE originals", but the
@@ -2960,6 +3212,7 @@ class InteractiveMenu:
         # For manifest mode, we set mode to special value 99 (manifest mode)
         workflow['mode'] = 99  # Special mode for manifest execution
         workflow['manifest_entries'] = entries
+        workflow['manifest_row_options'] = row_options
         workflow['manifest_path'] = manifest_path
         # auto_mode_used stays False: a manifest run must not report
         # "Auto Mode: Yes" in the Step-7 summary.
@@ -5084,42 +5337,84 @@ class InteractiveMenu:
             return False
         script = str(script_path)
 
+        # Per-row effective options: a manifest option column overrides the
+        # wizard's answer for THAT row (empty cell = not applied; absent
+        # column = the wizard's answer). Computed once, aligned with
+        # manifest_entries, and reused by the guards, the collision scan and
+        # the command builder.
+        _row_opts_all = (workflow.get('manifest_row_options')
+                         or [None] * len(manifest_entries))
+        _row_effs = [_row_effective_options(workflow, advanced, _o, origin, dest)
+                     for _o in _row_opts_all]
+        _derived_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                         if _has_derivative_options(_a)]
+        _rename_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                        if _a.get('rename_from')]
+
         # The derivative options have no in-place form and never delete (same
-        # rules as the direct-run guard in execute_workflow). Every manifest row
-        # gets the same options, so an in-place row would only fail with exit 2
-        # after the run had started: refuse the whole manifest up front, naming
-        # the rows, before anything is charged or written.
-        _shaping = _has_derivative_options(advanced)
+        # rules as the direct-run guard in execute_workflow). Evaluated PER
+        # ROW: a manifest column can make one row a derivative where the
+        # wizard's answer made none (or vice versa), so only the rows that
+        # actually combine the two are refused — before anything is charged
+        # or written.
         _manifest_delete = bool(advanced.get('delete_source')
                                 or _flags_request_delete(workflow.get('expert_flags')))
-        if origin == 'jxl' and dest == 'jxl' and (_shaping
-                                                  or advanced.get('rename_from')):
-            if _shaping and _manifest_delete:
+        if origin == 'jxl' and dest == 'jxl' and (_derived_rows or _rename_rows):
+            if _derived_rows and _manifest_delete:
                 self._print_error("A derivative (colour conversion/resize/sharpening) "
-                                  "never deletes its source — drop the delete option.")
+                                  "never deletes its source — drop the delete option "
+                                  f"(derivative row(s): {', '.join(map(str, _derived_rows))}).")
                 return False
-            _bad = _derivative_in_place_rows(manifest_entries)
+            _in_place = set()
+            for _i, _e in enumerate(manifest_entries):
+                if _derivative_in_place_rows([_e]):
+                    _in_place.add(_i + 1)
+            _bad = sorted(_in_place & (set(_derived_rows) | set(_rename_rows)))
             if _bad:
-                _what = ("Derivatives (colour conversion/resize/sharpening)"
-                         if _shaping else "--rename-from")
-                self._print_error(f"{_what} cannot run in place, and {len(_bad)} manifest "
-                                  f"row(s) would (mode 8, or mode 0 with Destination = "
-                                  f"Source). Give them another mode (1-7) or a different "
-                                  f"Destination:")
-                for s_, d_, m_ in _bad[:5]:
-                    print(f"  mode {m_}: {s_}")
+                self._print_error(f"Derivatives (colour conversion/resize/sharpening) and "
+                                  f"--rename-from cannot run in place, and manifest "
+                                  f"row(s) {', '.join(map(str, _bad))} would (mode 8, or "
+                                  f"mode 0 with Destination = Source). Give them another "
+                                  f"mode (1-7) or a different Destination:")
+                for _n in _bad[:5]:
+                    s_, d_, m_ = manifest_entries[_n - 1]
+                    print(f"  row {_n}, mode {m_}: {s_}")
                 if len(_bad) > 5:
                     print(f"  ... and {len(_bad) - 5} more")
                 return False
-        if (origin == 'jxl' and dest in ('jpeg', 'png') and _shaping
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
                 and workflow.get('conversion_type') in
                     ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
                 and _manifest_delete):
-            # The transcoder's decode direction: the child refuses a delete
-            # flag together with the resize/sharpening ones.
-            self._print_error("Resize/sharpening write a derivative that never deletes "
-                              "its source — drop the delete option.")
-            return False
+            # The transcoder's decode direction. Resize/sharpening write a
+            # derivative that never deletes: a row whose EFFECTIVE recipe
+            # (wizard answer or its own columns) resizes or sharpens, combined
+            # with --delete-source, is refused up front — the user asked for a
+            # delete, so it must never be dropped silently. OutputICC alone
+            # does not count (it mirrors --icc-profile in the direct mode):
+            # those rows keep their conversion and never receive
+            # --delete-source — the command builder suppresses it per row.
+            _shape_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                           if _a.get('resize_mode')
+                           or (_a.get('sharpen') or 'none') != 'none']
+            if _shape_rows:
+                self._print_error("Resize/sharpening write a derivative that never deletes "
+                                  "its source — remove the delete option or move "
+                                  f"row(s) {', '.join(map(str, _shape_rows))} to a separate "
+                                  "manifest without it.")
+                return False
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and workflow.get('conversion_type') == 'jxl_to_jpeg_lossless'):
+            # A bit-exact JPEG reconstruction cannot be resized/sharpened; the
+            # child would refuse per file — refuse here, before the token.
+            _bad = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                    if _a.get('resize_mode') or (_a.get('sharpen') or 'none') != 'none']
+            if _bad:
+                self._print_error("A bit-exact JPEG reconstruction cannot be "
+                                  "resized/sharpened — pick the lossy JXL→JPEG "
+                                  "conversion for that "
+                                  f"(row(s): {', '.join(map(str, _bad))}).")
+                return False
 
         # Create the analyzer once — prefer the workflow's mode_config marker (a
         # manifest run with a custom marker must detect modes with the same
@@ -5265,6 +5560,9 @@ class InteractiveMenu:
                 export_jxl_folder=workflow.get('mode_config', {}).get('export_jxl_folder'),
                 rename_from=(workflow.get('advanced_options') or {}).get('rename_from', ''),
                 rename_to=(workflow.get('advanced_options') or {}).get('rename_to', ''),
+                row_renames=[((_a.get('rename_from') or ''),
+                              (_a.get('rename_to') or ''))
+                             for _w, _a in _row_effs],
                 cross_sink=cross_out_folders,
             )
         if collisions:
@@ -5410,7 +5708,11 @@ class InteractiveMenu:
 
             # Build command for this entry (the builder appends --dry-run when
             # workflow['dry_run'] is set, so the child prints the REAL output
-            # paths instead of a vague "would process").
+            # paths instead of a vague "would process"). The row's own
+            # manifest option columns ride in wf_row/adv_row (resolved_entries
+            # is 1:1 with manifest_entries, in the same order, so i-1 indexes
+            # the row's options).
+            wf_row, adv_row = _row_effs[i - 1]
             cmd = self._build_manifest_entry_cmd(
                 script=script,
                 source=source,
@@ -5419,8 +5721,8 @@ class InteractiveMenu:
                 origin=origin,
                 dest=dest,
                 workers=workers,
-                workflow=workflow,
-                advanced=advanced
+                workflow=wf_row,
+                advanced=adv_row
             )
 
             if cmd is None:
@@ -5895,6 +6197,7 @@ class InteractiveMenu:
                                     export_jxl_folder: str = None,
                                     rename_from: str = '',
                                     rename_to: str = '',
+                                    row_renames: Optional[List[Tuple[str, str]]] = None,
                                     cross_sink: Optional[Dict[int, Set[str]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
@@ -5932,6 +6235,11 @@ class InteractiveMenu:
         cells alone, because modes 1/3/4/5/6/7 derive their outputs from
         script constants.
 
+        `row_renames` (optional): one (rename_from, rename_to) per entry,
+        aligned with manifest_entries — a manifest RenameFrom/RenameTo column
+        renames ONE row's outputs, so the global rename pair is only the
+        fallback for rows without their own.
+
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
         resolver = None
@@ -5956,17 +6264,30 @@ class InteractiveMenu:
             except ImportError:
                 _child = None
             if _child is not None:
-                def _rename_out(p: Optional[Path]) -> Optional[Path]:
+                def _apply_rename_name(name: str, rf: str, rt: str) -> str:
+                    """Literal first-occurrence, case-sensitive stem
+                    replacement — the semantics the recompressor's
+                    _apply_rename and the transcoder's resolve_output_convert
+                    share (a token that differs only by case does NOT rename)."""
+                    if rf:
+                        stem, ext = os.path.splitext(name)
+                        if rf in stem:
+                            return stem.replace(rf, rt, 1) + ext
+                    return name
+
+                def _rename_out(p: Optional[Path], rf: str, rt: str) -> Optional[Path]:
                     """--rename-from changes the output NAME at planning time
                     (all modes, 0/1/2 included): mirror it, so a collision the
-                    rename creates is caught here too (folders are unchanged)."""
-                    if (p is not None and rename_from
-                            and _child.__name__ == 'jxl_recompressor'):
-                        return p.with_name(
-                            _child._apply_rename(p.name, rename_from, rename_to))
+                    rename creates is caught here too (folders are unchanged).
+                    The transcoder applies the rename on its decode/convert
+                    paths only, but the manifest option columns are only ever
+                    offered for the directions that honour them."""
+                    if p is not None and rf:
+                        return p.with_name(_apply_rename_name(p.name, rf, rt))
                     return p
 
-                def resolver(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
+                def resolver(f: Path, mode: int, src_root: Path, dest_cell: str,
+                             rf: str, rt: str) -> Optional[Path]:
                     # Mode 0 HONORS the Destination column: the cmd builder
                     # always passes it as the child's output positional, and
                     # every child resolves `output_root = args.output or
@@ -5977,11 +6298,11 @@ class InteractiveMenu:
                     # src_root and a Destination equal to the Source resolves
                     # identically: one branch covers both.
                     if mode in (0, 2):
-                        return _rename_out(Path(dest_cell) / (f.stem + out_ext))
+                        return _rename_out(Path(dest_cell) / (f.stem + out_ext), rf, rt)
                     if mode == 8:
-                        return _rename_out(f.parent / (f.stem + out_ext))
+                        return _rename_out(f.parent / (f.stem + out_ext), rf, rt)
                     if mode == 1:
-                        return _rename_out(src_root / conv_folder / (f.stem + out_ext))
+                        return _rename_out(src_root / conv_folder / (f.stem + out_ext), rf, rt)
                     if _child.__name__ == 'jxl_jpeg_transcoder':
                         # The transcoder has TWO resolvers and this used
                         # resolve_output_transcode for every direction — the
@@ -6002,16 +6323,17 @@ class InteractiveMenu:
                             return _child.resolve_output_convert(
                                 f, mode, _child.CONVERT_OUTPUT_FOLDER, "",
                                 (dest if dest != 'jpg' else 'jpeg'),
+                                rename_from=rf, rename_to=rt,
                                 output_root=src_root, decode=True)
                         return _child.resolve_output_transcode(f, mode, src_root, _dec)
-                    return _rename_out(_child.resolve_output(f, mode, src_root))
+                    return _rename_out(_child.resolve_output(f, mode, src_root), rf, rt)
 
-                def _stem_key(f: Path) -> str:
+                def _stem_key(f: Path, rf: str, rt: str) -> str:
                     """The output stem this source will land under — renamed when
-                    the recompressor's --rename-from applies, exactly like the
-                    child plans it."""
-                    if rename_from and _child.__name__ == 'jxl_recompressor':
-                        name = _child._apply_rename(f.name, rename_from, rename_to)
+                    the row's --rename-from applies, exactly like the child
+                    plans it."""
+                    if rf:
+                        name = _apply_rename_name(f.name, rf, rt)
                         return os.path.normcase(os.path.splitext(name)[0])
                     return os.path.normcase(f.stem)
 
@@ -6080,13 +6402,13 @@ class InteractiveMenu:
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
 
-        def _record_output(f: Path, out_folder) -> None:
+        def _record_output(f: Path, out_folder, rf: str, rt: str) -> None:
             """Collision bookkeeping for one resolved source file."""
             if out_folder is None:
                 return
             key = os.path.normcase(str(out_folder))
             seen = by_dest.setdefault(key, {})
-            stem = _stem_key(f) if _child is not None else os.path.normcase(f.stem)
+            stem = _stem_key(f, rf, rt) if _child is not None else os.path.normcase(f.stem)
             prev = seen.get(stem)
             if prev is None:
                 seen[stem] = f
@@ -6113,6 +6435,10 @@ class InteractiveMenu:
             for ei, (source, dest_path, mode) in enumerate(manifest_entries):
                 if not dest_path:
                     continue
+                # The row's own RenameFrom/RenameTo, when the manifest carries
+                # the columns; the run-wide pair is the fallback.
+                rf, rt = (row_renames[ei] if row_renames is not None
+                          else (rename_from, rename_to))
                 # Per-entry output-tree recording for the cross-entry guard
                 # (only when a sink was handed in).
                 _entry_outs = (cross_sink.setdefault(ei, set())
@@ -6129,9 +6455,9 @@ class InteractiveMenu:
                         elif _skip_check is not None and _skip_check(src_root, src_root.parent, mode):
                             _file_out = None
                         else:
-                            _file_out = resolver(src_root, mode, src_root.parent, dest_path)
+                            _file_out = resolver(src_root, mode, src_root.parent, dest_path, rf, rt)
                         if _file_out is not None:
-                            _record_output(src_root, _file_out.parent)
+                            _record_output(src_root, _file_out.parent, rf, rt)
                             if _entry_outs is not None:
                                 _entry_outs.add(os.path.normcase(
                                     os.path.abspath(str(_file_out.parent))))
@@ -6161,7 +6487,8 @@ class InteractiveMenu:
                     except OSError:
                         continue
 
-                    def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path):
+                    def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
+                                     rf=rf, rt=rt):
                         for f in files:
                             # Filter BEFORE resolving: the child resolvers are
                             # only meaningful for real source files, and running
@@ -6173,7 +6500,7 @@ class InteractiveMenu:
                                 continue
                             if _skip_check is not None and _skip_check(f, src_root, mode):
                                 continue
-                            out = resolver(f, mode, src_root, dest_path)
+                            out = resolver(f, mode, src_root, dest_path, rf, rt)
                             # out is None for files the child skips (e.g. outside
                             # the export marker in modes 6/7).
                             yield f, (out.parent if out is not None else None)
@@ -6197,7 +6524,7 @@ class InteractiveMenu:
                     # case-sensitive filesystems treat Foto.tif/foto.tif as
                     # distinct files and must NOT collide. The recompressor's
                     # --rename-from renames that stem at planning time.
-                    stem = (_stem_key(f) if _child is not None
+                    stem = (_stem_key(f, rf, rt) if _child is not None
                             else os.path.normcase(f.stem))
                     prev = seen.get(stem)
                     if prev is None:
@@ -6565,6 +6892,12 @@ class InteractiveMenu:
                 # resize/sharpening shape decoded pixels: the lossless recovery
                 # reproduces the original JPEG byte-for-byte and cannot take them.
                 _append_derivative_flags(cmd, advanced)
+                # The transcoder only applies --rename-from/--rename-to on the
+                # conversion path (and warns about it itself); the lossless
+                # jbrd recovery keeps the original name.
+                if advanced.get('rename_from'):
+                    cmd.extend(['--rename-from', advanced['rename_from'],
+                                '--rename-to', advanced.get('rename_to') or ''])
             if workflow.get('staging'):
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('no_md5'):
@@ -6577,7 +6910,11 @@ class InteractiveMenu:
                 cmd.append('--overwrite')
             if advanced.get('sync'):
                 cmd.append('--sync')
-            if advanced.get('delete_source'):
+            if advanced.get('delete_source') and not _has_derivative_options(advanced):
+                # A derivative row (a manifest option column: colour
+                # conversion, resize, sharpening) never deletes its source —
+                # the flag is suppressed for THIS row; the plain rows of the
+                # same manifest keep it.
                 cmd.append('--delete-source')
                 cmd.append('--delete-confirm-off')
                 # Only meaningful alongside --delete-source: it widens which
@@ -7503,13 +7840,16 @@ class InteractiveMenu:
         is_manifest_repeat = last_mode == 99
         manifest_path = session.get('last_manifest_path')
         manifest_entries = None
+        manifest_row_options: List = []
         if is_manifest_repeat:
             if not manifest_path or not Path(manifest_path).exists():
                 self._print_error(
                     f"The manifest for the last run is gone: {manifest_path or '(not saved)'}\n"
                     f"Use 'New workflow' to generate or pick another one.")
                 return False
-            manifest_entries = self._load_manifest_entries(manifest_path, last_origin, last_dest)
+            manifest_entries = self._load_manifest_entries(
+                manifest_path, last_origin, last_dest,
+                row_options=manifest_row_options)
             if manifest_entries is None:
                 # _load_manifest_entries already explained why.
                 return False
@@ -7711,6 +8051,7 @@ class InteractiveMenu:
 
         if is_manifest_repeat:
             workflow['manifest_entries'] = manifest_entries
+            workflow['manifest_row_options'] = manifest_row_options
             workflow['manifest_path'] = manifest_path
 
         if workflow['mode'] == 2:

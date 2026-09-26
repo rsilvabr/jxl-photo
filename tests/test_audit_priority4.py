@@ -99,7 +99,7 @@ def test_wizard_manifest_mode8_asks_and_marks_delete(menu, tmp_path, monkeypatch
     monkeypatch.setattr(wp.InteractiveMenu, "_pick_manifest",
                         lambda self: _mode8_manifest(tmp_path))
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_manifest_entries",
-                        lambda self, p, e: True)
+                        lambda self, p, e, **k: True)
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     workflow = {"origin_format": "tiff", "dest_format": "jxl"}
     assert menu._wizard_run_from_manifest(workflow) is True
@@ -112,7 +112,7 @@ def test_wizard_manifest_mode8_decline_keeps_sources(menu, tmp_path, monkeypatch
     monkeypatch.setattr(wp.InteractiveMenu, "_pick_manifest",
                         lambda self: _mode8_manifest(tmp_path))
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_manifest_entries",
-                        lambda self, p, e: True)
+                        lambda self, p, e, **k: True)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     workflow = {"origin_format": "tiff", "dest_format": "jxl"}
     assert menu._wizard_run_from_manifest(workflow) is True

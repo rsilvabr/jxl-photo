@@ -89,8 +89,8 @@ def _manifest_prompt(monkeypatch, tmp_path, entries, answer="n"):
     menu = _menu()
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
     monkeypatch.setattr(menu, "_pick_manifest", lambda: str(manifest))
-    monkeypatch.setattr(menu, "_load_manifest_entries", lambda *a: entries)
-    monkeypatch.setattr(menu, "_confirm_manifest_entries", lambda *a: True)
+    monkeypatch.setattr(menu, "_load_manifest_entries", lambda *a, **k: entries)
+    monkeypatch.setattr(menu, "_confirm_manifest_entries", lambda *a, **k: True)
 
     printed = []
     monkeypatch.setattr("builtins.print",
