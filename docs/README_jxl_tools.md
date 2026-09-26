@@ -182,6 +182,41 @@ never waits on stdin.
 silently ignored — a stray `--dry-run` that did nothing would mean a real
 conversion for someone who asked for a simulation.
 
+##### Scheduling on Windows (Task Scheduler)
+
+```powershell
+schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 ^
+  /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync" /RL LIMITED
+```
+
+The `cd /d` matters — see *Start in* below. Or use the task editor: *Create
+Task → Actions → New → Start a program*:
+
+- **Program/script:** `py`
+- **Add arguments:** `jxl_photo.py --run-preset "nightly-sync"` — quote a name
+  that contains spaces (`--run-preset "SYNC PHOTOS"`)
+- **Start in:** the folder where `jxl_photo.py` lives. **Do not leave this
+  blank**: logs are written relative to it (`Logs\...`), and a blank field
+  starts the run in `C:\Windows\System32` — which is where the logs then land.
+
+##### Seeing what happened
+
+The console window of a scheduled task closes the moment `--run-preset` exits —
+**including on failure**. A run that aborts on a safety check (two files headed
+for the same output name, a refused overwrite) converts nothing and leaves no
+trace on screen; without one of the options below, you would never know:
+
+- **Run it in a terminal yourself** when you want to watch:
+  `py jxl_photo.py --run-preset nightly-sync` — the window is yours and stays open.
+- **Make the task keep its window open:** set the program to `cmd` with
+  arguments `/k py jxl_photo.py --run-preset nightly-sync` — the `/k` leaves the
+  window open at the end. Only meaningful when the task runs while you are
+  logged on, and the window stays until closed — pointless for a 3am job.
+- **Otherwise, check the exit code** in Task Scheduler's *History* (`0x1` =
+  failed, refused or aborted) and open the [logs](#logs) — every run writes
+  one: the child's own log, plus a combined wrapper log for manifest runs. The
+  abort names its culprits there.
+
 > **Presets that delete sources cannot run unattended — in any mode.** A preset
 > with `delete_source` on is refused with an explanation: that confirmation is a
 > typed token, and honouring it automatically would let a scheduled task delete

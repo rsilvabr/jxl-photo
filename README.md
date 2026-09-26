@@ -114,6 +114,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 - Exit codes: `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation
 - `--summary-json` emits one machine-readable line per run; the wrapper consumes it to total a multi-entry manifest
 - A full output volume stops the run instead of failing every remaining file one by one
+- Save a recurring workflow as a preset (menu option 7 → `[S]`) and schedule it unattended: `py jxl_photo.py --run-preset nightly-sync` runs with no menus or prompts — point Task Scheduler or cron at it ([setup guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron))
 
 ---
 
