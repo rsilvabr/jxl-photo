@@ -650,6 +650,8 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 
 ## Documentation
 
+### User guides
+
 | Document | Contents |
 |----------|----------|
 | [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | Full documentation for the interactive wrapper |
@@ -658,6 +660,11 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | Full documentation for JPEG ↔ JXL / JXL → PNG |
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | Full documentation for JXL → JXL recompression |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+
+### Project history
+
+| Document | Contents |
+|----------|----------|
 | [docs/version_history.md](docs/version_history.md) | Detailed notes for all superseded releases |
 | [docs/bug_tracking_since_v1.0.md](docs/bug_tracking_since_v1.0.md) | Every bug fix since v1.0, numbered and dated |
 | [docs/new_features_since_v1.0.md](docs/new_features_since_v1.0.md) | Every new feature since v1.0 |
