@@ -11,7 +11,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [Scripts](#scripts)
 - [Requirements & Installation](#requirements--installation)
 - [Quick Start — Interactive Wrapper](#quick-start--interactive-wrapper)
-- [Auto Mode (since v1.3)](#auto-mode-since-v13)
+- [Auto Mode](#auto-mode)
 - [Individual Scripts](#individual-scripts)
 - [Recommended Settings](#recommended-settings)
 - [Configuration File Location](#configuration-file-location)
@@ -299,7 +299,7 @@ The wizard guides you through: Source format → Destination → Directory → O
 
 ---
 
-## Auto Mode (since v1.3)
+## Auto Mode
 
 > Auto Mode reads your folder structure and *recommends* a mode — it never runs anything you have not confirmed. The recommendation fits common layouts; when it does not match what you had in mind, pick the mode yourself with **[N]**.
 
@@ -659,6 +659,10 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | Full documentation for JXL → JXL recompression |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [docs/version_history.md](docs/version_history.md) | Detailed notes for all superseded releases |
+| [docs/bug_tracking_since_v1.0.md](docs/bug_tracking_since_v1.0.md) | Every bug fix since v1.0, numbered and dated |
+| [docs/new_features_since_v1.0.md](docs/new_features_since_v1.0.md) | Every new feature since v1.0 |
+| [docs/code_quality_refactoring.md](docs/code_quality_refactoring.md) | Internal cleanups and compatibility notes |
+| [docs/README_testbench.md](docs/README_testbench.md) | The automated testbench (`tests/testbench.py`) |
 | [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
 
 ---

@@ -11,6 +11,20 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.2.0
+
+**Released 2026-09-24, superseded by v2.3.0.** The stable release of the v2.1.1 beta line, plus a new use for the recompressor: light 16-bit colour-converted copies of the masters. Four audits of the v2.1 series (rounds 37–40, 88 fixes), almost all in the delete/provenance/dry-run safety layer. Existing command lines keep working, but some TIFFs that earlier releases archived wrongly are now refused.
+
+- **Colour-converted derivatives (`--output-icc`).** The recompressor makes the light delivery set (e.g. a d=1.0 sRGB copy in `_EXPORT/16B_JXL_sRGB`) straight from the ProPhoto masters: decoded at 16 bits and converted with ImageMagick from the master's own ICC (relative colorimetric + black point compensation). Disposable by construction — never in place, never with `--delete-source`, never overwrites a non-derivative even with `--overwrite`, re-derived when the target changes — and stripped of the `jxlphoto-src`/`srcsum` markers, so a derivative can never pass as an archive. Measured: a d=1.0 sRGB derivative from a d=0.05 master lands 0.017 dB from a direct TIFF encode, at the same size.
+- **`--rename-from/--rename-to`** (recompressor) swap the profile token in output names at planning time, so sync and the duplicate-output abort see the final name; **`--export-jxl-folder NAME`** (encoder + recompressor) chooses the modes 6/7 output folder per run or preset. All three are in the wrapper (Step 5/6 questions, presets, manifests).
+- **The lossy distance floor follows the installed cjxl.** The "floor at 0.05" is libjxl 0.12 behaviour ([PR #4238](https://github.com/libjxl/libjxl/pull/4238), Level 5); 0.11 only clamps below 0.01, where d=0.01 measured 60.4 dB PSNR against 51.7 dB at d=0.05. The floor is now read from `cjxl --version` — 0.05 on libjxl 0.12+, 0.01 before — fixing a false dead-zone warning and a recompressor copy-instead-of-shrink on 0.11.
+- **⚠️ Four things from earlier releases to check** (v2.2.0 refuses or keeps in each, but cannot repair what an earlier run already did): TIFFs in CIELAB/YCbCr/MINISWHITE photometric were archived as RGB/MINISBLACK (wrong colours or inverted tones) and are now refused; `jxl_tiff_decoder.py --matrix --delete-source` dropped the alpha channel and deleted the JXL anyway (sources now always kept under `--matrix`); `jxl_jpeg_transcoder.py --force-convert --distance 0 --delete-source` broke the JPEG reconstruction data and deleted the JPEG untested (the full reconstruction proof now runs; `--repair-jbrd` audits and repairs); `jxl_recompressor.py --delete-source --delete-skipped` in modes 1/3 could delete on a same-named output from a different photo (the provenance proof is now required in every mode).
+- **Rounds 37–40 (bugs #347–#434):** sources deleted without proof (a foreign master TIFF admitted to the decoder's `--delete-skipped`, a multi-page marker-read failure zeroing the group veto, a keep-smaller copy skipping the MD5 proof, a decode promoted before its verdict); dry runs that lied (every preview now uses the same predicates as the real run); killed runs that poisoned sync (outputs are written to a temp beside the final name and swapped in atomically after the integrity check; `checksums.md5` appends locked across manifest children; wrapper config saved atomically). Also: `--repair-jbrd` strips every marker pair, JPEGs with trailers over 64 KiB (Motion Photos) pass the gate, manifests resolve relative paths against the CSV's folder instead of System32 under Task Scheduler, the wrapper keeps the recompressor policies, the lineage `gen=` never counts down, log names carry the pid.
+
+Every fix has a regression test proven to fail against the pre-fix code — **1576 tests** in the suite, including real-codec runs against real Capture One exports and film scans.
+
+---
+
 ## v2.1.1_beta1
 
 **Released 2026-09-20 as a pre-release, superseded by v2.2.0** (which ships all of it). Maintenance beta on top of v2.1.0 — ten fixes from the second audit of the recompressor release (round 37, bugs #347–#356), all in the safety/reporting layer. No command line and no file format changes.
