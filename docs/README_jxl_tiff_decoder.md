@@ -711,39 +711,6 @@ jxlinfo photo.jxl
 
 ---
 
-## Disclaimer
-
-These tools were made for my personal workflow. 
-Use at your own risk — I am not responsible for any issues you may encounter.
-
-However, If you find any bugs, report to me - I want to try my best to improve this project.
-
-Always test with a small batch before processing important archives.
-
----
-
-## Changes since v1.0
-
-### v1.3 (2026-04-10)
-- **Complete rebuild** - Decoder restructured for Capture One compatibility
-- **TIFF page order fixed** - Main image is Page 0, preview is Page 1 (matching C1 structure)
-- **sRGB preview conversion** - Preview automatically converted to sRGB via LittleCMS
-- **ICC placement corrected** - ICC profile only on main image (Page 0), removed from preview
-- **Preview size** - Changed from 1024px to 256px (similar to Capture One's ~160px)
-- **File integrity verification** - Validates TIFF before deleting source JXL
-- **Python 3.9+ compatibility** - Works with modern Python versions
-- **PIL decompression limit** - Added `PIL_MAX_IMAGE_PIXELS` setting for large panoramas (100+ MP)
-
-### Earlier Changes
-- **8-bit output support** — `--depth 8` flag for web/delivery workflows
-- Race condition in staging directory (UUID-based filenames)
-- PPM truncation validation
-- Integer overflow in JXL box parser (size limits)
-
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
-
----
-
 ## Multi-Page TIFF Reconstruction (v1.7.0+)
 
 `jxl_tiff_decoder.py` reconstructs multi-page TIFFs from pages that carry the encoder's XMP group marker (`jxlphoto-mpg:` in `XMP-dc:Relation`). Grouping is marker-based, not name-based, so independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged unless they were split by this encoder. Groups are keyed by `(folder, group-id)`, so two encodes of the same TIFF to different folders are never merged either.
@@ -888,6 +855,23 @@ python jxl_tiff_decoder.py "E:\photos_jxl" "E:\photos_reconstructed" --mode 2 --
 # Film scanner workflow: restore main + preview + IR/mask pages
 python jxl_tiff_decoder.py "E:\film_scans_jxl" "E:\film_scans_tiff" --mode 2 --thumbnail-handling include
 ```
+
+---
+
+## Disclaimer
+
+These tools were made for my personal workflow. 
+Use at your own risk — I am not responsible for any issues you may encounter.
+
+However, If you find any bugs, report to me - I want to try my best to improve this project.
+
+Always test with a small batch before processing important archives.
+
+---
+
+## Version history
+
+Feature and fix history: [version_history.md](./version_history.md) · [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) · [new_features_since_v1.0.md](./new_features_since_v1.0.md)
 
 ---
 

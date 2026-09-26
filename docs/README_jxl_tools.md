@@ -829,24 +829,9 @@ Always test with a small batch before processing important archives.
 
 * * *
 
-## Changes since v1.0
+## Version history
 
-### New Features
-- **D50 patch option** — wizard now asks for D50 patch mode (auto/on/off) in Step 6A for TIFF→JXL workflows
-- **Lossy JPEG→JXL** — fixed cjxl 0.11.2 incompatibility: added `--lossless_jpeg=0` when distance>0
-
-### Bug Fixes
-- Race condition in staging (UUID-based filenames in all scripts)
-- Distance not passed to cjxl for PNG→JXL encoding
-- Wrong delete confirmation for lossy operations (HHMM vs yes)
-- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
-- PPM truncation validation
-- Integer overflow in JXL box parser (size limits)
-- Missing UUID in process_group_transcode staging
-- D50 patch not preserved when repeating last workflow
-- Invalid --resize option removed (not supported by any script)
-
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
+Feature and fix history: [version_history.md](./version_history.md) · [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) · [new_features_since_v1.0.md](./new_features_since_v1.0.md)
 
 * * *
 

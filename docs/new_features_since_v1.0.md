@@ -906,15 +906,6 @@ D50 patch: 2 already correct | 8 would have needed (mode: off)
 
 ## Bug Fixes Summary
 
-**All bugs from v1.0 and v1.1 are documented in `bug_tracking_since_v1.0.md`.**
+**All bug fixes since v1.0 are documented in `bug_tracking_since_v1.0.md`.**
 
 **Code quality and compatibility notes are in `code_quality_refactoring.md`.**
-
-Key fixes that improved robustness:
-- Race conditions in staging directory (UUID added)
-- Integer overflow in JXL box parser
-- PPM truncation detection
-- Deadlock in djxl+ImageMagick pipeline
-- Distance parameter passed to cjxl correctly
-- exiftool warning filtering in metadata
-- lossless_jpeg=1 incompatible with distance>0

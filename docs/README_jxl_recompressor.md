@@ -504,3 +504,17 @@ EXPORT_JXL_SUBFOLDER = ""                   # mode 7
   keep-smaller check is what protects them.
 - `--summary-json` is the contract `jxl_photo.py` parses after each child
   run; the human log goes to `Logs/jxl_recompressor/`.
+
+## Version history
+
+Feature and fix history: [version_history.md](./version_history.md) · [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) · [new_features_since_v1.0.md](./new_features_since_v1.0.md)
+
+## License
+
+MIT License — feel free to use, modify, and distribute.
+
+## Acknowledgments
+
+- [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation
+- [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion

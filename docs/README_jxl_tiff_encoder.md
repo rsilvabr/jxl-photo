@@ -712,24 +712,14 @@ the TIFF (real 16 MP ProPhoto export, 2026-09-24).
 
 ---
 
-## XMP Preservation (Fixed in this version)
+## XMP Preservation
 
-### The XMP Overwrite Bug (Fixed)
-
-Previous versions had a bug where XMP metadata was overwritten:
-1. First, EXIF/XMP was copied from TIFF
-2. Then, a second pass overwrote ALL XMP with just the ICC data
-
-**Result**: Original ratings, keywords, and descriptions were lost!
-
-### The Fix
-
-This version uses **targeted XMP updates**:
+Metadata is written with **targeted XMP updates**:
 - `-xmp-dc:Description=` for the encode record (`gen=N | cjxl d=/e=` chain appended after any existing dc:description)
 - `-xmp-xmp:CreatorTool=` for ICC data (base64-encoded ICC profile)
 - All other XMP tags preserved via `-tagsfromfile`
 
-**Result**: Original metadata + encoding info + ICC all coexist!
+Original ratings, keywords and descriptions coexist with the encoding info and the ICC.
 
 ---
 
@@ -870,7 +860,7 @@ jxlinfo -v photo.jxl
 
 ---
 
-## Known behaviors 
+## Known behaviors
 
 ### IrfanView and color-calibrated monitors (reported & fixed)
 
@@ -1034,32 +1024,9 @@ Always test with a small batch before processing important archives.
 
 ---
 
-## Changes since v1.0
+## Version history
 
-### New Features
-
-**PIL decompression bomb limit — configurable for large panoramas**
-Added `PIL_MAX_IMAGE_PIXELS` setting to disable or configure PIL's decompression bomb protection. This prevents false "DOS attack" warnings when processing large panoramas (100+ MP) that exceed PIL's default ~89MP limit.
-
-- `None` (default): Disable the limit completely (recommended for trusted local files)
-- `N`: Set custom pixel limit (e.g., `500_000_000` for ~500MP)
-
-**D50 illuminant patch — auto-detection (default)**
-Capture One **may export** files with a known ICC rounding error that causes cjxl warnings. The patch was already part of the toolkit, but now supports three operating modes:
-
-- `auto` (default): Only applies D50 patch when EXIF `Software` field contains `capture one` or `captureone` — other files are unaffected.
-- `on`: Always applies the D50 patch to all files (forces correction regardless of source software).
-- `off`: Never applies the D50 patch (uses original ICC values as-is).
-
-CLI flag: `--d50-patch auto|on|off`
-Script setting: `D50_PATCH_MODE = "auto"` (default)
-
-### Bug Fixes
-- Integer overflow in JXL box parser (size validation added)
-- Race condition in staging directory (UUID-based filenames)
-- D50 patch statistics now shown in summary output
-
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
+Feature and fix history: [version_history.md](./version_history.md) · [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) · [new_features_since_v1.0.md](./new_features_since_v1.0.md)
 
 ---
 

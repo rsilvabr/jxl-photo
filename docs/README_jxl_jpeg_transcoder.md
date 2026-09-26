@@ -244,7 +244,7 @@ This allows mixed archives (some lossless-transcodable, some not) to be processe
 
 * * *
 
-##  Modes 6 and 7 — ONLY files inside `_EXPORT`
+## Modes 6 and 7 — ONLY files inside `_EXPORT`
 
 **Modes 6 and 7 ONLY process files inside folders whose names start with or end with `_EXPORT` (case-insensitive). Everything outside is IGNORED.**
 
@@ -923,20 +923,9 @@ Always test with a small batch before processing important archives.
 
 * * *
 
-## Changes since v1.0
+## Version history
 
-### New Features
-- **Lossy JPEG→JXL** — now works correctly. Added `--lossless_jpeg=0` when distance>0 (fixed cjxl 0.11.2 incompatibility with default --lossless_jpeg=1)
-- **Lossless JPEG↔JXL** — MD5 verification for bit-perfect transcode, jbrd box detection for automatic routing
-
-### Bug Fixes
-- Race condition in staging directory (UUID-based filenames)
-- Wrong delete confirmation for lossy operations (HHMM vs yes)
-- Deadlock in djxl+ImageMagick pipeline (threaded stderr reader)
-- Distance not passed to cjxl for PNG→JXL encoding
-- Integer overflow in JXL box parser (size limits)
-
-Full tracking: [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) | [new_features_since_v1.0.md](./new_features_since_v1.0.md) | [code_quality_refactoring.md](./code_quality_refactoring.md)
+Feature and fix history: [version_history.md](./version_history.md) · [bug_tracking_since_v1.0.md](./bug_tracking_since_v1.0.md) · [new_features_since_v1.0.md](./new_features_since_v1.0.md)
 
 * * *
 
