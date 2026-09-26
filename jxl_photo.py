@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -429,11 +429,33 @@ def _is_manifest_header_row(row) -> bool:
 
 # Optional per-row columns after Direction. Empty cell = the option is NOT
 # applied on that row; an ABSENT column falls back to the wizard's answer.
-_MANIFEST_OPTION_COLUMNS = ("outputicc", "resize", "sharpen", "renamefrom", "renameto")
-_MANIFEST_OPTION_DIRECTIONS = {"jxl2jxl", "jxl2jpeg", "jxl2png"}
+# The export columns are the exception: an empty cell keeps the RUN's value
+# (marker/subfolder/folder), so filling one row never resets the others.
+_MANIFEST_OPTION_COLUMNS = ("outputicc", "resize", "sharpen", "renamefrom",
+                            "renameto", "exportmarker", "exportsubfolder",
+                            "exportjxlfolder")
+# The derivative/rename columns: the directions whose child writes a
+# derivative. The manifest generator writes those five columns for exactly
+# these directions.
+_MANIFEST_DERIVATIVE_DIRECTIONS = frozenset({"jxl2jxl", "jxl2jpeg", "jxl2png"})
+_MANIFEST_ALL_DIRECTIONS = frozenset(
+    {"tiff2jxl", "jxl2tiff", "jpeg2jxl", "jxl2jpeg", "jxl2png", "jxl2jxl"})
+_MANIFEST_OPTION_DIRECTIONS = {
+    "outputicc":       _MANIFEST_DERIVATIVE_DIRECTIONS,
+    "resize":          _MANIFEST_DERIVATIVE_DIRECTIONS,
+    "sharpen":         _MANIFEST_DERIVATIVE_DIRECTIONS,
+    "renamefrom":      _MANIFEST_DERIVATIVE_DIRECTIONS,
+    "renameto":        _MANIFEST_DERIVATIVE_DIRECTIONS,
+    "exportmarker":    _MANIFEST_ALL_DIRECTIONS,
+    "exportsubfolder": _MANIFEST_ALL_DIRECTIONS,
+    "exportjxlfolder": frozenset({"tiff2jxl", "jxl2jxl"}),
+}
 _MANIFEST_OPTION_DISPLAY = {"outputicc": "OutputICC", "resize": "Resize",
                             "sharpen": "Sharpen", "renamefrom": "RenameFrom",
-                            "renameto": "RenameTo"}
+                            "renameto": "RenameTo",
+                            "exportmarker": "ExportMarker",
+                            "exportsubfolder": "ExportSubfolder",
+                            "exportjxlfolder": "ExportJxlFolder"}
 _MANIFEST_RESIZE_RE = re.compile(r"^(?:(long|short):(\d+)|(\d+(?:\.\d+)?)%)(\+up)?$",
                                  re.IGNORECASE)
 _MANIFEST_RENAME_BAD = re.compile(r'[,;/\\:*?"<>|]')
@@ -445,11 +467,13 @@ def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
     name to the raw cell text, for the columns PRESENT in the CSV only.
     Returned keys, only for present columns: output_icc (str|None),
     resize_mode/resize_value/allow_upscale, sharpen, rename_from, rename_to —
-    None / 'none' / '' meaning 'not applied'."""
+    None / 'none' / '' meaning 'not applied'. The export columns
+    (export_marker, export_subfolder, export_jxl_folder) are str and appear
+    ONLY when the cell has a value (empty keeps the run's value)."""
     opts: Dict = {}
     for name, raw in cells.items():
         value = (raw or "").strip()
-        if direction not in _MANIFEST_OPTION_DIRECTIONS:
+        if direction not in _MANIFEST_OPTION_DIRECTIONS[name]:
             if value:
                 return None, (f"column {_MANIFEST_OPTION_DISPLAY[name]} is not "
                               f"supported for {direction} manifests")
@@ -515,6 +539,17 @@ def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
                 return None, (f"column RenameTo: path characters are not "
                               f"allowed ({value!r})")
             opts["rename_to"] = value
+        elif name in ("exportmarker", "exportsubfolder", "exportjxlfolder"):
+            if not value:
+                continue  # empty = this row keeps the run's value
+            if (_MANIFEST_RENAME_BAD.search(value) or ".." in value
+                    or value.strip(". ") == ""):
+                return None, (f"column {_MANIFEST_OPTION_DISPLAY[name]}: must be a "
+                              f"plain folder name ({value!r})")
+            key = {"exportmarker": "export_marker",
+                   "exportsubfolder": "export_subfolder",
+                   "exportjxlfolder": "export_jxl_folder"}[name]
+            opts[key] = value
     if opts.get("rename_to") and not opts.get("rename_from"):
         return None, "column RenameTo is set but RenameFrom is empty on the same row"
     return opts, None
@@ -1729,7 +1764,9 @@ def _row_effective_options(workflow: Dict, advanced: Dict, row_opts: Optional[Di
                            origin: str, dest: str) -> Tuple[Dict, Dict]:
     """(workflow_row, advanced_row): shallow copies with this row's manifest
     columns applied. A key PRESENT in row_opts overrides (None/''/'none'
-    removes the option); an absent key keeps the wizard's value."""
+    removes the option); an absent key keeps the wizard's value. The export_*
+    keys are the exception: they only override when they have a value (they
+    never remove)."""
     wf = dict(workflow)
     adv = dict(advanced)
     if not row_opts:
@@ -1777,6 +1814,15 @@ def _row_effective_options(workflow: Dict, advanced: Dict, row_opts: Optional[Di
         else:
             adv.pop('rename_from', None)
             adv.pop('rename_to', None)
+    _export_keys = ('export_marker', 'export_subfolder', 'export_jxl_folder')
+    if any(row_opts.get(k) for k in _export_keys):
+        # COPY: wf is a shallow copy, so wf['mode_config'] is the run's own
+        # dict — mutating it would leak this row's values into every row.
+        mc = dict(wf.get('mode_config') or {})
+        for k in _export_keys:
+            if row_opts.get(k):
+                mc[k] = row_opts[k]
+        wf['mode_config'] = mc
     return wf, adv
 
 
@@ -1797,6 +1843,12 @@ def _row_options_summary(row_opts: Optional[Dict]) -> str:
         parts.append(row_opts['sharpen'])
     if row_opts.get('rename_from'):
         parts.append(f"{row_opts['rename_from']}→{row_opts.get('rename_to') or ''}")
+    if row_opts.get('export_marker'):
+        parts.append(f"marker:{row_opts['export_marker']}")
+    if row_opts.get('export_subfolder'):
+        parts.append(f"sub:{row_opts['export_subfolder']}")
+    if row_opts.get('export_jxl_folder'):
+        parts.append(f"out:{row_opts['export_jxl_folder']}")
     return " · ".join(parts)
 
 
@@ -2736,7 +2788,7 @@ class InteractiveMenu:
             # them (empty cell = the option is NOT applied on that row): the
             # user opens the CSV in Excel and only fills in what differs.
             direction = f"{analyzer.origin}2{analyzer.dest}"
-            with_options = direction in _MANIFEST_OPTION_DIRECTIONS
+            with_options = direction in _MANIFEST_DERIVATIVE_DIRECTIONS
             header = ["Source", "Destination", "Mode", "Direction"]
             if with_options:
                 header += ["OutputICC", "Resize", "Sharpen", "RenameFrom",
@@ -2896,10 +2948,12 @@ class InteractiveMenu:
         `row_options` (optional): when a list is passed, it is filled with one
         dict per entry, aligned with the returned list — the parsed values of
         the optional columns after Direction (OutputICC/Resize/Sharpen/
-        RenameFrom/RenameTo). A column PRESENT in the CSV overrides the
-        wizard's answer for that option on that row (empty cell = not applied);
-        absent columns never appear in the dicts. Any invalid value refuses the
-        whole manifest.
+        RenameFrom/RenameTo and the export columns ExportMarker/
+        ExportSubfolder/ExportJxlFolder). A column PRESENT in the CSV overrides
+        the wizard's answer for that option on that row (empty cell = not
+        applied; an empty Export* cell keeps the run's value); absent columns
+        never appear in the dicts. Any invalid value refuses the whole
+        manifest.
         """
         entries = []
         directions = set()
@@ -3067,6 +3121,10 @@ class InteractiveMenu:
             note = (f"Manifest option columns: {names} (these override the "
                     f"wizard's answers for those options; an empty cell means "
                     f"'not applied')")
+            if any(c in opt_index for c in ("exportmarker", "exportsubfolder",
+                                            "exportjxlfolder")):
+                note += ("; an empty Export* cell keeps the run's "
+                         "marker/subfolder/folder")
             if RICH_AVAILABLE and console:
                 console.print(f"[dim]{note}[/dim]")
             else:
@@ -5346,6 +5404,14 @@ class InteractiveMenu:
                          or [None] * len(manifest_entries))
         _row_effs = [_row_effective_options(workflow, advanced, _o, origin, dest)
                      for _o in _row_opts_all]
+
+        def _row_export_cfg(wf_row):
+            """(marker, subfolder, jxl_folder) this row's child will run with."""
+            mc = wf_row.get('mode_config') or {}
+            return (mc.get('export_marker') or self.config.config.export_marker,
+                    mc.get('export_subfolder'),
+                    mc.get('export_jxl_folder'))
+
         _derived_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
                          if _has_derivative_options(_a)]
         _rename_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
@@ -5418,9 +5484,13 @@ class InteractiveMenu:
 
         # Create the analyzer once — prefer the workflow's mode_config marker (a
         # manifest run with a custom marker must detect modes with the same
-        # marker the children will use).
+        # marker the children will use). `analyzer` is also used by the
+        # collision scan below (_get_extensions), so it stays even though the
+        # per-row detection uses a FolderAnalyzer per row (its __init__ only
+        # stores values, and a row's ExportMarker column must win here).
         _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
         analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
+        _row_markers = [_row_export_cfg(_w)[0] for _w, _a in _row_effs]
 
         # Resolve every entry's mode ONCE, here, and hand the guards below the
         # same modes the children will actually run with. A legacy manifest (no
@@ -5432,8 +5502,9 @@ class InteractiveMenu:
         # worst" inside each guard.
         resolved_entries = [
             (source, dest_path,
-             analyzer.detect_mode_for_entry(source, dest_path, original_mode=entry_mode))
-            for source, dest_path, entry_mode in manifest_entries
+             FolderAnalyzer(Path("."), origin, dest, _row_markers[_i])
+                 .detect_mode_for_entry(source, dest_path, original_mode=entry_mode))
+            for _i, (source, dest_path, entry_mode) in enumerate(manifest_entries)
         ]
 
         # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
@@ -5455,12 +5526,17 @@ class InteractiveMenu:
                 and not (workflow.get('mode_config') or {}).get('export_subfolder')):
             derived = set()
             underivable = []
-            for _s, _d, _m in resolved_entries:
+            for i, (_s, _d, _m) in enumerate(resolved_entries):
                 if _m != 7:
                     continue
+                # Rows with their own ExportSubfolder keep it: they neither
+                # participate in the derivation nor earn the warning.
+                if (_row_opts_all[i] or {}).get('export_subfolder'):
+                    continue
                 _parts = Path(_s).parts
-                _idx = next((i for i, p in enumerate(_parts)
-                             if _marker_matches(p.lower(), _marker.lower())), None)
+                _idx = next((j for j, p in enumerate(_parts)
+                             if _marker_matches(p.lower(),
+                                                _row_markers[i].lower())), None)
                 if _idx is not None and _idx + 1 < len(_parts):
                     derived.add(_parts[_idx + 1])
                 else:
@@ -5501,6 +5577,44 @@ class InteractiveMenu:
                     console.print(f"[dim]{_sub_msg}[/dim]")
                 else:
                     print(_sub_msg)
+
+        # The mode-7 derivation above may have filled the run's export_subfolder.
+        # Rows with their own Export* columns hold a COPY of mode_config, so
+        # they would not see it — rebuild, so every row inherits the derived
+        # subfolder unless it has its own. (_row_export can only be computed
+        # here, for the same reason.)
+        _row_effs = [_row_effective_options(workflow, advanced, _o, origin, dest)
+                     for _o in _row_opts_all]
+        _row_export = [_row_export_cfg(_w) for _w, _a in _row_effs]
+
+        # The child validates the modes 6/7 output folder name at startup
+        # (argparse exit 2). Mirror that here, per row and with the row's
+        # EFFECTIVE trio (so the default name is checked against the row's
+        # marker too), so a bad name fails before the first entry instead of
+        # on entry N mid-run.
+        if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'jxl')):
+            try:
+                if origin == 'tiff':
+                    import jxl_tiff_encoder as _vchild
+                else:
+                    import jxl_recompressor as _vchild
+            except ImportError:
+                _vchild = None      # the child validates it itself (exit 2)
+            if _vchild is not None:
+                _bad_folder = []
+                for i, (_s, _d, _m) in enumerate(resolved_entries, 1):
+                    if _m not in (6, 7):
+                        continue
+                    _mk, _sub, _jf = _row_export[i - 1]
+                    _why = _vchild._validate_export_folder_name(
+                        _jf or _vchild.EXPORT_JXL_FOLDER, _mk,
+                        (_sub or "") if _m == 7 else "")
+                    if _why:
+                        _bad_folder.append((i, _why))
+                if _bad_folder:
+                    for i, _why in _bad_folder[:5]:
+                        self._print_error(f"Manifest row {i}: output folder — {_why}")
+                    return False
 
         # Overlapping source trees: one entry's Source inside another's means
         # the same files are processed twice by SEPARATE child processes. Some
@@ -5543,7 +5657,19 @@ class InteractiveMenu:
         # there would already be a Source overlap, which the gate refuses to
         # declare safe.
         cross_out_folders: Dict[int, Set[str]] = {}
-        if not self._manifest_needs_collision_scan(resolved_entries, _marker):
+        # The skip logic below assumes ONE marker shared by every entry. It is
+        # enough for a valid ExportJxlFolder/ExportSubfolder to stay inside the
+        # marker dir, so only DIFFERENT effective markers between rows can
+        # invalidate it. With a single effective marker, use THAT one (it may
+        # differ from the global when every row carries the same ExportMarker).
+        _eff_markers = {_m.lower() for _m, _s, _j in _row_export}
+        if len(_eff_markers) > 1:
+            _can_skip = False
+        else:
+            _one_marker = _row_export[0][0] if _row_export else _marker
+            _can_skip = not self._manifest_needs_collision_scan(
+                resolved_entries, _one_marker)
+        if _can_skip:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
             if RICH_AVAILABLE and console:
@@ -5563,6 +5689,7 @@ class InteractiveMenu:
                 row_renames=[((_a.get('rename_from') or ''),
                               (_a.get('rename_to') or ''))
                              for _w, _a in _row_effs],
+                row_export=_row_export,
                 cross_sink=cross_out_folders,
             )
         if collisions:
@@ -6198,6 +6325,7 @@ class InteractiveMenu:
                                     rename_from: str = '',
                                     rename_to: str = '',
                                     row_renames: Optional[List[Tuple[str, str]]] = None,
+                                    row_export: Optional[List[Tuple]] = None,
                                     cross_sink: Optional[Dict[int, Set[str]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
@@ -6239,6 +6367,14 @@ class InteractiveMenu:
         aligned with manifest_entries — a manifest RenameFrom/RenameTo column
         renames ONE row's outputs, so the global rename pair is only the
         fallback for rows without their own.
+
+        `row_export` (optional): one (marker, subfolder, jxl_folder) per entry,
+        aligned with manifest_entries and ALREADY resolved with the global
+        fallback. The child's finder/resolver read those as module globals, so
+        the `_with_child_marker` context now enters PER ENTRY: an entry with
+        its own Export* columns must resolve with those, not the run's. When
+        None, the (export_marker, export_subfolder, export_jxl_folder)
+        arguments are the fallback for every entry.
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
@@ -6424,115 +6560,120 @@ class InteractiveMenu:
         # its marker and subfolder into every later in-process use of that child
         # for the rest of the menu session (the delete preview's count among
         # them, which made it depend on what had been run before it).
-        _marker_stack = ExitStack()
+        # The context enters PER ENTRY (row_export): an entry with its own
+        # Export* columns must resolve with those, not the run's — and it must
+        # EXIT between entries, because _with_child_marker only sets non-empty
+        # values, so a row with subfolder None left inside an outer context
+        # would inherit the outer value instead of the child's default.
         if _child is not None:
             _child_logger_was_disabled = _child.logger.disabled
             _child.logger.disabled = True
-            _marker_stack.enter_context(
-                _with_child_marker(_child, export_marker, export_subfolder,
-                                   export_jxl_folder))
         try:
             for ei, (source, dest_path, mode) in enumerate(manifest_entries):
                 if not dest_path:
                     continue
-                # The row's own RenameFrom/RenameTo, when the manifest carries
-                # the columns; the run-wide pair is the fallback.
-                rf, rt = (row_renames[ei] if row_renames is not None
-                          else (rename_from, rename_to))
-                # Per-entry output-tree recording for the cross-entry guard
-                # (only when a sink was handed in).
-                _entry_outs = (cross_sink.setdefault(ei, set())
-                               if cross_sink is not None else None)
-                src_root = Path(source)
-                try:
-                    if src_root.is_file():
-                        # A file Source is a legitimate manifest row, and the
-                        # cross-entry collision guard must see it too: it used
-                        # to be skipped here, silently. Resolve it exactly like
-                        # the folder walk resolves one file (parent as root).
-                        if resolver is None or mode is None:
-                            _file_out = Path(dest_path)
-                        elif _skip_check is not None and _skip_check(src_root, src_root.parent, mode):
-                            _file_out = None
-                        else:
-                            _file_out = resolver(src_root, mode, src_root.parent, dest_path, rf, rt)
-                        if _file_out is not None:
-                            _record_output(src_root, _file_out.parent, rf, rt)
-                            if _entry_outs is not None:
-                                _entry_outs.add(os.path.normcase(
-                                    os.path.abspath(str(_file_out.parent))))
-                        continue
-                    if not src_root.is_dir():
-                        continue
-                except OSError:
-                    continue
-                # Legacy manifests carry no Mode cell: the child detects the mode
-                # per folder downstream, so the flat Destination scan is the best
-                # the wrapper can do there (the old behavior for every entry).
-                if resolver is None or mode is None:
+                _m, _s, _j = (row_export[ei] if row_export is not None
+                              else (export_marker, export_subfolder,
+                                    export_jxl_folder))
+                with (_with_child_marker(_child, _m, _s, _j)
+                      if _child is not None else nullcontext()):
+                    # The row's own RenameFrom/RenameTo, when the manifest carries
+                    # the columns; the run-wide pair is the fallback.
+                    rf, rt = (row_renames[ei] if row_renames is not None
+                              else (rename_from, rename_to))
+                    # Per-entry output-tree recording for the cross-entry guard
+                    # (only when a sink was handed in).
+                    _entry_outs = (cross_sink.setdefault(ei, set())
+                                   if cross_sink is not None else None)
+                    src_root = Path(source)
                     try:
-                        files = sorted(src_root.iterdir())
-                    except OSError:
-                        continue
-                    outputs = ((f, Path(dest_path)) for f in files)
-                else:
-                    # This walk is the slow part on large trees (recursive glob
-                    # + per-file stat + resolver per source file) — say so.
-                    if RICH_AVAILABLE and console:
-                        console.print(f"[dim]Collision check: scanning {src_root} ...[/dim]")
-                    else:
-                        print(f"Collision check: scanning {src_root} ...")
-                    try:
-                        files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
-                    except OSError:
-                        continue
-
-                    def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
-                                     rf=rf, rt=rt):
-                        for f in files:
-                            # Filter BEFORE resolving: the child resolvers are
-                            # only meaningful for real source files, and running
-                            # them on directories/sidecars is wasted work.
-                            try:
-                                if not f.is_file() or f.suffix.lower() not in origin_exts:
-                                    continue
-                            except OSError:
-                                continue
-                            if _skip_check is not None and _skip_check(f, src_root, mode):
-                                continue
-                            out = resolver(f, mode, src_root, dest_path, rf, rt)
-                            # out is None for files the child skips (e.g. outside
-                            # the export marker in modes 6/7).
-                            yield f, (out.parent if out is not None else None)
-
-                    outputs = _resolve_all(files)
-                for f, out_folder in outputs:
-                    try:
-                        if not f.is_file() or f.suffix.lower() not in origin_exts:
+                        if src_root.is_file():
+                            # A file Source is a legitimate manifest row, and the
+                            # cross-entry collision guard must see it too: it used
+                            # to be skipped here, silently. Resolve it exactly like
+                            # the folder walk resolves one file (parent as root).
+                            if resolver is None or mode is None:
+                                _file_out = Path(dest_path)
+                            elif _skip_check is not None and _skip_check(src_root, src_root.parent, mode):
+                                _file_out = None
+                            else:
+                                _file_out = resolver(src_root, mode, src_root.parent, dest_path, rf, rt)
+                            if _file_out is not None:
+                                _record_output(src_root, _file_out.parent, rf, rt)
+                                if _entry_outs is not None:
+                                    _entry_outs.add(os.path.normcase(
+                                        os.path.abspath(str(_file_out.parent))))
+                            continue
+                        if not src_root.is_dir():
                             continue
                     except OSError:
                         continue
-                    if out_folder is None:
-                        continue
-                    if _entry_outs is not None:
-                        _entry_outs.add(os.path.normcase(
-                            os.path.abspath(str(out_folder))))
-                    key = os.path.normcase(str(out_folder))
-                    seen = by_dest.setdefault(key, {})
-                    # Outputs are named from the stem, so a stem clash is a clash
-                    # whatever the target extension is. normcase (not .lower()):
-                    # case-sensitive filesystems treat Foto.tif/foto.tif as
-                    # distinct files and must NOT collide. The recompressor's
-                    # --rename-from renames that stem at planning time.
-                    stem = (_stem_key(f, rf, rt) if _child is not None
-                            else os.path.normcase(f.stem))
-                    prev = seen.get(stem)
-                    if prev is None:
-                        seen[stem] = f
-                    elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
-                        collisions.append((prev, f, out_folder))
+                    # Legacy manifests carry no Mode cell: the child detects the mode
+                    # per folder downstream, so the flat Destination scan is the best
+                    # the wrapper can do there (the old behavior for every entry).
+                    if resolver is None or mode is None:
+                        try:
+                            files = sorted(src_root.iterdir())
+                        except OSError:
+                            continue
+                        outputs = ((f, Path(dest_path)) for f in files)
+                    else:
+                        # This walk is the slow part on large trees (recursive glob
+                        # + per-file stat + resolver per source file) — say so.
+                        if RICH_AVAILABLE and console:
+                            console.print(f"[dim]Collision check: scanning {src_root} ...[/dim]")
+                        else:
+                            print(f"Collision check: scanning {src_root} ...")
+                        try:
+                            files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
+                        except OSError:
+                            continue
+
+                        def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
+                                         rf=rf, rt=rt):
+                            for f in files:
+                                # Filter BEFORE resolving: the child resolvers are
+                                # only meaningful for real source files, and running
+                                # them on directories/sidecars is wasted work.
+                                try:
+                                    if not f.is_file() or f.suffix.lower() not in origin_exts:
+                                        continue
+                                except OSError:
+                                    continue
+                                if _skip_check is not None and _skip_check(f, src_root, mode):
+                                    continue
+                                out = resolver(f, mode, src_root, dest_path, rf, rt)
+                                # out is None for files the child skips (e.g. outside
+                                # the export marker in modes 6/7).
+                                yield f, (out.parent if out is not None else None)
+
+                        outputs = _resolve_all(files)
+                    for f, out_folder in outputs:
+                        try:
+                            if not f.is_file() or f.suffix.lower() not in origin_exts:
+                                continue
+                        except OSError:
+                            continue
+                        if out_folder is None:
+                            continue
+                        if _entry_outs is not None:
+                            _entry_outs.add(os.path.normcase(
+                                os.path.abspath(str(out_folder))))
+                        key = os.path.normcase(str(out_folder))
+                        seen = by_dest.setdefault(key, {})
+                        # Outputs are named from the stem, so a stem clash is a clash
+                        # whatever the target extension is. normcase (not .lower()):
+                        # case-sensitive filesystems treat Foto.tif/foto.tif as
+                        # distinct files and must NOT collide. The recompressor's
+                        # --rename-from renames that stem at planning time.
+                        stem = (_stem_key(f, rf, rt) if _child is not None
+                                else os.path.normcase(f.stem))
+                        prev = seen.get(stem)
+                        if prev is None:
+                            seen[stem] = f
+                        elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
+                            collisions.append((prev, f, out_folder))
         finally:
-            _marker_stack.close()
             if _child is not None:
                 _child.logger.disabled = _child_logger_was_disabled
         return collisions

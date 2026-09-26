@@ -332,6 +332,36 @@ plain rows keep it. The duplicate-output guard sees the **renamed** names,
 so a rename that would land two rows on the same file aborts before
 anything is written.
 
+### Per-row export marker, subfolder and output folder (optional columns)
+
+Three more optional columns can be added after `Direction` — the generator
+does **not** write them, add them by hand when needed:
+
+| Column | Directions | Effect on that row |
+|--------|------------|--------------------|
+| `ExportMarker` | all six | Detect and scan that row under this export marker instead of the run's. |
+| `ExportSubfolder` | all six | Pass `--export-subfolder` for that row (modes 6/7; the other modes ignore it). |
+| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl` only | Name the modes 6/7 output folder for that row (the decoder and the transcoder have no such flag — a value anywhere else refuses the manifest). |
+
+Unlike the five derivative columns above, **an empty cell keeps the run's
+value** (wizard, preset or config): filling one row never resets the others.
+To ask for the script's own default on a single row, write its name (e.g.
+`16B_JXL`); to process every subfolder, put mode **6** on that row. Each value
+must be one plain folder name (no `..`, no path characters), and the wrapper
+validates the effective name — against the row's own marker and input
+subfolder, with the child's default included — before any child starts. The
+name collision check reads the effective marker per row, so rows with
+different markers always get the full output scan.
+
+Example — two folders under the same `_EXPORT`, each row writing to its own
+output folder:
+
+```csv
+Source,Destination,Mode,Direction,ExportJxlFolder
+G:\fotos\_EXPORT\A,,6,tiff2jxl,PRINT_JXL
+G:\fotos\_EXPORT\B,,6,tiff2jxl,SCREEN_JXL
+```
+
 Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
 **`[M] Run from manifest`**. The encoding settings you pick in Step 6/6A
 (distance, effort, multi-page policy, ...) apply to every entry.
