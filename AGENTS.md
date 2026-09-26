@@ -1,19 +1,5 @@
 # jxl-photo — agent notes
 
-## ⚠️ Pending work (check first)
-
-- **Open bug — lossy JXL with an ICC blob decodes wrong** (found 2026-09-25).
-  Profiles with a table tone curve (ROMM with its linear toe; eciRGB v2 and
-  scanner LUT profiles when they are embedded) have no native JXL form, so a
-  lossy cjxl stores the whole ICC and djxl returns LINEAR sRGB. The decoder's
-  Roundtrip mode pastes the original ICC on those pixels (colours wrong, log
-  OK), and the recompressor/transcoder derivative paths assign the XMP ICC the
-  same way. The encoder's cautious test only checks brightness, so a profile
-  can slip through as "embed". Detect with djxl `--icc_out` vs
-  `--orig_icc_out` (different = this case); fix = float decode + convert.
-  Measurements: `docs/jxl_color_internals.md`, "Lossy JXL with an ICC blob".
-  Remove this entry when fixed.
-
 ## Do NOT touch (dead code)
 - `jxl_jpeg_transcoder_HDR.py` and `hdr/` — abandoned HDR side project, kept
   untracked at the repo root (gitignored). Do not read, edit, analyze, or
@@ -81,6 +67,11 @@
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Architecture gotchas
+- **djxl returns a lossy ICC-blob file in LINEAR sRGB**: never paste/assign the
+  original ICC without checking `--icc_out` == `--orig_icc_out`
+  (`_djxl_icc_args`/`_decoded_in_original_space`, parity-pinned in all four
+  scripts). The correct decode is a float PFM CONVERTED to the original
+  profile; the decoder fails closed when magick is absent.
 - **The encoder never converts colour, resizes or sharpens — by design.** It
   writes the MASTER, and its outputs carry the `jxlphoto-src`/`srcsum` proof
   that the delete gates trust. Derivatives (colour/size/sharpening) come from

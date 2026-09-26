@@ -3721,6 +3721,46 @@ def _png_chunk_types(png_path: Path) -> list:
     return types
 
 
+def _djxl_icc_args(tmp_dir: Path) -> tuple:
+    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
+    also report which colour space it decoded to and what the file's own is."""
+    out_icc = Path(tmp_dir) / "djxl_out.icc"
+    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
+    for p in (out_icc, orig_icc):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+
+
+def _png_has_alpha(png_path: Path) -> bool:
+    """True when the PNG djxl just wrote has an alpha channel (colour type 4
+    or 6). Only the 26-byte signature + IHDR is read."""
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    return head[25] in (4, 6)          # 4 = grey + alpha, 6 = RGBA
+
+
+def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
+    """True when djxl returned the pixels in the file's own colour space
+    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
+    that profile is correct. False for a LOSSY file carrying an ICC blob:
+    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
+    float decode. None when djxl did not write the profiles (unknown ->
+    callers keep today's behaviour and log it)."""
+    try:
+        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
+    except OSError:
+        return None
+    return a == b
+
+
 def _xmp_icc_from_creator_tool(text: str):
     """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
     rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
@@ -4146,23 +4186,49 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
 
 def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
                         output_icc, bit_depth: int, quality: int,
-                        is_png: bool) -> tuple:
+                        is_png: bool, float_src=None) -> tuple:
     """(magick args, size|None, grey, converted) for the derivative/ICC pass.
 
     Order validated in the plan: source profile -> target conversion ->
     Lanczos resize -> Lab sharpening -> output-profile re-assign (B2) ->
     depth/quality.
+
+    float_src: (pfm_path, float_icc_path, orig_icc_path) when djxl decoded a
+    lossy ICC-blob file to LINEAR sRGB (linear grey for a grey file, which
+    goes back to its own grey profile). The magick INPUT is the float PFM
+    (tmp_png only still provides size/grey detection), the source profile is
+    djxl's own (assigned explicitly — the PFM carries none), and WITHOUT an
+    output_icc the pixels are CONVERTED to the original ICC (re-assigning
+    linear sRGB would leave the master's space).
     """
     grey = _png_is_grayscale(tmp_png)
     derivative = _is_derivative()
     args = []
     converted = bool(output_icc) and not grey
     src_profile = None
-    if not grey:
-        src_args, src_profile = _source_profile_args(jxl_path, tmp_png, tmp_dir)
-        args += src_args
-        if output_icc:
-            args += _magick_icc_args(output_icc, [])
+    if grey and float_src is not None:
+        # Grey master with a table-curve grey profile: djxl returned LINEAR
+        # grey. Grey is never colour-converted, so go back to the file's own
+        # grey profile (the caller hands djxl's --orig_icc_out here).
+        _pfm, float_icc, orig_target = float_src
+        args += ["-profile", str(float_icc), "-intent", "Relative",
+                 "-black-point-compensation", "-profile", str(orig_target)]
+    elif not grey:
+        if float_src is not None:
+            _pfm, float_icc, orig_target = float_src
+            args += ["-profile", str(float_icc)]
+            src_profile = float_icc
+            if output_icc:
+                args += _magick_icc_args(output_icc, [])
+            else:
+                args += ["-intent", "Relative", "-black-point-compensation",
+                         "-profile", str(orig_target)]
+                src_profile = orig_target
+        else:
+            src_args, src_profile = _source_profile_args(jxl_path, tmp_png, tmp_dir)
+            args += src_args
+            if output_icc:
+                args += _magick_icc_args(output_icc, [])
     size = None
     if derivative and RESIZE_MODE:
         w, h = _png_size(tmp_png)
@@ -4301,12 +4367,49 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 tmp_png = Path(tmp) / "tmp.png"
                 try:
                     _decode_bits = 16 if derivative else bit_depth
-                    subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                    icc_args, out_icc, orig_icc = _djxl_icc_args(Path(tmp))
+                    subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                    # A lossy JXL carrying a whole ICC blob decodes to LINEAR
+                    # sRGB, not to the file's own space: the intermediate must
+                    # be the float PFM with djxl's own profile assigned, never
+                    # the PNG labelled with the XMP ICC.
+                    float_src = None
+                    magick_in = tmp_png
+                    if _decoded_in_original_space(out_icc, orig_icc) is False:
+                        if _png_has_alpha(tmp_png):
+                            # The float PFM has no alpha, and alpha is not
+                            # colour-managed: merging it back through the
+                            # recipe is not implemented. Fail closed rather
+                            # than silently dropping the channel.
+                            raise RuntimeError(
+                                "lossy ICC blob with an alpha channel: the "
+                                "correct decode goes through a float PFM, which "
+                                "has no alpha — refusing to convert")
+                        pfm_path = Path(tmp) / "dec.pfm"
+                        float_icc = Path(tmp) / "float_out.icc"
+                        subprocess.run(["djxl", str(jxl_path), str(pfm_path),
+                                        f"--icc_out={float_icc}"],
+                                       check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                        creator, _tokens = _read_creator_and_relation(jxl_path)
+                        # Grey: djxl's own original profile, always single-
+                        # channel (an XMP ICC could be RGB).
+                        _xmp_icc = (None if _png_is_grayscale(tmp_png)
+                                    else _xmp_icc_from_creator_tool(creator))
+                        if _xmp_icc:
+                            orig_target = Path(tmp) / "orig_target.icc"
+                            orig_target.write_bytes(_xmp_icc)
+                        else:
+                            orig_target = orig_icc
+                        float_src = (pfm_path, float_icc, orig_target)
+                        magick_in = pfm_path
+                        logger.info(f"  >ICC blob in a lossy file: converting from "
+                                    f"the float decode (djxl's linear output), not "
+                                    f"from the XMP-labelled PNG | {jxl_path.name}")
                     magick_output, size, grey, _converted = _output_magick_args(
                         jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
-                        quality, is_png)
+                        quality, is_png, float_src=float_src)
                     logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
-                    subprocess.run(["magick", str(tmp_png)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
+                    subprocess.run(["magick", str(magick_in)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
                     if not grey:
                         _verify_profile_in_output(actual_out, is_png=is_png)
                 except subprocess.CalledProcessError as cpe:

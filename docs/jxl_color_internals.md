@@ -207,16 +207,79 @@ each new profile. For eciRGB v2 and the Epson scanner profiles it decides
 correct (measured 57.3 / 56.4 dB, same-space numbers). The price is that the
 JXL itself displays with wrong colours in viewers, because it says sRGB.
 
-**Known bug (open):** the cautious test only checks that the image did not get
-much darker (mean ratio ≥ 0.7). A table-curve profile that passes that check —
-the ROMM-with-toe test profile does — is embedded, the JXL stores the ICC blob,
-and the toolkit's decoder pastes the original ICC on linear-sRGB pixels: the
-TIFF comes back with wrong colours and the log says OK. The same "use the XMP
-ICC first" rule sits in the recompressor's and the transcoder's derivative
-paths. A fix is planned (detect the case with `--icc_out`/`--orig_icc_out`,
-decode to float, convert instead of assign; make the cautious test check the
-same thing). Until it lands, keep the TIFFs of any archive made with a
-table-curve profile that the encoder logged as `Cautious ICC: embed`.
+**Fixed (2026-09-26, bug #437):** the decode now detects the case from djxl
+itself — `--icc_out` and `--orig_icc_out` on the same decode differ ONLY here
+— and takes the float path: `djxl … out.pfm --icc_out=…`, then ImageMagick
+converts from djxl's linear sRGB to the original profile (the "Convert"
+column above; alpha, which is not colour-managed, comes from the integer
+decode). The same rule sits in the recompressor's and the transcoder's
+derivative paths: the intermediate is the float PFM with djxl's own profile
+assigned, and a "keep the source space" derivative is CONVERTED back to the
+original ICC rather than re-assigned linear sRGB. The encoder's cautious test
+checks the same condition and refuses "embed" for a lossy ICC blob whatever
+the brightness ratio (the icc_cache key gained `:t=2`, so every profile is
+retested once). Without ImageMagick on PATH the decode of such a file fails
+closed with an error — a wrong-colour TIFF is never written. A grey master
+with a table-curve grey profile behaves the same (djxl returns linear grey):
+every path converts it back to the file's own grey profile, never to an RGB
+`--output-icc` (bug #438).
+
+### Why the fix goes through a float decode (the plain version)
+
+A lossy JPEG XL never stores the pixels in the original colour space. cjxl
+converts them to the format's internal space (XYB) and records what the
+original was; djxl has to convert back on the way out.
+
+- **Profile with a native form** (pure gamma, sRGB, Adobe RGB, Rec.2020…): the
+  space fits the format's compact description, djxl converts back to it on its
+  own, and pasting the original ICC on the output is correct.
+- **Table-curve profile:** there is no compact description, so cjxl stores the
+  whole ICC as an attachment. djxl does not apply an arbitrary ICC itself (that
+  takes a colour-management engine); it hands the pixels back in a space it can
+  produce — **linear sRGB** — and says so in `--icc_out`. The old bug was
+  ignoring that and pasting the original ICC on numbers that are in another
+  space.
+
+Why not just convert djxl's 16-bit PNG? **Gamut.** The master is in a large
+space (ProPhoto), sRGB is small, and a saturated ProPhoto green written in sRGB
+coordinates is something like R = −0.3, G = 1.2: valid numbers, just outside
+0–1. An integer PNG/TIFF can only hold 0–1, so those values are clipped *when
+the file is written*, before any conversion can bring them back. A **PFM** is a
+plain 32-bit-float image format and keeps −0.3 and 1.2 as they are:
+
+```
+JXL ──djxl──► PFM float, linear sRGB (values outside 0–1 preserved)
+                    │
+        magick: assign djxl's linear-sRGB profile,
+                convert to the original profile (ROMM, eciRGB…)
+                    │
+                    ▼
+        pixels back in the master's space, all inside 0–1 again
+```
+
+On the way back to ProPhoto, the "impossible" sRGB green is a valid colour
+again. Measured (2026-09-25): the whole photo comes back at **51.9 dB** — the
+same as a native-profile file — and the 9.4% of out-of-sRGB pixels at
+**47.3 dB**, against 40.7 dB for the same conversion from the clipped PNG and
+15.4 dB for the old paste-the-ICC behaviour.
+
+In practice:
+
+- **It only costs where it is needed.** The detection is free: the djxl call
+  that already existed gained `--icc_out`/`--orig_icc_out`, and the two profiles
+  differ only in this case. Only then does a second decode to PFM run. Files
+  with a native profile go through exactly the old path (the tests pin their
+  derivatives byte-identical to the pre-fix code).
+- **Alpha:** a PFM has no alpha channel. The decoder takes the alpha from the
+  first, integer decode (alpha is not colour-managed); the derivative paths
+  refuse the file instead of dropping the channel.
+- **Grey:** djxl writes a one-channel PFM, converted back to the file's own grey
+  profile.
+- **No ImageMagick:** the decoder stops with an error instead of writing a
+  wrong TIFF, and the delete gate never removes the JXL.
+- **New files rarely land here:** the encoder's cautious test now refuses to
+  embed such a profile in a lossy JXL and picks "skip", which already decoded
+  correctly. The float path exists mainly for JXLs already in an archive.
 
 ---
 

@@ -115,6 +115,13 @@ SHARED_HELPERS = [
     # stored gen= identically or one of them undercounts generations when the
     # field changes.
     "_merge_lineage_blocks",
+    # Lossy ICC-blob detection (djxl --icc_out vs --orig_icc_out): the decoder,
+    # the recompressor, the transcoder and the encoder's cautious probe must
+    # all recognise the "djxl returned linear sRGB" case the same way — one
+    # copy drifting is one backend pasting the original ICC on linear pixels.
+    "_djxl_icc_args",
+    "_decoded_in_original_space",
+    "_png_has_alpha",
     # Source-profile detection for colour conversion (B1): the transcoder and
     # the recompressor must read XMP ICC / iCCP / sRGB chunk the same way.
     "_png_chunk_types",

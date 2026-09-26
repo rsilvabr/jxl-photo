@@ -2473,6 +2473,33 @@ def _png_chunk_types(png_path: Path) -> list:
     return types
 
 
+def _djxl_icc_args(tmp_dir: Path) -> tuple:
+    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
+    also report which colour space it decoded to and what the file's own is."""
+    out_icc = Path(tmp_dir) / "djxl_out.icc"
+    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
+    for p in (out_icc, orig_icc):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+
+
+def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
+    """True when djxl returned the pixels in the file's own colour space
+    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
+    that profile is correct. False for a LOSSY file carrying an ICC blob:
+    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
+    float decode. None when djxl did not write the profiles (unknown ->
+    callers keep today's behaviour and log it)."""
+    try:
+        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
+    except OSError:
+        return None
+    return a == b
+
+
 def _png_is_grayscale(png_path: Path) -> bool:
     """True when the PNG djxl just wrote is single-channel (colour type 0 or 4).
 
@@ -2487,6 +2514,19 @@ def _png_is_grayscale(png_path: Path) -> bool:
     if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
         return False
     return head[25] in (0, 4)          # 0 = grey, 4 = grey + alpha
+
+
+def _png_has_alpha(png_path: Path) -> bool:
+    """True when the PNG djxl just wrote has an alpha channel (colour type 4
+    or 6). Only the 26-byte signature + IHDR is read."""
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    return head[25] in (4, 6)          # 4 = grey + alpha, 6 = RGBA
 
 
 SHARPEN_PRESETS = {
@@ -2638,6 +2678,11 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     to map; an RGB profile on a single channel is invalid — same rule as the
     transcoder), but resize and sharpening still apply.
 
+    A lossy file carrying a whole ICC blob (a table-curve profile) decodes to
+    LINEAR sRGB / linear grey instead of its own space: the source is then a
+    float PFM decode with djxl's profile assigned, converted to the target —
+    and a grey one back to its own grey profile.
+
     Returns (converted, size): converted True only for a colour conversion
     (CreatorTool then carries the TARGET profile); size is the resized (w, h)
     or None. _derivative_metadata_args takes both instead of guessing again
@@ -2648,49 +2693,114 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
         tmp = Path(tmp)
         dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
-        r = subprocess.run(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"],
+        icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
+        r = subprocess.run(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"]
+                           + icc_args,
                            capture_output=True, timeout=CJXL_TIMEOUT)
         if r.returncode != 0 or not dec_png.exists():
             raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+        # A lossy JXL carrying a whole ICC blob (table-curve profile) decodes
+        # to LINEAR sRGB, not to the file's own space: the PNG must NOT be
+        # labelled with the XMP ICC. The source then becomes a float PFM
+        # decode with djxl's own profile assigned explicitly.
+        blob = _decoded_in_original_space(out_icc, orig_icc) is False
         grey = _png_is_grayscale(dec_png)
         converted = False
         size = None
-        if grey and not (RESIZE_MODE or SHARPEN != "none"):
+        if grey and not blob and not (RESIZE_MODE or SHARPEN != "none"):
             logger.info(f"  >Grayscale image: encoded without colour conversion | {jxl_path.name}")
             enc_in = dec_png
         else:
             args = []
             out_profile = None
-            if not grey:
+            magick_in = dec_png
+            if blob:
+                if _png_has_alpha(dec_png):
+                    # The float PFM carries no alpha, and alpha is not
+                    # colour-managed: merging it back through the recipe
+                    # (resize/sharpen) is not implemented. Fail closed
+                    # rather than silently dropping the channel.
+                    raise RuntimeError(
+                        "lossy ICC blob with an alpha channel: the correct "
+                        "decode goes through a float PFM, which has no alpha "
+                        "— refusing to derive (decode to TIFF instead)")
+                dec_pfm = tmp / "dec.pfm"
+                float_icc = tmp / "float_out.icc"
+                r = subprocess.run(["djxl", str(jxl_path), str(dec_pfm),
+                                    f"--icc_out={float_icc}"],
+                                   capture_output=True, timeout=CJXL_TIMEOUT)
+                if r.returncode != 0 or not dec_pfm.exists():
+                    raise RuntimeError(
+                        f"djxl float decode: {(r.stderr or b'').decode(errors='replace')[:200]}")
+                logger.info(f"  >ICC blob in a lossy file: deriving from the "
+                            f"float decode, CONVERTED from djxl's linear output "
+                            f"| {jxl_path.name}")
+                magick_in = dec_pfm
+                # Assign djxl's own profile — never the XMP ICC, which
+                # describes the ORIGINAL space these pixels are not in.
+                args += ["-profile", str(float_icc)]
+            if grey and blob:
+                # A grey master with a table-curve grey profile (Photoshop
+                # "Dot Gain", scanner LUTs) decodes to LINEAR grey just like
+                # the RGB case. Grey is never colour-converted, so go back to
+                # the file's own grey profile (djxl's --orig_icc_out: always
+                # single-channel, unlike an XMP ICC that could be RGB). The
+                # copied CreatorTool keeps describing these pixels.
+                args += ["-intent", "Relative", "-black-point-compensation",
+                         "-profile", str(orig_icc)]
+                out_profile = orig_icc
+            elif not grey:
                 creator, _tokens = _read_creator_and_relation(jxl_path)
-                src_icc = _xmp_icc_from_creator_tool(creator)
-                chunks = _png_chunk_types(dec_png)
-                if src_icc:
-                    src_path = tmp / "src.icc"
-                    src_path.write_bytes(src_icc)
-                    args += ["+profile", "*", "-profile", str(src_path)]
-                elif "iCCP" in chunks:
-                    src_path = tmp / "src_iccp.icc"
-                    _r = subprocess.run(["magick", str(dec_png), str(src_path)],
-                                        capture_output=True, timeout=CJXL_TIMEOUT)
-                    if _r.returncode != 0 or not src_path.exists():
-                        raise RuntimeError(
-                            f"magick could not extract the source ICC: "
-                            f"{(_r.stderr or b'').decode(errors='replace')[:200]}")
-                    # convert from djxl's own iCCP, no explicit assign
-                elif "sRGB" in chunks:
-                    src_path = _SRGB_ICC_PATH
-                    args += ["+profile", "*", "-profile", str(src_path)]
+                if blob:
+                    if OUTPUT_ICC:
+                        args += ["-intent", "Relative", "-black-point-compensation",
+                                 "-profile", str(_OUTPUT_ICC_PATH)]
+                        converted = True
+                        out_profile = _OUTPUT_ICC_PATH
+                    else:
+                        # "keep" derivative: re-assigning linear sRGB would
+                        # leave the master's space, so CONVERT to the original
+                        # ICC (XMP, else the file's own as djxl reported it).
+                        # converted stays False: the copied CreatorTool already
+                        # carries that same ICC.
+                        src_icc = _xmp_icc_from_creator_tool(creator)
+                        if src_icc:
+                            orig_path = tmp / "orig_target.icc"
+                            orig_path.write_bytes(src_icc)
+                        else:
+                            orig_path = orig_icc
+                        args += ["-intent", "Relative", "-black-point-compensation",
+                                 "-profile", str(orig_path)]
+                        out_profile = orig_path
                 else:
-                    raise RuntimeError("cannot tell the source colour space (no XMP ICC, "
-                                       "no iCCP, no sRGB chunk) — refusing to guess")
-                if OUTPUT_ICC:
-                    args += ["-intent", "Relative", "-black-point-compensation",
-                             "-profile", str(_OUTPUT_ICC_PATH)]
-                    converted = True
-                    out_profile = _OUTPUT_ICC_PATH
-                else:
-                    out_profile = src_path
+                    src_icc = _xmp_icc_from_creator_tool(creator)
+                    chunks = _png_chunk_types(dec_png)
+                    if src_icc:
+                        src_path = tmp / "src.icc"
+                        src_path.write_bytes(src_icc)
+                        args += ["+profile", "*", "-profile", str(src_path)]
+                    elif "iCCP" in chunks:
+                        src_path = tmp / "src_iccp.icc"
+                        _r = subprocess.run(["magick", str(dec_png), str(src_path)],
+                                            capture_output=True, timeout=CJXL_TIMEOUT)
+                        if _r.returncode != 0 or not src_path.exists():
+                            raise RuntimeError(
+                                f"magick could not extract the source ICC: "
+                                f"{(_r.stderr or b'').decode(errors='replace')[:200]}")
+                        # convert from djxl's own iCCP, no explicit assign
+                    elif "sRGB" in chunks:
+                        src_path = _SRGB_ICC_PATH
+                        args += ["+profile", "*", "-profile", str(src_path)]
+                    else:
+                        raise RuntimeError("cannot tell the source colour space (no XMP ICC, "
+                                           "no iCCP, no sRGB chunk) — refusing to guess")
+                    if OUTPUT_ICC:
+                        args += ["-intent", "Relative", "-black-point-compensation",
+                                 "-profile", str(_OUTPUT_ICC_PATH)]
+                        converted = True
+                        out_profile = _OUTPUT_ICC_PATH
+                    else:
+                        out_profile = src_path
             if RESIZE_MODE:
                 w, h = _png_size(dec_png)
                 geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
@@ -2707,12 +2817,12 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # B2: `-colorspace Lab ... -colorspace sRGB` drops the ICC
                 # profile; re-assign the one that describes the pixels now.
                 args += ["-profile", str(out_profile)]
-            cmd = (["magick", str(dec_png)] + args
+            cmd = (["magick", str(magick_in)] + args
                    + ["-depth", "16", "png:" + str(conv_png)])
             r = subprocess.run(cmd, capture_output=True, timeout=CJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
                 raise RuntimeError(f"magick: {(r.stderr or b'').decode(errors='replace')[:200]}")
-            if not grey and "iCCP" not in _png_chunk_types(conv_png):
+            if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
                 # Traps A1/A2: without the profile cjxl would silently tag the
                 # converted pixels as sRGB. Never let that reach the archive.
                 raise RuntimeError("ImageMagick wrote the converted image without its ICC "

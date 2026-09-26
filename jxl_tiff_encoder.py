@@ -1758,6 +1758,33 @@ def _synthetic_image_for_icc(depth: int) -> np.ndarray:
     return img
 
 
+def _djxl_icc_args(tmp_dir: Path) -> tuple:
+    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
+    also report which colour space it decoded to and what the file's own is."""
+    out_icc = Path(tmp_dir) / "djxl_out.icc"
+    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
+    for p in (out_icc, orig_icc):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+
+
+def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
+    """True when djxl returned the pixels in the file's own colour space
+    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
+    that profile is correct. False for a LOSSY file carrying an ICC blob:
+    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
+    float decode. None when djxl did not write the profiles (unknown ->
+    callers keep today's behaviour and log it)."""
+    try:
+        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
+    except OSError:
+        return None
+    return a == b
+
+
 def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
     """Run one round-trip test at the given bit depth. Returns True if safe."""
     img = _synthetic_image_for_icc(depth)
@@ -1794,9 +1821,20 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
             return False
 
         out_png = tmp / "out.png"
-        r = subprocess.run(["djxl", str(jxl_path), str(out_png)], capture_output=True, timeout=120)
+        icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
+        r = subprocess.run(["djxl", str(jxl_path), str(out_png)] + icc_args, capture_output=True, timeout=120)
         if r.returncode != 0 or not out_png.exists():
             logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {r.stderr.decode(errors='replace')[:200]}")
+            return False
+
+        if CJXL_DISTANCE > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
+            # A table-curve profile (ROMM toe, eciRGB v2, scanner LUTs) has no
+            # native JXL form, so a LOSSY cjxl stores the whole ICC blob and
+            # djxl returns linear sRGB: a decoder that pastes the original ICC
+            # on those pixels gets wrong colours. The brightness check below
+            # cannot see that — refuse "embed" outright.
+            logger.debug(f"Cautious ICC test {depth}-bit: lossy ICC blob — the "
+                         f"decode would come back in linear sRGB; unsafe to embed")
             return False
 
         decoded = np.array(Image.open(out_png).convert("RGB"))
@@ -1828,9 +1866,11 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
     key = hashlib.sha256(icc_bytes).hexdigest()
     # Include the cjxl version in the key: an encoder upgrade can change
     # how a profile behaves, so stale verdicts from older cjxl builds
-    # must not be trusted.
+    # must not be trusted. ":t=2" is the test-format generation: t=2 added
+    # the lossy-ICC-blob refusal, so a t=1 "embed" verdict for a table-curve
+    # profile must be retested instead of trusted.
     cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
-    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}"
+    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
 
     def _cached_verdict():
         cached = _load_icc_cache().get(versioned_key)

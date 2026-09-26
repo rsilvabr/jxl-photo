@@ -1383,13 +1383,53 @@ def select_decode_strategy(has_original_icc=False):
 # DECODING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def decode_auto_png(jxl_path, output_png):
+def _djxl_icc_args(tmp_dir: Path) -> tuple:
+    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
+    also report which colour space it decoded to and what the file's own is."""
+    out_icc = Path(tmp_dir) / "djxl_out.icc"
+    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
+    for p in (out_icc, orig_icc):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+
+
+def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
+    """True when djxl returned the pixels in the file's own colour space
+    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
+    that profile is correct. False for a LOSSY file carrying an ICC blob:
+    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
+    float decode. None when djxl did not write the profiles (unknown ->
+    callers keep today's behaviour and log it)."""
+    try:
+        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
+    except OSError:
+        return None
+    return a == b
+
+
+def _png_has_alpha(png_path: Path) -> bool:
+    """True when the PNG djxl just wrote has an alpha channel (colour type 4
+    or 6). Only the 26-byte signature + IHDR is read."""
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    return head[25] in (4, 6)          # 4 = grey + alpha, 6 = RGBA
+
+
+def decode_auto_png(jxl_path, output_png, extra_args=None):
     """
     Decode JXL using djxl auto mode to PNG format.
     Returns True on success.
     Raises RuntimeError on failure.
     """
-    cmd = ["djxl", str(jxl_path), str(output_png)]
+    cmd = ["djxl", str(jxl_path), str(output_png)] + list(extra_args or [])
     r = subprocess.run(cmd, capture_output=True, timeout=DJXL_TIMEOUT)
     if r.returncode != 0:
         err = (r.stderr or b"").decode(errors='replace')[:200]
@@ -2464,7 +2504,65 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
 
     if mode == 'roundtrip':
         png_path = tmp_dir / "decoded_roundtrip.png"
-        decode_auto_png(jxl_path, png_path)
+        icc_args, out_icc, orig_icc = _djxl_icc_args(tmp_dir)
+        decode_auto_png(jxl_path, png_path, extra_args=icc_args)
+        same = _decoded_in_original_space(out_icc, orig_icc)
+        if same is False:
+            # Lossy JXL carrying a whole ICC blob (a table-curve profile with
+            # no native JXL form): djxl returned LINEAR sRGB, so pasting the
+            # original ICC on these pixels would give wrong colours (measured
+            # 15.4 dB). The correct decode is the float PFM (which keeps the
+            # out-of-sRGB-gamut values) CONVERTED to the original profile
+            # (measured 51.9 dB — the native-path figure).
+            if shutil.which("magick") is None:
+                raise RuntimeError(
+                    "this JXL stores its ICC profile inside a lossy file; "
+                    "decoding it correctly needs ImageMagick (magick) on PATH")
+            pfm_path = tmp_dir / "decoded.pfm"
+            float_icc = tmp_dir / "float_out.icc"
+            r = subprocess.run(["djxl", str(jxl_path), str(pfm_path),
+                                f"--icc_out={float_icc}"],
+                               capture_output=True, timeout=DJXL_TIMEOUT)
+            if r.returncode != 0 or not pfm_path.exists():
+                err = (r.stderr or b"").decode(errors='replace')[:200]
+                raise RuntimeError(f"djxl float decode failed: {err}")
+            if original_icc:
+                target_path = tmp_dir / "orig_target.icc"
+                target_path.write_bytes(original_icc)
+                final_icc = original_icc
+            else:
+                target_path = orig_icc
+                final_icc = orig_icc.read_bytes()
+            conv_png = tmp_dir / "converted.png"
+            r = subprocess.run(["magick", str(pfm_path),
+                                "-profile", str(float_icc),
+                                "-intent", "Relative",
+                                "-profile", str(target_path),
+                                "-depth", "16", "png:" + str(conv_png)],
+                               capture_output=True, timeout=DJXL_TIMEOUT)
+            if r.returncode != 0 or not conv_png.exists():
+                err = (r.stderr or b"").decode(errors='replace')[:200]
+                raise RuntimeError(f"magick ICC conversion failed: {err}")
+            rgb, _ = read_png_to_numpy(conv_png, target_depth=target_depth)
+            # The PFM has no alpha channel, and alpha is not colour-managed:
+            # take it from the integer PNG of the first decode, RGB from the
+            # converted float path.
+            alpha = None
+            if _png_has_alpha(png_path):
+                _rgb_i, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
+            if alpha is not None:
+                pixels = np.dstack([rgb, alpha])
+            else:
+                pixels = rgb
+            logger.info(" >ICC blob in a lossy file: decoded to float and "
+                        "CONVERTED from djxl's linear sRGB to the original "
+                        "profile (pasting it would give wrong colours)")
+            reason = "Roundtrip (converted: lossy ICC blob)"
+            return pixels, final_icc, reason, mode
+        if same is None:
+            logger.debug(" >djxl did not report its output/input profiles "
+                         "(--icc_out/--orig_icc_out); keeping the paste-the-"
+                         "original-ICC behaviour")
         rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
         if alpha is not None:
             pixels = np.dstack([rgb, alpha])
