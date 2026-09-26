@@ -74,6 +74,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 ### 3. **JPEG ↔ JXL Transcoding**
 - JPEG → JXL lossless transcoding (pixel-perfect)
 - JXL → JPEG/PNG with ICC color space conversion (sRGB, AdobeRGB, ProPhoto RGB)
+- **Resize + output sharpening** *(v2.3.0)*: `--resize-long/-short/-percent` and `--sharpen screen|print` (fitted to Capture One's presets) deliver a web/print JPEG at any size straight from the master
 - JPEG preview embedding
 
 ### 4. **JXL → JXL recompression** *(v2.1.0)*
@@ -83,13 +84,14 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 - **Keep-smaller net**: a re-encode that is not smaller than the source is replaced by the original bytes, so a run can never grow the archive
 - `--delete-source` with the same gates as the other scripts (integrity at the final path, MD5 match for copies, optional `--verify-roundtrip`)
 - **Colour-converted derivatives** *(v2.2.0)*: `--output-icc sRGB|AdobeRGB|<file.icc>` makes a light **16-bit** copy of a master in another colour space (e.g. a d=1.0 sRGB set that replaces the JPEG exports), with `--rename-from/--rename-to` to swap the profile name in the file names. A derivative is never written in place, never deletes, never overwrites anything that is not its own derivative, and never counts as proof that the original TIFF is archived
+- **Resized / sharpened derivatives** *(v2.3.0)*: the same `--resize-*` and `--sharpen` recipes, combinable with `--output-icc`
 
 ### 5. **Professional Workflow Support**
 - Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
 - Parallel processing (tested up to 32 workers)
 - Sync mode (reconvert only changed files)
 - Staging SSD support for large collections
-- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`)
+- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`); since v2.3.0 each manifest row can carry its own colour space, size, sharpening and rename
 - Choose the Capture One / Lightroom export output folder per run (`--export-jxl-folder`, *v2.2.0*) — e.g. masters in `_EXPORT/16B_JXL`, a separate print export in `_EXPORT/PRINT_JXL`, sRGB derivatives in `_EXPORT/16B_JXL_sRGB`
 
 ### 6. **Archive and replace** *(v2.0.0)*
@@ -115,7 +117,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 
 ---
 
-> **⚠️ Upgrading from an earlier release?** Read the [notices for upgraders](#notices-for-upgraders) before running anything destructive: v2.2.0 refuses some TIFFs earlier releases archived wrongly, saved command lines changed behavior in v2.0.0, and JPEG → JXL archives made with v2.0.0–v2.0.3 may need the jbrd repair.
+> **⚠️ Upgrading from an earlier release?** Read the [notices for upgraders](#notices-for-upgraders) before running anything destructive: v2.3.0 fixes the colours of JXLs with table-curve ICC profiles (TIFFs decoded from them earlier are wrong), v2.2.0 refuses some TIFFs earlier releases archived wrongly, saved command lines changed behavior in v2.0.0, and JPEG → JXL archives made with v2.0.0–v2.0.3 may need the jbrd repair.
 
 ---
 
@@ -334,6 +336,7 @@ F:\2025\São Paulo\_EXPORT\16bit,F:\2025\São Paulo\_EXPORT\16B_JXL,7,tiff2jxl
 - Paths may contain spaces and non-ASCII characters — the file is written as UTF-8 with a BOM so Excel keeps them. If Excel re-saves it in the system ANSI codepage the manifest is refused, not guessed at: re-save with *CSV UTF-8 (comma delimited)* or regenerate it
 - The `Direction` column binds the manifest to the workflow that generated it — running it from a different direction (e.g. a `tiff2jxl` manifest in a `jxl2tiff` session) is refused with a clear error instead of running the wrong script. Manifests without the column (older format) still run, with a warning.
 - **Destination column:** only modes **0 and 2** honor it. Modes 1/3/4/5/6/7/8 compute their own output locations from each script's settings (`16B_JXL`, `converted_jxl`, ...) — the wrapper prints a warning when a manifest entry's Destination is ignored.
+- **Per-row option columns (optional):** `jxl2jxl`, `jxl2jpeg` and `jxl2png` manifests carry `OutputICC, Resize, Sharpen, RenameFrom, RenameTo` after `Direction` — a filled cell overrides the wizard's answer for that row only (`sRGB`, `long:2048`, `print`, `ProPhoto`→`sRGB`, ...). Any invalid value refuses the whole manifest before anything runs; the per-row derivative rules (never in place, never deleting) are enforced per row. See [Running a list of folders](docs/README_jxl_tools.md#running-a-list-of-folders-manifest).
 - **Manifest compatibility:** manifests are guaranteed to work with the version that generated them. Backward compatibility with older 2-column manifests is not guaranteed; regenerate the manifest if upgrading from a previous version.
 
 ---
@@ -640,7 +643,7 @@ The decoder's Matrix mode (`--matrix`, for color-space conversion via LittleCMS)
 
 Most profiles have a native JPEG XL form (a pure gamma, sRGB, Rec.2020, DCI-P3…), and those round-trip correctly — ProPhoto, Elle's LargeRGB g2.2, Adobe RGB and Wide Gamut included, wide gamut intact. Profiles whose tone curve is a **table** (eciRGB v2's L* curve, scanner LUT profiles, ROMM RGB with its linear toe) have none: in lossy mode cjxl then stores the whole ICC, and djxl decodes such a file to **linear sRGB**, not to the original space.
 
-The encoder's default `cautious` ICC strategy detects most of these and encodes them "skip" (verified correct round trips for eciRGB v2 and Epson scanner profiles; the JXL itself then shows wrong colours in viewers, because it is tagged sRGB). A table-curve profile that passes the cautious check is a **known open bug**: the decoded TIFF comes back with wrong colours. Measurements, the exact mechanism and the planned fix: [Lossy JXL with an ICC blob](docs/jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
+The encoder's default `cautious` ICC strategy detects most of these and encodes them "skip" (verified correct round trips for eciRGB v2 and Epson scanner profiles; the JXL itself then shows wrong colours in viewers, because it is tagged sRGB). A table-curve profile that passes the cautious check is embedded as an ICC blob — and since bug #437 (2026-09-26) that case is handled everywhere: the decoder detects it from djxl's own `--icc_out`/`--orig_icc_out` output and decodes to float, CONVERTING to the original profile (51.9 dB measured, against 15.4 dB for the old paste-the-ICC behaviour), the derivative paths of the recompressor/transcoder do the same, and the cautious test now refuses "embed" for a lossy ICC blob whatever the brightness says. Decoding such a file needs ImageMagick on PATH; without it the decode fails closed instead of writing a wrong-colour TIFF. Measurements and the exact mechanism: [Lossy JXL with an ICC blob](docs/jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
 
 ---
 
@@ -660,6 +663,15 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 ---
 
 ## Notices for upgraders
+
+### ⚠️ Upgrading to v2.3.0: TIFFs decoded from JXLs with a table-curve ICC profile
+
+Earlier releases decoded a **lossy** JXL whose ICC profile has a table tone curve (ROMM RGB with its linear toe, eciRGB v2, scanner LUT profiles, Photoshop "Dot Gain" grey) with **wrong colours**, and logged it as OK. The same went for recompressor derivatives and transcoder JPEG/PNG conversions of those files. The **JXLs themselves are fine**: re-decode them with v2.3.0.
+
+- Most archives are not affected: Capture One / Lightroom exports in ProPhoto, Elle's LargeRGB, Adobe RGB or sRGB have a native JPEG XL form, and the encoder's default `cautious` strategy already encoded eciRGB v2 and scanner profiles as "skip", which decoded correctly.
+- Affected are files whose table-curve profile passed the cautious test, or files encoded with `--icc-png-strategy always`. To check one: `djxl file.jxl out.png --icc_out=a.icc --orig_icc_out=b.icc` — the file is affected when `a.icc` and `b.icc` differ.
+- Decoding those files now needs ImageMagick on PATH (without it the decode fails with an error instead of writing a wrong TIFF).
+- The encoder re-tests every ICC profile once on its first run (the cautious cache format changed), so that run is a little slower.
 
 ### ⚠️ Upgrading to v2.2.0 from any earlier release: four things to check
 
@@ -693,14 +705,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.2.0** (2026-09-24) — the stable release of the v2.1.1 beta line, plus colour-converted derivatives. Four audits of the v2.1 series (rounds 37–40, 88 fixes, almost all in the delete/provenance/dry-run safety layer), three new options and a version-aware distance floor:
+**v2.3.0** (2026-09-26) — derivatives at any size, and a colour fix for table-curve ICC profiles:
 
-- **`--output-icc sRGB|AdobeRGB|<file.icc>`** (recompressor) — light **16-bit** derivatives of your masters in another colour space, e.g. a d=1.0 sRGB set in `_EXPORT/16B_JXL_sRGB` to replace the JPEG exports, converted from the master's own ICC with relative colorimetric + black point compensation. Built-in Adobe RGB (1998)-compatible profile, identical to Adobe's own. Never in place, never deletes, never overwrites a file that is not its own derivative, and it strips the provenance markers, so a derivative can never pass as proof that a TIFF is archived.
-- **`--rename-from/--rename-to`** (recompressor) — swap the profile token in the derivative names (`..._ProPhoto-g22_v1` → `..._sRGB_v1`) at planning time, so sync and every guard see the final name.
-- **`--export-jxl-folder NAME`** (encoder + recompressor) — choose the modes 6/7 output folder per run or per preset.
-- **The distance floor follows your cjxl** — 0.05 on libjxl 0.12, 0.01 on 0.11, where 0.02–0.04 are real quality steps. See [the distance floor](#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011).
+- **Resize + output sharpening** — `--resize-long/-short/-percent` and `--sharpen screen|print` on the transcoder (JXL → JPEG/PNG) and on the recompressor's derivatives: a 2048 px sharpened sRGB JPEG straight from the ProPhoto master. The presets are fitted to Capture One's own.
+- **Per-row manifest options** — one manifest can mix recipes: `OutputICC, Resize, Sharpen, RenameFrom, RenameTo` columns override the wizard per row.
+- **`--icc-profile AdobeRGB` built into the transcoder** — no `.icc` file needed.
+- **Fixed: lossy JXLs with a table-curve ICC profile decoded with wrong colours** (ROMM with toe, eciRGB v2, scanner LUTs). They now decode through a float intermediate and a real conversion (15.4 → 51.9 dB). See the [upgrade notice](#notices-for-upgraders).
 
-Existing command lines keep working, but some inputs that earlier releases archived wrongly are now **refused**. Read the [upgrade notice](#notices-for-upgraders) first. **1576 tests.**
+Existing command lines and manifests keep working. **1710 tests.**
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -708,9 +720,42 @@ Existing command lines keep working, but some inputs that earlier releases archi
 
 ## Changelog
 
-### What's new — v2.2.0 (current stable)
+### What's new — v2.3.0 (current stable)
 
-**Released 2026-09-24.** Supersedes v2.1.0 and the v2.1.1_beta1 pre-release (whose notes are in [version history](docs/version_history.md#v211_beta1)). Rounds 37–40 of auditing (bugs #347–#434), plus colour-converted derivatives.
+**Released 2026-09-26.** Supersedes v2.2.0. Rounds 41–42 (bugs #436–#438), plus derivatives at any size.
+
+#### New: resize + output sharpening
+
+`--resize-long PX`, `--resize-short PX` or `--resize-percent P`, and `--sharpen none|screen|print`, on two scripts:
+
+- **jxl_jpeg_transcoder.py**, JXL → JPEG/PNG: a delivery file at any size from the master (`--resize-long 2048 --sharpen screen --quality 92`);
+- **jxl_recompressor.py**, JXL → JXL: `--output-icc`, resize and sharpen make the run a derivative, and the recipes combine.
+
+Aspect ratio is always kept, and nothing is enlarged without `--allow-upscale`. Sharpening works on the Lab **L** channel only (no colour fringes). The presets are fitted to Capture One's defaults on real Nikon Z7 exports at 1000–3000 px and full size: `print` is within 0.1 dB of the per-size best everywhere. A resized/sharpened file is a **derivative** with every guarantee `--output-icc` has: never in place, never deletes, never overwrites a non-derivative, and it carries `jxlphoto-derived:<recipe>` instead of the provenance markers, so changing the recipe re-derives on the next sync.
+
+#### New: per-row options in manifests
+
+`jxl2jxl`, `jxl2jpeg` and `jxl2png` manifests carry five optional columns after `Direction`: `OutputICC, Resize, Sharpen, RenameFrom, RenameTo`. A filled cell overrides the wizard's answer for that row only, and an empty cell means "not applied". The generated CSV already has them (empty), and older manifests load unchanged. An invalid value refuses the whole manifest before anything runs, the confirmation screen shows each row's recipe, and the derivative rules (never in place, never deleting) are checked per row.
+
+#### New: `--icc-profile AdobeRGB` in the transcoder
+
+The same built-in Adobe RGB (1998)-compatible profile as the recompressor. Built-in names are now case-insensitive, and a missing `.icc` path is refused up front.
+
+#### Fixed: table-curve ICC profiles decoded with wrong colours (#437, #438)
+
+A profile whose tone curve is a **table** has no native JPEG XL form, so a lossy cjxl stores the whole ICC and djxl returns the pixels in **linear sRGB**. The decoder pasted the original ICC on them (15.4 dB, colours completely off, logged as OK), and the derivative paths did the same. Now the case is detected from djxl itself, and the pixels are decoded to 32-bit float — which keeps the colours outside sRGB that an integer PNG would clip — and **converted** to the original profile: **51.9 dB**, the same as a native-profile file. Grey masters are covered too. The encoder's cautious test now refuses to embed such a profile in a lossy JXL. The plain explanation: [why the fix goes through a float decode](docs/jxl_color_internals.md#why-the-fix-goes-through-a-float-decode-the-plain-version).
+
+#### Also fixed
+
+- **#436:** a colour conversion of an **sRGB-encoded** JXL (`--to-srgb`/`--icc-profile`) re-tagged the pixels instead of converting them. The transcoder now always assigns the source profile explicitly.
+
+Every fix has a regression test proven to fail against the pre-fix code. **1710 tests** in the suite.
+
+---
+
+### v2.2.0 — previous stable
+
+**Released 2026-09-24, superseded by v2.3.0.** Supersedes v2.1.0 and the v2.1.1_beta1 pre-release (whose notes are in [version history](docs/version_history.md#v211_beta1)). Rounds 37–40 of auditing (bugs #347–#434), plus colour-converted derivatives.
 
 #### New: colour-converted derivatives (`--output-icc`)
 
@@ -766,7 +811,8 @@ Full list: [bug tracking, rounds 37–40](docs/bug_tracking_since_v1.0.md). Ever
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.2.0](#changelog)** | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
+| **[v2.3.0](#changelog)** | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
+| [v2.2.0](#v220--previous-stable) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
 | [v2.1.1_beta1](docs/version_history.md#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
 | [v2.1.0](docs/version_history.md#v210) | 2026-09-20 | New `jxl_recompressor.py`: shrink a JXL archive, refusing counterproductive re-encodes |
 | [v2.0.3](docs/version_history.md#v203) | 2026-08-23 | JXL → JPEG delete gates bound to content, not names; 32 fixes |

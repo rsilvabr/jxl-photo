@@ -23,6 +23,9 @@ Round 38 / 2026-09-21: Third audit of v2.1.0 (bug_report_260921.md) - 28 finding
 Round 39 / 2026-09-21: Fourth audit of v2.1.1_beta1 (20260921_audit2.md + 20260921_audit3.md, consolidated) - 34 findings: --force-convert d=0 broke jbrd recovery AND deleted the original unverified (the v2.0.0 data-loss class again), >64 KiB JPEG trailers rejected by the toolkit own gate, smart-sync skips that admitted foreign masters to --delete-skipped (see top section)
 Round 40 / 2026-09-23: Fifth audit of v2.1.1_beta1 (bug_report_260923.md) - 16 findings fixed (5 high/medium + 11 low): the recompressor deleted an original on the strength of an unrelated same-named output in modes 1/3 (the only reproduced data loss), --repair-jbrd stripped only the last marker pair, the decoder treated a normal `*_thumbnail` photo as a thumbnail under --no-reconstruct-multipage, and the dry-run toplines still counted would-SKIP pairs as conversions (see top section)
 v2.2.0 / 2026-09-24: Rounds 37-40 released as v2.2.0 (the v2.1.1 beta line never got a final), together with the new colour-converted derivatives (`--output-icc`), `--export-jxl-folder` and the recompressor's `--rename-from/--rename-to` - see new_features_since_v1.0.md Also bug #435: the lossy distance floor follows the installed cjxl (0.05 from libjxl 0.12, 0.01 before) (see top section)
+Round 41 / 2026-09-25: The resize/sharpen round - 1 bug found while measuring it: a colour conversion of an sRGB-encoded JXL re-tagged instead of converting (#436)
+Round 42 / 2026-09-26: The lossy ICC-blob decode - table-curve profiles (ROMM with toe, eciRGB v2, scanner LUTs) decoded with wrong colours in the decoder and every derivative path (#437), and the same on grey masters (#438)
+v2.3.0 / 2026-09-26: Rounds 41-42 released as v2.3.0, together with resize + output sharpening for derivatives, the transcoder's built-in AdobeRGB and the manifests' per-row option columns - see new_features_since_v1.0.md
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -61,6 +64,21 @@ found while measuring the new pipeline against real photos.
 
 ---
 
+## Round-42 - the lossy ICC-blob decode (2026-09-26)
+
+The open bug the colour measurements of 2026-09-25 ended with: a profile whose
+tone curve is a TABLE (ROMM with its linear toe, eciRGB v2, scanner LUTs) has
+no native JPEG XL form, so a lossy cjxl stores the whole ICC blob and djxl
+returns the pixels in LINEAR sRGB - and three places in the toolkit pasted or
+assigned the original ICC on those pixels. Full measurement tables:
+`docs/jxl_color_internals.md`, "Lossy JXL with an ICC blob".
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 437 | **A lossy JXL carrying a whole ICC blob decoded with wrong colours, logged as OK.** The decoder's Roundtrip mode pasted the XMP ICC on djxl's linear-sRGB output (15.4 dB on the ROMM-toe test photo, vs 51.9 dB for a correct float decode + conversion); the recompressor's `_derive_pixels` and the transcoder's `_source_profile_args` made the same mistake in every derivative/colour conversion of such a master; and the encoder's cautious test only checked the mean brightness, so a table-curve profile could slip through as "embed" | decoder, recompressor, transcoder, encoder | ✅ FIXED (the case is detected from djxl itself: `--icc_out` vs `--orig_icc_out` on the SAME decode are byte-identical in every correct case and differ only here - shared `_djxl_icc_args`/`_decoded_in_original_space`, parity-pinned in all four scripts. Roundtrip then decodes to a float PFM and CONVERTS from djxl's profile to the original one (alpha, not colour-managed, comes from the integer decode; no magick on PATH fails closed, so a wrong TIFF is never written and the delete gate never fires). The derivative paths switch their magick input to the float PFM with djxl's own profile assigned, and a keep-the-space derivative is converted back to the original ICC instead of being re-assigned linear sRGB; an ICC blob with an alpha channel is refused there. The cautious test refuses "embed" for a lossy ICC blob whatever the brightness, and the icc_cache key gained `:t=2` so every profile is retested once. Tests: `tests/test_icc_blob_decode.py` + `tests/_icc_fixtures.py` (a ROMM-toe profile built from scratch) - 14 real-codec tests, the six bug-facing ones verified failing against the pre-fix scripts (bug path 15.3 dB, fixed 52.4 dB on the fixture; blob derivatives at parity with the native-path control) and Elle-g2.2/"skip" controls byte-identical to before) |
+| 438 | **The same bug on GREY masters, in the derivative paths.** A grey master with a table-curve grey profile (Photoshop "Dot Gain"-style, scanner LUTs) also decodes to LINEAR grey, but the #437 derivative fix only covered RGB: the recompressor encoded djxl's linear grey and kept the copied XMP ICC (a later decode pasted it on those pixels), and the transcoder delivered the PNG/JPEG in djxl's linear grey instead of the master's profile (8-bit linear bands). Measured on the fixture: 14.7 dB off | recompressor, transcoder | ✅ FIXED (the grey blob case takes the same float PFM path and converts back to the file's own grey profile - djxl's `--orig_icc_out`, always single-channel; grey is still never colour-converted to `--output-icc`. The decoder already handled grey. Tests: 4 grey real-codec tests in `tests/test_icc_blob_decode.py` (`grey_toe_icc` in `_icc_fixtures.py`); the three derivative ones verified failing on the pre-fix scripts) |
+
+---
 
 ## Round-40 audit (2026-09-23)
 

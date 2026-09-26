@@ -1,6 +1,24 @@
 # New Features Since v1.0
 
-## Unreleased
+## v2.3.0 (2026-09-26)
+
+### Per-row output options in manifests (wrapper)
+
+Manifests for `jxl2jxl`, `jxl2jpeg` and `jxl2png` carry five optional columns
+after `Direction` — `OutputICC, Resize, Sharpen, RenameFrom, RenameTo` — so one
+manifest can mix recipes: the sports folder at `long:2048` + `screen` sharpen
+converted to sRGB, the archive folder plain. A filled cell overrides the
+wizard's answer for that option on that row only; an empty cell means "not
+applied". The generated CSV already includes the columns (empty); manifests
+without them load unchanged.
+
+Any invalid value refuses the whole manifest before anything runs, with the
+row and column named. The confirmation preview lists each row's recipe. The
+safety rules apply per row: a resize/sharpening row never runs in place and
+never deletes its sources (combined with a delete answer the manifest is
+refused up front), an `OutputICC`-only row keeps its conversion but receives
+no `--delete-source`, and the duplicate-output guard sees the renamed names,
+so a rename that would land two rows on the same file aborts first.
 
 ### Resize and output sharpening: derivatives on the transcoder and the recompressor
 
@@ -33,9 +51,11 @@ re-derives on the next sync. EXIF/XMP pixel dimensions are corrected to the
 output's own after a resize.
 
 The sharpening numbers live in one table (`SHARPEN_PRESETS`) in **output
-pixels**, provisionally calibrated against Capture One (`screen`:
-sigma 0.5/gain 0.6/threshold 0.02; `print`: 1.0/1.0/0.02) until a calibration
-session against real exports lands. The expert overrides
+pixels**, fitted to Capture One's default presets on the same Nikon Z7 photos
+exported with sharpening off/screen/print at 1000, 2000, 3000 px and full size
+(`screen`: sigma 0.8/gain 0.6/threshold 0; `print`: 3.24/0.77/0). `print` is
+within 0.1 dB of the per-size best everywhere; `screen` is the best single
+value (≤ 1.6 dB from the per-size best). The expert overrides
 (`--sharpen-sigma`, `--sharpen-gain`, `--sharpen-threshold`) are deliberately
 **outside** the recipe label: after changing one, re-derive with
 `--overwrite`. In auto mode a JXL with a `jbrd` box is decoded and re-encoded
@@ -44,6 +64,25 @@ single log line naming how many files that affected.
 
 The wizard asks for the recipe in Step 6 wherever it applies and shows
 `Resize:`/`Sharpening:` lines in the Step 7 summary.
+
+### Transcoder: built-in `AdobeRGB` for `--icc-profile`
+
+`--icc-profile AdobeRGB` (also `adobe`/`adobergb1998`, any case) uses the same
+Adobe RGB (1998)-compatible profile the recompressor's `--output-icc` has
+built in, so a JXL → JPEG/PNG delivery in Adobe RGB needs no `.icc` file.
+Built-in names are case-insensitive now (`srgb` used to reach ImageMagick as a
+file name and fail per file), and a missing `.icc` path is refused up front
+(exit 2) instead of failing on every file.
+
+### Bug fix: lossy JXLs with a table-curve ICC profile decoded with wrong colours
+
+A profile whose tone curve is a table (ROMM with its linear toe, eciRGB v2,
+scanner LUTs, "Dot Gain" grey) has no native JPEG XL form; a lossy JXL then
+stores the whole ICC and djxl returns linear sRGB (linear grey). The decoder
+and the derivative paths pasted the original ICC on those pixels (15.4 dB).
+They now detect the case and decode to float, converting to the original
+profile (51.9 dB). Bugs #437–#438; the plain explanation is in
+`jxl_color_internals.md`, "Why the fix goes through a float decode".
 
 ### Bug fix: a colour conversion could silently re-tag instead of converting (B1)
 
