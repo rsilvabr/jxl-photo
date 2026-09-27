@@ -260,7 +260,7 @@ def test_manifest_charges_hhmm_for_a_mode_3_entry(menu, monkeypatch, tmp_path):
     monkeypatch.setattr(wp.InteractiveMenu, "_confirm_archive_mode",
                         lambda self: (asked.append(True), False)[1])
     monkeypatch.setattr(wp.InteractiveMenu, "_manifest_needs_collision_scan",
-                        lambda self, e, m: False)
+                        lambda self, e, m, row_markers=None: False)
 
     wf = {"manifest_entries": [(str(src), str(src), 3)],
           "origin_format": "tiff", "dest_format": "jxl", "workers": 2,

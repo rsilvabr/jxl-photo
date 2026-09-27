@@ -485,7 +485,8 @@ def test_259_guards_receive_the_detected_mode(tmp_path, monkeypatch, menu):
         staticmethod(lambda entries: seen.setdefault("overlaps", list(entries)) and []))
     monkeypatch.setattr(
         wp.InteractiveMenu, "_manifest_needs_collision_scan",
-        lambda self, entries, marker: bool(seen.setdefault("scan", list(entries))) and False)
+        lambda self, entries, marker, row_markers=None:
+        bool(seen.setdefault("scan", list(entries))) and False)
     monkeypatch.setattr(wp.InteractiveMenu, "_run_subprocess", lambda self, cmd: 0)
     monkeypatch.setattr(wp.InteractiveMenu, "_render_manifest_summary",
                         lambda self, *a, **k: None)

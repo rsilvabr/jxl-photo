@@ -2784,20 +2784,34 @@ class InteractiveMenu:
             # The Direction column binds the manifest to the workflow that
             # generated it, so a TIFF->JXL manifest is never accidentally
             # replayed by a JXL->TIFF session (which would run the wrong script).
-            # The five optional columns follow for the directions that accept
+            # The five derivative columns follow for the directions that accept
             # them (empty cell = the option is NOT applied on that row): the
             # user opens the CSV in Excel and only fills in what differs.
+            # When ANY generated row is mode 6/7 the export columns are appended
+            # after them — ExportMarker/ExportSubfolder in every direction,
+            # ExportJxlFolder only where the child accepts the flag. Their empty
+            # cell keeps the run's marker/subfolder/folder, so filling one row
+            # never resets the others.
             direction = f"{analyzer.origin}2{analyzer.dest}"
             with_options = direction in _MANIFEST_DERIVATIVE_DIRECTIONS
+            with_export = any(entry_mode in (6, 7)
+                              for _s, _d, _c, entry_mode in mappings)
+            export_header = ["ExportMarker", "ExportSubfolder"]
+            if direction in _MANIFEST_OPTION_DIRECTIONS["exportjxlfolder"]:
+                export_header.append("ExportJxlFolder")
             header = ["Source", "Destination", "Mode", "Direction"]
             if with_options:
                 header += ["OutputICC", "Resize", "Sharpen", "RenameFrom",
                            "RenameTo"]
+            if with_export:
+                header += export_header
             writer.writerow(header)
             for src, dst, count, entry_mode in mappings:
                 row = [src, dst, entry_mode, direction]
                 if with_options:
                     row += ["", "", "", "", ""]
+                if with_export:
+                    row += [""] * len(export_header)
                 writer.writerow(row)
 
         return str(manifest_path)
@@ -3073,6 +3087,21 @@ class InteractiveMenu:
                             if reason:
                                 self._print_error(
                                     f"Manifest row {_row_n} ({source}): {reason}")
+                                return None
+                            # ExportSubfolder reaches the children as
+                            # --export-subfolder, which only mode 7 honors (mode
+                            # 6 processes every subfolder by design). A filled
+                            # cell on any other explicit Mode is a user mistake,
+                            # not a harmless no-op — refuse it. A legacy row
+                            # without a Mode cell stays accepted: its mode is
+                            # only resolved downstream.
+                            if (opts.get("export_subfolder")
+                                    and entry_mode is not None
+                                    and entry_mode != 7):
+                                self._print_error(
+                                    f"Manifest row {_row_n} ({source}): column "
+                                    f"ExportSubfolder only applies to Mode 7 rows "
+                                    f"(this row is mode {entry_mode}).")
                                 return None
                             row_options.append(opts)
 
@@ -5547,7 +5576,8 @@ class InteractiveMenu:
                     "determined (the Source is not <marker>/<subfolder>). The "
                     "children will use their script's EXPORT_*_SUBFOLDER default "
                     "— and when that is empty, they process EVERY subfolder of "
-                    "the export marker: they will run as mode 6.")
+                    "the export marker: they will run as mode 6. Filling the "
+                    "ExportSubfolder column on those rows resolves this.")
                 if RICH_AVAILABLE and console:
                     console.print(f"[yellow]{_sub_warn}[/yellow]")
                 else:
@@ -5559,8 +5589,8 @@ class InteractiveMenu:
                     # notice the run is converting more than the manifest says.
                     self._print_error(
                         "Refusing to run unattended: write the mode-7 Sources as "
-                        "<marker>/<subfolder>, or use mode 6 if every subfolder "
-                        "is intended.")
+                        "<marker>/<subfolder>, fill the ExportSubfolder column on "
+                        "those rows, or use mode 6 if every subfolder is intended.")
                     return False
                 if RICH_AVAILABLE and console:
                     ok_sub = Confirm.ask("Run anyway?", default=False)
@@ -5657,18 +5687,13 @@ class InteractiveMenu:
         # there would already be a Source overlap, which the gate refuses to
         # declare safe.
         cross_out_folders: Dict[int, Set[str]] = {}
-        # The skip logic below assumes ONE marker shared by every entry. It is
-        # enough for a valid ExportJxlFolder/ExportSubfolder to stay inside the
-        # marker dir, so only DIFFERENT effective markers between rows can
-        # invalidate it. With a single effective marker, use THAT one (it may
-        # differ from the global when every row carries the same ExportMarker).
-        _eff_markers = {_m.lower() for _m, _s, _j in _row_export}
-        if len(_eff_markers) > 1:
-            _can_skip = False
-        else:
-            _one_marker = _row_export[0][0] if _row_export else _marker
-            _can_skip = not self._manifest_needs_collision_scan(
-                resolved_entries, _one_marker)
+        # Each entry's marker comes from its own row (its ExportMarker column,
+        # or the run's), and the check reasons per row too: disjoint trees under
+        # markers that cannot nest stay skippable, while nested marker dirs
+        # force the scan.
+        _can_skip = not self._manifest_needs_collision_scan(
+            resolved_entries, _marker,
+            row_markers=[_m for _m, _s, _j in _row_export])
         if _can_skip:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
@@ -6221,7 +6246,8 @@ class InteractiveMenu:
         return str(Path(*parts[:idx + 1]))
 
     def _manifest_needs_collision_scan(self, manifest_entries: List,
-                                       export_marker: str) -> bool:
+                                       export_marker: str,
+                                       row_markers: Optional[List[str]] = None) -> bool:
         """Can any two entries write to the same output folder?
 
         The scan below is expensive (a recursive walk per Source), so it is worth
@@ -6248,12 +6274,19 @@ class InteractiveMenu:
         Sources do not overlap, so that is checked here rather than assumed:
         overlaps are only WARNED about upstream (attended runs may continue),
         which is weaker than this function had been relying on.
+
+        `row_markers` (optional): the export marker each entry actually runs
+        with (its ExportMarker column, or the run's), aligned with
+        manifest_entries. When omitted, `export_marker` is used for every row.
+        Per-row markers can NEST — one row anchored on `_EXPORT`, another on
+        `_EXPORT/SITE` — which the exact-marker-key comparison is blind to, so
+        nested marker dirs force the scan as well.
         """
         marker_dirs: Dict[str, str] = {}
         # Sources whose outputs stay inside their own tree. Disjoint ones can
         # never share an output folder; overlapping ones can.
         within_source: List[str] = []
-        for source, dest_path, mode in manifest_entries:
+        for i, (source, dest_path, mode) in enumerate(manifest_entries):
             # Legacy manifest (no Mode cell): the mode is detected per folder
             # downstream, so nothing can be ruled out here.
             if mode is None:
@@ -6268,7 +6301,10 @@ class InteractiveMenu:
                     return True
                 within_source.append(source)
             elif mode in (6, 7):
-                marker = self._entry_marker_dir(source, export_marker)
+                row_marker = (row_markers[i] if row_markers is not None
+                              and i < len(row_markers) and row_markers[i]
+                              else export_marker)
+                marker = self._entry_marker_dir(source, row_marker)
                 if marker is None:
                     # The marker is below the Source: outputs land under marker
                     # folders inside this tree.
@@ -6287,6 +6323,20 @@ class InteractiveMenu:
         norm = [os.path.normcase(os.path.abspath(s)) for s in within_source]
         for i, a in enumerate(norm):
             for b in norm[i + 1:]:
+                if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                    return True
+
+        # With ONE shared marker, two entries in the same path always resolve
+        # to the same marker dir (the outermost), so the exact-key check inside
+        # the loop already catches them. With per-row markers, one row's marker
+        # dir can sit INSIDE another's — `_EXPORT` and `_EXPORT/SITE` are
+        # different keys, so that comparison never sees it, yet both children
+        # write their (sibling) output folders into the shared tree. Treat any
+        # nesting between marker dirs as unsafe and force the scan.
+        marker_norm = [os.path.normcase(os.path.abspath(m))
+                       for m in marker_dirs]
+        for i, a in enumerate(marker_norm):
+            for b in marker_norm[i + 1:]:
                 if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
                     return True
 

@@ -107,10 +107,10 @@ def _run_manifest(monkeypatch, tmp_path, rows, origin="tiff", dest="jxl",
 def test_export_columns_load_into_row_options(tmp_path):
     src, dst = tmp_path / "A", tmp_path / "out"
     m = tmp_path / "m.csv"
-    _write_manifest(m, [(src, dst, 6, "tiff2jxl", "_PRINT", "TIFF16",
+    _write_manifest(m, [(src, dst, 7, "tiff2jxl", "_PRINT", "TIFF16",
                          "PRINT_JXL")])
     entries, ro = _load(_menu(), m)
-    assert entries == [(str(src), str(dst), 6)]
+    assert entries == [(str(src), str(dst), 7)]
     assert ro == [{"export_marker": "_PRINT", "export_subfolder": "TIFF16",
                    "export_jxl_folder": "PRINT_JXL"}]
 
@@ -161,7 +161,7 @@ def test_marker_and_subfolder_are_accepted_in_every_direction(
         tmp_path, direction, origin, dest):
     src, dst = tmp_path / "A", tmp_path / "out"
     m = tmp_path / "m.csv"
-    _write_manifest(m, [(src, dst, 6, direction, "_PRINT", "TIFF16", "")],
+    _write_manifest(m, [(src, dst, 7, direction, "_PRINT", "TIFF16", "")],
                     direction=direction)
     entries, ro = _load(_menu(), m, direction)
     assert entries is not None
@@ -197,6 +197,34 @@ def test_invalid_export_cell_refuses_the_manifest(tmp_path, col, val, capsys):
     entries, _ = _load(_menu(), m)
     assert entries is None
     assert col in capsys.readouterr().out
+
+
+def test_subfolder_on_a_non_mode_7_row_is_refused(tmp_path, capsys):
+    """--export-subfolder only means anything in mode 7; on any other explicit
+    Mode a filled ExportSubfolder cell refuses the manifest (a legacy row
+    without a Mode cell stays accepted — its mode is resolved downstream)."""
+    src, dst = tmp_path / "A", tmp_path / "out"
+    hdr = ["Source", "Destination", "Mode", "Direction", "ExportSubfolder"]
+
+    m6 = tmp_path / "m6.csv"
+    _write_manifest(m6, [(src, dst, 6, "tiff2jxl", "TIFF16")], header=hdr)
+    entries, _ = _load(_menu(), m6)
+    assert entries is None
+    out = capsys.readouterr().out
+    assert "column ExportSubfolder only applies to Mode 7 rows" in out
+    assert "row is mode 6" in out
+
+    m7 = tmp_path / "m7.csv"
+    _write_manifest(m7, [(src, dst, 7, "tiff2jxl", "TIFF16")], header=hdr)
+    entries, ro = _load(_menu(), m7)
+    assert entries is not None
+    assert ro == [{"export_subfolder": "TIFF16"}]
+
+    legacy = tmp_path / "legacy.csv"
+    _write_manifest(legacy, [(src, dst, None, "tiff2jxl", "TIFF16")], header=hdr)
+    entries, ro = _load(_menu(), legacy)
+    assert entries is not None
+    assert ro == [{"export_subfolder": "TIFF16"}]
 
 
 # ── merge per row ───────────────────────────────────────────────────────────
@@ -295,6 +323,17 @@ def test_own_subfolder_wins_the_derivation_and_skips_the_warning(
     assert cmds[1][cmds[1].index("--export-subfolder") + 1] == "TIFF16"
 
 
+def test_underivable_warning_mentions_the_column(tmp_path, monkeypatch, capsys):
+    """A mode-7 row whose Source is above the marker and carries no own
+    ExportSubfolder cannot be derived — the warning must name the column that
+    fixes it (the mocked 'n' then declines the run)."""
+    rows = [(tmp_path / "s1", tmp_path / "o1", 7)]
+    ok, cmds = _run_manifest(monkeypatch, tmp_path, rows)
+    assert not ok
+    assert not cmds
+    assert "ExportSubfolder" in capsys.readouterr().out
+
+
 # ── the executor validates the output folder per row ────────────────────────
 
 def test_output_folder_matching_the_marker_is_refused_before_any_child(
@@ -335,7 +374,8 @@ def test_default_folder_against_a_row_marker_is_refused(tmp_path, monkeypatch,
 
 # ── collision scan decision and per-row resolution ──────────────────────────
 
-def test_scan_runs_when_the_effective_markers_differ(tmp_path, monkeypatch):
+def test_different_markers_in_disjoint_trees_skip_the_scan(tmp_path, monkeypatch,
+                                                           capsys):
     calls = []
     monkeypatch.setattr(wp.InteractiveMenu, "_manifest_output_collisions",
                         lambda self, *a, **k: (calls.append(k), [])[1])
@@ -345,7 +385,8 @@ def test_scan_runs_when_the_effective_markers_differ(tmp_path, monkeypatch):
         monkeypatch, tmp_path, rows,
         row_options=[{"export_marker": "_PRINT"}, {"export_marker": "X_SITE"}])
     assert ok
-    assert len(calls) == 1, "two effective markers must force the scan"
+    assert not calls, "disjoint trees with per-row markers need no scan"
+    assert "Collision check: skipped" in capsys.readouterr().out
 
 
 def test_scan_skipped_when_only_the_output_folders_differ(tmp_path, monkeypatch,
@@ -367,15 +408,28 @@ def test_scan_skipped_when_only_the_output_folders_differ(tmp_path, monkeypatch,
 def test_one_effective_marker_is_passed_to_the_skip_check(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(wp.InteractiveMenu, "_manifest_needs_collision_scan",
-                        lambda self, entries, marker:
-                        (seen.append(marker), False)[1])
+                        lambda self, entries, marker, row_markers=None:
+                        (seen.append(row_markers), False)[1])
     rows = [(tmp_path / "A", tmp_path / "oA", 6),
             (tmp_path / "B", tmp_path / "oB", 6)]
     ok, cmds = _run_manifest(
         monkeypatch, tmp_path, rows,
         row_options=[{"export_marker": "_PRINT"}, {"export_marker": "_PRINT"}])
     assert ok
-    assert seen == ["_PRINT"], "the global _EXPORT was used, not the row's marker"
+    assert seen == [["_PRINT", "_PRINT"]], "the per-row markers were not passed"
+
+
+def test_nested_marker_dirs_force_the_scan(tmp_path):
+    """_EXPORT and _EXPORT/SITE are different keys, so the exact-marker
+    comparison cannot see that one row's anchor sits inside the other's —
+    the nesting itself must force the scan."""
+    entries = [
+        (str(tmp_path / "root" / "s_PRINT" / "A"), str(tmp_path / "o1"), 6),
+        (str(tmp_path / "root" / "s_PRINT" / "b_SITE" / "C"),
+         str(tmp_path / "o2"), 6),
+    ]
+    assert _menu()._manifest_needs_collision_scan(
+        entries, "_EXPORT", row_markers=["_PRINT", "_SITE"]) is True
 
 
 def test_collision_mirror_resolves_each_row_under_its_own_folder(tmp_path):
@@ -398,3 +452,47 @@ def test_collision_mirror_resolves_each_row_under_its_own_folder(tmp_path):
         row_export=[("_EXPORT", None, None)] * 2)
     assert collisions, "the shared default folder collision went unseen"
     assert enc.EXPORT_JXL_FOLDER == before, "the folder leaked past the call"
+
+
+# ── the generator writes the export columns for mode 6/7 rows ────────────────
+
+_OPT5 = ["OutputICC", "Resize", "Sharpen", "RenameFrom", "RenameTo"]
+_EXPORT3 = ["ExportMarker", "ExportSubfolder", "ExportJxlFolder"]
+
+
+def _generate(menu, monkeypatch, tmp_path, origin, dest, entry_mode):
+    analyzer = wp.FolderAnalyzer(Path("."), origin, dest, "marker")
+    monkeypatch.setattr(analyzer, "generate_manifest",
+                        lambda analysis, mode: [("S", "D", 1, entry_mode)])
+    monkeypatch.setattr(wp, "SCRIPT_DIR", tmp_path)
+    out = menu._generate_manifest(analyzer, {}, entry_mode)
+    assert out is not None
+    with open(out, newline="", encoding="utf-8-sig") as f:
+        return list(csv.reader(f)), out
+
+
+@pytest.mark.parametrize("origin,dest,entry_mode,extra", [
+    ("tiff", "jxl", 6, _EXPORT3),
+    ("jxl", "tiff", 7, _EXPORT3[:2]),
+    ("jxl", "jxl", 6, _OPT5 + _EXPORT3),
+    ("tiff", "jxl", 2, []),
+    ("jxl", "tiff", 2, []),
+    ("jxl", "jxl", 2, _OPT5),
+])
+def test_generator_writes_the_export_columns_for_modes_6_7(
+        tmp_path, monkeypatch, origin, dest, entry_mode, extra):
+    rows, _out = _generate(_menu(), monkeypatch, tmp_path, origin, dest,
+                           entry_mode)
+    assert rows[0] == ["Source", "Destination", "Mode", "Direction"] + extra
+    assert rows[1] == (["S", "D", str(entry_mode), f"{origin}2{dest}"]
+                       + [""] * len(extra))
+
+
+def test_generated_manifest_round_trips(tmp_path, monkeypatch):
+    rows, out = _generate(_menu(), monkeypatch, tmp_path, "tiff", "jxl", 6)
+    assert rows[0][-3:] == _EXPORT3
+    ro = []
+    entries = _menu()._load_manifest_entries(out, "tiff", "jxl",
+                                              row_options=ro)
+    assert entries is not None
+    assert ro == [{}], "the empty generated cells must not become row options"

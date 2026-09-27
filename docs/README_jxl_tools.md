@@ -334,14 +334,16 @@ anything is written.
 
 ### Per-row export marker, subfolder and output folder (optional columns)
 
-Three more optional columns can be added after `Direction` — the generator
-does **not** write them, add them by hand when needed:
+Three more optional columns are appended after `Direction` when the generated
+manifest has any mode-6/7 row — the generator writes them **empty**, so the
+user only fills what differs; a manifest whose rows are all in other modes
+gets none of them, and a hand-written manifest can always add them:
 
 | Column | Directions | Effect on that row |
 |--------|------------|--------------------|
 | `ExportMarker` | all six | Detect and scan that row under this export marker instead of the run's. |
-| `ExportSubfolder` | all six | Pass `--export-subfolder` for that row (modes 6/7; the other modes ignore it). |
-| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl` only | Name the modes 6/7 output folder for that row (the decoder and the transcoder have no such flag — a value anywhere else refuses the manifest). |
+| `ExportSubfolder` | all six (only mode 7 uses it) | Pass `--export-subfolder` for that row. Filling it on a row whose `Mode` cell is present and not 7 refuses the whole manifest; a row without a `Mode` cell is still accepted (its mode is resolved downstream). |
+| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl` only | Name the modes 6/7 output folder for that row (the decoder and the transcoder have no such flag — a value anywhere else refuses the manifest, and the generator only writes the column in these two directions). |
 
 Unlike the five derivative columns above, **an empty cell keeps the run's
 value** (wizard, preset or config): filling one row never resets the others.
@@ -350,8 +352,11 @@ To ask for the script's own default on a single row, write its name (e.g.
 must be one plain folder name (no `..`, no path characters), and the wrapper
 validates the effective name — against the row's own marker and input
 subfolder, with the child's default included — before any child starts. The
-name collision check reads the effective marker per row, so rows with
-different markers always get the full output scan.
+name collision check uses each row's marker, so disjoint trees under different
+markers still skip the full output scan (and it runs the moment two marker
+folders nest, e.g. one row's `_EXPORT` next to another row's `_EXPORT/SITE`).
+A mode-7 row whose Source sits **above** the marker — the case the warning
+below is about — can be fixed by filling `ExportSubfolder` on that row.
 
 Example — two folders under the same `_EXPORT`, each row writing to its own
 output folder:
