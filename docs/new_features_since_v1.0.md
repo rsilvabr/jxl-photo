@@ -1,5 +1,49 @@
 # New Features Since v1.0
 
+## v2.4.0 (2026-09-27)
+
+### Per-row export marker, subfolder and output folder in manifests (wrapper)
+
+Manifests gain three more optional columns after `Direction`: `ExportMarker`
+(all six directions), `ExportSubfolder` (all six, only mode 7 uses it) and
+`ExportJxlFolder` (`tiff2jxl`/`jxl2jxl` only). A filled cell overrides the
+run's marker/subfolder/output folder for that row; unlike the five derivative
+columns, **an empty cell keeps the run's value**, so filling one row never
+resets the others. Two folders under the same `_EXPORT` can write to different
+output folders in one run:
+
+```csv
+Source,Destination,Mode,Direction,ExportMarker,ExportSubfolder,ExportJxlFolder
+G:\fotos\_EXPORT\A,,6,tiff2jxl,,,PRINT_JXL
+G:\fotos\_EXPORT\B,,6,tiff2jxl,,,SCREEN_JXL
+```
+
+The generator writes the three columns empty whenever the manifest has a
+mode-6/7 row (`ExportJxlFolder` only in the directions whose child has the
+flag); a hand-written manifest can always add them. Each value must be one
+plain folder name, and the wrapper validates the effective name — against the
+row's own marker and input subfolder, with the child's default included —
+before any child starts.
+
+`ExportSubfolder` reaches the children as `--export-subfolder`, which only
+mode 7 honors (mode 6 processes every subfolder by design), so a filled cell
+on any other explicit `Mode` refuses the manifest with the row named; a legacy
+row without a `Mode` cell is still accepted. The mode-7 warning for a Source
+above the marker (and the unattended refusal) now names the column as a fix.
+
+The collision skip-check reasons per row: each entry is anchored on its own
+marker, so disjoint trees under different markers still skip the expensive
+full scan, while two marker folders that nest (`_EXPORT` and `_EXPORT/SITE`
+in different rows) force it — the exact-marker comparison is blind to nesting,
+and both children then write their output folders into the shared tree.
+
+Verified against real TIFFs through the real wrapper and children: four rows
+(two mode-6 under one marker with different output folders, one mode-7 row
+with `ExportSubfolder`, one mode-7 row whose Source sits above a second
+marker) each wrote only its own folder, the subfolder filter excluded the
+sibling subfolder, no JXL landed anywhere else, and a same-named collision in
+one shared output folder was refused before any child started.
+
 ## v2.3.0 (2026-09-26)
 
 ### Per-row output options in manifests (wrapper)

@@ -93,6 +93,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 - Staging SSD support for large collections
 - Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`); since v2.3.0 each manifest row can carry its own colour space, size, sharpening and rename
 - Choose the Capture One / Lightroom export output folder per run (`--export-jxl-folder`, *v2.2.0*) — e.g. masters in `_EXPORT/16B_JXL`, a separate print export in `_EXPORT/PRINT_JXL`, sRGB derivatives in `_EXPORT/16B_JXL_sRGB`
+- **Per-row export control in manifests** *(v2.4.0)*: `ExportMarker`, `ExportSubfolder` and `ExportJxlFolder` columns override the run's marker, mode-7 subfolder and modes-6/7 output folder for that row — the generator writes them (empty) for mode-6/7 rows, and a filled `ExportSubfolder` on any other explicit `Mode` is refused up front
 
 ### 6. **Archive and replace** *(v2.0.0)*
 - `--delete-source` in **every** mode — convert into a separate tree and drop the originals
@@ -717,14 +718,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.3.0** (2026-09-26) — derivatives at any size, and a colour fix for table-curve ICC profiles:
+**v2.4.0** (2026-09-27) — per-row export control for manifests:
 
-- **Resize + output sharpening** — `--resize-long/-short/-percent` and `--sharpen screen|print` on the transcoder (JXL → JPEG/PNG) and on the recompressor's derivatives: a 2048 px sharpened sRGB JPEG straight from the ProPhoto master. The presets are fitted to Capture One's own.
-- **Per-row manifest options** — one manifest can mix recipes: `OutputICC, Resize, Sharpen, RenameFrom, RenameTo` columns override the wizard per row.
-- **`--icc-profile AdobeRGB` built into the transcoder** — no `.icc` file needed.
-- **Fixed: lossy JXLs with a table-curve ICC profile decoded with wrong colours** (ROMM with toe, eciRGB v2, scanner LUTs). They now decode through a float intermediate and a real conversion (15.4 → 51.9 dB). See the [upgrade notice](#notices-for-upgraders).
+- **New manifest columns** `ExportMarker`, `ExportSubfolder` and `ExportJxlFolder` override the run's marker, mode-7 subfolder and modes-6/7 output folder for that row only — e.g. two folders under the same `_EXPORT` writing to `PRINT_JXL` and `SCREEN_JXL` in one run.
+- **The generator writes them** (empty) whenever the manifest has a mode-6/7 row; `ExportJxlFolder` appears only in `tiff2jxl`/`jxl2jxl`.
+- **`ExportSubfolder` on any other explicit Mode is refused** — the flag only means something in mode 7. A mode-7 row whose Source is above the marker can also be fixed by filling that column.
+- **The collision skip-check uses each row's marker**: disjoint trees under different markers still skip the full scan; nested marker folders (`_EXPORT` next to `_EXPORT/SITE`) force it.
 
-Existing command lines and manifests keep working. **1710 tests.**
+Existing command lines and manifests keep working. **1752 tests.**
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -732,36 +733,33 @@ Existing command lines and manifests keep working. **1710 tests.**
 
 ## Changelog
 
-### What's new — v2.3.0 (current stable)
+### What's new — v2.4.0 (current stable)
 
-**Released 2026-09-26.** Supersedes v2.2.0. Rounds 41–42 (bugs #436–#438), plus derivatives at any size.
+**Released 2026-09-27.** Supersedes v2.3.0. Manifests gain per-row export control.
 
-#### New: resize + output sharpening
+#### New: per-row export columns in manifests
 
-`--resize-long PX`, `--resize-short PX` or `--resize-percent P`, and `--sharpen none|screen|print`, on two scripts:
+Three optional columns after `Direction` let one row carry its own export settings, on top of the run's:
 
-- **jxl_jpeg_transcoder.py**, JXL → JPEG/PNG: a delivery file at any size from the master (`--resize-long 2048 --sharpen screen --quality 92`);
-- **jxl_recompressor.py**, JXL → JXL: `--output-icc`, resize and sharpen make the run a derivative, and the recipes combine.
+```csv
+Source,Destination,Mode,Direction,ExportMarker,ExportSubfolder,ExportJxlFolder
+G:\fotos\_EXPORT\A,,6,tiff2jxl,,,PRINT_JXL
+G:\fotos\_EXPORT\B,,6,tiff2jxl,,,SCREEN_JXL
+G:\fotos\_EXPORT,,7,tiff2jxl,,TIFF16,
+```
 
-Aspect ratio is always kept, and nothing is enlarged without `--allow-upscale`. Sharpening works on the Lab **L** channel only (no colour fringes). The presets are fitted to Capture One's defaults on real Nikon Z7 exports at 1000–3000 px and full size: `print` is within 0.1 dB of the per-size best everywhere. A resized/sharpened file is a **derivative** with every guarantee `--output-icc` has: never in place, never deletes, never overwrites a non-derivative, and it carries `jxlphoto-derived:<recipe>` instead of the provenance markers, so changing the recipe re-derives on the next sync.
+- **`ExportMarker`** (all six directions) — detect and scan that row under another export marker instead of the run's.
+- **`ExportSubfolder`** (all six, only mode 7 uses it) — pass `--export-subfolder` for that row. Filled on a row whose `Mode` cell is present and not 7, the manifest is refused with the row named; a row without a `Mode` cell (legacy) is still accepted.
+- **`ExportJxlFolder`** (`tiff2jxl`/`jxl2jxl` only) — name the modes 6/7 output folder for that row; a value in any other direction refuses the manifest.
+- **An empty cell keeps the run's value** (wizard, preset or config) — unlike the five derivative columns, where empty means "not applied" — so filling one row never resets the others.
 
-#### New: per-row options in manifests
+The generator writes the three columns (empty) whenever the manifest has a mode-6/7 row — `ExportJxlFolder` only in the two directions whose child accepts the flag. A mode-7 row whose Source sits above the marker now warns with the fix (fill `ExportSubfolder` on that row), and unattended presets stay refused.
 
-`jxl2jxl`, `jxl2jpeg` and `jxl2png` manifests carry five optional columns after `Direction`: `OutputICC, Resize, Sharpen, RenameFrom, RenameTo`. A filled cell overrides the wizard's answer for that row only, and an empty cell means "not applied". The generated CSV already has them (empty), and older manifests load unchanged. An invalid value refuses the whole manifest before anything runs, the confirmation screen shows each row's recipe, and the derivative rules (never in place, never deleting) are checked per row.
+#### Changed: the collision skip-check reads each row's marker
 
-#### New: `--icc-profile AdobeRGB` in the transcoder
+The check that decides whether the expensive full output scan can be skipped now uses the marker each row actually runs with. Disjoint trees under different markers still skip the scan; two marker folders that nest (`_EXPORT` in one row, `_EXPORT/SITE` in another) force it — the exact-marker comparison could not see the nesting, and both children write their output folders into the shared tree.
 
-The same built-in Adobe RGB (1998)-compatible profile as the recompressor. Built-in names are now case-insensitive, and a missing `.icc` path is refused up front.
-
-#### Fixed: table-curve ICC profiles decoded with wrong colours (#437, #438)
-
-A profile whose tone curve is a **table** has no native JPEG XL form, so a lossy cjxl stores the whole ICC and djxl returns the pixels in **linear sRGB**. The decoder pasted the original ICC on them (15.4 dB, colours completely off, logged as OK), and the derivative paths did the same. Now the case is detected from djxl itself, and the pixels are decoded to 32-bit float — which keeps the colours outside sRGB that an integer PNG would clip — and **converted** to the original profile: **51.9 dB**, the same as a native-profile file. Grey masters are covered too. The encoder's cautious test now refuses to embed such a profile in a lossy JXL. The plain explanation: [why the fix goes through a float decode](docs/jxl_color_internals.md#why-the-fix-goes-through-a-float-decode-the-plain-version).
-
-#### Also fixed
-
-- **#436:** a colour conversion of an **sRGB-encoded** JXL (`--to-srgb`/`--icc-profile`) re-tagged the pixels instead of converting them. The transcoder now always assigns the source profile explicitly.
-
-Every fix has a regression test proven to fail against the pre-fix code. **1710 tests** in the suite.
+Every change has a regression test proven to fail against the pre-fix code. The per-row paths were also verified end to end against real 16-bit TIFFs through the real wrapper and children: each row wrote only its own output folder, the mode-7 subfolder filter excluded the sibling subfolder, no JXL landed anywhere else, and a same-named collision in one shared output folder was refused before any child started. **1752 tests** in the suite.
 
 ---
 
@@ -769,7 +767,8 @@ Every fix has a regression test proven to fail against the pre-fix code. **1710 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.3.0](#changelog)** | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
+| **[v2.4.0](#changelog)** | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
+| [v2.3.0](docs/version_history.md#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
 | [v2.2.0](docs/version_history.md#v220) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
 | [v2.1.1_beta1](docs/version_history.md#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
 | [v2.1.0](docs/version_history.md#v210) | 2026-09-20 | New `jxl_recompressor.py`: shrink a JXL archive, refusing counterproductive re-encodes |

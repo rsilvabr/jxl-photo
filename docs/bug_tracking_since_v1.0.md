@@ -26,6 +26,7 @@ v2.2.0 / 2026-09-24: Rounds 37-40 released as v2.2.0 (the v2.1.1 beta line never
 Round 41 / 2026-09-25: The resize/sharpen round - 1 bug found while measuring it: a colour conversion of an sRGB-encoded JXL re-tagged instead of converting (#436)
 Round 42 / 2026-09-26: The lossy ICC-blob decode - table-curve profiles (ROMM with toe, eciRGB v2, scanner LUTs) decoded with wrong colours in the decoder and every derivative path (#437), and the same on grey masters (#438)
 v2.3.0 / 2026-09-26: Rounds 41-42 released as v2.3.0, together with resize + output sharpening for derivatives, the transcoder's built-in AdobeRGB and the manifests' per-row option columns - see new_features_since_v1.0.md
+v2.4.0 / 2026-09-27: Per-row export columns in manifests (ExportMarker/ExportSubfolder/ExportJxlFolder), the generator writing them (empty) for mode-6/7 rows, the ExportSubfolder-only-on-mode-7 guard, and the collision skip-check now reading each row's marker (nested marker dirs force the scan) - see new_features_since_v1.0.md
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in

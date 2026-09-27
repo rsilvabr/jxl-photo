@@ -11,6 +11,39 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.3.0
+
+**Released 2026-09-26, superseded by v2.4.0.** Derivatives at any size, and a colour fix for JXLs whose ICC profile has a table tone curve. The delivery JPEG for the web or for print can now come straight from the ProPhoto master, resized and sharpened like a Capture One export.
+
+### New: resize + output sharpening
+
+`--resize-long PX`, `--resize-short PX` or `--resize-percent P`, and `--sharpen none|screen|print`, on two scripts:
+
+- **jxl_jpeg_transcoder.py**, JXL → JPEG/PNG: a delivery file at any size from the master (`--resize-long 2048 --sharpen screen --quality 92`);
+- **jxl_recompressor.py**, JXL → JXL: `--output-icc`, resize and sharpen make the run a derivative, and the recipes combine.
+
+Aspect ratio is always kept, and nothing is enlarged without `--allow-upscale`. Sharpening works on the Lab **L** channel only (no colour fringes). The presets are fitted to Capture One's defaults on real Nikon Z7 exports at 1000–3000 px and full size: `print` is within 0.1 dB of the per-size best everywhere. A resized/sharpened file is a **derivative** with every guarantee `--output-icc` has: never in place, never deletes, never overwrites a non-derivative, and it carries `jxlphoto-derived:<recipe>` instead of the provenance markers, so changing the recipe re-derives on the next sync.
+
+### New: per-row options in manifests
+
+`jxl2jxl`, `jxl2jpeg` and `jxl2png` manifests carry five optional columns after `Direction`: `OutputICC, Resize, Sharpen, RenameFrom, RenameTo`. A filled cell overrides the wizard's answer for that row only, and an empty cell means "not applied". The generated CSV already has them (empty), and older manifests load unchanged. An invalid value refuses the whole manifest before anything runs, the confirmation screen shows each row's recipe, and the derivative rules (never in place, never deleting) are checked per row.
+
+### New: `--icc-profile AdobeRGB` in the transcoder
+
+The same built-in Adobe RGB (1998)-compatible profile as the recompressor. Built-in names are now case-insensitive, and a missing `.icc` path is refused up front.
+
+### Fixed: table-curve ICC profiles decoded with wrong colours (#437, #438)
+
+A profile whose tone curve is a **table** has no native JPEG XL form, so a lossy cjxl stores the whole ICC and djxl returns the pixels in **linear sRGB**. The decoder pasted the original ICC on them (15.4 dB, colours completely off, logged as OK), and the derivative paths did the same. Now the case is detected from djxl itself, and the pixels are decoded to 32-bit float — which keeps the colours outside sRGB that an integer PNG would clip — and **converted** to the original profile: **51.9 dB**, the same as a native-profile file. Grey masters are covered too. The encoder's cautious test now refuses to embed such a profile in a lossy JXL. The plain explanation: [why the fix goes through a float decode](jxl_color_internals.md#why-the-fix-goes-through-a-float-decode-the-plain-version).
+
+### Also fixed
+
+- **#436:** a colour conversion of an **sRGB-encoded** JXL (`--to-srgb`/`--icc-profile`) re-tagged the pixels instead of converting them. The transcoder now always assigns the source profile explicitly.
+
+Every fix has a regression test proven to fail against the pre-fix code. **1710 tests** in the suite. Full detail in [bug tracking](bug_tracking_since_v1.0.md) (rounds 41–42) and [new features](new_features_since_v1.0.md).
+
+---
+
 ## v2.2.0
 
 **Released 2026-09-24, superseded by v2.3.0.** The stable release of the v2.1.1 beta line, plus a new use for the recompressor: light 16-bit colour-converted copies of the masters. Four audits of the v2.1 series (rounds 37–40, 88 fixes), almost all in the delete/provenance/dry-run safety layer. Existing command lines keep working, but some TIFFs that earlier releases archived wrongly are now refused.
