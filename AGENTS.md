@@ -130,6 +130,15 @@
   ```
   Do **not** use `git stash` for this: the repo can carry unrelated stashes, and
   a `stash pop` may apply the wrong one and leave a merge conflict.
+- **Changing a function's signature** (or adding a keyword argument to a
+  call): first `grep -rn "<name>" --include=*.py .` — ignoring `claude/`,
+  `PIP/` and `deprecated/` — and list every caller AND every test double
+  (`monkeypatch.setattr(..., "<name>", lambda ...)`, `mock.patch`, fake
+  classes). A double with a fixed arity breaks on a new keyword even when
+  every real call site is fine. New parameters go last, with a default. The
+  wrapper imports child functions in-process (resolvers, finders,
+  `_validate_export_folder_name`), so a child's signature reaches
+  `jxl_photo.py` too. A plan that changes a signature must include this list.
 
 ## Docs map
 - `README.md` — current release, install, quick start
