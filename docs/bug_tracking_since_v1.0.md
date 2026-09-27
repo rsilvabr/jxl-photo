@@ -34,7 +34,7 @@ progress (v1.9.2, v1.9.3, v1.9.4, v1.10.1, v1.10.2, v1.10.3) were never tagged
 and never shipped. They are kept as audit rounds, in order, because the bug
 numbers reference each other.
 Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_decoder.py`, `jxl_jpeg_transcoder.py`
-**Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). Original v1 preserved in `deprecated/`.
+**Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
 
@@ -1625,8 +1625,8 @@ The old "discard ICC" behavior is still available as the **None** mode (`--none`
 
 **Change:** TIFF decoder completely rebuilt in v1.3
 
-**Previous versions (deprecated):**
-- `jxl_tiff_decoder_v1_old.py` — Original decoder (JPEG preview as page 1, no ICC in preview)
+**Previous version:**
+- The in-place predecessor of `jxl_tiff_decoder.py` (JPEG preview as page 1, no ICC in preview), recoverable from the repository history before the v1.3 rebuild — it was never copied into `deprecated/`
 
 **Current official (v1.3):**
 - `jxl_tiff_decoder.py` — Completely rebuilt decoder
@@ -1647,7 +1647,7 @@ The old decoder saved JPEG preview as a secondary page (page 1), which Windows E
 
 **Migration:**
 - Use `jxl_tiff_decoder.py` (current official)
-- Old versions preserved in `deprecated/` for reference only
+- The old decoder is not in `deprecated/` — recover it from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild)
 
 ---
 ### Bug #15 — Missing Method in Manifest Workflow
@@ -2707,10 +2707,14 @@ The Basic mode call was also updated to pass `DJXL_OUTPUT_DEPTH` explicitly.
 - `jxl_photo.py` — Bug fixes #2, #9, #10, #21
 - `jxl_photo_v2.py` — Bug fixes #15, #18, #20, #21
 
-**Deprecated (reference only):**
-- `deprecated/jxl_tiff_decoder_v1_old.py` — Original v1 decoder
-- `deprecated/jxl_tiff_decoder_old.py` — Previous version
-- `deprecated/jxl_to_jpg_png.py` — Legacy script
+**Deprecated (reference only) — what `deprecated/` actually holds:**
+- `deprecated/jxl_to_jpg_png.py` — retired JXL → JPG/PNG converter (superseded by `jxl_jpeg_transcoder.py`)
+- `deprecated/jxl_to_jpg_png_terminal.ps1` — its PowerShell variant
+- `deprecated/README_jxl_to_jpg_png.md` — how to use them
+- `deprecated/README.md` — why they are kept and their known issues
+
+Old `jxl_tiff_decoder.py` versions are NOT in `deprecated/`; recover them from
+the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild).
 
 ---
 
