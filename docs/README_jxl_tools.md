@@ -287,7 +287,8 @@ session — `G:\2024`, `G:\2025`, `G:\2026` — use a manifest (see below).
 
 A manifest is a CSV where each row is one folder, processed as its own run. Auto
 Mode can generate one for you (`[P] Generate manifest CSV`), but you can also
-write it by hand and drop it in `manifests/` next to `jxl_photo.py`:
+write it by hand and drop it in `manifests/` next to `jxl_photo.py` (name it
+`manifest_*.csv` so the picker lists it):
 
 ```csv
 Source,Destination,Mode,Direction
@@ -296,168 +297,36 @@ G:\2025,,3,tiff2jxl
 G:\2026,,3,tiff2jxl
 ```
 
-| Column | Meaning |
-|--------|---------|
-| `Source` | Input folder. Rows starting with `#` are comments. |
-| `Destination` | Only used by modes 0 and 2. Leave **empty** for every other mode — they compute their own output location, and a value there is ignored (the wrapper warns). |
-| `Mode` | 0–8, per row. Different folders can use different modes. Mode **7** in a hand-written manifest means "only `<marker>/<subfolder>`", so write the Source as that path — the wrapper derives the subfolder from it and passes it to the children as `--export-subfolder`. A mode-7 row whose Source sits **above** the marker cannot derive one, and the child would then process every subfolder (i.e. run as mode 6): attended runs warn and can be declined, unattended presets are refused. Use mode 6 if every subfolder is intended. |
-| `Direction` | `tiff2jxl`, `jpeg2jxl`, `jxl2tiff`, ... Must match the workflow you start, so a TIFF→JXL manifest can never be replayed by a JXL→TIFF session. |
-
-### Per-row output options (optional columns)
-
-Manifests for **`jxl2jxl`, `jxl2jpeg` and `jxl2png`** carry five extra columns
-after `Direction` (the generated CSV already includes them; hand-written ones
-may omit them entirely):
-
-| Column | Values | Effect on that row |
-|--------|--------|--------------------|
-| `OutputICC` | empty, `sRGB`, `AdobeRGB`, or a path to a `.icc`/`.icm` | Convert the output to that profile (a derivative — 16-bit, from the source's own profile). |
-| `Resize` | empty, `long:2048`, `short:1024`, `50%` (add `+up` to allow upscaling) | Resize the output. |
-| `Sharpen` | empty, `none`, `screen`, `print` | Output sharpening after the resize. |
-| `RenameFrom` / `RenameTo` | text (no path characters, no `..`) | Rename the output files: the first occurrence of `RenameFrom` in the name becomes `RenameTo` (literal, case-sensitive). `RenameTo` requires `RenameFrom` on the same row. |
-
-A **filled cell overrides the wizard's answer for that option on that row
-only**; an empty cell means "not applied on this row" (it also *clears* the
-wizard's answer — the row runs plain). Any invalid value refuses the whole
-manifest before anything runs, with the row and column named — a typo must
-never become a silent "option not applied". The confirmation preview lists
-each row's recipe next to it (`sRGB · long:2048 · screen`).
-
-The safety rules of the direct run apply per row: a row with a **resize or
-sharpening** recipe cannot run in place (mode 8, or mode 0 with
-Destination = Source) and never deletes its sources — combined with a delete
-answer the whole manifest is refused up front; a row with only `OutputICC`
-keeps its conversion but simply receives no `--delete-source` while the
-plain rows keep it. The duplicate-output guard sees the **renamed** names,
-so a rename that would land two rows on the same file aborts before
-anything is written.
-
-### Per-row export marker, subfolder and output folder (optional columns)
-
-Three more optional columns are appended after `Direction` when the generated
-manifest has any mode-6/7 row — the generator writes them **empty**, so the
-user only fills what differs; a manifest whose rows are all in other modes
-gets none of them, and a hand-written manifest can always add them:
-
-| Column | Directions | Effect on that row |
-|--------|------------|--------------------|
-| `ExportMarker` | all six | Detect and scan that row under this export marker instead of the run's. |
-| `ExportSubfolder` | all six (only mode 7 uses it) | Pass `--export-subfolder` for that row. Filling it on a row whose `Mode` cell is present and not 7 refuses the whole manifest; a row without a `Mode` cell is still accepted (its mode is resolved downstream). |
-| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl` only | Name the modes 6/7 output folder for that row (the decoder and the transcoder have no such flag — a value anywhere else refuses the manifest, and the generator only writes the column in these two directions). |
-
-Unlike the five derivative columns above, **an empty cell keeps the run's
-value** (wizard, preset or config): filling one row never resets the others.
-To ask for the script's own default on a single row, write its name (e.g.
-`16B_JXL`); to process every subfolder, put mode **6** on that row. Each value
-must be one plain folder name (no `..`, no path characters), and the wrapper
-validates the effective name — against the row's own marker and input
-subfolder, with the child's default included — before any child starts. The
-name collision check uses each row's marker, so disjoint trees under different
-markers still skip the full output scan (and it runs the moment two marker
-folders nest, e.g. one row's `_EXPORT` next to another row's `_EXPORT/SITE`).
-A mode-7 row whose Source sits **above** the marker — the case the warning
-below is about — can be fixed by filling `ExportSubfolder` on that row.
-
-Example — two folders under the same `_EXPORT`, each row writing to its own
-output folder:
-
-```csv
-Source,Destination,Mode,Direction,ExportJxlFolder
-G:\fotos\_EXPORT\A,,6,tiff2jxl,PRINT_JXL
-G:\fotos\_EXPORT\B,,6,tiff2jxl,SCREEN_JXL
-```
-
 Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
 **`[M] Run from manifest`**. The encoding settings you pick in Step 6/6A
-(distance, effort, multi-page policy, ...) apply to every entry.
+(distance, effort, multi-page policy, ...) apply to every entry; the CSV
+carries what differs per folder. `Destination` is only honored by modes 0 and
+2, and an empty `Mode` cell auto-detects.
+
+Beyond the four base columns, a manifest can carry **per-row optional
+columns** — the derivative recipe (`OutputICC`, `Resize`, `Sharpen`,
+`RenameFrom`/`RenameTo`, on `jxl2jxl`/`jxl2jpeg`/`jxl2png`) and the export
+overrides (`ExportMarker`, `ExportSubfolder`, `ExportJxlFolder`) —
+each with rules for what may be omitted and what an empty cell means.
+
+→ **Full manifest reference: [README_manifest.md](README_manifest.md)** —
+every column, what can be omitted, the pre-run guards, deletion, the
+end-of-run recap, a recipe gallery, and the manifest → preset → Task
+Scheduler walkthrough.
+
+Each row runs as a **separate child process**, so a failure in one folder does
+not kill the rest; before anything runs, the wrapper refuses the whole manifest
+if files from *different* rows would land on the same output (a child can only
+see its own entry, so that check has to live here). A manifest containing
+**mode-8** rows is asked once whether to delete the originals — the answer
+applies to *every* row — and the `HHMM` token is still charged at execution
+time.
 
 **Editing a manifest in Excel:** generated manifests are UTF-8 **with BOM**, so
 Excel opens non-ASCII folder names (Japanese, accents) correctly instead of as
 mojibake. When you save, keep **`CSV UTF-8 (comma delimited)`** — plain `CSV`
 writes the system ANSI codepage, and the wrapper then refuses the file rather
 than guess an encoding and run against a wrongly-decoded path.
-
-Each row runs as a **separate child process**, so a failure in one folder does not
-kill the rest. Before anything runs, the wrapper checks for files from *different*
-rows that would land on the same output file and refuses the whole manifest if it
-finds any — a child process can only see its own entry, so that check has to live
-here. That scan walks every Source, so it is **skipped when a collision is
-impossible**: rows that write inside their own Source tree (modes 1/3/8, mode 0
-in place, and 6/7 whose export marker sits below the Source) cannot reach each
-other as long as their Sources do not overlap. The common
-`G:\2024` / `G:\2025` / `G:\2026` manifest in mode 6 therefore starts converting
-immediately instead of walking all three libraries first.
-
-**Deleting originals from a manifest.** A manifest containing **mode-8** rows is
-asked once whether to delete the originals, and the answer applies to *every*
-row — deleting is a run-wide setting, not a per-row one, and the question says
-so. Answering yes then asks the same gates the `[D]` menu asks for a single run:
-
-- **round-trip verification** before each delete (TIFF→JXL only);
-- whether to delete originals that were **already converted** (`SKIP`);
-- how an **existing output** is matched to the source about to replace it, when
-  at least one row uses a mode that drops folder structure (2/4/5/6/7).
-
-The `HHMM` token is still charged once, at execution time, and a dry run never
-asks for it.
-
-### Reading the result
-
-A manifest over a few folders can run for hours, and the per-folder totals scroll
-away long before it ends. The run therefore closes with a block covering
-everything:
-
-```
-===========================================================================
-Manifest complete: 3 entries - 2 ok, 1 with failures, 0 cancelled
----------------------------------------------------------------------------
-  #  mode folder                           OK    ovw   skip corrupt    err
-  1  6    D:\2026\260318_Rio             2003      0      0       0      2
-  2  6    E:\2026\260425_Nara            3001      2      4       0      0
-  3  6    G:\2026\260512_Recife           758      0      0       1      0
----------------------------------------------------------------------------
-  TOTAL files                            5762      2      4       1      2
----------------------------------------------------------------------------
-  D50 patched: 12  |  Thumbnails excluded: 5762
----------------------------------------------------------------------------
-  FAILURES (2):
-    [1] D:\2026\260318_Rio\_EXPORT\IMG_0412.tif
-        -> cjxl exit 1
-    [1] D:\2026\260318_Rio\_EXPORT\IMG_0587.tif
-        -> ICC profile rejected
----------------------------------------------------------------------------
-  CORRUPT / UNREADABLE (1):
-  These were NOT converted. The source files are damaged.
-    [3] G:\2026\260512_Recife\_EXPORT\scan_099.tif
-        -> no readable pages (corrupt or truncated TIFF)
-===========================================================================
-```
-
-The first line counts **entries**; the table counts **files**. The two failure
-sections are deliberately separate:
-
-| Section | Meaning |
-|---------|---------|
-| `FAILURES` | The conversion failed on that file — this is what makes the run exit non-zero. |
-| `CORRUPT / UNREADABLE` | The source file is damaged and was not converted. The run itself is fine, so exit codes are unaffected. |
-
-Both list the file **paths**, not just a count: a number still leaves you opening
-per-entry logs to find out which photo broke.
-
-An entry whose child crashed, was killed, or was cancelled shows
-`(no summary - failed)` instead of zeros, so a dead child is never mistaken for a
-clean folder.
-
-Ctrl+C cancels cleanly: the running child is killed, the summary block above is
-still rendered (the interrupted entry marked `cancelled`, the rest
-`not started`), and the wrapper exits `130` — the accounting of what *did*
-complete survives the interruption.
-
-**`Logs/jxl_photo/<timestamp>.log`** holds the same block plus the untruncated
-folder paths (the table shortens them to fit the terminal) and the complete
-failure lists (the screen shows the first 15). Each entry still writes its own
-detailed log under `Logs/jxl_tiff_encoder/` etc., and the block lists those paths
-too.
 
 If you just want a shell loop instead, the encoder takes one folder per call:
 

@@ -147,6 +147,9 @@
   per-script CLI, settings and modes (every `--flag` must appear in its doc:
   `tests/test_docs_cover_the_flags.py` enforces it)
 - `docs/README_jxl_tools.md` — the interactive wrapper
+- `docs/README_manifest.md` — the manifest CSV format: base/optional columns,
+  absent-vs-empty-vs-filled semantics, guards, recipes, scheduling. The wrapper
+  README keeps only a summary and links here — do not re-document columns there
 - `docs/jxl_color_internals.md` — XYB, ICC blobs vs native primaries
 - `docs/bug_tracking_since_v1.0.md` — every fix since v1.0
 - `docs/version_history.md` — detailed notes for all superseded releases
