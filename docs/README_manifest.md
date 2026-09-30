@@ -145,6 +145,35 @@ child would then process *every* subfolder of the marker — mode 6 wearing a
 mode-7 label. Attended runs warn and can be declined; unattended presets are
 refused. Filling the column on that row resolves it.
 
+### `ExcludeFolders` — folder exclusions per row (`tiff2jxl`, `jxl2tiff` only)
+
+| Column | Directions | Effect on that row |
+|--------|------------|--------------------|
+| `ExcludeFolders` | `tiff2jxl`, `jxl2tiff` only | The row's `';'`-separated folder NAMES, passed to the child as `--exclude-folders`. The encoder and the decoder are the only children with that flag — a **filled** cell in any other direction refuses the manifest. |
+
+Its cell is a **hybrid** between the two families above: it follows the export
+columns' "empty keeps the run's value" rule, and adds an explicit "no
+exclusion" value, because the run's answer can legitimately be a list that
+does not suit one row:
+
+| State | Meaning on that row |
+|-------|---------------------|
+| **Column absent** from the CSV | The run's `--exclude-folders` answer applies |
+| **Cell empty** | The row **keeps the run's value** (same convention as the Export columns) |
+| **Cell `-` or `none`** | **No exclusion on that row** — the run's answer does not apply here |
+| **Cell filled** | That row's own list, **overriding** the run's value |
+
+Like the flag itself, the cell takes folder **names**, not paths: any `;`
+entry containing `\` or `/` refuses the whole manifest. (The generator writes
+the column, empty, for `tiff2jxl`/`jxl2tiff` manifests only.)
+
+The collision skip-check reasons per row: disjoint trees under different
+markers still skip the full output scan, while two marker folders that nest
+(one row's `_EXPORT` next to another row's `_EXPORT\SITE`) force it. The
+wrapper's collision walk also applies each row's own `ExcludeFolders` value
+before resolving outputs, so an excluded file — which the child would never
+process — cannot abort the run as a phantom collision.
+
 * * *
 
 ## What is per-row and what is run-wide
@@ -155,7 +184,7 @@ multi-page policy, downgrade/regeneration policies, staging, expert flags — an
 the delete behaviour, which is deliberately run-wide (see below). If two folders
 need different *encoding settings*, that is two runs, not one manifest.
 
-Per-row: `Source`, `Destination`, `Mode`, and the eight optional columns.
+Per-row: `Source`, `Destination`, `Mode`, and the nine optional columns.
 
 * * *
 
@@ -404,5 +433,6 @@ snapshot of its rows.
 | Optional column (whole column) | The wizard's/run's answer applies to every row |
 | Derivative cell empty | Option not applied on that row (clears the wizard's answer) |
 | Export cell empty | Row keeps the run's marker/subfolder/output folder |
+| `ExcludeFolders` cell empty | Row keeps the run's folder exclusions; a filled cell in this direction-restricted column overrides them (and `-` means "none" on that row) |
 | BOM | Optional for reading; always written by the generator |
 | Rows | Empty `Source` or a leading `#` = comment |

@@ -425,7 +425,8 @@ def test_generator_writes_the_five_option_columns(tmp_path, monkeypatch):
     assert rows[1] == ["S", "D", "2", "jxl2png", "", "", "", "", ""]
 
 
-def test_generator_keeps_tiff2jxl_at_four_columns(tmp_path, monkeypatch):
+def test_generator_gives_tiff2jxl_five_columns(tmp_path, monkeypatch):
     rows = _generate(_menu(), monkeypatch, tmp_path, "tiff", "jxl")
-    assert rows[0] == ["Source", "Destination", "Mode", "Direction"]
-    assert rows[1] == ["S", "D", "2", "tiff2jxl"]
+    assert rows[0] == ["Source", "Destination", "Mode", "Direction",
+                       "ExcludeFolders"]
+    assert rows[1] == ["S", "D", "2", "tiff2jxl", ""]

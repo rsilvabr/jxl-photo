@@ -458,6 +458,7 @@ def test_collision_mirror_resolves_each_row_under_its_own_folder(tmp_path):
 
 _OPT5 = ["OutputICC", "Resize", "Sharpen", "RenameFrom", "RenameTo"]
 _EXPORT3 = ["ExportMarker", "ExportSubfolder", "ExportJxlFolder"]
+_EXCL = ["ExcludeFolders"]
 
 
 def _generate(menu, monkeypatch, tmp_path, origin, dest, entry_mode):
@@ -472,11 +473,11 @@ def _generate(menu, monkeypatch, tmp_path, origin, dest, entry_mode):
 
 
 @pytest.mark.parametrize("origin,dest,entry_mode,extra", [
-    ("tiff", "jxl", 6, _EXPORT3),
-    ("jxl", "tiff", 7, _EXPORT3[:2]),
+    ("tiff", "jxl", 6, _EXCL + _EXPORT3),
+    ("jxl", "tiff", 7, _EXCL + _EXPORT3[:2]),
     ("jxl", "jxl", 6, _OPT5 + _EXPORT3),
-    ("tiff", "jxl", 2, []),
-    ("jxl", "tiff", 2, []),
+    ("tiff", "jxl", 2, _EXCL),
+    ("jxl", "tiff", 2, _EXCL),
     ("jxl", "jxl", 2, _OPT5),
 ])
 def test_generator_writes_the_export_columns_for_modes_6_7(

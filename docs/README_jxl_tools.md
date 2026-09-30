@@ -281,6 +281,20 @@ Enter the folder path containing the files (surrounding quotes are stripped, so 
 The wizard takes **one** folder here. To run a **list of folders** in a single
 session — `G:\2024`, `G:\2025`, `G:\2026` — use a manifest (see below).
 
+TIFF→JXL and JXL→TIFF runs — and only those; the flag lives only in the
+TIFF encoder and decoder — get one more question at the end of Step 3:
+
+```
+Exclude folders? (';'-separated folder names, '-' = none; only affects recursive modes)
+```
+
+`-`, `none` or an empty answer means no exclusion; anything else is passed to
+the child as `--exclude-folders` (folder NAMES, relative to the input root —
+see the encoder/decoder READMEs). The default is your **last answer**, and
+the answer is asked here — before the mode is known and before the `[D]`
+delete panel counts the files — so that count always matches what the child
+will actually process.
+
 * * *
 
 ## Running a list of folders (manifest)
@@ -305,8 +319,9 @@ carries what differs per folder. `Destination` is only honored by modes 0 and
 
 Beyond the four base columns, a manifest can carry **per-row optional
 columns** — the derivative recipe (`OutputICC`, `Resize`, `Sharpen`,
-`RenameFrom`/`RenameTo`, on `jxl2jxl`/`jxl2jpeg`/`jxl2png`) and the export
-overrides (`ExportMarker`, `ExportSubfolder`, `ExportJxlFolder`) —
+`RenameFrom`/`RenameTo`, on `jxl2jxl`/`jxl2jpeg`/`jxl2png`), the export
+overrides (`ExportMarker`, `ExportSubfolder`, `ExportJxlFolder`), and the
+per-row folder exclusions (`ExcludeFolders`, `tiff2jxl`/`jxl2tiff` only) —
 each with rules for what may be omitted and what an empty cell means.
 
 → **Full manifest reference: [README_manifest.md](README_manifest.md)** —
@@ -469,6 +484,10 @@ _EXPORT/
   input subfolder) and exits 2 with a clear message if it is unusable
 - Mode 2: Specify the output directory for merged files
 
+Folder exclusions are not asked again here: the question (and its default)
+is in Step 3, and the manifest's `ExcludeFolders` column overrides it per
+row ([manifest reference](README_manifest.md)).
+
 ### Step 6 — Parameters
 Basic parameters always shown:
 - **Workers** — parallel threads (default: 4)
@@ -543,6 +562,13 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
   **lossless** encoder, exactly like entry `[1]`.
 - **Confirm deletes** — safety confirmation before destructive operations
 - **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`)
+
+Alongside these defaults the config keeps the **last-run answers** the wizard
+offers back as defaults — among them `last_exclude_folders`, the raw
+`';'`-separated string of the last TIFF↔JXL run's folder-exclusion answer
+(`-`/empty stored as no exclusion). It is not editable here; the wizard's
+Step 3 question offers it as the default, and `Repeat last workflow`/
+snapshots replay it as-is.
 
 * * *
 

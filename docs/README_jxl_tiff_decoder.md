@@ -396,6 +396,27 @@ session/_EXPORT/sRGB/photo.jxl     → ignored
 
 ---
 
+## Excluding folders from discovery (`--exclude-folders`)
+
+`--exclude-folders` takes a `';'`-separated list of folder **names**, not
+paths (entries containing `\` or `/` are rejected at startup). Matching is by
+**segment**, case-insensitive — `_EXPORT` never matches `My_EXPORT_photos` —
+and is evaluated **relative to the input folder**: only folders **below** the
+input count, so the input folder's own name and its ancestors never exclude,
+and pointing the input AT a folder named `_EXPORT` still processes it. The
+run logs `Excluded N file(s) under: ...` whenever something is excluded, so an
+exclusion is never invisible. The flag is accepted in every mode (0–8), but
+the flat modes 0/1 and single-file inputs never have anything below the root
+to exclude — like the export marker, it only really bites in the recursive
+modes:
+
+```powershell
+# Everything under the root EXCEPT the _EXPORT trees, in place
+py jxl_tiff_decoder.py "F:\2024" --mode 8 --exclude-folders _EXPORT
+```
+
+---
+
 ## Output modes
 
 | Mode | Input | How it finds files | Output location | Example |
@@ -499,10 +520,14 @@ Options:
                      to total a multi-entry run; it is never printed to the
                      user. Safe to use in your own scripts -- the prefix is
                      stable and the payload is JSON.
-  --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
-                     setting in the script). Matched case-insensitively on
-                     folder names that START or END with it.
-  --thumbnail-suffix S
+   --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
+                      setting in the script). Matched case-insensitively on
+                      folder names that START or END with it.
+   --exclude-folders NAMES
+                      ';'-separated folder NAMES skipped during discovery, in
+                      every mode (see "Excluding folders" below). Entries
+                      containing '\' or '/' are rejected at startup
+   --thumbnail-suffix S
                      Filename suffix that marks a thumbnail JXL (default: the
                      THUMBNAIL_SUFFIX setting, `_thumbnail`). Only a FALLBACK:
                      the encoder's `jxlphoto-thumb` marker wins when present, so

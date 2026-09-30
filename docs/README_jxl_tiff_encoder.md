@@ -295,6 +295,27 @@ py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder Print --expo
 
 ---
 
+## Excluding folders from discovery (`--exclude-folders`)
+
+`--exclude-folders` takes a `';'`-separated list of folder **names**, not
+paths (entries containing `\` or `/` are rejected at startup). Matching is by
+**segment**, case-insensitive — `_EXPORT` never matches `My_EXPORT_photos` —
+and is evaluated **relative to the input folder**: only folders **below** the
+input count, so the input folder's own name and its ancestors never exclude,
+and pointing the input AT a folder named `_EXPORT` still processes it. The
+run logs `Excluded N file(s) under: ...` whenever something is excluded, so an
+exclusion is never invisible. The flag is accepted in every mode (0–8), but
+the flat modes 0/1 and single-file inputs never have anything below the root
+to exclude — like the export marker, it only really bites in the recursive
+modes:
+
+```powershell
+# Everything under the root EXCEPT the _EXPORT trees, in place
+py jxl_tiff_encoder.py "F:\2024" --mode 8 --exclude-folders _EXPORT
+```
+
+---
+
 ## Output modes
 
 | Mode | Input | How it finds files | Output location | Example |
@@ -423,6 +444,10 @@ Options:
                   export marker (it would become a second anchor) and must not
                   equal the --export-subfolder (outputs would land among the
                   sources). Ignored, with a warning, outside modes 6/7.
+  --exclude-folders NAMES
+                  ';'-separated folder NAMES skipped during discovery, in every
+                  mode (see "Excluding folders" below). Entries containing
+                  '\' or '/' are rejected at startup
   --icc-cache-dir D  Where the ICC round-trip test caches its verdicts (default:
                   the ICC_CACHE_DIR_OVERRIDE setting, else a folder beside the
                   script). One entry per profile; see "ICC strategy" below

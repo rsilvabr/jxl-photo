@@ -45,6 +45,10 @@ SHARED_HELPERS = [
     # deleting sources in a layout another one guards.
     "_run_collapses_structure",
     "_marker_matches",
+    # --exclude-folders discovery filter (encoder/decoder finders + the
+    # wrapper's collision walk): a drifting copy would let one site see a file
+    # set another does not.
+    "_path_excluded_below_root",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_validate_export_folder_name",

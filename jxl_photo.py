@@ -306,6 +306,15 @@ def _session_number_error(session: Dict) -> Optional[str]:
         if not isinstance(raw, str) or raw.lower() not in allowed:
             return (f"{field[len('last_'):]} is not a known value: {raw!r} "
                     f"(valid: {'/'.join(allowed)})")
+
+    # Same refuse-corrupt rule for a free-form string field that reaches the
+    # child's command line (#319e pattern): a hand-edited
+    # last_exclude_folders holding a number or a list must not become
+    # '--exclude-folders <garbage>' on a replayed workflow. Empty string and
+    # None both read as "no exclusion", so they pass.
+    raw_excl = session.get("last_exclude_folders")
+    if raw_excl not in (None, "") and not isinstance(raw_excl, str):
+        return f"exclude_folders is not a string: {raw_excl!r}"
     return None
 
 
@@ -397,6 +406,22 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     return False
 
 
+def _path_excluded_below_root(file_path: Path, root, names) -> bool:
+    """True when any folder segment of file_path BELOW root matches one
+    of `names` (lower-cased). Relative to root, segment match,
+    fail-closed."""
+    if not names or root is None:
+        return False
+    try:
+        rel = file_path.parent.relative_to(root)
+    except ValueError:
+        try:
+            rel = file_path.parent.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            rel = file_path.parent  # fail closed, like _is_tool_output_path
+    return any(seg.lower() in names for seg in rel.parts)
+
+
 def _append_expert_flags(cmd: List[str], flags: str) -> None:
     """Append free-form expert flags to a child command line.
 
@@ -433,7 +458,7 @@ def _is_manifest_header_row(row) -> bool:
 # (marker/subfolder/folder), so filling one row never resets the others.
 _MANIFEST_OPTION_COLUMNS = ("outputicc", "resize", "sharpen", "renamefrom",
                             "renameto", "exportmarker", "exportsubfolder",
-                            "exportjxlfolder")
+                            "exportjxlfolder", "excludefolders")
 # The derivative/rename columns: the directions whose child writes a
 # derivative. The manifest generator writes those five columns for exactly
 # these directions.
@@ -449,13 +474,16 @@ _MANIFEST_OPTION_DIRECTIONS = {
     "exportmarker":    _MANIFEST_ALL_DIRECTIONS,
     "exportsubfolder": _MANIFEST_ALL_DIRECTIONS,
     "exportjxlfolder": frozenset({"tiff2jxl", "jxl2jxl"}),
+    # --exclude-folders lives in the TIFF encoder and decoder only.
+    "excludefolders":  frozenset({"tiff2jxl", "jxl2tiff"}),
 }
 _MANIFEST_OPTION_DISPLAY = {"outputicc": "OutputICC", "resize": "Resize",
                             "sharpen": "Sharpen", "renamefrom": "RenameFrom",
                             "renameto": "RenameTo",
                             "exportmarker": "ExportMarker",
                             "exportsubfolder": "ExportSubfolder",
-                            "exportjxlfolder": "ExportJxlFolder"}
+                            "exportjxlfolder": "ExportJxlFolder",
+                            "excludefolders": "ExcludeFolders"}
 _MANIFEST_RESIZE_RE = re.compile(r"^(?:(long|short):(\d+)|(\d+(?:\.\d+)?)%)(\+up)?$",
                                  re.IGNORECASE)
 _MANIFEST_RENAME_BAD = re.compile(r'[,;/\\:*?"<>|]')
@@ -467,9 +495,15 @@ def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
     name to the raw cell text, for the columns PRESENT in the CSV only.
     Returned keys, only for present columns: output_icc (str|None),
     resize_mode/resize_value/allow_upscale, sharpen, rename_from, rename_to —
-    None / 'none' / '' meaning 'not applied'. The export columns
+    None / 'none' / '' meaning 'not applied'.     The export columns
     (export_marker, export_subfolder, export_jxl_folder) are str and appear
-    ONLY when the cell has a value (empty keeps the run's value)."""
+    ONLY when the cell has a value (empty keeps the run's value).
+    `exclude_folders` (ExcludeFolders) is a hybrid: '' keeps the run's
+    value (key absent), '-'/'none' means "no exclusion on this row"
+    (exclude_folders=None, PRESENT), a value is the raw ';'-separated
+    string (the run's value with entries for this row). Any ';' entry
+    containing '\\' or '/' refuses the whole manifest — folder NAMES, not
+    paths."""
     opts: Dict = {}
     for name, raw in cells.items():
         value = (raw or "").strip()
@@ -550,6 +584,24 @@ def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
                    "exportsubfolder": "export_subfolder",
                    "exportjxlfolder": "export_jxl_folder"}[name]
             opts[key] = value
+        elif name == "excludefolders":
+            # '' keeps the run's value (key absent; the export* convention).
+            # '-' / 'none' are explicit removals for this row
+            # (exclude_folders=None, PRESENT) — the wizard's "no exclusion"
+            # answer spelled out.
+            if value:
+                if value.lower() != "none" and value != "-":
+                    entries = [n.strip() for n in value.split(";") if n.strip()]
+                    if any("\\" in n or "/" in n for n in entries):
+                        return None, (f"column ExcludeFolders takes folder "
+                                      f"NAMES, not paths ({value!r})")
+                    if not entries:
+                        # ';' or ';;' only: the children filter nothing.
+                        opts["exclude_folders"] = None
+                    else:
+                        opts["exclude_folders"] = value
+                else:
+                    opts["exclude_folders"] = None
     if opts.get("rename_to") and not opts.get("rename_from"):
         return None, "column RenameTo is set but RenameFrom is empty on the same row"
     return opts, None
@@ -651,15 +703,16 @@ _CHILD_SUBFOLDER_GLOBALS = ('EXPORT_TIFF_SUBFOLDER', 'EXPORT_JXL_SUBFOLDER',
 
 @contextmanager
 def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = None,
-                       jxl_folder: Optional[str] = None):
-    """Run a child's own finder/resolver under THIS run's marker, subfolder and
-    modes 6/7 output folder.
+                       jxl_folder: Optional[str] = None,
+                       exclude_folders: Optional[str] = None):
+    """Run a child's own finder/resolver under THIS run's marker, subfolder,
+    modes 6/7 output folder and --exclude-folders list.
 
-    The children read `EXPORT_MARKER`, `EXPORT_*_SUBFOLDER` and
-    `EXPORT_JXL_FOLDER` as module globals, set from CLI flags. The wrapper
-    imports those modules in-process to reuse their path logic, so it has to
-    mirror the flags by assignment — and then put them back, because this
-    process outlives the call.
+    The children read `EXPORT_MARKER`, `EXPORT_*_SUBFOLDER`,
+    `EXPORT_JXL_FOLDER` and `EXCLUDE_FOLDERS` as module globals, set from CLI
+    flags. The wrapper imports those modules in-process to reuse their path
+    logic, so it has to mirror the flags by assignment — and then put them
+    back, because this process outlives the call.
 
     One context manager instead of two hand-written blocks, because the two had
     already drifted in both directions:
@@ -691,6 +744,16 @@ def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = 
         if jxl_folder and hasattr(child, 'EXPORT_JXL_FOLDER'):
             saved['EXPORT_JXL_FOLDER'] = child.EXPORT_JXL_FOLDER
             child.EXPORT_JXL_FOLDER = jxl_folder
+        # Like the marker above: set only when truthy, so the children's
+        # default () stays the default for callers that never had the
+        # question (transcoder/recompressor run-level answers). The
+        # transcoder and recompressor simply do not have the global, and
+        # hasattr there makes this a no-op — the callers pass `workflow.get(
+        # 'exclude_folders')` for ALL children so the sites stay uniform.
+        if exclude_folders and hasattr(child, 'EXCLUDE_FOLDERS'):
+            saved['EXCLUDE_FOLDERS'] = child.EXCLUDE_FOLDERS
+            child.EXCLUDE_FOLDERS = tuple(
+                n.strip().lower() for n in exclude_folders.split(';') if n.strip())
         yield child
     finally:
         for name, value in saved.items():
@@ -785,6 +848,9 @@ class ToolConfig:
     # entries: the repeat re-reads the file, so edits made in Excel between runs
     # are picked up instead of silently replaying a stale copy.
     last_manifest_path: Optional[str] = None
+    # ';'-separated folder NAMES the last TIFF<->JXL run excluded from
+    # discovery (--exclude-folders). Raw string, so a repeat re-splits it.
+    last_exclude_folders: Optional[str] = None
 
     # Named snapshots of the last_* fields above ({name: {last_*: value}}), so
     # several recurring jobs can coexist instead of fighting over the single
@@ -909,7 +975,8 @@ class ConfigManager:
                           bit_depth: Optional[int] = None,
                           add_preview: Optional[bool] = None,
                           mode_config: Optional[Dict] = None,
-                          manifest_path=_STAGING_UNSET) -> None:
+                          manifest_path=_STAGING_UNSET,
+                          exclude_folders: Optional[str] = _STAGING_UNSET) -> None:
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -977,6 +1044,17 @@ class ConfigManager:
             # offer to repeat a manifest that has nothing to do with the last
             # saved session.
             self.config.last_manifest_path = manifest_path
+        if exclude_folders is not self._STAGING_UNSET:
+            # Sentinel-based (same as staging/icc): the run-level value is
+            # None BOTH when the user answered '-' (= no exclusion) and when
+            # the direction never got asked the question — only the first
+            # means "clear the saved value". With a plain `is not None`
+            # param, a TIFF->JXL run WITH exclusions followed by one WITHOUT
+            # would leave the stale list saved (bug #319(a)'s class over the
+            # whole "last workflow" slot), so the callers that know the
+            # answer pass None explicitly; the ones that never asked omit
+            # the argument entirely.
+            self.config.last_exclude_folders = exclude_folders
         self.save_config()
 
     def session_snapshot(self) -> Dict:
@@ -1766,11 +1844,15 @@ def _row_effective_options(workflow: Dict, advanced: Dict, row_opts: Optional[Di
     columns applied. A key PRESENT in row_opts overrides (None/''/'none'
     removes the option); an absent key keeps the wizard's value. The export_*
     keys are the exception: they only override when they have a value (they
-    never remove)."""
+    never remove). `exclude_folders` is a hybrid: '' was mapped to an ABSENT
+    key by _parse_manifest_row_options (keeps the run's value), '-'/'none'
+    lands as None (removes), a value is the row's own raw string."""
     wf = dict(workflow)
     adv = dict(advanced)
     if not row_opts:
         return wf, adv
+    if 'exclude_folders' in row_opts:
+        wf['exclude_folders'] = row_opts['exclude_folders'] or None
     if 'output_icc' in row_opts:
         val = row_opts['output_icc']
         if origin == 'jxl' and dest == 'jxl':
@@ -1849,6 +1931,8 @@ def _row_options_summary(row_opts: Optional[Dict]) -> str:
         parts.append(f"sub:{row_opts['export_subfolder']}")
     if row_opts.get('export_jxl_folder'):
         parts.append(f"out:{row_opts['export_jxl_folder']}")
+    if row_opts.get('exclude_folders'):
+        parts.append(f"excl:{row_opts['exclude_folders']}")
     return " · ".join(parts)
 
 
@@ -2540,6 +2624,32 @@ class InteractiveMenu:
 
         workflow['input_dir'] = str(path)
 
+        # Folder exclusions, ONLY for the directions whose child has the
+        # flag (--exclude-folders exists in the TIFF encoder and decoder).
+        # Asked here, at the END of Step 3, and NOT in Step 5: the [D]
+        # delete gate counts the source files in Step 4 (_count_origin_files),
+        # so a later question would leave the "About to delete originals"
+        # panel counting a tree the run would skip (bug #297's class).
+        # The mode is not known yet, so the note says "recursive modes".
+        if (workflow.get('origin_format'), workflow.get('dest_format')) in (
+                ('tiff', 'jxl'), ('jxl', 'tiff')):
+            _excl_default = self.config.config.last_exclude_folders
+            _excl_q = ("Exclude folders? (';'-separated folder names, '-' = none; "
+                       "only affects recursive modes)")
+            if RICH_AVAILABLE and console:
+                _excl_raw = Prompt.ask(_excl_q, default=_excl_default or "-")
+            else:
+                print("Folder NAMES to exclude, ';'-separated ('-' = none; "
+                      "only affects recursive modes)")
+                _excl_raw = input(f"Exclude folders [{_excl_default or '-'}]: ").strip()
+            _excl_raw = (_excl_raw or "").strip()
+            if not _excl_raw or _excl_raw.lower() in ("-", "none"):
+                workflow['exclude_folders'] = None
+                self.config.config.last_exclude_folders = None
+            else:
+                workflow['exclude_folders'] = _excl_raw
+                self.config.config.last_exclude_folders = _excl_raw
+
         return True
 
     def _wizard_auto_mode(self, workflow: Dict) -> bool:
@@ -2794,6 +2904,7 @@ class InteractiveMenu:
             # never resets the others.
             direction = f"{analyzer.origin}2{analyzer.dest}"
             with_options = direction in _MANIFEST_DERIVATIVE_DIRECTIONS
+            with_exclude = direction in _MANIFEST_OPTION_DIRECTIONS["excludefolders"]
             with_export = any(entry_mode in (6, 7)
                               for _s, _d, _c, entry_mode in mappings)
             export_header = ["ExportMarker", "ExportSubfolder"]
@@ -2803,6 +2914,12 @@ class InteractiveMenu:
             if with_options:
                 header += ["OutputICC", "Resize", "Sharpen", "RenameFrom",
                            "RenameTo"]
+            # ExcludeFolders is offered for the two TIFF directions whether
+            # or not mode 6/7 appears: the flag bites in every recursive
+            # mode. Empty cell = the row keeps the run's '-' answer (or
+            # whatever 'Repeat last workflow' stored).
+            if with_exclude:
+                header += ["ExcludeFolders"]
             if with_export:
                 header += export_header
             writer.writerow(header)
@@ -2810,6 +2927,8 @@ class InteractiveMenu:
                 row = [src, dst, entry_mode, direction]
                 if with_options:
                     row += ["", "", "", "", ""]
+                if with_exclude:
+                    row += [""]
                 if with_export:
                     row += [""] * len(export_header)
                 writer.writerow(row)
@@ -2963,7 +3082,8 @@ class InteractiveMenu:
         dict per entry, aligned with the returned list — the parsed values of
         the optional columns after Direction (OutputICC/Resize/Sharpen/
         RenameFrom/RenameTo and the export columns ExportMarker/
-        ExportSubfolder/ExportJxlFolder). A column PRESENT in the CSV overrides
+        ExportSubfolder/ExportJxlFolder, plus ExcludeFolders). A column
+        PRESENT in the CSV overrides
         the wizard's answer for that option on that row (empty cell = not
         applied; an empty Export* cell keeps the run's value); absent columns
         never appear in the dicts. Any invalid value refuses the whole
@@ -3606,7 +3726,12 @@ class InteractiveMenu:
                 _was_disabled = child.logger.disabled
                 child.logger.disabled = True        # its finders log; this is a preview
                 try:
-                    with _with_child_marker(child, marker, subfolder, jxl_folder):
+                    # The exclusion too — the child's finders filter through
+                    # their own EXCLUDE_FOLDERS global, which _with_child_marker
+                    # now mirrors. Without it the delete panel would count a
+                    # set the run would skip (bug #297's class again).
+                    with _with_child_marker(child, marker, subfolder, jxl_folder,
+                                            exclude_folders=workflow.get('exclude_folders')):
                         fn = getattr(child, finders.get(mode, recursive))
                         return len(fn(root))
                 finally:
@@ -3636,7 +3761,8 @@ class InteractiveMenu:
                 # Same marker AND subfolder the encoder/decoder branch uses: the
                 # transcoder filters modes 6/7 inside its resolver rather than in
                 # a finder, but it reads the same globals.
-                with _with_child_marker(_tr, marker, subfolder, jxl_folder):
+                with _with_child_marker(_tr, marker, subfolder, jxl_folder,
+                                        exclude_folders=workflow.get('exclude_folders')):
                     _decode = (origin == 'jxl')
                     return sum(1 for f in files
                                if _tr.resolve_output_transcode(f, mode, root, _decode)
@@ -5164,6 +5290,8 @@ class InteractiveMenu:
                 extra_info.append("Adopt scan: OFF (pairing trusted, not verified)")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
+        if workflow.get('exclude_folders'):
+            extra_info.append(f"Excluding: {workflow['exclude_folders']}")
         if workflow.get('dry_run'):
             extra_info.append("DRY RUN")
 
@@ -5715,6 +5843,7 @@ class InteractiveMenu:
                               (_a.get('rename_to') or ''))
                              for _w, _a in _row_effs],
                 row_export=_row_export,
+                row_excludes=[_w.get('exclude_folders') for _w, _a in _row_effs],
                 cross_sink=cross_out_folders,
             )
         if collisions:
@@ -6376,7 +6505,8 @@ class InteractiveMenu:
                                     rename_to: str = '',
                                     row_renames: Optional[List[Tuple[str, str]]] = None,
                                     row_export: Optional[List[Tuple]] = None,
-                                    cross_sink: Optional[Dict[int, Set[str]]] = None) -> List:
+                                    cross_sink: Optional[Dict[int, Set[str]]] = None,
+                                    row_excludes: Optional[List[Optional[str]]] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -6425,6 +6555,15 @@ class InteractiveMenu:
         its own Export* columns must resolve with those, not the run's. When
         None, the (export_marker, export_subfolder, export_jxl_folder)
         arguments are the fallback for every entry.
+
+        `row_excludes` (optional): one raw exclude_folders value (';' string
+        or None) per entry, aligned with manifest_entries — the manifest's
+        ExcludeFolders column, ALREADY effective per row. The children's
+        finders never run here (this walk goes through its own rglob +
+        resolver), so the exclusion must be applied in the walk's resolver
+        branch or a flat-output row would abort on PHANTOM collisions: the
+        excluded file would never be processed at all. When None, no entry
+        has an exclusion (the only real caller always passes the list).
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
@@ -6625,7 +6764,17 @@ class InteractiveMenu:
                 _m, _s, _j = (row_export[ei] if row_export is not None
                               else (export_marker, export_subfolder,
                                     export_jxl_folder))
-                with (_with_child_marker(_child, _m, _s, _j)
+                # This entry's exclusion (ExcludeFolders column, or None for
+                # a legacy manifest), mirrored into the child's
+                # EXCLUDE_FOLDERS global AND applied on the walk below — the
+                # walk never passes through the child's finders, where the
+                # filter otherwise lives.
+                _excl_eff = (row_excludes[ei] if row_excludes is not None
+                             else None)
+                _excl_names = tuple(n.strip().lower() for n in _excl_eff.split(';')
+                                    ) if _excl_eff else ()
+                _excl_names = tuple(n for n in _excl_names if n)
+                with (_with_child_marker(_child, _m, _s, _j, _excl_eff)
                       if _child is not None else nullcontext()):
                     # The row's own RenameFrom/RenameTo, when the manifest carries
                     # the columns; the run-wide pair is the fallback.
@@ -6680,7 +6829,7 @@ class InteractiveMenu:
                             continue
 
                         def _resolve_all(files, mode=mode, src_root=src_root, dest_path=dest_path,
-                                         rf=rf, rt=rt):
+                                         rf=rf, rt=rt, _excl_names=_excl_names):
                             for f in files:
                                 # Filter BEFORE resolving: the child resolvers are
                                 # only meaningful for real source files, and running
@@ -6689,6 +6838,16 @@ class InteractiveMenu:
                                     if not f.is_file() or f.suffix.lower() not in origin_exts:
                                         continue
                                 except OSError:
+                                    continue
+                                # The entry's --exclude-folders: the walk never
+                                # passes through the child's finders, so the
+                                # ONLY place the exclusion can bite is here.
+                                # Skipping an excluded file before resolving is
+                                # what keeps a flat-output row from aborting on
+                                # a collision the run would never produce
+                                # (the file is not even processed).
+                                if _excl_names and _path_excluded_below_root(
+                                        f, src_root, _excl_names):
                                     continue
                                 if _skip_check is not None and _skip_check(f, src_root, mode):
                                     continue
@@ -6864,6 +7023,31 @@ class InteractiveMenu:
         if pv == 'adopt' and advanced.get('adopt_scan') is False:
             cmd.append('--no-adopt-scan')
 
+    def _warn_exclude_folders_unsupported(self, origin: str, dest: str,
+                                          value: str, at_most_once: bool = False) -> None:
+        """Warn that --exclude-folders does not exist for this direction.
+
+        Only the TIFF encoder and decoder accept the flag; the recompressor
+        and the transcoder do not, so the wrapper omits it there and says so
+        instead of silently ignoring the user's setting.
+
+        `at_most_once` is for the MANIFEST builder, which runs once per entry:
+        a run-scoped set keyed by direction keeps a 30-entry manifest from
+        printing 30 copies of the same line.
+        """
+        if at_most_once:
+            _warned = self.__dict__.setdefault('_exclude_folder_warned', set())
+            if (origin, dest) in _warned:
+                return
+            _warned.add((origin, dest))
+        _msg = (f"--exclude-folders is not supported for "
+                f"{origin.upper()} -> {dest.upper()} runs; the "
+                f"ExcludeFolders setting ({value}) is IGNORED here.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{_msg}[/yellow]")
+        else:
+            print(f"WARNING: {_msg}")
+
     def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
                                    origin: str, dest: str, workers: int,
                                    workflow: Dict, advanced: Dict) -> Optional[List]:
@@ -6904,6 +7088,19 @@ class InteractiveMenu:
             export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
             if export_jxl_folder:
                 cmd.extend(['--export-jxl-folder', export_jxl_folder])
+
+        # --exclude-folders exists in the TIFF encoder and decoder only. A
+        # manifest of an unsupported direction carries its exclusion as the
+        # run-level value, so this builder (once per entry) warns at most
+        # once per run instead of once per entry.
+        _excl = workflow.get('exclude_folders')
+        if _excl:
+            if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff')):
+                cmd.extend(['--exclude-folders', _excl])
+            else:
+                # Once per run (see the method): this builder runs per entry.
+                self._warn_exclude_folders_unsupported(origin, dest, _excl,
+                                                       at_most_once=True)
 
         if origin == 'tiff' and dest == 'jxl':
             distance = workflow.get('distance', 0.1)
@@ -7458,6 +7655,9 @@ class InteractiveMenu:
             export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
             if export_jxl_folder:
                 cmd.extend(['--export-jxl-folder', export_jxl_folder])
+            _excl = workflow.get('exclude_folders')
+            if _excl:
+                cmd.extend(['--exclude-folders', _excl])
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -7535,6 +7735,9 @@ class InteractiveMenu:
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
                 cmd.extend(['--export-subfolder', export_subfolder])
+            _excl = workflow.get('exclude_folders')
+            if _excl:
+                cmd.extend(['--exclude-folders', _excl])
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -7612,6 +7815,9 @@ class InteractiveMenu:
             export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
             if export_jxl_folder:
                 cmd.extend(['--export-jxl-folder', export_jxl_folder])
+            _excl = workflow.get('exclude_folders')
+            if _excl:
+                self._warn_exclude_folders_unsupported(origin, dest, _excl)
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -7692,6 +7898,9 @@ class InteractiveMenu:
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
                 cmd.extend(['--export-subfolder', export_subfolder])
+            _excl = workflow.get('exclude_folders')
+            if _excl:
+                self._warn_exclude_folders_unsupported(origin, dest, _excl)
 
             # Mode 2: flat output folder
             if mode == 2:
@@ -7867,6 +8076,8 @@ class InteractiveMenu:
             bits.append(f"d={_sane_distance(distance):g}")
         elif not distance_driven and quality_driven and session.get('last_quality') is not None:
             bits.append(f"q={session['last_quality']}")
+        if session.get('last_exclude_folders'):
+            bits.append(f"excl: {session['last_exclude_folders']}")
         return " | ".join(bits)
 
     @staticmethod
@@ -8277,6 +8488,12 @@ class InteractiveMenu:
 
         workflow['origin_format'] = origin
         workflow['dest_format'] = last_dest
+        # TOP-LEVEL, never inside the per-mode _keep of mode_config: folder
+        # exclusion is not mode-specific (it filters discovery in every
+        # mode), and the manifest's ExcludeFolders column overrides it per
+        # row via _row_effective_options. Validated above by
+        # _session_number_error.
+        workflow['exclude_folders'] = session.get('last_exclude_folders')
         workflow['use_ram'] = session.get('last_use_ram') if session.get('last_use_ram') is not None else True
         workflow['icc_profile'] = session.get('last_icc_profile')
         workflow['compression'] = session.get('last_compression') or 'zip'
@@ -8514,6 +8731,12 @@ def _main():
                     mode_config=workflow.get('mode_config'),
                     # None on a normal run: clears any previously stored CSV.
                     manifest_path=workflow.get('manifest_path'),
+                    # The wizard asked only in the TIFF<->JXL directions; for
+                    # every other the key is absent and the saved value is
+                    # kept (`is not self._STAGING_UNSET` semantics).
+                    exclude_folders=(workflow['exclude_folders']
+                                     if 'exclude_folders' in workflow
+                                     else config._STAGING_UNSET),
                 )
 
                 if RICH_AVAILABLE and console:

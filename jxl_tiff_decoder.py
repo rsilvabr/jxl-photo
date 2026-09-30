@@ -1019,6 +1019,7 @@ TIFF_SUFFIX_REPLACE = "TIFF"
 
 # || MODES 6 and 7 SETTINGS ||
 EXPORT_MARKER = "_EXPORT"
+EXCLUDE_FOLDERS: tuple = ()   # lower-cased folder names excluded from discovery
 EXPORT_TIFF_FOLDER = "16B_TIFF"
 EXPORT_JXL_SUBFOLDER = ""
 # [MODE 6/7] Uses EXPORT_MARKER as an anchor in the path
@@ -3330,9 +3331,26 @@ def process_group(group_tasks, workers, target_icc=None):
 JXL_EXTS = frozenset({".jxl"})
 
 
+def _path_excluded_below_root(file_path: Path, root, names) -> bool:
+    """True when any folder segment of file_path BELOW root matches one
+    of `names` (lower-cased). Relative to root, segment match,
+    fail-closed."""
+    if not names or root is None:
+        return False
+    try:
+        rel = file_path.parent.relative_to(root)
+    except ValueError:
+        try:
+            rel = file_path.parent.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            rel = file_path.parent  # fail closed, like _is_tool_output_path
+    return any(seg.lower() in names for seg in rel.parts)
+
+
 def _iter_jxls(paths, root=None):
     seen = set()
     files = []
+    excluded = 0
     _scan = _scan_state(root)
     for f in paths:
         _scan_tick(_scan, len(files))
@@ -3344,10 +3362,15 @@ def _iter_jxls(paths, root=None):
             key = f.resolve()
         except OSError:
             continue
+        if _path_excluded_below_root(f, root, EXCLUDE_FOLDERS):
+            excluded += 1
+            continue
         if key not in seen:
             seen.add(key)
             files.append(f)
     _scan_done(_scan, len(files))
+    if excluded > 0:
+        logger.info(f"Excluded {excluded} file(s) under: {', '.join(EXCLUDE_FOLDERS)}")
     return sorted(files)
 
 
@@ -4067,6 +4090,13 @@ Examples:
                         help="Staging directory for output files")
     parser.add_argument("--export-marker", type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
+    parser.add_argument("--exclude-folders", default="",
+                        help="';'-separated folder NAMES skipped during discovery, in every "
+                             "mode. Segment match (case-insensitive), evaluated relative to "
+                             "the input folder: '_EXPORT' skips any <input>\\...\\_EXPORT\\... "
+                             "tree but never 'My_EXPORT_photos', and never a folder above the "
+                             "input — pointing the input AT an excluded name still works. "
+                             "Names only: entries containing '\\' or '/' are rejected.")
     parser.add_argument("--delete-source", action="store_true",
                         help="Delete source JXLs after successful decode. Works in EVERY "
                              "mode, not just 8. IRREVERSIBLE")
@@ -4213,8 +4243,15 @@ Examples:
     # NOTE: --clean-staging is applied after setup_logger() below (it must be
     # auditable, and it must not run on a dry run).
     if args.export_marker:
-        global EXPORT_MARKER
+        global EXPORT_MARKER, EXCLUDE_FOLDERS
         EXPORT_MARKER = args.export_marker
+
+    _excl_raw = [n.strip() for n in args.exclude_folders.split(";") if n.strip()]
+    for _n in _excl_raw:
+        if "\\" in _n or "/" in _n:
+            parser.error(f"--exclude-folders takes folder NAMES, not paths: {_n!r} "
+                         "(use a ';'-separated list of bare names, e.g. --exclude-folders \"_EXPORT;temp\")")
+    EXCLUDE_FOLDERS = tuple(n.lower() for n in _excl_raw)
     if args.no_preview:
         ADD_JPEG_PREVIEW = False
     if args.thumbnail_handling is not None:

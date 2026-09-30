@@ -17,8 +17,11 @@
   `pyproject.toml` version is not what the code in it is.
 
 ## Active scripts
-- `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`)
-- `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Smart sync never
+- `jxl_tiff_encoder.py` — TIFF → JXL (uses `cjxl`). Also accepts
+  `--exclude-folders` (folder NAMES, ';'-separated, matched relative to the
+  input root as segments)
+- `jxl_tiff_decoder.py` — JXL → TIFF (uses `djxl`). Also accepts
+  `--exclude-folders` (same semantics as the encoder's). Smart sync never
   overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original
   master): that is status `"refused"` — NOT `"skipped"`, because a skip
   admits the source to `--delete-skipped`
@@ -93,6 +96,9 @@
   (`_marker_matches`, `_validate_export_folder_name`, `_replace_suffix_token`,
   `_is_relative_to`,
   `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`,
+  plus `_path_excluded_below_root` (the discovery filter of the
+  encoder/decoder and the filter behind the wrapper's manifest collision
+  walk — three parity-pinned copies),
   plus the verify/integrity family shared by the backends:
   `_verify_jxl_integrity`/`_verify_file_integrity`, `has_jbrd_box`,
   `md5_of_file`, `_warn_distance_clamp`, `_would_skip`, `_decode_jxl_for_verify`,
