@@ -4988,7 +4988,12 @@ def cmd_convert(args, from_jxl: bool = True):
         if deleted:
             logger.info(f" -> Deleted {deleted} source file(s)")
 
-    for src, status, detail, _ in results:
+    # Indexed, never unpacked at a fixed arity: encode_to_jxl's ok-result also
+    # carries the source md5 and the JXL self-hash (round 43, #444) — a
+    # 4-name unpack crashed every JPEG/PNG -> JXL --force-convert run right
+    # after its last file converted, before the summary and the delete gate.
+    for result in results:
+        src, status, detail = result[0], result[1], result[2]
         if status == "ok":
             ok += 1
         # Counted apart from BOTH skipped and errors: the run gave

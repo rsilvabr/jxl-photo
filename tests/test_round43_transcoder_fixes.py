@@ -318,3 +318,39 @@ def test_main_keeps_the_settings_edited_in_the_script(monkeypatch, tmp_path):
     assert tr.DELETE_CONFIRM is False
     assert tr.STORE_MD5 is False
     assert tr.TEMP2_DIR == str(staging)
+
+
+# ---------------------------------------------------------------------------
+# Real codec: a JPEG -> JXL --force-convert -d 0 run completes end to end
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil
+import subprocess as _subprocess
+
+
+@pytest.mark.skipif(_shutil.which("cjxl") is None or _shutil.which("exiftool") is None,
+                    reason="cjxl/exiftool not installed")
+def test_real_force_convert_d0_run_completes(tmp_path):
+    """REAL cjxl, the whole script as a subprocess. #444 made encode_to_jxl
+    return the source md5 and the JXL self-hash as extra tuple members, and
+    cmd_convert's summary loop still unpacked four names: every JPEG/PNG -> JXL
+    --force-convert run crashed with a ValueError right after converting —
+    before the summary and the delete gate. The stubbed tests above call
+    encode_to_jxl alone and could not see it (caught by the real-photo
+    battery)."""
+    import numpy as np
+    from PIL import Image
+    src = tmp_path / "in"
+    src.mkdir()
+    rng = np.random.default_rng(7)
+    Image.fromarray(rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)).save(
+        src / "j.jpg", quality=90)
+    out = tmp_path / "out"
+    r = _subprocess.run([sys.executable, str(Path(tr.__file__)), str(src), str(out),
+                         "--mode", "2", "--force-convert", "--distance", "0"],
+                        stdin=_subprocess.DEVNULL, capture_output=True, text=True,
+                        cwd=str(tmp_path))
+    assert "Traceback" not in (r.stdout + r.stderr), r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (out / "j.jxl").exists()
+    assert "jxl-md5" in (out / "checksums.md5").read_text(encoding="utf-8")

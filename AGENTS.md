@@ -169,6 +169,26 @@
   wrapper imports child functions in-process (resolvers, finders,
   `_validate_export_folder_name`), so a child's signature reaches
   `jxl_photo.py` too. A plan that changes a signature must include this list.
+  The same applies to a function's RETURN shape (a tuple gaining a member):
+  list every consumer that unpacks it — round 43's #468 crashed every
+  JPEG/PNG → JXL `--force-convert` run because one loop unpacked 4 names.
+- **Real-photo battery** — `py tools/real_photo_battery.py --fixtures <folder>`
+  runs the four scripts as unattended subprocesses on COPIES of real photos
+  (16-bit exports, an RGB+IR film scan, JPEGs made from them) and checks the
+  files on disk: delete gates (own / foreign / markerless archives),
+  confirmations on a closed stdin, markers, exclusions, ICC + pixels against
+  an independent djxl decode, multi-page split → reconstruct, in-place group
+  replacement and veto, JPEG ↔ JXL bit-exact, and that no run ends in a
+  Python traceback. ~4 minutes; the scratch folder is deleted on success and
+  the report lands in `AI_tools/<YYMMDD>_battery_report.md`. **Run it before
+  every release** and after any change to what the codecs/exiftool read or
+  write, to a delete gate, to the in-place paths, or to a function's
+  signature/return shape — then paste the report into the coder report or the
+  review. A new behavior that only a real file can prove gets a new check
+  there (and a real-codec pytest when it fits in a few seconds). The fixtures
+  are the owner's local photos (ask for the folder, or read
+  `JXLPHOTO_FIXTURES`; the layout is in the script's docstring) and are never
+  modified.
 
 ## AI workflow: planner → coder → reviewer
 Heavy changes run in three steps, each leaving a document in `AI_tools/`
@@ -199,12 +219,14 @@ less) and record it. Never commit. Write the report:
 - every deviation from the plan, and why;
 - the commands actually run with their REAL output (pytest summary lines,
   the pre-fix failure proof) — never "tests pass" without the output;
+- the real-photo battery's summary line and any failed check, when the change
+  is one the *Verification* section says needs it;
 - what was NOT verified, and open questions for the reviewer.
 Finish by telling the user the report's path.
 
 **3. Review (Claude/Opus).** Read the plan, the report and the full diff;
-re-run the tests and the pre-fix proofs instead of trusting the report;
-check the claims against real tools where it matters; write the review with
+re-run the tests, the pre-fix proofs and the real-photo battery instead of
+trusting the report; write the review with
 must-fix / should-fix items and a commit verdict.
 
 ## Docs map
