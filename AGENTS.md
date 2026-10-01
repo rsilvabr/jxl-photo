@@ -189,6 +189,21 @@
   are the owner's local photos (ask for the folder, or read
   `JXLPHOTO_FIXTURES`; the layout is in the script's docstring) and are never
   modified.
+- **Run the tool twice and feed it its own output** when testing a sync,
+  skip or delete path: the second run over files the toolkit wrote itself is
+  where the delete-skipped, provenance and in-place bugs live (the sibling
+  tiff-workflow found two of three serious findings of one round that way).
+
+## Editing source safely
+- **Bash heredocs eat backslashes**, even with a quoted delimiter
+  (`python - <<'PY'`): a Windows path or a regex like `'[\\/]'` can land
+  mangled — and the patch may still "succeed". Use the Edit tool for exact
+  edits. When a bulk edit needs Python, write the script to a file, `assert
+  s.count(old) == N` before replacing, and verify the bytes on disk afterwards.
+  (Round 43: a heredoc patch hit `invalid escape sequence '\T'` and silently
+  skipped one replacement.)
+- **Stage files by name, never `git add -A`**: the repo root carries the
+  owner's untracked drafts and test images.
 
 ## AI workflow: planner → coder → reviewer
 Heavy changes run in three steps, each leaving a document in `AI_tools/`
