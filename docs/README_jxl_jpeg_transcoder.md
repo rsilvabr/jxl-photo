@@ -90,7 +90,7 @@ py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --to-srgb --quality 95
 
 # JXL master → 2048 px sRGB JPEG with output sharpening (a DERIVATIVE:
 # it never deletes the source and never claims the master is archived)
-py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --force-convert --to-srgb ^
+py jxl_jpeg_transcoder.py "F:\Photos\photo.jxl" --force-convert --to-srgb `
      --resize-long 2048 --sharpen screen --quality 92
 
 # PNG → JXL (convert to JXL format)

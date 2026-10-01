@@ -406,15 +406,19 @@ paths too.
    py jxl_photo.py --list-presets
    py jxl_photo.py --run-preset nightly-sync --dry-run
    ```
-4. **Schedule it:**
-   ```powershell
-   schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 ^
-     /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync" /RL LIMITED
+4. **Schedule it** — one line, in `cmd` or PowerShell:
+   ```text
+   schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
    ```
    The `cd /d` matters — logs land in `Logs\` relative to it. In the task
    editor: **Program** `py`, **arguments** `jxl_photo.py --run-preset
    nightly-sync`, **Start in** the folder where `jxl_photo.py` lives (never
    blank).
+5. **Several manifests?** One manifest holds one direction (TIFF→JXL, JXL→JXL,
+   JPEG→JXL... never mixed), so a library with several workflows has one
+   preset per manifest — and one scheduled task can run them all, in order,
+   from a small `.cmd` file: see
+   [Several presets in one scheduled run](README_jxl_tools.md#several-presets-in-one-scheduled-run-a-cmd-file).
 
 What the scheduled run does: **sync** by default (reconvert only what is
 newer); `--overwrite` redoes everything; `--dry-run` simulates — and neither is

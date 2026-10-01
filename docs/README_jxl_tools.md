@@ -187,9 +187,12 @@ conversion for someone who asked for a simulation.
 
 ##### Scheduling on Windows (Task Scheduler)
 
-```powershell
-schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 ^
-  /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync" /RL LIMITED
+One line — it works the same in `cmd` and in PowerShell (a `^` line
+continuation does **not** work in PowerShell, and a long line pasted from a
+narrow window can arrive broken in two, so keep it on one line):
+
+```text
+schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
 ```
 
 The `cd /d` matters — see *Start in* below. Or use the task editor: *Create
@@ -201,6 +204,57 @@ Task → Actions → New → Start a program*:
 - **Start in:** the folder where `jxl_photo.py` lives. **Do not leave this
   blank**: logs are written relative to it (`Logs\...`), and a blank field
   starts the run in `C:\Windows\System32` — which is where the logs then land.
+
+##### Several presets in one scheduled run (a `.cmd` file)
+
+One scheduled task can run any number of presets, in order, from a small batch
+file. That is how a library with several workflows stays in sync with one
+task — e.g. the TIFF masters, then light copies made FROM those masters (they
+must run after the masters of the same night), then a JPEG folder. Save this as
+`run_scheduled_presets.cmd` in the folder where `jxl_photo.py` lives:
+
+```bat
+@echo off
+rem One line per preset, in the order they must run.
+cd /d "%~dp0"
+py jxl_photo.py --run-preset "SYNC PHOTOS"
+py jxl_photo.py --run-preset "MOBILE"
+rem py jxl_photo.py --run-preset "OUTTAKES JPEG"
+```
+
+- **Order matters** when one preset reads what another writes: masters first,
+  derivatives (`--output-icc`/resize/a lighter distance) after.
+- **Each line runs even if the one before failed** — every preset is its own
+  run with its own log, so one bad folder does not cancel the others. (Join
+  lines with `&&` only if a failure must stop everything after it.)
+- **`rem` disables a line** without deleting it — handy for a preset you only
+  want after a backup.
+- `cd /d "%~dp0"` makes the batch work from wherever it is started (logs land
+  in `Logs\` next to the scripts), so the task needs no *Start in*.
+- **Do not list presets that delete sources**: they are refused unattended
+  (exit 1) and only clutter the log. Run those from the menu.
+
+Then point one task at the batch file — again one line, `cmd` or PowerShell
+(the example runs every Saturday at 23:30; `/SC DAILY` for every night):
+
+```text
+schtasks /Create /TN "jxl-photo" /SC WEEKLY /D SAT /ST 23:30 /RL LIMITED /TR "cmd /k C:\tools\jxl-photo\run_scheduled_presets.cmd"
+```
+
+- **A task you already have**: `schtasks /Change /TN "jxl-photo" /TR "cmd /k
+  C:\tools\jxl-photo\run_scheduled_presets.cmd"` replaces only what it runs
+  (the schedule stays). If it asks for the *run as* password, just press
+  Enter — the task stays "run only when logged on". *Access denied* means the
+  task was created by an administrator: run the console as administrator — or
+  save that one line as a `.cmd` file and use *right-click → Run as
+  administrator*.
+- **Keep the path free of spaces** (`C:\tools\jxl-photo`), or the quoting
+  inside `/TR` gets fiddly; the task editor (*Actions → Edit*) takes any path.
+- **`/k` vs `/c`**: `/k` keeps the window open at the end so you can read the
+  run summary the next morning (only when the task runs while you are logged
+  on); `/c` closes it. Either way the logs stay in `Logs\`.
+- **Leave "random delay" off** in the task's trigger: with *Delay task for up
+  to 1 day* the run can start any time in the 24 hours after the time you set.
 
 ##### Seeing what happened
 

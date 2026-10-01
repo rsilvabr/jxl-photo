@@ -259,14 +259,14 @@ py jxl_tiff_encoder.py "F:\Fotos\2025" --mode 7 --export-subfolder TIFF16 --dist
     ->  _EXPORT/16B_JXL/*.jxl
 
 # light 16-bit sRGB derivative (replaces the JPEG), profile swapped in the name
-py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL ^
-     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync ^
+py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL `
+     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync `
      --rename-from ProPhoto-g22 --rename-to sRGB
     ->  _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
 
 # light JXL derivative, 4000 px on the long edge, with screen sharpening
-py jxl_recompressor.py "<pasta>" --mode 7 --export-subfolder 16B_JXL ^
-     --export-jxl-folder 16B_JXL_4k --output-icc sRGB --resize-long 4000 ^
+py jxl_recompressor.py "<pasta>" --mode 7 --export-subfolder 16B_JXL `
+     --export-jxl-folder 16B_JXL_4k --output-icc sRGB --resize-long 4000 `
      --sharpen screen --distance 1.0
 ```
 
@@ -382,8 +382,8 @@ many files were left alone. The rename applies to any run, with or without
 `--output-icc` — this is how the profile in the name follows the derivative:
 
 ```
-py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL ^
-     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync ^
+py jxl_recompressor.py "F:\Fotos\2025" --mode 7 --export-subfolder 16B_JXL `
+     --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync `
      --rename-from ProPhoto-g22 --rename-to sRGB
     master:    _EXPORT/16B_JXL/_DSC0013_ProPhoto-g22_v1.jxl
     derivative: _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
