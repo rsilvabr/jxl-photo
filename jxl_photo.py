@@ -3395,14 +3395,27 @@ class InteractiveMenu:
                 print(f"WARNING: {warn}")
 
         if opt_index:
+            # Two families with OPPOSITE empty-cell semantics (docs/
+            # README_manifest.md): an empty derivative cell clears the option
+            # on that row, an empty Export*/ExcludeFolders cell keeps the
+            # run's value. One blanket "empty = not applied" told the user the
+            # opposite of what the keep-the-run columns do.
+            _keep_cols = ("exportmarker", "exportsubfolder", "exportjxlfolder",
+                          "excludefolders")
             names = ", ".join(_MANIFEST_OPTION_DISPLAY[c] for c in opt_index)
-            note = (f"Manifest option columns: {names} (these override the "
-                    f"wizard's answers for those options; an empty cell means "
-                    f"'not applied')")
-            if any(c in opt_index for c in ("exportmarker", "exportsubfolder",
-                                            "exportjxlfolder")):
-                note += ("; an empty Export* cell keeps the run's "
-                         "marker/subfolder/folder")
+            cleared = [_MANIFEST_OPTION_DISPLAY[c] for c in opt_index
+                       if c not in _keep_cols]
+            kept = [_MANIFEST_OPTION_DISPLAY[c] for c in opt_index
+                    if c in _keep_cols]
+            note = (f"Manifest option columns: {names} (a filled cell overrides "
+                    f"the run's answer on that row")
+            if cleared:
+                note += f"; an empty {'/'.join(cleared)} cell means 'not applied'"
+            if kept:
+                note += f"; an empty {'/'.join(kept)} cell keeps the run's value"
+            if "excludefolders" in opt_index:
+                note += "; ExcludeFolders '-' means no exclusion on that row"
+            note += ")"
             if RICH_AVAILABLE and console:
                 console.print(f"[dim]{note}[/dim]")
             else:

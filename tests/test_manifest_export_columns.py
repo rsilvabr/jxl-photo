@@ -121,9 +121,46 @@ def test_manifest_option_note_mentions_the_export_semantics(tmp_path, capsys):
     _write_manifest(m, [(src, dst, 6, "tiff2jxl", "_PRINT", "", "")])
     entries, _ = _load(_menu(), m)
     assert entries is not None
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())      # undo console wrapping
     assert "ExportMarker, ExportSubfolder, ExportJxlFolder" in out
-    assert "an empty Export* cell keeps the run's marker/subfolder/folder" in out
+    assert ("an empty ExportMarker/ExportSubfolder/ExportJxlFolder cell keeps "
+            "the run's value") in out
+    # No derivative column here, so nothing may claim "empty = not applied".
+    assert "not applied" not in out
+
+
+def test_manifest_option_note_puts_excludefolders_with_the_kept_columns(tmp_path,
+                                                                        capsys):
+    """Round 43 follow-up: the note said "an empty cell means 'not applied'" for
+    EVERY column, but an empty ExcludeFolders (like an empty Export*) cell keeps
+    the run's value — the opposite. The user's own upgraded manifest printed it."""
+    src = tmp_path / "A"
+    m = tmp_path / "m.csv"
+    m.write_text("Source,Destination,Mode,Direction,ExcludeFolders,ExportMarker,"
+                 "ExportSubfolder,ExportJxlFolder\n"
+                 f"{src},{src},6,tiff2jxl,,,,\n", encoding="utf-8-sig")
+    entries, ro = _load(_menu(), m)
+    assert entries is not None and ro == [{}]
+    out = " ".join(capsys.readouterr().out.split())
+    assert ("an empty ExcludeFolders/ExportMarker/ExportSubfolder/ExportJxlFolder "
+            "cell keeps the run's value") in out
+    assert "not applied" not in out
+    assert "ExcludeFolders '-' means no exclusion on that row" in out
+
+
+def test_manifest_option_note_keeps_not_applied_for_derivative_columns(tmp_path,
+                                                                       capsys):
+    src = tmp_path / "A"
+    m = tmp_path / "m.csv"
+    m.write_text("Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,"
+                 "RenameFrom,RenameTo,ExportMarker\n"
+                 f"{src},{tmp_path / 'o'},2,jxl2jxl,sRGB,,,,,\n", encoding="utf-8-sig")
+    entries, _ = _load(_menu(), m, direction="jxl2jxl")
+    assert entries is not None
+    out = " ".join(capsys.readouterr().out.split())
+    assert ("an empty OutputICC/Resize/Sharpen/RenameFrom/RenameTo cell means "
+            "'not applied'") in out
+    assert "an empty ExportMarker cell keeps the run's value" in out
 
 
 def test_unknown_column_is_still_refused(tmp_path, capsys):

@@ -735,7 +735,7 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 - **Unattended re-runs no longer stop on a confirmation** nobody can answer: the delete prompt is charged only when the plan can actually delete.
 - **Multi-page documents recompressed in place** are replaced all-or-nothing; settings edited at the top of a script are never shadowed by the wrapper or reset to literals.
 
-**1919 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**1921 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -764,7 +764,7 @@ The skipped path of the delete gate now requires the existing output's provenanc
 - **Transcoder**: `--force-convert -d 0` JPEG archives record their checksums (a later delete run can prove them); `--dry-run` starts no subprocess; `--to-srgb`/`--icc-profile` on a JPEG → JXL encode warn that they do not apply.
 - **Wrapper**: a hand-edited session with an unknown format, a dead `ExportMarker`/`ExportJxlFolder` cell on a mode without them, a rename on the lossless JPEG recovery and invalid resize answers are refused up front; a child interrupted with Ctrl+C stops the manifest; the end-of-run summary counts entries that never started.
 
-Every fix has a regression test proven to fail against the pre-fix code, and the suite no longer depends on test order. The release was also run against real files — 16-bit ProPhoto exports, a 3-page RGB+IR film scan and JPEGs: captions carried verbatim, foreign and markerless archives kept, multi-page split → reconstruct bit-identical, in-place group replacement and veto, JPEG ↔ JXL bit-exact. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 43, #439–#468). **1919 tests.**
+Every fix has a regression test proven to fail against the pre-fix code, and the suite no longer depends on test order. The release was also run against real files — 16-bit ProPhoto exports, a 3-page RGB+IR film scan and JPEGs: captions carried verbatim, foreign and markerless archives kept, multi-page split → reconstruct bit-identical, in-place group replacement and veto, JPEG ↔ JXL bit-exact. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 43, #439–#469). **1921 tests.**
 
 ---
 
@@ -772,7 +772,7 @@ Every fix has a regression test proven to fail against the pre-fix code, and the
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.5.0](#changelog)** | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (30 fixes) |
+| **[v2.5.0](#changelog)** | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
 | [v2.4.0](docs/version_history.md#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
 | [v2.3.0](docs/version_history.md#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
 | [v2.2.0](docs/version_history.md#v220) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
