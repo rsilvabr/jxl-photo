@@ -1,5 +1,24 @@
 # New Features Since v1.0
 
+## v2.5.0 (2026-10-02)
+
+### `--exclude-folders`: leave folder trees out of discovery (encoder, decoder, wrapper)
+
+`--exclude-folders "_EXPORT;temp"` skips every file below a folder with one of
+those names. Folder NAMES, `;`-separated, matched as whole path segments,
+case-insensitive, and only below the input folder — the input's own name and
+its ancestors never exclude, so pointing a run AT `_EXPORT` still works; an
+entry with `\` or `/` is refused at startup. Accepted in every mode; it bites in
+the recursive ones. The run logs how many files each exclusion removed.
+
+- **Wizard**: asked at the end of Step 3 in the TIFF ↔ JXL directions (Enter
+  reuses the last answer, `-` clears it), before the delete panel counts the
+  sources — the count matches what the script will process.
+- **Manifests**: an `ExcludeFolders` column; empty keeps the run's value, `-`
+  / `none` removes it for that row, a value replaces it.
+- **Other directions**: the recompressor and the transcoder have no such flag;
+  the wrapper says the setting is ignored there instead of passing it.
+
 ## v2.4.0 (2026-09-27)
 
 ### Per-row export marker, subfolder and output folder in manifests (wrapper)

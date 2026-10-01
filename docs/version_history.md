@@ -11,6 +11,34 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.4.0
+
+**Released 2026-09-27, superseded by v2.5.0.** Manifests gain per-row export control.
+
+### New: per-row export columns in manifests
+
+Three optional columns after `Direction` let one row carry its own export settings, on top of the run's:
+
+```csv
+Source,Destination,Mode,Direction,ExportMarker,ExportSubfolder,ExportJxlFolder
+G:\fotos\_EXPORT\A,,6,tiff2jxl,,,PRINT_JXL
+G:\fotos\_EXPORT\B,,6,tiff2jxl,,,SCREEN_JXL
+G:\fotos\_EXPORT,,7,tiff2jxl,,TIFF16,
+```
+
+- **`ExportMarker`** (all six directions) — detect and scan that row under another export marker instead of the run's.
+- **`ExportSubfolder`** (all six, only mode 7 uses it) — pass `--export-subfolder` for that row. Filled on a row whose `Mode` cell is present and not 7, the manifest is refused with the row named; a row without a `Mode` cell (legacy) is still accepted.
+- **`ExportJxlFolder`** (`tiff2jxl`/`jxl2jxl` only) — name the modes 6/7 output folder for that row; a value in any other direction refuses the manifest.
+- **An empty cell keeps the run's value** (wizard, preset or config) — unlike the five derivative columns, where empty means "not applied" — so filling one row never resets the others.
+
+The generator writes the three columns (empty) whenever the manifest has a mode-6/7 row — `ExportJxlFolder` only in the two directions whose child accepts the flag. A mode-7 row whose Source sits above the marker now warns with the fix (fill `ExportSubfolder` on that row), and unattended presets stay refused.
+
+### Changed: the collision skip-check reads each row's marker
+
+The check that decides whether the expensive full output scan can be skipped now uses the marker each row actually runs with. Disjoint trees under different markers still skip the scan; two marker folders that nest (`_EXPORT` in one row, `_EXPORT/SITE` in another) force it — the exact-marker comparison could not see the nesting, and both children write their output folders into the shared tree.
+
+Every change has a regression test proven to fail against the pre-fix code. The per-row paths were also verified end to end against real 16-bit TIFFs through the real wrapper and children: each row wrote only its own output folder, the mode-7 subfolder filter excluded the sibling subfolder, no JXL landed anywhere else, and a same-named collision in one shared output folder was refused before any child started. **1752 tests** in the suite.
+
 ## v2.3.0
 
 **Released 2026-09-26, superseded by v2.4.0.** Derivatives at any size, and a colour fix for JXLs whose ICC profile has a table tone curve. The delivery JPEG for the web or for print can now come straight from the ProPhoto master, resized and sharpened like a Capture One export.

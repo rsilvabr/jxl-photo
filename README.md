@@ -679,6 +679,14 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 
 ## Notices for upgraders
 
+### ⚠️ Upgrading to v2.5.0: `--delete-skipped` needs a matching provenance marker in every mode
+
+`--delete-skipped` deletes a source whose output **already existed** — a file this run never wrote. Until v2.4.0 the TIFF encoder certified that output by name, timestamp and an integrity check, and the decoder by the mere *presence* of a marker; in the folder-preserving modes (0/1/3/8) a valid, newer JXL of a **different photo** with the same name (a camera's file counter restarting across cards, folders merged) deleted the master TIFF. v2.5.0 requires the output's `jxlphoto-src`/`jxlphoto-srcsum` marker to **match** the source, in every mode.
+
+- **Archives written before v2.0.0 carry no marker**, so `--delete-skipped` now **keeps** their sources (with a log line saying so) where it used to delete them. Nothing is lost; to finish such an archive, re-encode it (`--overwrite`), or stamp it once with `--provenance adopt` in a folder-collapsing mode (TIFF → JXL).
+- A folder **moved** as a whole (sources and outputs together) no longer matches under the default `--provenance path`; pass `--provenance content`.
+- The wrapper now **always** passes its export marker (menu option 4) to the scripts. If you edited `EXPORT_MARKER` at the top of a script and ran it through the wrapper, set the same marker in the wrapper.
+
 ### ⚠️ Upgrading to v2.3.0: TIFFs decoded from JXLs with a table-curve ICC profile
 
 Earlier releases decoded a **lossy** JXL whose ICC profile has a table tone curve (ROMM RGB with its linear toe, eciRGB v2, scanner LUT profiles, Photoshop "Dot Gain" grey) with **wrong colours**, and logged it as OK. The same went for recompressor derivatives and transcoder JPEG/PNG conversions of those files. The **JXLs themselves are fine**: re-decode them with v2.3.0.
@@ -720,14 +728,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.4.0** (2026-09-27) — per-row export control for manifests:
+**v2.5.0** (2026-10-02) — folder exclusion and the round-43 audit:
 
-- **New manifest columns** `ExportMarker`, `ExportSubfolder` and `ExportJxlFolder` override the run's marker, mode-7 subfolder and modes-6/7 output folder for that row only — e.g. two folders under the same `_EXPORT` writing to `PRINT_JXL` and `SCREEN_JXL` in one run.
-- **The generator writes them** (empty) whenever the manifest has a mode-6/7 row; `ExportJxlFolder` appears only in `tiff2jxl`/`jxl2jxl`.
-- **`ExportSubfolder` on any other explicit Mode is refused** — the flag only means something in mode 7. A mode-7 row whose Source is above the marker can also be fixed by filling that column.
-- **The collision skip-check uses each row's marker**: disjoint trees under different markers still skip the full scan; nested marker folders (`_EXPORT` next to `_EXPORT/SITE`) force it.
+- **New `--exclude-folders`** (TIFF encoder and decoder, wizard, `ExcludeFolders` manifest column): skip whole folder trees by name, e.g. archive a shoot in place while leaving its `_EXPORT` folders alone.
+- **`--delete-skipped` proves the pairing** in the encoder and the decoder: a same-named archive of a different photo can no longer certify deleting a master. Read the [notice](#notices-for-upgraders) — pre-v2.0.0 archives are now kept.
+- **Unattended re-runs no longer stop on a confirmation** nobody can answer: the delete prompt is charged only when the plan can actually delete.
+- **Multi-page documents recompressed in place** are replaced all-or-nothing; settings edited at the top of a script are never shadowed by the wrapper or reset to literals.
 
-Existing command lines and manifests keep working. **1918 tests.**
+**1919 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -735,33 +743,28 @@ Existing command lines and manifests keep working. **1918 tests.**
 
 ## Changelog
 
-### What's new — v2.4.0 (current stable)
+### What's new — v2.5.0 (current stable)
 
-**Released 2026-09-27.** Supersedes v2.3.0. Manifests gain per-row export control.
+**Released 2026-10-02.** Supersedes v2.4.0. Folder exclusion, and the fixes of the round-43 audit of the whole repo.
 
-#### New: per-row export columns in manifests
+#### New: `--exclude-folders`
 
-Three optional columns after `Direction` let one row carry its own export settings, on top of the run's:
+`jxl_tiff_encoder.py` and `jxl_tiff_decoder.py` take a `;`-separated list of folder **names** to leave out of discovery: `--mode 8 --exclude-folders "_EXPORT;temp"` archives a shoot in place without touching its export trees. Names match whole folder segments, case-insensitive, only **below** the input folder (pointing a run AT `_EXPORT` still works); paths are refused. The wizard asks for it in the TIFF ↔ JXL directions (Enter reuses the last answer), the delete panel counts what the scripts will really see, and manifests carry an `ExcludeFolders` column (empty keeps the run's value, `-` removes it for that row).
 
-```csv
-Source,Destination,Mode,Direction,ExportMarker,ExportSubfolder,ExportJxlFolder
-G:\fotos\_EXPORT\A,,6,tiff2jxl,,,PRINT_JXL
-G:\fotos\_EXPORT\B,,6,tiff2jxl,,,SCREEN_JXL
-G:\fotos\_EXPORT,,7,tiff2jxl,,TIFF16,
-```
+#### Fixed: `--delete-skipped` could delete a master on the strength of another photo's archive (#439)
 
-- **`ExportMarker`** (all six directions) — detect and scan that row under another export marker instead of the run's.
-- **`ExportSubfolder`** (all six, only mode 7 uses it) — pass `--export-subfolder` for that row. Filled on a row whose `Mode` cell is present and not 7, the manifest is refused with the row named; a row without a `Mode` cell (legacy) is still accepted.
-- **`ExportJxlFolder`** (`tiff2jxl`/`jxl2jxl` only) — name the modes 6/7 output folder for that row; a value in any other direction refuses the manifest.
-- **An empty cell keeps the run's value** (wizard, preset or config) — unlike the five derivative columns, where empty means "not applied" — so filling one row never resets the others.
+The skipped path of the delete gate now requires the existing output's provenance marker to **match** the source — the encoder never read one there, the decoder only checked that one existed. The dry-run preview runs the same check. See the [notice](#notices-for-upgraders) for archives without markers.
 
-The generator writes the three columns (empty) whenever the manifest has a mode-6/7 row — `ExportJxlFolder` only in the two directions whose child accepts the flag. A mode-7 row whose Source sits above the marker now warns with the fix (fill `ExportSubfolder` on that row), and unattended presets stay refused.
+#### Changed
 
-#### Changed: the collision skip-check reads each row's marker
+- **Delete confirmation only when something can be deleted** (encoder, decoder): a scheduled re-run of an archived folder used to wait for a token on a closed stdin and exit 3 forever.
+- **In-place recompression of multi-page documents** (mode 8): a group's pages are replaced together once the last one is verified, or none of them; single files are still replaced as they finish. Overwriting an output whose markers name another origin (modes 1/3) is logged loudly.
+- **Settings are read, never copied**: the wrapper always passes its export marker and reads each script's own output-folder names; every script starts each run from the settings at the top of its file (an in-process second run no longer inherits the first one's `--delete-source`).
+- **Decoder**: if djxl does not report the ICC probes, a lossy ICC-blob file is refused instead of decoded with wrong colours.
+- **Transcoder**: `--force-convert -d 0` JPEG archives record their checksums (a later delete run can prove them); `--dry-run` starts no subprocess; `--to-srgb`/`--icc-profile` on a JPEG → JXL encode warn that they do not apply.
+- **Wrapper**: a hand-edited session with an unknown format, a dead `ExportMarker`/`ExportJxlFolder` cell on a mode without them, a rename on the lossless JPEG recovery and invalid resize answers are refused up front; a child interrupted with Ctrl+C stops the manifest; the end-of-run summary counts entries that never started.
 
-The check that decides whether the expensive full output scan can be skipped now uses the marker each row actually runs with. Disjoint trees under different markers still skip the scan; two marker folders that nest (`_EXPORT` in one row, `_EXPORT/SITE` in another) force it — the exact-marker comparison could not see the nesting, and both children write their output folders into the shared tree.
-
-Every change has a regression test proven to fail against the pre-fix code. The per-row paths were also verified end to end against real 16-bit TIFFs through the real wrapper and children: each row wrote only its own output folder, the mode-7 subfolder filter excluded the sibling subfolder, no JXL landed anywhere else, and a same-named collision in one shared output folder was refused before any child started. **1918 tests** in the suite.
+Every fix has a regression test proven to fail against the pre-fix code, and the suite no longer depends on test order. The release was also run against real files — 16-bit ProPhoto exports, a 3-page RGB+IR film scan and JPEGs: captions carried verbatim, foreign and markerless archives kept, multi-page split → reconstruct bit-identical, in-place group replacement and veto, JPEG ↔ JXL bit-exact. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 43, #439–#468). **1919 tests.**
 
 ---
 
@@ -769,7 +772,8 @@ Every change has a regression test proven to fail against the pre-fix code. The 
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.4.0](#changelog)** | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
+| **[v2.5.0](#changelog)** | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (30 fixes) |
+| [v2.4.0](docs/version_history.md#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
 | [v2.3.0](docs/version_history.md#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
 | [v2.2.0](docs/version_history.md#v220) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
 | [v2.1.1_beta1](docs/version_history.md#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
