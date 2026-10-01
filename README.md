@@ -86,36 +86,36 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 - **Colour-converted derivatives** *(v2.2.0)*: `--output-icc sRGB|AdobeRGB|<file.icc>` makes a light **16-bit** copy of a master in another colour space (e.g. a d=1.0 sRGB set that replaces the JPEG exports), with `--rename-from/--rename-to` to swap the profile name in the file names. A derivative is never written in place, never deletes, never overwrites anything that is not its own derivative, and never counts as proof that the original TIFF is archived
 - **Resized / sharpened derivatives** *(v2.3.0)*: the same `--resize-*` and `--sharpen` recipes, combinable with `--output-icc`
 
-### 5. **Professional Workflow Support**
+### 5. **Manifests and scheduled runs**
+- **One CSV, many folders**: each row is a Source → Destination with its own mode, and optionally its own colour space, size, sharpening, rename *(v2.3.0)* and export marker / subfolder / output folder *(v2.4.0)*. Auto Mode generates it from your folder tree; edit it in Excel; comment a row out with `#`
+- **Checked before anything runs**: two rows writing the same output file, or any invalid cell, refuse the whole manifest up front — never halfway through. Overlapping sources, or a row whose output folder is another row's source, ask for confirmation (and are refused unattended)
+- **Run it unattended**: save the workflow as a preset (menu option 7 → `[S]`) and point Windows Task Scheduler (or cron) at `py jxl_photo.py --run-preset nightly-sync` — no menus, no prompts. A preset that deletes sources or replaces them in place is refused unattended (it runs from the menu, or with `--dry-run`) ([setup guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron))
+- **Built for logs**: exit codes `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation · `130` interrupted with Ctrl+C; `--summary-json` emits one machine-readable line per run, totalled across the manifest; a full output volume stops the run instead of failing every remaining file one by one
+- Column reference, omission rules and recipes: [docs/README_manifest.md](docs/README_manifest.md)
+
+### 6. **Professional Workflow Support**
 - Multiple folder structure modes (flat, recursive, Capture One / Lightroom EXPORT workflows)
 - Parallel processing (tested up to 32 workers)
 - Sync mode (reconvert only changed files)
 - Staging SSD support for large collections
-- Manifests (CSV) for multi-folder batches, and named presets runnable unattended (`--run-preset`); since v2.3.0 each manifest row can carry its own colour space, size, sharpening and rename
 - Choose the Capture One / Lightroom export output folder per run (`--export-jxl-folder`, *v2.2.0*) — e.g. masters in `_EXPORT/16B_JXL`, a separate print export in `_EXPORT/PRINT_JXL`, sRGB derivatives in `_EXPORT/16B_JXL_sRGB`
-- **Per-row export control in manifests** *(v2.4.0)*: `ExportMarker`, `ExportSubfolder` and `ExportJxlFolder` columns override the run's marker, mode-7 subfolder and modes-6/7 output folder for that row — the generator writes them (empty) for mode-6/7 rows, and a filled `ExportSubfolder` on any other explicit `Mode` is refused up front
+- Skip whole folder trees by name during discovery (`--exclude-folders "_EXPORT;temp"`, TIFF ↔ JXL; also a manifest column) — matched as folder names below the input root, never as substrings or paths
 
-### 6. **Archive and replace** *(v2.0.0)*
+### 7. **Archive and replace** *(v2.0.0)*
 - `--delete-source` in **every** mode — convert into a separate tree and drop the originals
 - The source is removed only after its output is written to its **final** path, passes an integrity check there, and (with `--verify-roundtrip`) decodes back to the source pixels
 - `--delete-skipped` finishes an archive interrupted between the conversion and the unlink
 - Three confirmations before anything is deleted, the last one a time token that cannot be answered by reflex
 
-### 7. **Provenance: which source made this output** *(v2.0.0)*
+### 8. **Provenance: which source made this output** *(v2.0.0)*
 - The folder-collapsing modes let two files with the same name land on the same output. Every conversion records **which source it came from** (`jxlphoto-src` / `jxlphoto-srcsum` in XMP), so a later delete run refuses to overwrite one archive with an unrelated photo
 - `--provenance path` (default, free) · `content` (survives folders you moved) · `adopt` (TIFF → JXL only: verifies and stamps an archive built before this existed, one time)
 - A mismatch always fails closed: not converted, nothing overwritten, nothing deleted
 - Lossless JXL → JPEG is bound to the JXL's **content**, not its name: `checksums.md5` now also stores the JXL's own MD5 (a `<name>.jxl-md5` companion line), and a delete run compares it — older databases fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12), and when no proof can run the source is kept
 
-### 8. **Multi-page and film scans**
+### 9. **Multi-page and film scans**
 - Split each page of a multi-page TIFF into its own JXL and reconstruct the original later — per-page ICC, bit depth, grayscale and `SubfileType` all restored (the IR page of a scan keeps its role)
 - A split that arrives with **pages missing** is detected and its sources kept: the short TIFF it would produce is a perfectly valid file, so nothing downstream could tell
-
-### 9. **Built for unattended runs**
-- Exit codes: `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation
-- `--summary-json` emits one machine-readable line per run; the wrapper consumes it to total a multi-entry manifest
-- A full output volume stops the run instead of failing every remaining file one by one
-- Save a recurring workflow as a preset (menu option 7 → `[S]`) and schedule it unattended: `py jxl_photo.py --run-preset nightly-sync` runs with no menus or prompts — point Task Scheduler or cron at it ([setup guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron))
 
 ---
 
@@ -727,7 +727,7 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 - **`ExportSubfolder` on any other explicit Mode is refused** — the flag only means something in mode 7. A mode-7 row whose Source is above the marker can also be fixed by filling that column.
 - **The collision skip-check uses each row's marker**: disjoint trees under different markers still skip the full scan; nested marker folders (`_EXPORT` next to `_EXPORT/SITE`) force it.
 
-Existing command lines and manifests keep working. **1752 tests.**
+Existing command lines and manifests keep working. **1918 tests.**
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -761,7 +761,7 @@ The generator writes the three columns (empty) whenever the manifest has a mode-
 
 The check that decides whether the expensive full output scan can be skipped now uses the marker each row actually runs with. Disjoint trees under different markers still skip the scan; two marker folders that nest (`_EXPORT` in one row, `_EXPORT/SITE` in another) force it — the exact-marker comparison could not see the nesting, and both children write their output folders into the shared tree.
 
-Every change has a regression test proven to fail against the pre-fix code. The per-row paths were also verified end to end against real 16-bit TIFFs through the real wrapper and children: each row wrote only its own output folder, the mode-7 subfolder filter excluded the sibling subfolder, no JXL landed anywhere else, and a same-named collision in one shared output folder was refused before any child started. **1752 tests** in the suite.
+Every change has a regression test proven to fail against the pre-fix code. The per-row paths were also verified end to end against real 16-bit TIFFs through the real wrapper and children: each row wrote only its own output folder, the mode-7 subfolder filter excluded the sibling subfolder, no JXL landed anywhere else, and a same-named collision in one shared output folder was refused before any child started. **1918 tests** in the suite.
 
 ---
 
@@ -861,4 +861,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation  
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling  
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O  
-- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion
+- [Claude](https://www.anthropic.com/claude) (Anthropic) and [DeepSeek](https://www.deepseek.com), among other AI tools, for code assistance, reviews and technical discussion

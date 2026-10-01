@@ -41,6 +41,17 @@ SHARED_HELPERS = [
     "_file_digest_cached",
     "_read_source_markers_batch",
     "_provenance_ok",
+    # The argfile lines that RECORD which source made an output. Encoder,
+    # decoder and transcoder each write the markers their delete gates read
+    # back; a copy that dropped `srcsum` would silently write an archive no
+    # other backend could verify.
+    "_provenance_marker_args",
+    # Derived (non-archive) marker reads and the partial-output cleanup that
+    # guards a derivative write. Duplicated transcoder/recompressor; a drift
+    # either mislabels a derivative or leaves a truncated output behind.
+    "_read_derived_markers_batch",
+    "_capture_output_identity",
+    "_delete_partial_if_written",
     # Which runs need that check at all. A copy drifting would leave one backend
     # deleting sources in a layout another one guards.
     "_run_collapses_structure",
@@ -142,6 +153,20 @@ SHARED_HELPERS = [
     "_derived_label",
 ]
 
+# DELIBERATE divergences — do NOT add these to SHARED_HELPERS:
+#
+#   _derivative_metadata_args  different signatures on purpose. Transcoder:
+#                              `(jxl_path, label, size)`; recompressor:
+#                              `(jxl_path, converted=True, ...)`. Only the
+#                              recompressor has --output-icc, so only its copy
+#                              rewrites the CreatorTool ICC. Same as
+#                              _cjxl_buffering_flag, a divergence by design.
+#   _move_dest_from_staging    UNPINNABLE under the current mechanism: it is a
+#                              NESTED function, and the transcoder defines two
+#                              same-named twins (encoder :4363, decoder :3099,
+#                              transcoder :2773 AND :4516). Pinning by name is
+#                              ambiguous; hoisting would be needed first.
+#
 # Two helpers are semantically equivalent across their copies but structurally
 # different, so normalisation cannot fold them together:
 #

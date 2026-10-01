@@ -165,6 +165,11 @@ def test_delete_gate_keeps_a_skipped_source_without_marker(tmp_path, monkeypatch
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
     monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    # Round 43 (D-2): a marker-less TIFF reads as both markers None → the gate's
+    # `_provenance_ok` refuses. Stub the batch so the test never spawns exiftool.
+    monkeypatch.setattr(dec, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": None, "srcsum": None}
+                                       for p in paths})
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda m, e, w, f, *a: (str(m), "skipped", str(f)))
 
@@ -192,6 +197,13 @@ def test_delete_gate_still_deletes_a_proven_skip(tmp_path, monkeypatch):
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
     monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    # Round 43 (D-2): the delete gate now proves the skip by a marker MATCH
+    # (`_read_source_markers_batch` + `_provenance_ok`), not by the presence
+    # check `_decode_output_is_ours` above (which only drives the skip itself).
+    monkeypatch.setattr(dec, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": dec._source_path_id(src),
+                                                "srcsum": None}
+                                       for p in paths})
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda m, e, w, f, *a: (str(m), "skipped", str(f)))
 

@@ -175,6 +175,15 @@ for a true in-place run. Mode 0 accepts its own folder as output: it is flat,
 so that simply IS the in-place run. Modes 1/3/4/5/6/7 compute their own
 folders and ignore the output positional.
 
+**Overwriting a foreign output is loudly warned, never blocked.** In the
+folder-preserving modes (1 and 3) a sync/`--overwrite` run re-encodes over an
+existing output with no provenance gate — the source is authoritative on
+that path, and re-running is what regenerates it. If that output carries
+`jxlphoto-src:`/`jxlphoto-srcsum:` markers naming a DIFFERENT origin, the
+run logs a loud warning before replacing it. A markerless or unreadable
+output — the common case — says nothing: there is no cheap proof to
+arbitrate an arbitrary pair, so the check is advisory by design.
+
 ## Deleting the originals
 
 `--delete-source` removes each source JXL after its output is:
@@ -214,7 +223,14 @@ In-place runs (mode 0/8, and staging promotions) replace the source only
 after the re-encode passed every gate, via a temp file in the destination
 folder and a same-volume atomic `os.replace` — a cross-volume move failure
 can no longer leave the original destroyed with the only good copy stranded
-in staging under a UUID name.
+in staging under a UUID name. Multi-page documents replaced in place are
+held together as well: pages of one `jxlphoto-mpg:` id are swapped only
+after every page of the group has settled, and a page that failed — or one
+whose siblings did not all take part this run — vetoes the replacement of
+the whole group (`GROUP HELD IN PLACE`, the re-encodes discarded). The
+all-or-nothing rule the delete gate applies to deletion therefore extends
+to the replacement itself, and no document is ever left spread across two
+generations.
 
 Three interactive confirmations guard the deletion unless
 `--delete-confirm-off` is passed — the wrapper (`jxl_photo.py`) charges its

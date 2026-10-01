@@ -35,6 +35,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -370,11 +371,41 @@ def test_251_valid_ranges_still_pass(tmp_path):
     assert r.returncode == 0
 
 
-def test_251_sub_threshold_distance_warns_about_the_cjxl_clamp(tmp_path, caplog):
+def test_251_sub_threshold_distance_warns_about_the_cjxl_clamp(tmp_path, monkeypatch):
+    """On a REAL run the sub-threshold warning still fires with the resolved
+    floor. A --dry-run deliberately resolves no floor (and so warns nothing):
+    the floor probe is `cjxl --version`, and a simulation runs no subprocess
+    (see the pin below), so the warning is asserted on the non-dry path."""
     from PIL import Image
     Image.new("RGB", (16, 16), (10, 20, 30)).save(tmp_path / "a.jpg", quality=90)
-    r = subprocess.run(
-        [sys.executable, str(REPO / "jxl_jpeg_transcoder.py"), str(tmp_path),
-         "--force-convert", "--distance", "0.01", "--dry-run"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace")
-    assert "behaves exactly like 0.05" in r.stdout
+    tr.setup_logger()
+    warnings = []
+    monkeypatch.setattr(tr.logger, "warning",
+                        lambda m, *a: warnings.append(str(m)))
+    monkeypatch.setattr(tr, "_min_effective_distance", lambda exe: 0.05)
+    monkeypatch.setattr(tr, "process_group_convert", lambda *a, **k: ([], set()))
+    args = tr.build_parser().parse_args(
+        [str(tmp_path), "--force-convert", "--distance", "0.01", "--mode", "0"])
+    tr.cmd_convert(args, from_jxl=False)
+    assert any("behaves exactly like 0.05" in w for w in warnings), warnings
+
+
+def test_251_dry_run_spawns_no_subprocess(tmp_path, monkeypatch):
+    """T-1's contract, pinned here too: a --dry-run resolves no cjxl floor, so
+    it spawns NO subprocess (the eager `cjxl --version` probe was a regression
+    the full-suite cache had hidden)."""
+    from PIL import Image
+    Image.new("RGB", (16, 16), (10, 20, 30)).save(tmp_path / "a.jpg", quality=90)
+    tr.setup_logger()
+    probed, spawned = [], []
+    monkeypatch.setattr(tr, "_min_effective_distance",
+                        lambda exe: probed.append(exe) or 0.05)
+    monkeypatch.setattr(tr.subprocess, "run",
+                        lambda *a, **k: spawned.append(a[0]) or SimpleNamespace(
+                            stdout="", stderr="", returncode=0))
+    args = tr.build_parser().parse_args(
+        [str(tmp_path), "--force-convert", "--distance", "0.01", "--dry-run",
+         "--mode", "0"])
+    tr.cmd_convert(args, from_jxl=False)
+    assert probed == [], "a dry run resolved the cjxl distance floor"
+    assert spawned == [], "a dry run spawned a subprocess"

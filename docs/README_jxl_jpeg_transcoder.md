@@ -439,7 +439,10 @@ Options:
   --dry-run          Preview operations without converting. With --delete-source
                      armed, every entry point (transcode, convert, auto) says so:
                      `Dry run: --delete-source is ARMED. Up to N source(s) would
-                     be deleted`, with the gates that stand in front of it
+                     be deleted`, with the gates that stand in front of it. A dry
+                     run spawns no subprocess at all: the distance-floor probe
+                     (`cjxl --version`) that a real run performs before warning
+                     about clamped distances is skipped with it
   --summary-json     Emit ONE machine-readable line per run:
                      `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`
                      on stdout, in addition to the normal log. jxl_photo.py
@@ -460,6 +463,7 @@ Options:
 | `1` | One or more files failed, or invalid input |
 | `2` | Aborted (e.g. duplicate output destinations) |
 | `3` | User declined the delete-source confirmation |
+| `130` | Interrupted with Ctrl+C (cancelled) |
 
 * * *
 
@@ -484,11 +488,19 @@ entirely on the direction, and the difference is large**:
 
 > ### ⚠️ The lossy directions cannot prove anything
 >
-> Nothing is stored for a lossy conversion, and a lossy output cannot reproduce
-> its source, so there is **no way to tell** that the existing file came from the
+> Nothing is stored for a lossy (`d>0`) conversion, and a lossy output cannot
+> reproduce its source, so there is **no way to tell** that the existing file came from the
 > source you are about to delete. The only check is that the output is a
 > structurally valid file of the right type — **an unrelated file with the same
 > name would pass**.
+>
+> The one exception: a JPEG archived with `--force-convert --distance 0` produces
+> a `jbrd` container (XMP provenance markers must never go there), and that encode
+> now records the source's MD5 and the JXL's self-hash in `checksums.md5` exactly
+> like a lossless transcode. A later re-run in a folder-collapsing mode can
+> therefore prove the pairing instead of failing closed with "no checksum to
+> prove it (was it written with --no-md5?)" — earlier releases stored nothing for
+> that combination and blocked the workflow.
 >
 > Use it there only when you know the archive's provenance yourself. The run
 > prints this warning at startup, and `jxl_photo.py` charges a separate

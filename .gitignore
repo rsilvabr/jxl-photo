@@ -53,3 +53,6 @@ hdr/
 
 # PyPI packaging workspace (local only)
 PIP/
+
+# Plans, coder reports and reviews exchanged between AI tools (see AGENTS.md)
+AI_tools/

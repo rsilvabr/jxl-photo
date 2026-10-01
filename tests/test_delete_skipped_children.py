@@ -102,6 +102,13 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     monkeypatch.setattr(dec, "TEMP2_DIR", staging)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: integrity)
     monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: ours)
+    # Round 43 (D-2): the skipped path's delete gate certifies the existing TIFF
+    # by its provenance marker MATCHING these sources, not by mere marker
+    # presence. `ours` now stands for a matching jxlphoto-src marker.
+    _mark = ({"src": dec._source_path_id(src), "srcsum": None} if ours
+             else {"src": "someone-elses-id", "srcsum": None})
+    monkeypatch.setattr(dec, "_read_source_markers_batch",
+                        lambda paths: {str(p): dict(_mark) for p in paths})
     # A dict now: the KIND of incompleteness decides the advice in the KEEP line.
     monkeypatch.setattr(dec, "_incomplete_groups",
                         {os.path.normcase(str(src)): "truncated"} if incomplete else {})

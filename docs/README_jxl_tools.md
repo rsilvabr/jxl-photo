@@ -116,7 +116,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `1` | New workflow | Start the conversion wizard |
 | `2` | Repeat last workflow | Re-run the previous conversion with same settings. **Manifest runs are repeatable too**: the entry reads `Repeat last workflow (manifest: <file>.csv)`, skips the input-folder question and re-reads the CSV, so edits you made in Excel between runs are picked up. It is disabled only while that CSV is missing. You are still asked overwrite/sync (default: sync) and dry-run every time |
 | `3` | Check dependencies again | Re-scan all tools and libraries |
-| `4` | Edit default settings | Change workers, quality, effort, export marker |
+| `4` | Edit default settings | Change workers, quality, effort, export marker. The marker set here is **always** passed to every script (`--export-marker`), so the wrapper and the script anchor on the same folders even if a script's own `EXPORT_MARKER` setting was edited. The modes-6/7 output folder names shown in the delete panel are read from each script's own `EXPORT_*_FOLDER` setting |
 | `5` | Reset all settings | Delete config and start fresh |
 | `6` | Move settings file | Toggle between script folder and User Profile |
 | `7` | Presets | Save the last workflow under a name and re-run it later. See below |
@@ -128,7 +128,10 @@ config is plain JSON you can hand-edit, so not just the numbers (mode, workers,
 distance, ...) but also the enumerated values (bit depth, provenance,
 multi-page policy, compression, depth policy, conversion type, ICC profile)
 are checked. A corrupt value is **refused with the reason**, not defaulted and
-not passed to a child as a command line nobody typed.
+not passed to a child as a command line nobody typed. That includes the two
+fields that pick WHICH script runs (`last_origin_format`/`last_dest_format`):
+an unknown value there is refused instead of routing the run to the wrong
+script while the panel still shows the direction you expected.
 
 ### Presets (option 7)
 
@@ -293,7 +296,11 @@ the child as `--exclude-folders` (folder NAMES, relative to the input root —
 see the encoder/decoder READMEs). The default is your **last answer**, and
 the answer is asked here — before the mode is known and before the `[D]`
 delete panel counts the files — so that count always matches what the child
-will actually process.
+will actually process. The answer is also only **persisted and replayed for
+these two directions**: a stale `last_exclude_folders` left over from a TIFF
+run is not carried into a JPEG/JXL workflow — no child there reads the flag,
+so the stale value can neither shrink a run nor raise the spammy "IGNORED"
+warning on a direction that never asked.
 
 * * *
 
@@ -510,7 +517,11 @@ Basic parameters always shown:
 - **Resize** — JXL→JXL (modes 1–7) and JXL→JPEG/PNG: `none` (default), `long
   edge`, `short edge` or `percent`, then the value and "Allow upscale?"
   (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`).
-  A resized output is a **derivative** of its own: not offered in modes 0/8
+  The value is validated before it becomes a flag: a percentage must be
+  finite and above zero, an edge a positive integer — `nan`, `inf`, `0` and
+  negatives are re-prompted instead of handed to the child to fail per file
+  (the same domain the manifest's `Resize` column enforces). A resized
+  output is a **derivative** of its own: not offered in modes 0/8
   for JXL→JXL, and not offered for the bit-exact JPEG recovery (which has no
   pixels to shape). `none` clears an answer from an earlier pass
 - **Output sharpening** — the same directions: `none` (default), `screen` or
@@ -568,7 +579,8 @@ offers back as defaults — among them `last_exclude_folders`, the raw
 `';'`-separated string of the last TIFF↔JXL run's folder-exclusion answer
 (`-`/empty stored as no exclusion). It is not editable here; the wizard's
 Step 3 question offers it as the default, and `Repeat last workflow`/
-snapshots replay it as-is.
+snapshots replay it as-is — but only in the TIFF↔JXL directions, where the
+flag actually exists; every other direction runs without it.
 
 * * *
 

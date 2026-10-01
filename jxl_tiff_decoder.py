@@ -1047,6 +1047,10 @@ _counter = {"done": 0, "total": 0}
 # What the deletion actually did. Module-level because the delete gate lives in
 # process_group while main() owns the summary — without this the most
 # destructive thing the tool does never reached emit_summary_json.
+#
+# "kept", like "deleted", counts SOURCES (JXL files preserved), in EVERY gate
+# branch — the summary line says "file(s)": a branch that counted the group
+# instead of its JXLs understated what survived (round 43, D-6).
 _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
 
@@ -1402,8 +1406,10 @@ def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
     (native colour, lossless, or an encoder 'skip' file): pasting/assigning
     that profile is correct. False for a LOSSY file carrying an ICC blob:
     djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
-    float decode. None when djxl did not write the profiles (unknown ->
-    callers keep today's behaviour and log it)."""
+    float decode. None when djxl did not write the profiles: the caller must
+    fail CLOSED there — without the probes nothing can prove the pixels kept
+    the file's own colour space, and pasting the original ICC on a lossy
+    ICC-blob decode is exactly the linear-sRGB trap (round 43, D-5)."""
     try:
         a, b = out_icc.read_bytes(), orig_icc.read_bytes()
     except OSError:
@@ -2561,9 +2567,22 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
             reason = "Roundtrip (converted: lossy ICC blob)"
             return pixels, final_icc, reason, mode
         if same is None:
-            logger.debug(" >djxl did not report its output/input profiles "
-                         "(--icc_out/--orig_icc_out); keeping the paste-the-"
-                         "original-ICC behaviour")
+            # Fail closed (round 43, D-5): djxl did not write EITHER probe
+            # profile, so nothing can prove these pixels kept the file's own
+            # colour space. Pasting the original ICC here is exactly the
+            # linear-sRGB trap on a LOSSY file carrying an ICC blob (measured
+            # 15.4 dB wrong), and "is this file lossy?" cannot be answered
+            # without the probes — so the paste is refused in every case the
+            # probes are missing, which on a supported djxl means the probes
+            # were lost, and on an odd one means the whole check is absent.
+            raise RuntimeError(
+                "djxl did not write the --icc_out/--orig_icc_out profiles this "
+                "decode needs to prove the pixels kept the file's own colour "
+                "space; the original ICC must NOT be pasted without that proof "
+                "(on a lossy file carrying an ICC blob the result is linear "
+                "sRGB and the paste would give wrong colours). Increase djxl: "
+                "libjxl >= 0.11.2 writes both profiles — "
+                "https://github.com/libjxl/libjxl/releases")
         rgb, alpha = read_png_to_numpy(png_path, target_depth=target_depth)
         if alpha is not None:
             pixels = np.dstack([rgb, alpha])
@@ -2778,18 +2797,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
     if _promote_local:
         write_path = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
 
-    # Identity of a pre-existing output (non-staging only). The error handler
-    # compares against this: a file whose identity is UNCHANGED was never
-    # touched by this run (e.g. djxl failed before TiffWriter ever opened the
-    # output — in that case the original TIFF is still intact on disk) and
-    # must be KEPT, not deleted.
-    _pre_identity = None
-    if write_path == final_path and already_exists:
-        try:
-            _st = final_path.stat()
-            _pre_identity = (_st.st_mtime_ns, _st.st_size)
-        except OSError:
-            pass
+    # NOTE: write_path can NEVER equal final_path here any more — the local
+    # (non-staging) write went to the uuid ".tmp" above, and the staging run
+    # never started at the final path — so the exception handler below has no
+    # "did this run overwrite a pre-existing final?" case to guard: the final
+    # name is only ever touched by the atomic os.replace after integrity,
+    # and a pre-existing output is preserved by construction.
 
     with tempfile.TemporaryDirectory(prefix="tiff_", dir=TEMP_DIR) as tmp:
         tmp_dir = Path(tmp)
@@ -3006,28 +3019,13 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
         except Exception as e:
             # Remove any partial output produced by THIS run so the next
             # smart-sync run does not mistake it for a fresh, up-to-date TIFF
-            # and skip it forever. The delete only happens when THIS run
-            # actually wrote: staging UUID file, no pre-existing file, or the
-            # on-disk identity changed. A pre-existing TIFF that was never
-            # touched (e.g. djxl/decode failed before TiffWriter opened the
-            # output) is KEPT — the old comment claiming "TiffWriter already
-            # truncated it" was only true for failures inside the writer.
+            # and skip it forever. The delete only touches this run's own
+            # write: a pre-existing final is never written to (the uuid ".tmp"
+            # + atomic os.replace do that — see the note above), so the final
+            # name is preserved by construction on any failure.
             if write_path != final_path:
                 try:
                     if write_path.exists():
-                        write_path.unlink()
-                except OSError:
-                    pass
-            elif _pre_identity is None:
-                try:
-                    if write_path.exists():
-                        write_path.unlink()
-                except OSError:
-                    pass
-            else:
-                try:
-                    _st = write_path.stat()
-                    if (_st.st_mtime_ns, _st.st_size) != _pre_identity:
                         write_path.unlink()
                 except OSError:
                     pass
@@ -3184,6 +3182,18 @@ def process_group(group_tasks, workers, target_icc=None):
         # would cross statuses under concurrency and could delete sources of
         # failed conversions. Key explicitly on the returned identifier.
         status_by_main = {r[0]: r[1] for r in results}
+        # (Round 43, D-2 — the recompressor's #419 fix, ported) A skipped
+        # source is certified by the PRE-EXISTING OUTPUT's provenance
+        # markers MATCHING these sources, never by marker presence. The
+        # classifications above stay as they are; the gate reads the markers
+        # of every skipped output in ONE batched call and demands
+        # _provenance_ok — an unrelated photo's TIFF (marker-carrying or
+        # marker-less) can no longer certify the deletion of these JXLs.
+        _skip_finals = [task["final_tiff"] for task in tasks
+                        if DELETE_SKIPPED
+                        and status_by_main.get(str(task["main_jxl"])) == "skipped"]
+        _skip_marks = (_read_source_markers_batch(_skip_finals)
+                       if _skip_finals else {})
         for task in tasks:
             status = status_by_main.get(str(task["main_jxl"]), "error")
             # A skip is admitted only with DELETE_SKIPPED, and only so the
@@ -3197,7 +3207,8 @@ def process_group(group_tasks, workers, target_icc=None):
                 continue
             final_tiff = task["final_tiff"]
             if not final_tiff.exists():
-                _delete_stats["kept"] += 1
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
                 logger.warning(f" KEEP (final output missing) | {task['main_jxl'].name}")
                 continue
             # A staged output whose move FAILED leaves a stale pre-existing
@@ -3212,30 +3223,40 @@ def process_group(group_tasks, workers, target_icc=None):
             # worked and silently delete nothing whenever staging is configured.
             if (use_staging and not was_skipped
                     and os.path.normcase(str(final_tiff)) not in moved_finals):
-                _delete_stats["kept"] += 1
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
                 logger.warning(f" KEEP (output never left staging) | {task['main_jxl'].name}")
                 continue
             if not _verify_tiff_integrity(final_tiff):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
-                continue
-            # A SKIPPED source is judged on the FILE — and the marker is the
-            # part of the file that says whose decode this TIFF is. The skip
-            # decision itself is a timestamp comparison (convert_multipage_
-            # jxl_group checks the marker in both branches, but this gate is
-            # the last line of defence): an original master with no
-            # jxlphoto-src marker — re-saved, touched, restored from a backup,
-            # re-synced by a cloud drive — must never certify a deletion, no
-            # matter how fresh its mtime looks. Fail closed: keep the sources.
-            if was_skipped and not _decode_output_is_ours(final_tiff):
                 _delete_stats["kept"] += (len(task["entries"])
                                           + len(task.get("ignored_thumbs", [])))
-                logger.warning(
-                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
-                    f"the existing {final_tiff.name} carries no jxlphoto-src marker, "
-                    f"so it is not a file this tool decoded — it cannot prove these "
-                    f"sources are archived")
+                logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
                 continue
+            # A SKIPPED source is judged on the FILE — and the MATCH, not the
+            # presence, of the marker is what says whose decode this TIFF is.
+            # The skip decision itself is a timestamp comparison
+            # (convert_multipage_jxl_group checks presence in both branches,
+            # but this gate is the last line of defence): a TIFF that carries
+            # a marker pointing at DIFFERENT sources — or no marker at all,
+            # or an unreadable one — must never certify a deletion, no
+            # matter how fresh its mtime looks. Fail closed: keep the sources.
+            if was_skipped:
+                _skip_info = (_skip_marks.get(str(final_tiff))
+                              or {"src": None, "srcsum": None})
+                if not _provenance_ok(_skip_info, [e[0] for e in task["entries"]],
+                                      PROVENANCE_CHECK):
+                    _delete_stats["kept"] += (len(task["entries"])
+                                              + len(task.get("ignored_thumbs", [])))
+                    logger.warning(
+                        f" KEPT {len(task['entries'])} source(s) | "
+                        f"{task['main_jxl'].name} | "
+                        f"the existing {final_tiff.name} carries no jxlphoto-src "
+                        f"marker MATCHING these sources, so it is not their "
+                        f"decode — it cannot prove the sources are archived"
+                        + ("" if PROVENANCE_CHECK == "content" else
+                           "; if these sources MOVED, re-run with "
+                           "--provenance content"))
+                    continue
             # Pages of this group were not in the run. Every check above passes
             # — the single-page TIFF written is valid and complete — so this is
             # the only place that can stop the deletion. Fail closed: a page
@@ -3291,7 +3312,8 @@ def process_group(group_tasks, workers, target_icc=None):
             # sources whose pixels all reached the TIFF may go, and matrix
             # cannot prove that. Fail closed, like ignored thumbnails.
             if USE_MATRIX_MODE:
-                _delete_stats["kept"] += len(task["entries"])
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
                 logger.warning(
                     f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
                     f"--matrix decodes through PPM and cannot prove alpha was not "
@@ -4022,7 +4044,64 @@ def collect_multipage_groups(jxls: list) -> dict:
 # ARGUMENT PARSING AND MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Every run-scoped global main() assigns. It assigns them ONE-WAY (a CLI flag
+# only ever moves a setting in one direction), so a second main() in the same
+# process — the test suite, the wrapper's in-process helpers, anything that
+# imports this module — inherited the first run's arming: a plain run after
+# `--delete-source` stayed armed (D-1), and the same holds for every name
+# below. main() now records the pre-run value of each name AFTER the restore
+# below and restores the recorded deltas at the next entry, so a run starts
+# with exactly the values it was entered with, never with a previous run's.
+# (Deliberately a transaction record rather than a freeze of import-time
+# values: a module setting edited after import — tests, in-process config —
+# is a config change, not a leak, and must survive a later run with no flag.)
+_RUN_ASSIGNABLE = (
+    "OVERWRITE", "DELETE_SOURCE", "DELETE_SKIPPED", "ALLOW_INCOMPLETE_GROUPS",
+    "PROVENANCE_CHECK", "DELETE_CONFIRM", "EXPORT_JXL_SUBFOLDER", "DEPTH_POLICY",
+    "USE_MATRIX_MODE", "FORCE_BASIC_MODE", "FORCE_NONE_MODE",
+    "CLEANUP_XMP_ICC_MARKER", "DJXL_OUTPUT_DEPTH", "TIFF_COMPRESSION",
+    "TEMP2_DIR", "EXPORT_MARKER", "EXCLUDE_FOLDERS", "ADD_JPEG_PREVIEW",
+    "THUMBNAIL_HANDLING", "THUMBNAIL_SUFFIX", "RECONSTRUCT_MULTIPAGE",
+)
+# {global name: value BEFORE the last run that changed it}. Consumed (and
+# cleared) by main() at entry; nothing else touches it.
+_prev_run_globals: dict = {}
+
+def _plan_touches_sources(tasks) -> bool:
+    """(#432, ported from the transcoder and the recompressor) Would THIS plan
+    actually delete anything?
+
+    The confirmation used to be charged for every --delete-source run, plan or
+    no plan: a no-TTY re-run of an already-archived folder was asked for a
+    token it could not answer, exited 3, and would exit 3 FOREVER — all
+    without a single deletion pending.
+
+    The mirror of the delete gate's own logic: every group that will be
+    WRITTEN deletes its sources on ok; a skipped group is deleted only
+    through --delete-skipped's gate. Everything uncertain, however, counts as
+    a reason to ask (a refusal later still means the user wanted deletion).
+    One exception is KNOWN, not uncertain: --matrix's gate keeps EVERY source
+    (it decodes through PPM and cannot prove alpha reached the TIFF), so a
+    matrix plan can never delete.
+    """
+    if USE_MATRIX_MODE:
+        return False
+    for task in tasks:
+        if not _would_skip_group(task["entries"], task["final_tiff"]):
+            return True        # will be written; the delete gate deletes on ok
+        if DELETE_SKIPPED:
+            return True        # subject to the --delete-skipped gate below
+    return False
+
+
 def main():
+    # Every module global this function assigns (D-1). Declared as one block at
+    # the top so no assignment can ever textually precede its declaration when
+    # the validation order below changes.
+    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS
+    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
+
     parser = argparse.ArgumentParser(
         description="JPEG XL to TIFF converter with ICC preservation",
         epilog="""
@@ -4102,8 +4181,8 @@ Examples:
                              "mode, not just 8. IRREVERSIBLE")
     parser.add_argument("--provenance", type=str, default=None,
                         choices=["path", "content"],
-                        help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
-                             "output is matched to the source about to overwrite it: "
+                        help="[with --delete-source] How an EXISTING output is matched "
+                             "to the source it would replace or certify (every mode): "
                              "path (default, free) compares the recorded LOCATION; "
                              "content also accepts matching source bytes, so it "
                              "survives MOVED folders at the cost of reading each "
@@ -4113,7 +4192,9 @@ Examples:
                              "ALREADY EXISTS (reported as SKIP), so a decode interrupted "
                              "between the write and the unlink can be finished without "
                              "re-decoding everything. Never acts on the timestamp alone: "
-                             "the output must exist and pass the integrity check.")
+                             "the output must exist, pass the integrity check, and carry "
+                             "a provenance marker naming these sources — a mismatch or "
+                             "an unreadable marker keeps them.")
     parser.add_argument("--allow-incomplete-groups", action="store_true",
                         help="[with --delete-source] Delete the JXLs of a multi-page "
                              "split even when pages of it are MISSING. By default those "
@@ -4154,6 +4235,15 @@ Examples:
 
     args = parser.parse_args()
 
+    # (Round 43, D-1 class fix) Restore whatever a PREVIOUS main() call in
+    # this process assigned, so every run starts from the settings as the
+    # module was entered with — never from a previous run's flags. Record the
+    # pre-run values now; the deltas are stored right after the assignments.
+    for _name, _val in _prev_run_globals.items():
+        globals()[_name] = _val
+    _prev_run_globals.clear()
+    _pre_run_globals = {n: globals()[n] for n in _RUN_ASSIGNABLE}
+
     if not args.input.exists():
         parser.error(f"input path does not exist: {args.input}")
 
@@ -4189,10 +4279,26 @@ Examples:
     _check_dir(TEMP_DIR, "TEMP_DIR")
     _check_dir(args.staging, "staging directory")
 
-    # Apply globals
-    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS
+    # Value validations that must run BEFORE the flag assignments below: a
+    # parser.error raised after a one-way assignment would exit before the D-1
+    # delta record at the end of this block, and the change would leak into the
+    # next in-process run. Every parser.error reachable from here fires ahead
+    # of the writes.
+    _excl_raw = [n.strip() for n in args.exclude_folders.split(";") if n.strip()]
+    for _n in _excl_raw:
+        if "\\" in _n or "/" in _n:
+            parser.error(f"--exclude-folders takes folder NAMES, not paths: {_n!r} "
+                         "(use a ';'-separated list of bare names, e.g. --exclude-folders \"_EXPORT;temp\")")
+    if args.thumbnail_suffix is not None and not args.thumbnail_suffix.strip():
+        parser.error("--thumbnail-suffix must not be empty")
+    if not args.staging and TEMP2_DIR is not None:
+        # The script-set TEMP2_DIR was never validated — only --staging was,
+        # above — so a bad path in the setting crashed mid-run at
+        # staging_dir.mkdir with a raw traceback instead of the clean
+        # parser.error every other directory gets.
+        _check_dir(TEMP2_DIR, "TEMP2_DIR")
 
+    # Apply globals
     if args.sync:
         OVERWRITE = "smart"
     elif args.overwrite:
@@ -4209,7 +4315,6 @@ Examples:
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.export_subfolder is not None:
-        global EXPORT_JXL_SUBFOLDER
         EXPORT_JXL_SUBFOLDER = args.export_subfolder
 
     if args.depth_policy:
@@ -4234,23 +4339,14 @@ Examples:
         TIFF_COMPRESSION = args.compression
     if args.staging:
         TEMP2_DIR = args.staging
-    elif TEMP2_DIR is not None:
-        # The script-set TEMP2_DIR was never validated — only --staging was,
-        # above — so a bad path in the setting crashed mid-run at
-        # staging_dir.mkdir with a raw traceback instead of the clean
-        # parser.error every other directory gets.
-        _check_dir(TEMP2_DIR, "TEMP2_DIR")
     # NOTE: --clean-staging is applied after setup_logger() below (it must be
     # auditable, and it must not run on a dry run).
-    if args.export_marker:
-        global EXPORT_MARKER, EXCLUDE_FOLDERS
+    # Explicitly empty (--export-marker "") is honored: an empty marker
+    # matches nothing (fail closed, see _marker_matches). `if args.export_marker:`
+    # kept the script default instead (bug #433's decoder twin, round 43).
+    if args.export_marker is not None:
         EXPORT_MARKER = args.export_marker
 
-    _excl_raw = [n.strip() for n in args.exclude_folders.split(";") if n.strip()]
-    for _n in _excl_raw:
-        if "\\" in _n or "/" in _n:
-            parser.error(f"--exclude-folders takes folder NAMES, not paths: {_n!r} "
-                         "(use a ';'-separated list of bare names, e.g. --exclude-folders \"_EXPORT;temp\")")
     EXCLUDE_FOLDERS = tuple(n.lower() for n in _excl_raw)
     if args.no_preview:
         ADD_JPEG_PREVIEW = False
@@ -4259,11 +4355,17 @@ Examples:
         if THUMBNAIL_HANDLING == "generate":
             THUMBNAIL_HANDLING = "include"
     if args.thumbnail_suffix is not None:
-        if not args.thumbnail_suffix.strip():
-            parser.error("--thumbnail-suffix must not be empty")
         THUMBNAIL_SUFFIX = args.thumbnail_suffix
     if getattr(args, "no_reconstruct_multipage", False):
         RECONSTRUCT_MULTIPAGE = False
+
+    # (D-1) The assignments above are one-way; record which run-scoped
+    # globals actually CHANGED so the next entry in this process can restore
+    # them. Kept here — before every return/exit of main() — so even a dry
+    # run or an empty folder leaves no arming behind.
+    for _name in _RUN_ASSIGNABLE:
+        if globals()[_name] != _pre_run_globals[_name]:
+            _prev_run_globals[_name] = _pre_run_globals[_name]
 
     log_file = setup_logger()
 
@@ -4285,7 +4387,7 @@ Examples:
     if args.provenance is not None and not DELETE_SOURCE:
         logger.warning(f"--provenance {args.provenance} has no effect without "
                        f"--delete-source: it only decides whether an EXISTING output "
-                       f"may be overwritten and its source deleted.")
+                       f"may be overwritten, or certify the deletion of a skipped source.")
 
     if ALLOW_INCOMPLETE_GROUPS and not DELETE_SOURCE:
         logger.warning("--allow-incomplete-groups has no effect without --delete-source: "
@@ -4634,22 +4736,25 @@ Examples:
                     _would_keep.append((task["main_jxl"], "output failed the integrity check",
                                         _n_src))
             # The real gate certifies a SKIPPED source on the FILE: the
-            # jxlphoto-src marker is what proves the existing TIFF is this
-            # decoder's own output. Batch-read the markers once and move
-            # marker-less groups to would-keep — an original master must never
-            # be counted as "would DELETE" (item 3's rule, previewed).
+            # jxlphoto-src marker MATCHING these sources is what proves the
+            # existing TIFF is their decode (round 43, D-2 — the preview uses
+            # the same _provenance_ok predicate as the gate, so a refused
+            # delete is never counted as "would delete" here either). Move
+            # marker-less/mismatched groups to would-keep — an original master
+            # must never be counted as "would DELETE" (item 3's rule, previewed).
             if _would_delete:
                 _marks = _read_source_markers_batch([t["final_tiff"] for t in _would_delete])
                 _proven = []
                 for t in _would_delete:
                     _info = _marks.get(str(t["final_tiff"])) or {"src": None, "srcsum": None}
-                    if _info.get("src") or _info.get("srcsum"):
+                    if _provenance_ok(_info, [e[0] for e in t["entries"]], PROVENANCE_CHECK):
                         _proven.append(t)
                     else:
                         _would_keep.append(
                             (t["main_jxl"],
-                             "existing TIFF carries no jxlphoto-src marker (not this "
-                             "tool's decode — refused)", len(t["entries"])))
+                             "existing TIFF carries no jxlphoto-src marker MATCHING "
+                             "this source (not this tool's decode — refused)",
+                             len(t["entries"])))
                 _would_delete = _proven
             if _would_delete or _would_keep:
                 _n_files = sum(len(t["entries"]) for t in _would_delete)
@@ -4704,11 +4809,18 @@ Examples:
 
     # Delete confirmation (after dry-run so simulations never prompt). Charged
     # for EVERY mode: deletion is a separate opt-in from the output layout, so a
-    # direct `--mode 3 --delete-source` must ask exactly like mode 8 does.
+    # direct `--mode 3 --delete-source` must ask exactly like mode 8 does — but
+    # only when the plan can actually delete something (#432): an all-skip plan
+    # (a no-TTY re-run over an already-archived folder) deletes nothing, and
+    # asking for a token that ends in exit 3 would do so forever.
     if DELETE_SOURCE:
         logger.info(f"DELETE_SOURCE=True (mode {args.mode}): source JXLs will be deleted "
                     f"after their TIFF is written and verified")
-        if DELETE_CONFIRM:
+        # DELETE_CONFIRM is tested BEFORE the probe: the wrapper always passes
+        # --delete-confirm-off, and _plan_touches_sources spawns one exiftool
+        # read per group to predict the skip classification — charging that
+        # cost on every unattended run just to discard the answer.
+        if DELETE_CONFIRM and _plan_touches_sources(tasks):
             if not confirm_deletion_jxl():
                 logger.info("Deletion not confirmed -- exiting.")
                 sys.exit(3)

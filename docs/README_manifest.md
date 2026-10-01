@@ -110,14 +110,18 @@ writes these columns in these three directions.
 | `OutputICC` | `sRGB`, `AdobeRGB`, or a path to a `.icc`/`.icm` file (relative anchors to the CSV folder) | Colour-converted 16-bit derivative, converted from the source's own profile. |
 | `Resize` | `long:2048`, `short:1024`, `50%` — add `+up` to allow upscaling (`long:3000+up`) | Resize the output, aspect ratio kept. |
 | `Sharpen` | `none`, `screen`, `print` | Output sharpening after the resize. |
-| `RenameFrom` / `RenameTo` | Literal text — no path characters, no `..` | The first occurrence of `RenameFrom` in the output **file name** becomes `RenameTo` (case-sensitive). `RenameTo` requires `RenameFrom` on the same row. |
+| `RenameFrom` / `RenameTo` | Literal text — no path characters, no `..` | The first occurrence of `RenameFrom` in the output **file name** becomes `RenameTo` (case-sensitive). `RenameTo` requires `RenameFrom` on the same row. Refused on a bit-exact `jxl2jpeg` recovery row (the recovered JPEG keeps the original file name). |
 
 The safety rules of a direct run apply per row:
 
 - A **resize/sharpen** row can never run in place (mode 8, or mode 0 with
   Destination = Source) and never deletes its source — combined with a delete
   answer, the whole manifest is refused up front. A bit-exact JPEG recovery
-  refuses resize/sharpen entirely: pick the lossy JXL→JPEG conversion for
+  refuses resize/sharpen entirely — and a `RenameFrom` on it is refused too,
+  up front, for the same reason (the recovered JPEG keeps its original name).
+  An `OutputICC` cell on such a row is **ignored with a warning** instead of
+  refused: there is no pixel to convert, and the recovered JPEG keeps the
+  original bytes, colour included. Pick the lossy JXL→JPEG conversion for
   those rows.
 - An **`OutputICC`-only** row keeps its conversion but receives no
   `--delete-source`, while the plain rows keep it.
@@ -164,8 +168,11 @@ does not suit one row:
 | **Cell filled** | That row's own list, **overriding** the run's value |
 
 Like the flag itself, the cell takes folder **names**, not paths: any `;`
-entry containing `\` or `/` refuses the whole manifest. (The generator writes
-the column, empty, for `tiff2jxl`/`jxl2tiff` manifests only.)
+entry containing `\` or `/` refuses the whole manifest. A cell holding only
+`;` characters (with no name) reads as **empty** — it filters nothing in the
+children, so the row keeps the run's value instead of silently erasing it.
+(The generator writes the column, empty, for `tiff2jxl`/`jxl2tiff`
+manifests only.)
 
 The collision skip-check reasons per row: disjoint trees under different
 markers still skip the full output scan, while two marker folders that nest

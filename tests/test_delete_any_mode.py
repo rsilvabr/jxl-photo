@@ -499,6 +499,13 @@ def _skip_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     monkeypatch.setattr(enc, "TEMP2_DIR", staging)
     monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", verify is not None)
     monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: integrity)
+    # Round 43 (E-1): a skipped page is only deleted when the pre-existing JXL
+    # carries the jxlphoto-src marker of THIS source. Stub the batched read so
+    # the "already archived" fixture really is provably archived.
+    monkeypatch.setattr(enc, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": enc._source_path_id(src),
+                                                "srcsum": None}
+                                       for p in paths})
     if verify is not None:
         monkeypatch.setattr(enc, "_verify_roundtrip_page",
                             lambda *a, **k: (verify, "stubbed"))
@@ -619,6 +626,12 @@ def test_delete_skipped_needs_every_page_of_a_split(tmp_path, monkeypatch):
     monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", False)
     # page 2's output is never actually written -> exists() fails -> KEEP
     monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: True)
+    # page 0's pre-existing output IS provably this source's archive, so the
+    # KEEP below can only come from page 2's missing output (Round 43, E-1).
+    monkeypatch.setattr(enc, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": enc._source_path_id(src),
+                                                "srcsum": None}
+                                       for p in paths})
     real_convert = enc.convert_one
     monkeypatch.setattr(enc, "convert_one",
                         lambda t, w, f, p=0, *a, **k: (real_convert(t, w, f, p)

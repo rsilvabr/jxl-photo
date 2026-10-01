@@ -1914,7 +1914,10 @@ def test_png_lossless_convert_produces_container():
         Image.fromarray(np.zeros((16, 16, 3), dtype=np.uint8)).save(src)
         out = td / "a.jxl"
         tr.setup_logger()
-        (s, status, msg, _) = tr.encode_to_jxl(src, out, out, 1, 0.0, True, False)
+        # The success record is a 5-tuple since round 43 (T-2): result[4] now
+        # carries the JXL self-hash filed next to the source hash at the
+        # destination.
+        (s, status, msg, _src_md5, _jxl_md5) = tr.encode_to_jxl(src, out, out, 1, 0.0, True, False)
         assert status == "ok", f"PNG d=0 convert failed: {msg}"
         assert tr._verify_file_integrity(out)
 

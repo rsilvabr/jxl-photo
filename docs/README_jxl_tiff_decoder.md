@@ -325,6 +325,10 @@ you are about to delete JXLs that cannot be recovered if the decode had issues.
 If anything other than the exact token is entered, the script exits without converting
 or deleting anything.
 
+The token is only charged when the plan can actually delete something: a no-TTY
+re-run of an already-decoded folder produces an all-skip plan, deletes nothing
+and exits `0` without prompting.
+
 Set `DELETE_CONFIRM = False` only if running the script from an automation pipeline
 where interactive input is not possible. For any manual use, leave it `True` —
 it takes 3 seconds and is much safer.
@@ -472,12 +476,15 @@ Options:
   --delete-source    Delete source JXLs after successful decode. Works in EVERY
                      mode, not just 8. IRREVERSIBLE
   --provenance path|content
-                     [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
-                     structure, so two JXLs with the same name in different folders
-                     land on the same TIFF. Before overwriting a TIFF that already
-                     exists -- and deleting the JXL that made it -- the run checks
-                     that TIFF really came from this source, using the markers a
-                     decode writes (jxlphoto-src = location, jxlphoto-srcsum = image).
+                     [with --delete-source] How an EXISTING output is matched to
+                     the source it would replace OR certify, in EVERY mode: the
+                     folder-collapsing modes (2/4/5/6/7) drop folder structure, so
+                     two JXLs with the same name in different folders land on the
+                     same TIFF, and --delete-skipped's gate reads the same proof
+                     everywhere else. Before overwriting a TIFF that already exists
+                     -- and deleting the JXL that made it -- the run checks that
+                     TIFF really came from this source, using the markers a decode
+                     writes (jxlphoto-src = location, jxlphoto-srcsum = image).
                      path (default): compares the LOCATION. Free. A MOVED folder
                      reads as a different file.
                      content: also accepts matching source BYTES, so it survives
@@ -502,11 +509,18 @@ Options:
                      EXISTS (reported as SKIP), so a decode interrupted between the
                      write and the unlink can be finished without redoing the whole
                      library. Never acts on the timestamp alone -- the output must
-                     exist and pass the integrity check.
-                     WARNING: that is a STRUCTURAL check only. This script has no
-                     --verify-roundtrip (the encoder does), so nothing compares the
-                     pixels: a TIFF that came from different JXLs with the same name
-                     would pass
+                     exist, pass the integrity check, AND its `jxlphoto-src` marker
+                     must MATCH these sources: the match (not the marker's mere
+                     presence) is what proves whose decode the TIFF is. An
+                     unreadable, absent or foreign marker KEEPS the sources, with a
+                     log line naming the fix (re-decode into place; if the sources
+                     MOVED, re-run with --provenance content).
+                     WARNING: the marker proves the pairing, not the pixels. This
+                     script has no --verify-roundtrip (the encoder does): under the
+                     default --provenance path the marker is tied to the source's
+                     LOCATION, so a different JXL written over the same same-named
+                     source still passes -- --provenance content binds the source
+                     BYTES instead
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                      automation that already asked the user)
   --export-subfolder NAME
@@ -520,14 +534,14 @@ Options:
                      to total a multi-entry run; it is never printed to the
                      user. Safe to use in your own scripts -- the prefix is
                      stable and the payload is JSON.
-   --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
-                      setting in the script). Matched case-insensitively on
-                      folder names that START or END with it.
-   --exclude-folders NAMES
-                      ';'-separated folder NAMES skipped during discovery, in
-                      every mode (see "Excluding folders" below). Entries
-                      containing '\' or '/' are rejected at startup
-   --thumbnail-suffix S
+  --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
+                     setting in the script). Matched case-insensitively on
+                     folder names that START or END with it.
+  --exclude-folders NAMES
+                     ';'-separated folder NAMES skipped during discovery, in
+                     every mode (see "Excluding folders" above). Entries
+                     containing '\' or '/' are rejected at startup
+  --thumbnail-suffix S
                      Filename suffix that marks a thumbnail JXL (default: the
                      THUMBNAIL_SUFFIX setting, `_thumbnail`). Only a FALLBACK:
                      the encoder's `jxlphoto-thumb` marker wins when present, so
@@ -546,6 +560,7 @@ Options:
 | `1` | One or more files failed |
 | `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
 | `3` | User declined the delete-source confirmation |
+| `130` | Interrupted with Ctrl+C (cancelled) |
 
 ---
 
@@ -729,7 +744,7 @@ jxlinfo photo.jxl
 
 ## Known limitations
 
-- **eciRGB v2, scanner profiles and other table-curve ICC profiles**: a lossy JXL whose profile has no native form (table curve) stores the whole ICC, and djxl decodes it to linear sRGB. Files the encoder wrote with its default `cautious` strategy as "skip" (eciRGB v2 and Epson scanner profiles, verified) round-trip correctly. A lossy JXL that *does* carry such an ICC blob is detected in Roundtrip mode (djxl's `--icc_out` and `--orig_icc_out` differ only in this case) and decoded to float, then CONVERTED to the original profile — correct colours, wide gamut intact (measured 51.9 dB, the native-path figure). **That decode needs ImageMagick (`magick`) on PATH**; without it the file fails with an error instead of writing a wrong-colour TIFF, and the JXL is kept. An ICC blob with an alpha channel is refused in the derivative paths of the other tools (the float decode has no alpha); plain decode to TIFF handles it. Details: [Lossy JXL with an ICC blob](jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
+- **eciRGB v2, scanner profiles and other table-curve ICC profiles**: a lossy JXL whose profile has no native form (table curve) stores the whole ICC, and djxl decodes it to linear sRGB. Files the encoder wrote with its default `cautious` strategy as "skip" (eciRGB v2 and Epson scanner profiles, verified) round-trip correctly. A lossy JXL that *does* carry such an ICC blob is detected in Roundtrip mode (djxl's `--icc_out` and `--orig_icc_out` differ only in this case) and decoded to float, then CONVERTED to the original profile — correct colours, wide gamut intact (measured 51.9 dB, the native-path figure). When djxl writes **neither** probe profile, the decoder refuses the decode instead of pasting the original ICC (that paste is the linear-sRGB trap on a lossy ICC-blob file) — libjxl ≥ 0.11.2 writes both. **That decode needs ImageMagick (`magick`) on PATH**; without it the file fails with an error instead of writing a wrong-colour TIFF, and the JXL is kept. An ICC blob with an alpha channel is refused in the derivative paths of the other tools (the float decode has no alpha); plain decode to TIFF handles it. Details: [Lossy JXL with an ICC blob](jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
 - **Metadata extraction**: Some exotic JXL metadata formats may not transfer perfectly to TIFF. Standard EXIF/XMP/ICC from cjxl/libjxl work correctly.
 - **Animation**: JXL animations decode to the first frame only (TIFF doesn't support animation).
 - **Grayscale with alpha**: May produce RGB TIFF depending on djxl version. Use `--depth 8` for smaller files if alpha is not needed.

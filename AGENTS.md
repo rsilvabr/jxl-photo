@@ -69,6 +69,21 @@
   planning time, so sync/refusals/duplicate aborts see the final name.
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
+## Settings are never hardcoded
+- Every script's user-editable settings live at the TOP of the script
+  (`EXPORT_MARKER`, `EXPORT_*_FOLDER`, `DELETE_CONFIRM`, `TEMP2_DIR`, ...).
+  Code must READ those constants — never repeat their default as a literal
+  (`"_EXPORT"`, `"16B_JXL"`, `"path"`). A literal equal to the default passes
+  every test and silently discards the user's edit. Two cases that shipped
+  into review in round 43: the transcoder's `main()` reset its globals to
+  literals, and the wrapper omitted `--export-marker` when it equalled
+  `"_EXPORT"`.
+- Resetting run-scoped globals: restore the import-time snapshot
+  (`_RUN_DEFAULTS`), then apply the flags one way.
+- The wrapper reads a child's setting from the child module
+  (`_child_setting`); a shipped default may appear only as the fallback when
+  the child cannot be imported. It always passes its own marker to the child.
+
 ## Architecture gotchas
 - **djxl returns a lossy ICC-blob file in LINEAR sRGB**: never paste/assign the
   original ICC without checking `--icc_out` == `--orig_icc_out`
@@ -100,12 +115,21 @@
   encoder/decoder and the filter behind the wrapper's manifest collision
   walk — three parity-pinned copies),
   plus the verify/integrity family shared by the backends:
-  `_verify_jxl_integrity`/`_verify_file_integrity`, `has_jbrd_box`,
+  `_verify_jxl_integrity` (encoder + recompressor; `_verify_file_integrity`
+  exists ONLY in the transcoder — a JXL/JPEG/PNG/TIFF superset, not a
+  shared copy),
+  `has_jbrd_box`,
   `md5_of_file`, `_warn_distance_clamp`, `_would_skip`, `_decode_jxl_for_verify`,
-  `_canon_for_compare`, `_compare_stats`, plus the encode-record lineage
+  `_canon_for_compare`, `_compare_stats`, `_provenance_marker_args`
+  (encoder/decoder/transcoder), `_read_derived_markers_batch`,
+  `_capture_output_identity`, `_delete_partial_if_written` (transcoder/
+  recompressor), plus the encode-record lineage
   family shared by the encoder and the recompressor: `_strip_encode_params`,
   `_reconcile_gen`, `_append_encode_entry`, `_log_gen_notes_once`) so each
-  stays standalone. Fix bugs in ALL copies — `tests/test_helper_parity.py`
+  stays standalone. One pair diverges ON PURPOSE: `_derivative_metadata_args` —
+  only the recompressor rewrites the CreatorTool ICC for `--output-icc`, a flag
+  that never reaches the transcoder. Fix bugs in ALL copies —
+  `tests/test_helper_parity.py`
   pins the variants and fails the moment one copy drifts.
 - The recompressor's recursive finders skip its OWN output folder names
   (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — plus
@@ -145,6 +169,43 @@
   wrapper imports child functions in-process (resolvers, finders,
   `_validate_export_folder_name`), so a child's signature reaches
   `jxl_photo.py` too. A plan that changes a signature must include this list.
+
+## AI workflow: planner → coder → reviewer
+Heavy changes run in three steps, each leaving a document in `AI_tools/`
+(gitignored, local only). Names: `YYMMDD_<Tool>_<kind>_<topic>.md`, e.g.
+`261002_Claude_plan_exclude-folders.md`, `261002_DeepSeek_report_exclude-folders.md`,
+`261003_Claude_review_exclude-folders.md`. Same `<topic>` across the three.
+
+**1. Plan (Claude/Opus).** Literal and complete — the coder must not have to
+make a design decision. Every plan states:
+- each change as file + function (+ line hint), current behavior → required
+  behavior, and WHY;
+- every decision already taken (no "either A or B"); out-of-scope items named;
+- the signature checklist from *Verification* (every caller and test double)
+  when a signature changes;
+- the tests to write, which must be real-codec/real-exiftool ones (anything
+  touching what exiftool or the codecs read/write), and the exact command
+  that proves each one FAILS against the pre-fix code;
+- the rules most often broken: settings never hardcoded, fix ALL copies of a
+  duplicated helper, docs for every new `--flag`, no `git stash`, no commits;
+- acceptance criteria: the commands to run and the results expected.
+
+**2. Code (DeepSeek or another coder).** Follow the plan literally. When the
+plan is wrong, ambiguous, or the code differs from what it describes: do not
+improvise a design — take the most conservative option (fail closed, change
+less) and record it. Never commit. Write the report:
+- per plan item: done / partly / not done, with the files and functions touched;
+- every decision taken that the plan did not dictate, and why;
+- every deviation from the plan, and why;
+- the commands actually run with their REAL output (pytest summary lines,
+  the pre-fix failure proof) — never "tests pass" without the output;
+- what was NOT verified, and open questions for the reviewer.
+Finish by telling the user the report's path.
+
+**3. Review (Claude/Opus).** Read the plan, the report and the full diff;
+re-run the tests and the pre-fix proofs instead of trusting the report;
+check the claims against real tools where it matters; write the review with
+must-fix / should-fix items and a commit verdict.
 
 ## Docs map
 - `README.md` — current release, install, quick start

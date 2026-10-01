@@ -1124,6 +1124,45 @@ _discard_warned = {"count": 0, "suppressed": 0}
 # end-of-manifest recap could not say a single word about it.
 _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 
+# Script defaults for every global the CLI mutates, captured at import. main()
+# resets run-scoped state UNCONDITIONALLY at entry (a second in-process run
+# used to inherit the first one's armed --delete-source / --delete-confirm-off
+# / --staging — the flags were assigned one-way, `if args.x:` with no else;
+# the recompressor got exactly this reset in the same round). The reset must
+# restore THESE values and not hardcoded literals: a user who edits a setting
+# in the file must not have it silently revert at the top of every run; the
+# `if args.x:` overrides then apply per flag below. (EXCLUDE_FOLDERS is not
+# here only because it is rewritten unconditionally from --exclude-folders a
+# few lines into main(), so it cannot leak between runs as-is.)
+_RUN_DEFAULTS = {
+    "OVERWRITE": OVERWRITE,
+    "CJXL_DISTANCE": CJXL_DISTANCE,
+    "CJXL_EFFORT": CJXL_EFFORT,
+    "CJXL_BUFFERING": CJXL_BUFFERING,
+    "CJXL_MODULAR": CJXL_MODULAR,
+    "USE_RAM_FOR_PNG": USE_RAM_FOR_PNG,
+    "DELETE_SOURCE": DELETE_SOURCE,
+    "DELETE_CONFIRM": DELETE_CONFIRM,
+    "TEMP2_DIR": TEMP2_DIR,
+    "ENCODE_TAG_MODE": ENCODE_TAG_MODE,
+    "D50_PATCH_MODE": D50_PATCH_MODE,
+    "EMBED_JPEG_THUMBNAIL": EMBED_JPEG_THUMBNAIL,
+    "MULTIPAGE_TIFF_MODE": MULTIPAGE_TIFF_MODE,
+    "THUMBNAIL_MODE": THUMBNAIL_MODE,
+    "THUMBNAIL_SUFFIX": THUMBNAIL_SUFFIX,
+    "WARN_DISCARDED_THUMBNAILS": WARN_DISCARDED_THUMBNAILS,
+    "ICC_PNG_STRATEGY": ICC_PNG_STRATEGY,
+    "ICC_CACHE_DIR_OVERRIDE": ICC_CACHE_DIR_OVERRIDE,
+    "VERIFY_ROUNDTRIP": VERIFY_ROUNDTRIP,
+    "DELETE_SKIPPED": DELETE_SKIPPED,
+    "PROVENANCE_CHECK": PROVENANCE_CHECK,
+    "ADOPT_SCAN": ADOPT_SCAN,
+    "EXPORT_TIFF_SUBFOLDER": EXPORT_TIFF_SUBFOLDER,
+    "EXPORT_JXL_FOLDER": EXPORT_JXL_FOLDER,
+    "EXPORT_MARKER": EXPORT_MARKER,
+    "STRIP_METADATA": STRIP_METADATA,
+}
+
 def _capped_discard_warning(msg: str):
     """Log a per-file discard warning, but only up to DISCARD_WARN_LIMIT of them.
 
@@ -2194,28 +2233,22 @@ def read_existing_description(xmp_path):
     if not xmp_path or not xmp_path.exists():
         return ""
     try:
+        # -s3 (NOT -s): only -s3 prints the bare VALUE. Plain -s prints
+        # "Description                     : value", and returning that line
+        # verbatim seeded the tag name into the new dc:Description (round 43).
         r = _run_exiftool_argfile(
-            ["-s", "-XMP-dc:Description", str(xmp_path)], timeout=15
+            ["-s3", "-XMP-dc:Description", str(xmp_path)], timeout=15
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
-            # Filter out exiftool warnings from output
-            lines = [ln for ln in stdout.splitlines()
-                     if not ln.strip().startswith(("Warning:", "[minor]", "[major]"))]
-            stdout = "\n".join(lines).strip()
-            if not stdout:
-                return ""
-            # Try multiple parsing strategies
-            # Strategy 1: Split by " : " (standard exiftool output)
-            if " : " in stdout:
-                parts = stdout.split(" : ", 1)
-                if len(parts) > 1:
-                    return parts[1].strip()
-            # Strategy 2: Use regex to find content after first colon
-            match = re.search(r'^[^:]+:(.+)$', stdout, re.DOTALL)
-            if match:
-                return match.group(1).strip()
-            # Strategy 3: If no colon, return whole string (might be just the value)
+            # The value is used UNFILTERED: exiftool's own warnings go to
+            # STDERR (a failed read is refused by the returncode check), so a
+            # stdout prefix filter ("Warning:", "[minor]", "[major]") can only
+            # ever drop a real caption that begins with those words. Nor is it
+            # split at a colon: a caption "Captured: autumn 1958" is a value.
+            if r.stderr:
+                logger.debug(f"Reading description: exiftool stderr: "
+                             f"{r.stderr.strip()[:200]}")
             return stdout
     except Exception as e:
         logger.debug(f"Failed to read description: {e}")
@@ -3209,6 +3242,34 @@ def _provenance_marker_args(src_paths):
     return lines
 
 
+def _skipped_archive_proof(pairs: list) -> dict:
+    """E-1 proof for --delete-skipped: does each pre-existing output carry the
+    provenance markers of the VERY source behind it?
+
+    The source is the master TIFF, so there is no marker on the source side to
+    compare against (unlike the recompressor, whose source JXLs carry the pair
+    verbatim): `_provenance_ok` recomputes the proof from the TIFF itself —
+    the recorded path id (or, with --provenance content, the source-bytes id)
+    must match. This is EXACTLY the predicate the collapsing modes check at
+    the plan stage (:5399), now also required for the already-archived
+    deletions in modes that keep folder structure. Fail closed: a markerless
+    legacy archive, an unreadable batch or a foreign marker all read False →
+    the source is KEPT (heal by re-encoding, or by --provenance adopt in a
+    collapsing mode).
+
+    Returns {(tiff_path, final_path) -> bool}; keys are normcased to line up
+    with the string paths the delete gate and the preview carry.
+    """
+    outputs = sorted({str(dst) for _src, dst in pairs})
+    marks = _read_source_markers_batch([Path(o) for o in outputs])
+    proof = {}
+    for src, dst in pairs:
+        info = marks.get(str(dst)) or {"src": None, "srcsum": None}
+        proof[(os.path.normcase(str(src)), os.path.normcase(str(dst)))] = \
+            _provenance_ok(info, Path(src), PROVENANCE_CHECK)
+    return proof
+
+
 def _canon_for_compare(a: np.ndarray) -> np.ndarray:
     """Both sides of the comparison in one shape/dtype convention.
 
@@ -3315,6 +3376,26 @@ def _would_skip(tiff_path: Path, final_path: Path) -> bool:
         except OSError:
             return False
     return False        # OVERWRITE True: always reconvert, never a skip
+
+
+def _plan_would_delete_source(all_items: list) -> bool:
+    """Would this plan even ATTEMPT a source deletion? The gates only delete
+    for real conversions — or, under --delete-skipped, for the already-
+    archived ones.
+
+    The confirmation used to run before the plan was consulted at all: a
+    no-TTY re-run of an already-archived folder (--delete-source, no
+    --delete-skipped) was asked for a token it could not answer, exited 3, and
+    would exit 3 FOREVER — without a single deletion pending (bug #432's
+    decoder twin). Fail closed: any doubt (an item this run would write, or a
+    deletion-eligible skip) keeps the prompt charged.
+    """
+    for _t, _j, *_ in all_items:
+        if not _would_skip(_t, _j):
+            return True
+        if DELETE_SKIPPED:
+            return True
+    return False
 
 
 def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: int = 0,
@@ -4237,7 +4318,8 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
         except OSError:
             continue        # destination not readable/created yet: nothing to adopt
         sibs = [f for f in present
-                if _parse_output_page_suffix(f.stem)[0] == tiff.stem]
+                if os.path.normcase(_parse_output_page_suffix(f.stem)[0])
+                == os.path.normcase(tiff.stem)]
         if sibs:
             candidates[key] = sibs
     if not candidates:
@@ -4452,6 +4534,27 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         for _, _, final_jxl, _, _, _, _, _, _ in tasks:
             by_final[str(final_jxl)] = final_jxl
 
+        # A SKIPPED page is deleted on the strength of a PRE-EXISTING output
+        # this run never wrote — its own status proves nothing but "a file by
+        # this name exists". Before the checks below such an output used to be
+        # certified only by exists() + integrity (+ an optional pixel
+        # round-trip), and a same-named JXL of ANOTHER photo (a camera's name
+        # counter resetting across cards, or simply OVERWRITE=False's "SKIP
+        # (exists)" on any age) deleted the master TIFF for nothing. One
+        # batched exiftool pass over all skipped finals + sources proves the
+        # pairing (`_skipped_archive_proof`); an unreadable, absent or
+        # foreign marker fails CLOSED (the source is kept). The dry-run
+        # preview of --delete-skipped runs the same predicate.
+        _skip_proof = {}
+        if DELETE_SKIPPED:
+            _skip_pairs = []
+            for _tk, _trs in results_by_tiff.items():
+                for _r in _trs:
+                    if _r[1] == "skipped":
+                        _skip_pairs.append((Path(_tk), Path(_r[2])))
+            if _skip_pairs:
+                _skip_proof = _skipped_archive_proof(_skip_pairs)
+
         for tiff_key, tiff_results in results_by_tiff.items():
             # Every page must have freshly succeeded — or, with DELETE_SKIPPED,
             # have been skipped because its output was already there. A skip
@@ -4527,9 +4630,36 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     can_delete = False
                     break
 
+            # For the skipped pages of this source: the pre-existing output
+            # must PROVE it is an archive of THIS photo (E-1, above). Runs
+            # after the integrity loop so a broken file is named as such; a
+            # mixed source (one page freshly written, one skipped) is judged
+            # page by page exactly like an all-skipped one.
+            _prov_reject = None
+            if can_delete and skipped_finals and DELETE_SKIPPED:
+                for r in tiff_results:
+                    if r[1] != "skipped":
+                        continue
+                    if _skip_proof.get((os.path.normcase(tiff_key),
+                                        os.path.normcase(r[2])), False):
+                        continue
+                    can_delete = False
+                    _prov_reject = ("its existing output failed the provenance "
+                                    "check — the markers do not prove that file "
+                                    "is an archive of THIS photo (absent, "
+                                    "unreadable, or foreign); re-encode it, or "
+                                    "run --provenance adopt with a "
+                                    "folder-collapsing mode")
+                    break
+
             if not can_delete:
                 _delete_stats["kept"] += 1
-                logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
+                if _prov_reject:
+                    logger.warning(
+                        f"  KEEP source (provenance check failed) | "
+                        f"{Path(tiff_key).name} | {_prov_reject}")
+                else:
+                    logger.warning(f"  KEEP source (JXL integrity check failed) | {Path(tiff_key).name}")
                 continue
 
             # Last gate, and the only one that looks at PIXELS. Everything above
@@ -4875,6 +5005,19 @@ def main():
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
+    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here,
+    # BEFORE the flag overrides below (the recompressor's canonical R-2
+    # pattern, same round): the assignments further down only fire when their
+    # flag was passed, so a second main() in the SAME process (the test
+    # suite, or anything importing this module) inherited the first run's
+    # armed state — a `--delete-source --delete-confirm-off` run left
+    # DELETE_SOURCE on with no confirmation for the next run, and `--staging`
+    # leaked TEMP2_DIR. _RUN_DEFAULTS restores each global to its SCRIPT
+    # setting (captured at import), so a user-edited setting survives while
+    # cross-run leakage does not.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
+
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:
         ICC_CACHE_DIR_OVERRIDE = Path(args.icc_cache_dir)
@@ -4979,7 +5122,11 @@ def main():
         TEMP2_DIR = args.staging
     # NOTE: --clean-staging is applied after setup_logger() below (it must be
     # auditable, and it must not run on a dry run).
-    if args.export_marker:
+    # Explicitly empty (--export-marker "") is honored: an empty marker
+    # matches nothing (fail closed, see _marker_matches). `if args.export_marker:`
+    # kept the script default instead — the modes 6/7 run behaved as if the
+    # flag had not been passed (bug #433's encoder twin).
+    if args.export_marker is not None:
         global EXPORT_MARKER, EXCLUDE_FOLDERS
         EXPORT_MARKER = args.export_marker
 
@@ -5131,7 +5278,8 @@ def main():
             "of which source made them. In modes 2/4/5/6/7 — and in mode 0 with an "
             "output folder — a later run with "
             "--delete-source will refuse them (nothing can prove the pairing) until you "
-            "pass --provenance adopt. Drop --strip if you want that protection.")
+            "pass --provenance adopt; and in EVERY mode --delete-skipped will keep "
+            "the sources of such outputs. Drop --strip if you want that protection.")
 
     if DELETE_SKIPPED and not DELETE_SOURCE:
         logger.warning("--delete-skipped has no effect without --delete-source: it only "
@@ -5521,17 +5669,33 @@ def main():
         # Preview --delete-skipped. A dry run returns before process_group, so
         # without this the one destructive option that acts on files this run
         # does NOT touch would have no preview at all. Uses the cheap checks
-        # only; the round-trip is not run here and the report says so.
+        # only (the round-trip is not run here and the report says so) — but
+        # the provenance proof is the SAME predicate the real delete gate
+        # runs (`_skipped_archive_proof`), so the preview can never promise a
+        # deletion the gate would refuse (E-1: a foreign same-named archive
+        # used to be previewed as an already-archived source).
         if DELETE_SOURCE and DELETE_SKIPPED:
             _by_src: Dict[str, list] = {}
             for t, j, page_idx, _th, _sf, _sp in all_items:
                 _by_src.setdefault(str(t), []).append(j)
+            # Only the FULLY-skipped sources can be deleted by this flag, so
+            # only their finals go into the batched marker read.
+            _fully_skipped = {_src: _finals for _src, _finals in _by_src.items()
+                              if all(_would_skip(Path(_src), Path(j)) for j in _finals)}
+            _proof = _skipped_archive_proof(
+                [(Path(_src), Path(j)) for _src, _finals in _fully_skipped.items()
+                 for j in _finals])
             _would_delete, _would_keep = [], []
-            for _src, _finals in _by_src.items():
-                if not all(_would_skip(Path(_src), j) for j in _finals):
-                    continue        # not a fully-skipped source: the normal path
+            for _src, _finals in _fully_skipped.items():
                 if os.path.normcase(_src) in _discarded_real_page_sources:
                     _would_keep.append((_src, "pages were discarded"))
+                elif not all(_proof.get((os.path.normcase(_src),
+                                         os.path.normcase(str(j))), False)
+                             for j in _finals):
+                    _would_keep.append((_src, "output carries no matching "
+                                                "provenance marker — it cannot "
+                                                "prove it is an archive of THIS "
+                                                "photo"))
                 elif all(_verify_jxl_integrity(j) for j in _finals):
                     _would_delete.append(_src)
                 else:
@@ -5595,7 +5759,14 @@ def main():
         if VERIFY_ROUNDTRIP:
             logger.info("  Round-trip verification is ON: each JXL is decoded and compared "
                         "against its source before the source is deleted")
-        if DELETE_CONFIRM:
+        # The token is charged only when the plan can actually delete
+        # something (#432's decoder twin): a no-TTY re-run of an
+        # already-archived folder used to be asked for a token nobody could
+        # type and exit 3 forever. Fail closed — _plan_would_delete_source
+        # says yes as soon as anything might be deleted, including the
+        # --delete-skipped cases (whose real gates, E-1 included, still run in
+        # the delete gate itself). A dry run never reaches this block at all.
+        if DELETE_CONFIRM and _plan_would_delete_source(all_items):
             is_lossy = CJXL_DISTANCE > 0
             if not confirm_deletion_tiff(is_lossy):
                 logger.info("Deletion not confirmed -- exiting.")

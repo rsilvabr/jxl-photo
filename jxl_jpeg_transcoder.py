@@ -3644,6 +3644,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
 
+        src_md5 = md5_of_file(src_path) if STORE_MD5 else None
         # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode —
         # but NEVER into a jbrd-carrying JXL. _copy_metadata's
         # `-tagsfromfile -xmp:all` REWRITES the XMP inside the container, and
@@ -3675,13 +3676,31 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         if not _verify_file_integrity(write_path):
             raise RuntimeError("cjxl returned 0 but the output failed the integrity check")
 
+        # A d=0 --force-convert JPEG yields a jbrd container, which by design
+        # carries NO XMP markers (they break djxl --reconstruct_jpeg): its
+        # provenance is the checksums.md5 db instead. Record the same entries
+        # encode_one_transcode records when STORE_MD5 — otherwise the second
+        # run in a collapsing mode with --delete-source fails closed with the
+        # misleading "no checksum to prove it (was it written with --no-md5?)".
+        jxl_md5 = None
+        if STORE_MD5 and src_md5 and has_jbrd_box(write_path):
+            checksum_path = write_path.parent / final_path.name
+            store_md5_db(checksum_path, src_md5)
+            # Hashed AFTER reorder_jxl_boxes + the integrity check, so it is
+            # the exact bytes that reach the destination.
+            jxl_md5 = md5_of_file(write_path)
+            store_jxl_self_hash_db(checksum_path, jxl_md5)
+
         if _promote_local:
             os.replace(str(write_path), str(final_path))
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {final_path.name}")
-        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path), None)
+        # result[4] carries the JXL self-hash so process_group_convert can
+        # file it next to the source hash at the destination (staging runs).
+        return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
+                src_md5, jxl_md5)
     except Exception as e:
         # Remove any partial output produced by THIS run (identity-checked) so
         # the next run does not mistake it for a completed conversion — but
@@ -4578,6 +4597,38 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
             if use_staging and pending_by_dest[dest] == 0:
                 _move_dest_from_staging(tasks_by_dest[dest], status_map)
 
+    # Distribute each checksum to the folder its own output landed in, keyed
+    # by the TASK (mirror of process_group_transcode; only the to_jxl encode
+    # direction creates checksums). Without this, a --force-convert -d 0 run
+    # with --staging left the jbrd output's provenance dead in the staging db.
+    if use_staging and direction == "to_jxl":
+        _stranded = 0
+        for _r in results:
+            if _r[1] not in ("ok", "reconvert") or len(_r) < 4 or not _r[3]:
+                continue
+            _final = Path(_r[2])
+            # Only for outputs that actually reached their destination: a
+            # checksum must never claim coverage of a file still in staging.
+            if os.path.normcase(str(_final)) not in moved_finals:
+                _stranded += 1
+                continue
+            _final.parent.mkdir(parents=True, exist_ok=True)
+            store_md5_db(_final, _r[3])
+            if len(_r) > 4 and _r[4]:
+                store_jxl_self_hash_db(_final, _r[4])
+        staging_db = staging_dir / CHECKSUMS_FILENAME
+        if staging_db.exists():
+            if _stranded:
+                logger.warning(
+                    f"  Keeping {staging_db}: {_stranded} output(s) are still in "
+                    f"staging and their checksums live only there. Move the file "
+                    f"and its line to the destination folder, or re-run.")
+            else:
+                try:
+                    staging_db.unlink()
+                except OSError:
+                    pass
+
     # moved_finals lets the mode-8 delete gate distinguish "this run's output
     # arrived at the final path" from a stale pre-existing file whose
     # overwrite FAILED (the gate's integrity check would otherwise certify
@@ -4603,7 +4654,11 @@ def cmd_convert(args, from_jxl: bool = True):
 
     log_file = setup_logger()
     _apply_staging_args(args)
-    _warn_distance_clamp(args.distance, _min_effective_distance("cjxl"))
+    # A dry run runs no subprocess (the contract tests pin): the floor needs
+    # `cjxl --version`, so it is resolved only when the run really encodes.
+    # Real runs warn exactly as before.
+    if not args.dry_run:
+        _warn_distance_clamp(args.distance, _min_effective_distance("cjxl"))
 
     # Determine direction and set defaults
     if from_jxl:
@@ -4996,7 +5051,10 @@ def cmd_auto(args):
 
     log_file = setup_logger()
     _apply_staging_args(args)
-    _warn_distance_clamp(args.distance, _min_effective_distance("cjxl"))
+    # A dry run runs no subprocess (see cmd_convert): the clamp floor is
+    # probed only on a real run.
+    if not args.dry_run:
+        _warn_distance_clamp(args.distance, _min_effective_distance("cjxl"))
 
     # A stale staging checksums.md5 from a crashed previous run would leak
     # wrong entries into this run's destination folders — start clean. Skipped
@@ -5050,6 +5108,12 @@ def cmd_auto(args):
         # such step (cjxl eats the source pixels). Say so rather than ignore.
         logger.warning("--resize-*/--sharpen only apply when decoding JXL: the "
                        "JPEG/PNG -> JXL groups in this run ignore them.")
+    if args.icc_profile and (jpeg_files or png_files):
+        # Mirror of cmd_convert's to_jxl warning: encode_to_jxl has no
+        # colour-conversion step, so --icc-profile/--to-srgb silently did
+        # nothing for these groups while decode/lossy groups honor it.
+        logger.warning("--icc-profile/--to-srgb is ignored for JPEG/PNG -> JXL encodes "
+                       "(no ICC-conversion step on that pipeline).")
 
     # Separate JXL files by jbrd presence
     jxl_transcode_files = []  # Have jbrd - can decode losslessly to JPEG
@@ -5677,9 +5741,34 @@ Examples:
     return parser
 
 
+# Script settings for every global the CLI mutates, captured at import (after
+# every setting above is defined). main() restores THESE at entry — not
+# hardcoded literals — so a setting edited at the top of this file survives
+# while a previous in-process run's flags do not (round 43).
+_RUN_DEFAULTS = {
+    "EXPORT_MARKER": EXPORT_MARKER,
+    "EXPORT_JPEG_SUBFOLDER": EXPORT_JPEG_SUBFOLDER,
+    "AUTO_REPAIR_JBRD": AUTO_REPAIR_JBRD,
+    "DELETE_CONFIRM": DELETE_CONFIRM,
+    "DELETE_SOURCE": DELETE_SOURCE,
+    "DELETE_SKIPPED": DELETE_SKIPPED,
+    "PROVENANCE_CHECK": PROVENANCE_CHECK,
+    "STORE_MD5": STORE_MD5,
+    "TEMP2_DIR": TEMP2_DIR,
+}
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    # Every run-scoped global starts from its SCRIPT setting (captured at
+    # import) — a second main() in the same process used to inherit the first
+    # run's armed flags (the one-way `if args.x:` pattern). Import-time values,
+    # never hardcoded literals: a setting the user edited at the top of this
+    # file (EXPORT_MARKER, DELETE_CONFIRM, TEMP2_DIR, ...) stays in force.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
 
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
     global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
@@ -5778,11 +5867,11 @@ def main():
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5
+    # Each global was restored to its SCRIPT setting at the top of main()
+    # (_RUN_DEFAULTS); the flags override it here, one way.
     if args.export_marker is not None:
-        # `is not None`, mirroring --export-subfolder: `if args.export_marker:`
-        # treated --export-marker "" (an explicit "export NOTHING here") as
-        # absent and silently kept the default marker instead.
+        # `is not None` (#433): --export-marker "" means "export NOTHING".
         EXPORT_MARKER = args.export_marker
     if args.auto_repair_jbrd:
         AUTO_REPAIR_JBRD = True
@@ -5796,6 +5885,8 @@ def main():
         DELETE_SKIPPED = True
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
+    if args.no_md5:
+        STORE_MD5 = False
 
     if DELETE_SKIPPED and not DELETE_SOURCE:
         print("WARNING: --delete-skipped has no effect without --delete-source: it only "

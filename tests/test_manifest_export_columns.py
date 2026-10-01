@@ -263,7 +263,9 @@ def test_row_export_trio_reaches_only_its_own_command(tmp_path, monkeypatch):
     assert len(cmds) == 2
     assert cmds[0][cmds[0].index("--export-marker") + 1] == "X_PRINT"
     assert cmds[0][cmds[0].index("--export-jxl-folder") + 1] == "PRINT_JXL"
-    assert "--export-marker" not in cmds[1]
+    # Row B gets the RUN's marker (always passed since round 43, so the child
+    # never falls back to its own script setting), never row A's X_PRINT.
+    assert cmds[1][cmds[1].index("--export-marker") + 1] != "X_PRINT"
     assert "--export-jxl-folder" not in cmds[1]
 
 

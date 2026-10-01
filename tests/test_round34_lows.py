@@ -124,6 +124,12 @@ def test_script_set_staging_dir_is_validated(tmp_path, monkeypatch, capsys):
     blocker = tmp_path / "blocker"
     blocker.write_text("I am a file", encoding="utf-8")   # mkdir below it fails
     monkeypatch.setattr(enc, "TEMP2_DIR", str(blocker / "sub"))
+    # main() resets every run-scoped global from the import-time _RUN_DEFAULTS
+    # snapshot (class fix), so editing the global alone is erased at entry. A
+    # user editing the SCRIPT changes the captured setting too — mirror that.
+    _defaults = getattr(enc, "_RUN_DEFAULTS", None)
+    if _defaults is not None:
+        monkeypatch.setitem(_defaults, "TEMP2_DIR", str(blocker / "sub"))
     monkeypatch.setattr(sys, "argv", ["jxl_tiff_encoder.py", str(tmp_path), "--mode", "0"])
 
     with pytest.raises(SystemExit) as exit_info:

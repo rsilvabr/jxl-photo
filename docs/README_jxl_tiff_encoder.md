@@ -245,6 +245,10 @@ When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
 - **Lossy:** type the current time in `HHMM` format (forces conscious decision)
 ```
 
+The confirmation is only charged when the plan can actually delete something: a
+re-run of an already-archived folder produces only skips, deletes nothing and
+exits `0` without a prompt.
+
 
 
 ---
@@ -366,7 +370,10 @@ Options:
                   land on the same output. Before overwriting an output that already
                   exists -- and deleting the file that made it -- the run checks the
                   archive really came from this source, using markers every encode
-                  writes (jxlphoto-src = location, jxlphoto-srcsum = image).
+                  writes (jxlphoto-src = location, jxlphoto-srcsum = image). The
+                  same proof also backs --delete-skipped in EVERY mode: a skipped
+                  source is only deleted when its pre-existing output carries the
+                  markers this source proves.
                   path (default): compares the LOCATION. Free. Handles re-exporting a
                   file in place, but a MOVED folder reads as a different file.
                   content: also accepts a matching IMAGE, so it survives moved
@@ -389,10 +396,16 @@ Options:
                   EXISTS -- the files reported as SKIP. Without it an archive
                   interrupted between the encode and the unlink can never be
                   finished: the leftover is skipped on every later run, and a skip
-                  blocks the delete. NEVER acts on the timestamp alone -- the output
-                  must exist and pass the integrity check. Pair it with
-                  --verify-roundtrip: a SKIP carries no proof that the JXL came
-                  from that photo
+                  blocks the delete. NEVER acts on the timestamp alone -- the
+                  output must exist, pass the integrity check, AND carry a
+                  provenance marker MATCHING this source (jxlphoto-src/srcsum --
+                  the same check the folder-collapsing modes run before an
+                  overwrite). A markerless (a pre-marker legacy archive) or
+                  foreign output is KEPT, with a log line saying how to heal it:
+                  re-encode, or stamp it once with --provenance adopt in a
+                  folder-collapsing mode. Pair it with --verify-roundtrip as
+                  well: the marker proves the pairing, the round-trip proves
+                  the pixels
   --verify-roundtrip
                   Before deleting a source, decode its JXL and compare it with
                   the source page. --distance 0: the pixels must match exactly.
@@ -446,7 +459,7 @@ Options:
                   sources). Ignored, with a warning, outside modes 6/7.
   --exclude-folders NAMES
                   ';'-separated folder NAMES skipped during discovery, in every
-                  mode (see "Excluding folders" below). Entries containing
+                  mode (see "Excluding folders" above). Entries containing
                   '\' or '/' are rejected at startup
   --icc-cache-dir D  Where the ICC round-trip test caches its verdicts (default:
                   the ICC_CACHE_DIR_OVERRIDE setting, else a folder beside the
@@ -475,6 +488,7 @@ Options:
 | `1` | One or more files failed |
 | `2` | Aborted (e.g. duplicate output destinations, invalid arguments) |
 | `3` | User declined the delete-source confirmation |
+| `130` | Interrupted with Ctrl+C (cancelled) |
 
 **D50 Patch option:**
 ```powershell

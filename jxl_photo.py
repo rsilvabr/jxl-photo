@@ -6,6 +6,7 @@ Based on jxl_photo.py - all original features preserved.
 """
 
 import argparse
+import importlib
 import io
 import json
 import logging
@@ -242,6 +243,13 @@ _SESSION_CHOICES = {
 }
 # --depth / --bit-depth are argparse choices=[8, 16] in every child.
 _SESSION_BIT_DEPTHS = (8, 16)
+# The wizard's Step 1/2 formats. These two fields pick WHICH child script a
+# replayed session runs, so they are validated case-SENSITIVELY (unlike
+# _SESSION_CHOICES): a hand-edited "Tiff" would survive a lowercased check
+# and then fail every `== 'tiff'` comparison downstream, silently routing
+# the run to the wrong script while the panel says TIFF.
+_SESSION_ORIGIN_FORMATS = ("jpeg", "tiff", "jxl")
+_SESSION_DEST_FORMATS = ("jpeg", "tiff", "jxl", "png")
 
 
 def _as_exact_int(raw: Any) -> int:
@@ -307,14 +315,33 @@ def _session_number_error(session: Dict) -> Optional[str]:
             return (f"{field[len('last_'):]} is not a known value: {raw!r} "
                     f"(valid: {'/'.join(allowed)})")
 
+    # The two fields that pick WHICH script runs. Case-sensitive on purpose
+    # (see the constants): accepting "Tiff" here would route the replay to
+    # the transcoder on a TIFF tree while the panel says TIFF -> JXL.
+    for field, allowed in (("last_origin_format", _SESSION_ORIGIN_FORMATS),
+                           ("last_dest_format", _SESSION_DEST_FORMATS)):
+        raw = session.get(field)
+        if raw in (None, ""):
+            continue
+        if not isinstance(raw, str) or raw not in allowed:
+            return (f"{field[len('last_'):]} is not a known value: {raw!r} "
+                    f"(valid: {'/'.join(allowed)})")
+
     # Same refuse-corrupt rule for a free-form string field that reaches the
     # child's command line (#319e pattern): a hand-edited
     # last_exclude_folders holding a number or a list must not become
     # '--exclude-folders <garbage>' on a replayed workflow. Empty string and
-    # None both read as "no exclusion", so they pass.
+    # None both read as "no exclusion", so they pass. The entries must also
+    # be folder NAMES — the same shape rule the children enforce on the CLI
+    # (exit 2 there; refused here instead, before anything runs).
     raw_excl = session.get("last_exclude_folders")
-    if raw_excl not in (None, "") and not isinstance(raw_excl, str):
-        return f"exclude_folders is not a string: {raw_excl!r}"
+    if raw_excl not in (None, ""):
+        if not isinstance(raw_excl, str):
+            return f"exclude_folders is not a string: {raw_excl!r}"
+        if any(("\\" in n) or ("/" in n)
+               for n in raw_excl.split(";") if n.strip()):
+            return ("exclude_folders takes folder NAMES, not paths: "
+                    f"{raw_excl!r}")
     return None
 
 
@@ -595,11 +622,13 @@ def _parse_manifest_row_options(cells: Dict[str, str], direction: str,
                     if any("\\" in n or "/" in n for n in entries):
                         return None, (f"column ExcludeFolders takes folder "
                                       f"NAMES, not paths ({value!r})")
-                    if not entries:
-                        # ';' or ';;' only: the children filter nothing.
-                        opts["exclude_folders"] = None
-                    else:
+                    if entries:
                         opts["exclude_folders"] = value
+                    # A ';' / ';;' / whitespace-only cell filters NOTHING in
+                    # the children, so it reads as an EMPTY cell: the row
+                    # keeps the run's value (key absent, the export*
+                    # convention), it does not silently erase a run-level
+                    # exclusion for this row.
                 else:
                     opts["exclude_folders"] = None
     if opts.get("rename_to") and not opts.get("rename_from"):
@@ -1246,6 +1275,43 @@ class DependencyChecker:
         return " | ".join(parts)
 
 
+# Folder names the mode-6 preview (Auto Mode / manifest generator) skips below
+# an export folder in EVERY direction: the decoder's TIFF output folders (the
+# encoder's mode-6 finder skips them; in the other directions they hold no
+# source files anyway).
+_DECODER_OUTPUT_NAMES = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
+# Shipped defaults of jxl_recompressor._RECOMPRESSOR_OUTPUT_FOLDERS + its
+# EXPORT_JXL_FOLDER — used ONLY if the child cannot be imported.
+_RECOMPRESSOR_OUTPUT_FALLBACK = frozenset(
+    {"recompressed_jxl", "jxl_recompressed", "jxl_small", "16b_jxl_small"})
+
+
+def _mode6_preview_skips(origin: str, dest: str, below_lower: List[str]) -> bool:
+    """Does the CHILD's mode-6 finder skip a file whose folder parts BELOW the
+    export folder are `below_lower`? The preview count and the generated
+    manifest must match what the child will process (the #269/#297 class).
+
+    The recompressor's own output folders are skipped ONLY for JXL -> JXL:
+    that child is the only one whose finders skip them — the decoder decodes a
+    JXL inside JXL_small/ like any other, so skipping it there under-counted
+    the run and could drop an export folder from a generated manifest (round
+    43). Asked from the recompressor itself (`_is_own_output_path`): it knows
+    its configured EXPORT_JXL_FOLDER and the _JXL_small suffix rule, so a
+    folder name edited at the top of that script is honored here too.
+    """
+    if any(p in _DECODER_OUTPUT_NAMES for p in below_lower):
+        return True
+    if (origin, dest) != ('jxl', 'jxl'):
+        return False
+    try:
+        rec = importlib.import_module('jxl_recompressor')
+        return bool(rec._is_own_output_path(below_lower))
+    except Exception:
+        own = _export_folder_name('jxl', 'jxl').lower()
+        return any(p in _RECOMPRESSOR_OUTPUT_FALLBACK or p == own
+                   or p.endswith("_jxl_small") for p in below_lower)
+
+
 class FolderAnalyzer:
     """Analyzes folder structure to recommend best mode."""
 
@@ -1579,16 +1645,18 @@ class FolderAnalyzer:
         origin_exts = self._get_extensions(self.origin)
 
         if mode == 6:
-            # Process all files inside export folders. Skip the decoder's own
-            # output folders (16B_TIFF etc.) — find_tiffs_mode6 filters them
-            # too, so the preview count must match what the child will do.
-            _decoder_outs = {"16b_tiff", "tiff_16bits", "converted_tiff"}
+            # Process all files inside export folders, skipping exactly the
+            # tool output folders the CHILD's mode-6 finder skips for this
+            # direction (_mode6_preview_skips) — the preview count must match
+            # what the child will do.
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
                 origin_files = [
                     f for f in export_dir.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
-                    and not any(part.lower() in _decoder_outs for part in f.relative_to(export_dir).parts[:-1])
+                    and not _mode6_preview_skips(
+                        self.origin, self.dest,
+                        [part.lower() for part in f.relative_to(export_dir).parts[:-1]])
                 ]
                 if origin_files:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files)))
@@ -1720,15 +1788,17 @@ class FolderAnalyzer:
         origin_exts = self._get_extensions(self.origin)
 
         if mode == 6:
-            # For mode 6/7, generate one entry per export folder (skipping the
-            # decoder's own output folders, like the child's finder does)
-            _decoder_outs = {"16b_tiff", "tiff_16bits", "converted_tiff"}
+            # For mode 6/7, generate one entry per export folder, skipping the
+            # tool output folders the child's mode-6 finder skips for this
+            # direction (_mode6_preview_skips).
             for export_path in analysis['export_marker_paths']:
                 export_dir = Path(export_path)
                 origin_files = [
                     f for f in export_dir.rglob('*')
                     if f.is_file() and f.suffix.lower() in origin_exts
-                    and not any(part.lower() in _decoder_outs for part in f.relative_to(export_dir).parts[:-1])
+                    and not _mode6_preview_skips(
+                        self.origin, self.dest,
+                        [part.lower() for part in f.relative_to(export_dir).parts[:-1]])
                 ]
                 if origin_files:
                     mappings.append((str(export_dir), str(export_dir), len(origin_files), 6))
@@ -2007,25 +2077,42 @@ def _ask_output_shaping(workflow: Dict) -> None:
         for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
             _adv.pop(_k, None)
     else:
-        if _rich:
-            _what = {"long": "Long edge in pixels",
-                     "short": "Short edge in pixels",
-                     "percent": "Scale in percent"}[_mode]
-            if _mode == "percent":
-                _value = float(Prompt.ask(_what, default="100"))
+        _what = {"long": "Long edge in pixels",
+                 "short": "Short edge in pixels",
+                 "percent": "Scale in percent"}[_mode]
+        # The same domain the manifest's Resize column enforces
+        # (_MANIFEST_RESIZE_RE): a percent must be finite and > 0 (float()
+        # happily parses 'nan' and 'inf'), an edge must be a positive
+        # integer. An out-of-domain NUMBER gets a re-prompt; unparseable text
+        # in the plain UI keeps the old "never guess a size" disable.
+        while True:
+            if _rich:
+                try:
+                    if _mode == "percent":
+                        _value = float(Prompt.ask(_what, default="100"))
+                    else:
+                        _value = int(IntPrompt.ask(_what))
+                except ValueError:
+                    print("Invalid number — try again.")
+                    continue
             else:
-                _value = int(IntPrompt.ask(_what))
-        else:
-            _what = {"long": "Long edge in pixels",
-                     "short": "Short edge in pixels",
-                     "percent": "Scale in percent"}[_mode]
-            _raw = input(f"{_what}: ").strip()
-            try:
-                _value = float(_raw) if _mode == "percent" else int(_raw)
-            except ValueError:
-                # Never guess a size: a typo must not become a 1 px output.
-                print("Invalid value — resize disabled for this run.")
-                _mode, _value = "none", None
+                _raw = input(f"{_what}: ").strip()
+                try:
+                    _value = float(_raw) if _mode == "percent" else int(_raw)
+                except ValueError:
+                    # Never guess a size: a typo must not become a 1 px output.
+                    print("Invalid value — resize disabled for this run.")
+                    _mode, _value = "none", None
+                    break
+            if _mode == "percent":
+                _ok = (_value == _value
+                       and _value not in (float("inf"), float("-inf"))
+                       and _value > 0)
+            else:
+                _ok = _value > 0
+            if _ok:
+                break
+            print("Must be a positive (and finite) number — try again.")
         if _mode == "none":
             for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
                 _adv.pop(_k, None)
@@ -2083,11 +2170,15 @@ def _derivative_in_place_rows(entries: List) -> List:
 def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) -> str:
     """The folder modes 6/7 create under the export marker, by direction.
 
-    Keep in sync with EXPORT_*_FOLDER in the scripts. The delete gate used to
-    hardcode "16B_JXL" for EVERY direction, so a JXL -> TIFF run about to erase
-    originals was told they would land somewhere they never do (16B_TIFF), and
-    a JPEG run was told the same about JXL_jpeg. The whole point of that gate is
-    that a wrong destination is visible before the user types the token.
+    Read from the child's OWN setting (EXPORT_TIFF_FOLDER / EXPORT_JXL_FOLDER /
+    EXPORT_JPEG_FOLDER at the top of each script), never hardcoded here: a name
+    the user edited in the script is the folder the child really writes, so it
+    is the one the delete panel must announce (round 43). The literal fallbacks
+    are the scripts' shipped defaults, used only if the child cannot be
+    imported. The delete gate used to hardcode "16B_JXL" for EVERY direction,
+    so a JXL -> TIFF run about to erase originals was told they would land
+    somewhere they never do (16B_TIFF). The whole point of that gate is that a
+    wrong destination is visible before the user types the token.
 
     `override` is the run's `--export-jxl-folder` (the wrapper's
     `mode_config['export_jxl_folder']`): it only means something for the two
@@ -2096,16 +2187,27 @@ def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) 
     if override and dest == 'jxl' and origin in ('tiff', 'jxl'):
         return override
     if dest == 'tiff':
-        return '16B_TIFF'                       # jxl_tiff_decoder.EXPORT_TIFF_FOLDER
+        return _child_setting('jxl_tiff_decoder', 'EXPORT_TIFF_FOLDER', '16B_TIFF')
     if dest == 'jxl':
-        # jxl_tiff_encoder.EXPORT_JXL_FOLDER vs jxl_recompressor's vs the
-        # transcoder's own.
         if origin == 'tiff':
-            return '16B_JXL'
+            return _child_setting('jxl_tiff_encoder', 'EXPORT_JXL_FOLDER', '16B_JXL')
         if origin == 'jxl':
-            return '16B_JXL_small'              # jxl_recompressor.EXPORT_JXL_FOLDER
-        return 'JXL_jpeg'
-    return 'JPEG_recovered'                     # transcoder EXPORT_JPEG_FOLDER
+            return _child_setting('jxl_recompressor', 'EXPORT_JXL_FOLDER', '16B_JXL_small')
+        return _child_setting('jxl_jpeg_transcoder', 'EXPORT_JXL_FOLDER', 'JXL_jpeg')
+    return _child_setting('jxl_jpeg_transcoder', 'EXPORT_JPEG_FOLDER', 'JPEG_recovered')
+
+
+def _child_setting(module: str, name: str, fallback):
+    """A child script's own configured setting (the value at the top of that
+    script), so the wrapper never shadows a user edit with a literal copy.
+    `fallback` is the shipped default, used only when the child cannot be
+    imported (a missing optional dependency)."""
+    try:
+        mod = importlib.import_module(module)
+    except Exception:
+        return fallback
+    value = getattr(mod, name, None)
+    return value if value else fallback
 
 
 class InteractiveMenu:
@@ -2641,14 +2743,22 @@ class InteractiveMenu:
             else:
                 print("Folder NAMES to exclude, ';'-separated ('-' = none; "
                       "only affects recursive modes)")
-                _excl_raw = input(f"Exclude folders [{_excl_default or '-'}]: ").strip()
+                # Empty answer = keep the displayed default, exactly like the
+                # rich branch's Prompt.ask(default=...) and the other plain
+                # prompts (the default is shown in brackets, so Enter must
+                # mean "the same as last time"). '-'/'none' still mean "no
+                # exclusion".
+                _excl_raw = (input(f"Exclude folders [{_excl_default or '-'}]: ")
+                             .strip() or (_excl_default or ""))
             _excl_raw = (_excl_raw or "").strip()
+            # Staged in the workflow ONLY: persistence happens in
+            # save_last_session's sentinel path after the run, so cancelling
+            # the wizard later must not leave this answer on disk (the #319f
+            # invariant — a cancelled wizard persists nothing).
             if not _excl_raw or _excl_raw.lower() in ("-", "none"):
                 workflow['exclude_folders'] = None
-                self.config.config.last_exclude_folders = None
             else:
                 workflow['exclude_folders'] = _excl_raw
-                self.config.config.last_exclude_folders = _excl_raw
 
         return True
 
@@ -3147,6 +3257,12 @@ class InteractiveMenu:
                 if row and len(row) >= 1:
                     source = row[0].strip()
                     is_comment = not source or source.startswith('#')
+                    if is_comment:
+                        # Comment/blank rows are fully INERT: no cell of theirs
+                        # is validated. The Mode cell used to be parsed BEFORE
+                        # this check, so a '# row,dest,9.5,dir' comment refused
+                        # the whole manifest (Direction already worked this way).
+                        continue
                     # Empty Destination cell must fall back to Source, not to
                     # "" — Path("") becomes "." (the CWD) downstream.
                     dest = (row[1].strip() or source) if len(row) > 1 else source
@@ -3170,60 +3286,73 @@ class InteractiveMenu:
                         if not 0 <= entry_mode <= 8:
                             self._print_error(f"Mode out of range (0-8) in manifest: {entry_mode} (row: {source})")
                             return None
-                    # Direction cells only count on real entries: a comment row
-                    # carrying one must not poison the single-direction guard.
-                    if not is_comment and len(row) > 3 and row[3].strip():
+                    if len(row) > 3 and row[3].strip():
                         directions.add(row[3].strip())
-                    if not is_comment:
-                        # Validate paths to prevent directory traversal. Check
-                        # path PARTS (not a substring match, which false-
-                        # positives on legitimate names like "2024..final").
-                        # The check runs on the TYPED cell, before anchoring —
-                        # '..' is refused whatever it would resolve against.
-                        if '..' in Path(source).parts or '..' in Path(dest).parts:
-                            # Refuse the whole manifest, do not skip the row.
-                            # Skipping shrank the run silently: the summary
-                            # counts only the entries that LOADED, so a
-                            # dropped folder looks exactly like a folder that
-                            # synced cleanly. Same fail-closed rule as the
-                            # Mode checks above.
+                    # Validate paths to prevent directory traversal. Check
+                    # path PARTS (not a substring match, which false-
+                    # positives on legitimate names like "2024..final").
+                    # The check runs on the TYPED cell, before anchoring —
+                    # '..' is refused whatever it would resolve against.
+                    if '..' in Path(source).parts or '..' in Path(dest).parts:
+                        # Refuse the whole manifest, do not skip the row.
+                        # Skipping shrank the run silently: the summary
+                        # counts only the entries that LOADED, so a
+                        # dropped folder looks exactly like a folder that
+                        # synced cleanly. Same fail-closed rule as the
+                        # Mode checks above.
+                        self._print_error(
+                            f"Path traversal in manifest entry: {source} -> {dest}\n"
+                            f"Relative paths ARE allowed — they resolve against the manifest's "
+                            f"own folder, not the wrapper's working directory — but '..' is "
+                            f"refused outright. Use absolute paths (or paths relative to the "
+                            f"CSV folder, without '..') and run it again.")
+                        return None
+                    # Anchor AFTER the '..' refusal: relative paths become
+                    # absolute against the CSV's folder so the guards, the
+                    # cmd builder and the children all see the same
+                    # location regardless of the wrapper's CWD.
+                    entries.append((_anchor(source), _anchor(dest), entry_mode))
+                    if row_options is not None:
+                        cells = {name: (row[i] if i < len(row) else "")
+                                 for name, i in opt_index.items()}
+                        opts, reason = _parse_manifest_row_options(
+                            cells, current_direction_pre, _anchor)
+                        if reason:
                             self._print_error(
-                                f"Path traversal in manifest entry: {source} -> {dest}\n"
-                                f"Relative paths ARE allowed — they resolve against the manifest's "
-                                f"own folder, not the wrapper's working directory — but '..' is "
-                                f"refused outright. Use absolute paths (or paths relative to the "
-                                f"CSV folder, without '..') and run it again.")
+                                f"Manifest row {_row_n} ({source}): {reason}")
                             return None
-                        # Anchor AFTER the '..' refusal: relative paths become
-                        # absolute against the CSV's folder so the guards, the
-                        # cmd builder and the children all see the same
-                        # location regardless of the wrapper's CWD.
-                        entries.append((_anchor(source), _anchor(dest), entry_mode))
-                        if row_options is not None:
-                            cells = {name: (row[i] if i < len(row) else "")
-                                     for name, i in opt_index.items()}
-                            opts, reason = _parse_manifest_row_options(
-                                cells, current_direction_pre, _anchor)
-                            if reason:
-                                self._print_error(
-                                    f"Manifest row {_row_n} ({source}): {reason}")
-                                return None
-                            # ExportSubfolder reaches the children as
-                            # --export-subfolder, which only mode 7 honors (mode
-                            # 6 processes every subfolder by design). A filled
-                            # cell on any other explicit Mode is a user mistake,
-                            # not a harmless no-op — refuse it. A legacy row
-                            # without a Mode cell stays accepted: its mode is
-                            # only resolved downstream.
-                            if (opts.get("export_subfolder")
-                                    and entry_mode is not None
-                                    and entry_mode != 7):
-                                self._print_error(
-                                    f"Manifest row {_row_n} ({source}): column "
-                                    f"ExportSubfolder only applies to Mode 7 rows "
-                                    f"(this row is mode {entry_mode}).")
-                                return None
-                            row_options.append(opts)
+                        # ExportSubfolder reaches the children as
+                        # --export-subfolder, which only mode 7 honors (mode
+                        # 6 processes every subfolder by design). A filled
+                        # cell on any other explicit Mode is a user mistake,
+                        # not a harmless no-op — refuse it. A legacy row
+                        # without a Mode cell stays accepted: its mode is
+                        # only resolved downstream.
+                        if (opts.get("export_subfolder")
+                                and entry_mode is not None
+                                and entry_mode != 7):
+                            self._print_error(
+                                f"Manifest row {_row_n} ({source}): column "
+                                f"ExportSubfolder only applies to Mode 7 rows "
+                                f"(this row is mode {entry_mode}).")
+                            return None
+                        # Same fail-closed rule for ExportMarker and
+                        # ExportJxlFolder: they reach the children as
+                        # --export-marker/--export-jxl-folder, which only the
+                        # modes-6/7 finders consult — a filled cell on any
+                        # other explicit Mode is a dead option the
+                        # confirmation panel would still show (a "scoped"
+                        # delete run that actually converts the whole tree).
+                        if entry_mode is not None and entry_mode not in (6, 7):
+                            for _col, _key in (("ExportMarker", "export_marker"),
+                                               ("ExportJxlFolder", "export_jxl_folder")):
+                                if opts.get(_key):
+                                    self._print_error(
+                                        f"Manifest row {_row_n} ({source}): column "
+                                        f"{_col} only applies to Mode 6/7 rows "
+                                        f"(this row is mode {entry_mode}).")
+                                    return None
+                        row_options.append(opts)
 
         # Say the anchoring out loud ONCE per load: a relative path that used to
         # mean "relative to wherever the wrapper happened to start" now means
@@ -5574,6 +5703,31 @@ class InteractiveMenu:
         _rename_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
                         if _a.get('rename_from')]
 
+        # Create the analyzer once — prefer the workflow's mode_config marker (a
+        # manifest run with a custom marker must detect modes with the same
+        # marker the children will use). `analyzer` is also used by the
+        # collision scan below (_get_extensions), so it stays even though the
+        # per-row detection uses a FolderAnalyzer per row (its __init__ only
+        # stores values, and a row's ExportMarker column must win here).
+        _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
+        analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
+        _row_markers = [_row_export_cfg(_w)[0] for _w, _a in _row_effs]
+
+        # Resolve every entry's mode ONCE, here, and hand the guards below the
+        # same modes the children will actually run with. A legacy manifest (no
+        # Mode cell) arrives as None and is resolved to 0/6/7 by
+        # detect_mode_for_entry — but the guards used to receive the raw None
+        # and fall back to a flat Destination scan, which models a write that
+        # modes 6/7 never perform. Fail-closed behaviour is unchanged: an entry
+        # that still resolves to None keeps counting as "unknown, assume the
+        # worst" inside each guard.
+        resolved_entries = [
+            (source, dest_path,
+             FolderAnalyzer(Path("."), origin, dest, _row_markers[_i])
+                 .detect_mode_for_entry(source, dest_path, original_mode=entry_mode))
+            for _i, (source, dest_path, entry_mode) in enumerate(manifest_entries)
+        ]
+
         # The derivative options have no in-place form and never delete (same
         # rules as the direct-run guard in execute_workflow). Evaluated PER
         # ROW: a manifest column can make one row a derivative where the
@@ -5588,8 +5742,14 @@ class InteractiveMenu:
                                   "never deletes its source — drop the delete option "
                                   f"(derivative row(s): {', '.join(map(str, _derived_rows))}).")
                 return False
+            # resolved_entries, NOT manifest_entries: a legacy row (no Mode
+            # cell) arrives as None, which _derivative_in_place_rows never
+            # flags — the child then refused the run with exit 2 in the
+            # MIDDLE of the manifest, after the HHMM token was charged. The
+            # mode-7 derivation and the overlap guard already used the
+            # resolved list; this one was the straggler.
             _in_place = set()
-            for _i, _e in enumerate(manifest_entries):
+            for _i, _e in enumerate(resolved_entries):
                 if _derivative_in_place_rows([_e]):
                     _in_place.add(_i + 1)
             _bad = sorted(_in_place & (set(_derived_rows) | set(_rename_rows)))
@@ -5600,7 +5760,7 @@ class InteractiveMenu:
                                   f"mode 0 with Destination = Source). Give them another "
                                   f"mode (1-7) or a different Destination:")
                 for _n in _bad[:5]:
-                    s_, d_, m_ = manifest_entries[_n - 1]
+                    s_, d_, m_ = resolved_entries[_n - 1]
                     print(f"  row {_n}, mode {m_}: {s_}")
                 if len(_bad) > 5:
                     print(f"  ... and {len(_bad) - 5} more")
@@ -5638,31 +5798,32 @@ class InteractiveMenu:
                                   "conversion for that "
                                   f"(row(s): {', '.join(map(str, _bad))}).")
                 return False
-
-        # Create the analyzer once — prefer the workflow's mode_config marker (a
-        # manifest run with a custom marker must detect modes with the same
-        # marker the children will use). `analyzer` is also used by the
-        # collision scan below (_get_extensions), so it stays even though the
-        # per-row detection uses a FolderAnalyzer per row (its __init__ only
-        # stores values, and a row's ExportMarker column must win here).
-        _marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-        analyzer = FolderAnalyzer(Path("."), origin, dest, _marker)
-        _row_markers = [_row_export_cfg(_w)[0] for _w, _a in _row_effs]
-
-        # Resolve every entry's mode ONCE, here, and hand the guards below the
-        # same modes the children will actually run with. A legacy manifest (no
-        # Mode cell) arrives as None and is resolved to 0/6/7 by
-        # detect_mode_for_entry — but the guards used to receive the raw None
-        # and fall back to a flat Destination scan, which models a write that
-        # modes 6/7 never perform. Fail-closed behaviour is unchanged: an entry
-        # that still resolves to None keeps counting as "unknown, assume the
-        # worst" inside each guard.
-        resolved_entries = [
-            (source, dest_path,
-             FolderAnalyzer(Path("."), origin, dest, _row_markers[_i])
-                 .detect_mode_for_entry(source, dest_path, original_mode=entry_mode))
-            for _i, (source, dest_path, entry_mode) in enumerate(manifest_entries)
-        ]
+            # --rename-from is just as impossible: the recovered JPEG keeps
+            # the ORIGINAL file name (the child ignores the flag on the
+            # lossless path), so a rename would only fool the collision scan
+            # into modelling outputs the run never writes. Refuse it too.
+            _ren = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                    if _a.get('rename_from')]
+            if _ren:
+                self._print_error("A bit-exact JPEG reconstruction keeps the "
+                                  "original file names — --rename-from does not "
+                                  "apply to the lossless JXL→JPEG recovery "
+                                  f"(row(s): {', '.join(map(str, _ren))}). Pick "
+                                  "the lossy conversion for that.")
+                return False
+            # OutputICC is likewise ignored on the lossless path (there is no
+            # pixel to convert) — warn, don't refuse: the recovery itself is
+            # still exactly what was asked.
+            _icc = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
+                    if _a.get('output_icc')]
+            if _icc:
+                _msg = (f"OutputICC is ignored by a bit-exact JPEG reconstruction "
+                        f"(row(s): {', '.join(map(str, _icc))}) — the recovered "
+                        "JPEG keeps the original bytes, colour included.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_msg}[/yellow]")
+                else:
+                    print(f"WARNING: {_msg}")
 
         # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
         # reaches the children as --export-subfolder — which comes from
@@ -5845,6 +6006,7 @@ class InteractiveMenu:
                 row_export=_row_export,
                 row_excludes=[_w.get('exclude_folders') for _w, _a in _row_effs],
                 cross_sink=cross_out_folders,
+                conversion_type=workflow.get('conversion_type'),
             )
         if collisions:
             self._print_error(
@@ -6040,6 +6202,7 @@ class InteractiveMenu:
             aborted = False
             usage_err = None
             killed = False
+            interrupted = False
             if rc == 0:
                 ok_count += 1
                 state = "ok"
@@ -6087,6 +6250,18 @@ class InteractiveMenu:
                 state = "killed"
                 killed = True
                 aborted = True
+            elif rc == 130:
+                # Ctrl+C reached the CHILD (128+SIGINT — the recompressor's
+                # documented interrupt path, which prints its own summary
+                # before exiting). The operator asked to STOP: relaunching
+                # the remaining entries is the opposite of that, so this is
+                # the same stop-everything class as exit 2 and -1. (When the
+                # wrapper itself takes the interrupt, _stream_child raises
+                # KeyboardInterrupt and the except above runs instead.)
+                error_count += 1
+                state = "interrupted"
+                interrupted = True
+                aborted = True
             else:
                 error_count += 1
                 state = "failed"
@@ -6118,6 +6293,14 @@ class InteractiveMenu:
                            "followed by more deleting. Check the child log, fix "
                            "the cause and re-run — sync mode resumes where this "
                            "stopped.")
+                elif interrupted:
+                    # Ctrl+C was caught by the CHILD (exit 130), not by this
+                    # wrapper. Saying "exit 2" here would read as a safety
+                    # abort that never happened.
+                    msg = ("Entry interrupted (exit 130, Ctrl+C inside the "
+                           "child): the manifest stops here instead of "
+                           "launching the remaining entries. Re-run it — "
+                           "sync mode resumes where this stopped.")
                 else:
                     # "Nothing was deleted" was a promise the wrapper could not
                     # keep: exit 2 is also the disk-full abort, which fires part
@@ -6229,8 +6412,17 @@ class InteractiveMenu:
 
         # Counts entries, not files — the table below counts files, and mixing
         # the two in one line read as a contradiction ("3 OK" over "5762 OK").
+        # The header's parts must SUM to the total: the not-started entries
+        # appended after an abort/interrupt sit in no ok/error/cancel bucket
+        # (only the entry that aborted does), so they get their own bucket —
+        # a 5-entry run aborted at #2 used to read "5 entries - 1 ok, 1 with
+        # failures, 0 cancelled" and leave three entries unaccounted (W2-4).
+        _not_started = (len(entry_reports)
+                        - (ok_count + skip_count + error_count))
         head = (f"Manifest complete: {len(entry_reports)} entries - "
                 f"{ok_count} ok, {error_count} with failures, {skip_count} cancelled")
+        if _not_started > 0:
+            head += f", {_not_started} not started"
         if any_dry_run:
             head = "[DRY RUN] " + head
         lines.append((head, "bold red" if error_count else "bold"))
@@ -6506,7 +6698,8 @@ class InteractiveMenu:
                                     row_renames: Optional[List[Tuple[str, str]]] = None,
                                     row_export: Optional[List[Tuple]] = None,
                                     cross_sink: Optional[Dict[int, Set[str]]] = None,
-                                    row_excludes: Optional[List[Optional[str]]] = None) -> List:
+                                    row_excludes: Optional[List[Optional[str]]] = None,
+                                    conversion_type: str = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -6564,9 +6757,22 @@ class InteractiveMenu:
         branch or a flat-output row would abort on PHANTOM collisions: the
         excluded file would never be processed at all. When None, no entry
         has an exclusion (the only real caller always passes the list).
+        The filter is only applied for the tiff<->jxl directions — the only
+        ones whose child ever RECEIVES --exclude-folders (the cmd builder's
+        emission gate). Filtering anywhere else would shrink the walk below
+        what the child processes and hide REAL collisions.
+
+        `conversion_type` (optional): the workflow's conversion type. The
+        transcoder recovers jbrd files with their ORIGINAL name — it ignores
+        --rename-from on that path (and on jxl_to_jpeg_lossless entirely) —
+        so the scan must not model the rename for those files, in either
+        direction: applying it misses real collisions (two rows, renames
+        x->a and x->b, child writes x.jpg twice) and inventing it refuses
+        legitimate runs. Files are probed once, with has_jbrd_box cached.
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
+
         resolver = None
         _skip_check = None
         _child = None
@@ -6611,6 +6817,36 @@ class InteractiveMenu:
                         return p.with_name(_apply_rename_name(p.name, rf, rt))
                     return p
 
+                # Per-file jbrd probe, cached: the scan calls it twice per
+                # file (resolver + stem key), and only when a rename is in
+                # play at all.
+                _jbrd_cache: Dict[str, bool] = {}
+
+                def _jbrd_keeps_name(f: Path) -> bool:
+                    """True when THIS file's output keeps the original stem
+                    even with --rename-from in play: the transcoder recovers
+                    jbrd files byte-for-byte under the ORIGINAL JPEG name (the
+                    child logs "rename ignored"), and jxl_to_jpeg_lossless
+                    never renames at all. Modelling the rename there
+                    desynchronizes the guard from the run both ways (a missed
+                    real collision AND a refused legitimate one)."""
+                    if (_child.__name__ != 'jxl_jpeg_transcoder'
+                            or origin != 'jxl' or dest not in ('jpeg', 'jpg')):
+                        return False
+                    if conversion_type == 'jxl_to_jpeg_lossless':
+                        return True
+                    if conversion_type != 'jxl_to_jpeg_auto':
+                        return False
+                    key = os.path.normcase(str(f))
+                    hit = _jbrd_cache.get(key)
+                    if hit is None:
+                        try:
+                            hit = bool(_child.has_jbrd_box(f))
+                        except OSError:
+                            hit = False
+                        _jbrd_cache[key] = hit
+                    return hit
+
                 def resolver(f: Path, mode: int, src_root: Path, dest_cell: str,
                              rf: str, rt: str) -> Optional[Path]:
                     # Mode 0 HONORS the Destination column: the cmd builder
@@ -6622,12 +6858,16 @@ class InteractiveMenu:
                     # single output in silence. Mode 0 is FLAT, so f.parent ==
                     # src_root and a Destination equal to the Source resolves
                     # identically: one branch covers both.
+                    # The rename THIS file actually gets: empty when the child
+                    # will ignore it (jbrd recovery / the lossless decode).
+                    erf, ert = ((rf, rt) if rf and not _jbrd_keeps_name(f)
+                                else ('', ''))
                     if mode in (0, 2):
-                        return _rename_out(Path(dest_cell) / (f.stem + out_ext), rf, rt)
+                        return _rename_out(Path(dest_cell) / (f.stem + out_ext), erf, ert)
                     if mode == 8:
-                        return _rename_out(f.parent / (f.stem + out_ext), rf, rt)
+                        return _rename_out(f.parent / (f.stem + out_ext), erf, ert)
                     if mode == 1:
-                        return _rename_out(src_root / conv_folder / (f.stem + out_ext), rf, rt)
+                        return _rename_out(src_root / conv_folder / (f.stem + out_ext), erf, ert)
                     if _child.__name__ == 'jxl_jpeg_transcoder':
                         # The transcoder has TWO resolvers and this used
                         # resolve_output_transcode for every direction — the
@@ -6648,16 +6888,16 @@ class InteractiveMenu:
                             return _child.resolve_output_convert(
                                 f, mode, _child.CONVERT_OUTPUT_FOLDER, "",
                                 (dest if dest != 'jpg' else 'jpeg'),
-                                rename_from=rf, rename_to=rt,
+                                rename_from=erf, rename_to=ert,
                                 output_root=src_root, decode=True)
                         return _child.resolve_output_transcode(f, mode, src_root, _dec)
-                    return _rename_out(_child.resolve_output(f, mode, src_root), rf, rt)
+                    return _rename_out(_child.resolve_output(f, mode, src_root), erf, ert)
 
                 def _stem_key(f: Path, rf: str, rt: str) -> str:
                     """The output stem this source will land under — renamed when
                     the row's --rename-from applies, exactly like the child
-                    plans it."""
-                    if rf:
+                    plans it (a jbrd recovery keeps the ORIGINAL name)."""
+                    if rf and not _jbrd_keeps_name(f):
                         name = _apply_rename_name(f.name, rf, rt)
                         return os.path.normcase(os.path.splitext(name)[0])
                     return os.path.normcase(f.stem)
@@ -6771,6 +7011,14 @@ class InteractiveMenu:
                 # filter otherwise lives.
                 _excl_eff = (row_excludes[ei] if row_excludes is not None
                              else None)
+                # ...but ONLY where the child honors it: the cmd builder emits
+                # --exclude-folders for the tiff<->jxl directions alone, so
+                # anywhere else this walk must see every file the child will
+                # process. Filtering in another direction hid REAL collisions
+                # (a stale last_exclude_folders replayed into a jxl2jxl
+                # preset shrank the walk below the recompressor's file set).
+                if (origin, dest) not in (('tiff', 'jxl'), ('jxl', 'tiff')):
+                    _excl_eff = None
                 _excl_names = tuple(n.strip().lower() for n in _excl_eff.split(';')
                                     ) if _excl_eff else ()
                 _excl_names = tuple(n for n in _excl_names if n)
@@ -6815,6 +7063,15 @@ class InteractiveMenu:
                             files = sorted(src_root.iterdir())
                         except OSError:
                             continue
+                        # Same exclusion filter as the resolver branch (already
+                        # gated to the tiff<->jxl directions above): a legacy
+                        # TIFF manifest still gets --exclude-folders from the
+                        # cmd builder, so the child skips those files while
+                        # this flat scan counted them — a phantom abort.
+                        if _excl_names:
+                            files = [f for f in files
+                                     if not _path_excluded_below_root(
+                                         f, src_root, _excl_names)]
                         outputs = ((f, Path(dest_path)) for f in files)
                     else:
                         # This walk is the slow part on large trees (recursive glob
@@ -7076,8 +7333,12 @@ class InteractiveMenu:
         cmd.append('--summary-json')
 
         # Pass configured export marker so scripts match the wrapper's detection.
+        # ALWAYS passed, the default included: omitting it when it equalled
+        # "_EXPORT" let a child whose EXPORT_MARKER setting was edited at the
+        # top of its script anchor on a DIFFERENT marker than the one the
+        # wrapper detected modes and counted files with (round 43).
         export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-        if export_marker and export_marker != "_EXPORT":
+        if export_marker:
             cmd.extend(['--export-marker', export_marker])
         export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
         if export_subfolder:
@@ -7523,6 +7784,14 @@ class InteractiveMenu:
     def execute_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute the workflow - Build command dynamically"""
 
+        # Run-scoped state resets. `_exclude_folder_warned` documents itself
+        # as "at most once per run" (the manifest builder keys its once-off
+        # warning on it), but it lived on `self` forever: a second run of an
+        # unsupported direction in the same menu session stayed mute. Every
+        # execution path — direct and manifest (mode 99, dispatched below) —
+        # funnels through here, so resetting at the entry covers both (F-7).
+        self._exclude_folder_warned = set()
+
         # A delete flag the child's argparse rejects cannot run: it exits 2
         # ("ambiguous option", or an explicit argument on a store_true flag)
         # before the child does anything. Caught here, ahead of every gate, so
@@ -7597,6 +7866,33 @@ class InteractiveMenu:
                               "its source — drop the delete option.")
             return False
 
+        # --rename-from on the lossless JXL->JPEG recovery is impossible for
+        # the DIRECT run too (the same refusal the manifest executor makes):
+        # the recovered JPEG keeps the original file name, so a rename left in
+        # the workflow (a preset carried over from a JXL->JXL run) must refuse
+        # up front, before the token (W2-1a).
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and _conv_pre == 'jxl_to_jpeg_lossless'
+                and _adv_pre.get('rename_from')):
+            self._print_error("A bit-exact JPEG reconstruction keeps the "
+                              "original file names — --rename-from does not "
+                              "apply to the lossless JXL→JPEG recovery. Pick "
+                              "the lossy conversion for that.")
+            return False
+        # OutputICC is likewise ignored on the lossless path (there is no
+        # pixel to convert) — warn, don't refuse: the recovery itself is
+        # still exactly what was asked.
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and _conv_pre == 'jxl_to_jpeg_lossless'
+                and _adv_pre.get('output_icc')):
+            _icc_msg = ("OutputICC is ignored by a bit-exact JPEG reconstruction "
+                        "— the recovered JPEG keeps the original bytes, "
+                        "colour included.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{_icc_msg}[/yellow]")
+            else:
+                print(f"WARNING: {_icc_msg}")
+
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
         # recompressor proves provenance on its skipped path now.) Applied here
@@ -7647,7 +7943,7 @@ class InteractiveMenu:
             ]
 
             export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker and export_marker != "_EXPORT":
+            if export_marker:
                 cmd.extend(['--export-marker', export_marker])
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
@@ -7730,7 +8026,7 @@ class InteractiveMenu:
             ]
 
             export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker and export_marker != "_EXPORT":
+            if export_marker:
                 cmd.extend(['--export-marker', export_marker])
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
@@ -7807,7 +8103,7 @@ class InteractiveMenu:
             ]
 
             export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker and export_marker != "_EXPORT":
+            if export_marker:
                 cmd.extend(['--export-marker', export_marker])
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
@@ -7893,7 +8189,7 @@ class InteractiveMenu:
             ]
 
             export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker and export_marker != "_EXPORT":
+            if export_marker:
                 cmd.extend(['--export-marker', export_marker])
             export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
             if export_subfolder:
@@ -8493,7 +8789,17 @@ class InteractiveMenu:
         # mode), and the manifest's ExcludeFolders column overrides it per
         # row via _row_effective_options. Validated above by
         # _session_number_error.
-        workflow['exclude_folders'] = session.get('last_exclude_folders')
+        # CARRIED only for the directions whose child receives the flag
+        # (tiff<->jxl, the cmd builder's emission gate): a stale
+        # last_exclude_folders left over from a TIFF run replayed into a
+        # jxl2jxl/jpeg preset used to shrink the collision walk below the
+        # child's real file set (hiding a real collision) AND raise the
+        # spurious "IGNORED" warning on runs that never asked for it (F-1,
+        # part 2).
+        workflow['exclude_folders'] = (
+            session.get('last_exclude_folders')
+            if (origin, last_dest) in (('tiff', 'jxl'), ('jxl', 'tiff'))
+            else None)
         workflow['use_ram'] = session.get('last_use_ram') if session.get('last_use_ram') is not None else True
         workflow['icc_profile'] = session.get('last_icc_profile')
         workflow['compression'] = session.get('last_compression') or 'zip'
@@ -8731,11 +9037,17 @@ def _main():
                     mode_config=workflow.get('mode_config'),
                     # None on a normal run: clears any previously stored CSV.
                     manifest_path=workflow.get('manifest_path'),
-                    # The wizard asked only in the TIFF<->JXL directions; for
-                    # every other the key is absent and the saved value is
-                    # kept (`is not self._STAGING_UNSET` semantics).
+                    # The wizard stages the answer only in the TIFF<->JXL
+                    # directions (same gate the replay honors): for every
+                    # other direction the run never asked, so the saved
+                    # value is kept (`is not self._STAGING_UNSET`
+                    # semantics) instead of having a scripted None from a
+                    # direction that never asks erase a TIFF run's
+                    # exclusion.
                     exclude_folders=(workflow['exclude_folders']
-                                     if 'exclude_folders' in workflow
+                                     if (workflow['origin_format'], workflow['dest_format'])
+                                     in (('tiff', 'jxl'), ('jxl', 'tiff'))
+                                     and 'exclude_folders' in workflow
                                      else config._STAGING_UNSET),
                 )
 

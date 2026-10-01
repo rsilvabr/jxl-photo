@@ -142,6 +142,13 @@ def test_mixed_source_is_not_labelled_already_archived(tmp_path, monkeypatch, ca
     monkeypatch.setattr(enc, "_delete_stats",
                         {"deleted": 0, "deleted_archived": 0, "kept": 0})
     monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: True)
+    # Round 43 (E-1): the skipped page's pre-existing output must PROVE it is
+    # this source's archive before the mixed source can be deleted at all, so
+    # stub the marker read to match — the point here stays the #270 LABEL.
+    monkeypatch.setattr(enc, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": enc._source_path_id(src),
+                                                "srcsum": None}
+                                       for p in paths})
     monkeypatch.setattr(
         enc, "convert_one",
         lambda t, w, f, p=0, *a, **k: (((str(t), p), "skipped", str(f), None)

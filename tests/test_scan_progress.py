@@ -25,9 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jxl_tiff_encoder as enc
 import jxl_tiff_decoder as dec
 import jxl_jpeg_transcoder as tr
+import jxl_recompressor as rec
 
 BACKENDS = pytest.mark.parametrize(
-    "mod", [enc, dec, tr], ids=["encoder", "decoder", "transcoder"])
+    "mod", [enc, dec, tr, rec],
+    ids=["encoder", "decoder", "transcoder", "recompressor"])
 
 
 @pytest.fixture

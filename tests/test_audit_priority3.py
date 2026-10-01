@@ -89,6 +89,10 @@ def test_encoder_clean_staging_without_staging_flag(monkeypatch, tmp_path):
     photos.mkdir()
     calls = []
     monkeypatch.setattr(enc, "TEMP2_DIR", str(staging))  # the script setting
+    # main() resets every run-scoped global from the import-time _RUN_DEFAULTS
+    # snapshot, so editing the global alone is erased at entry. A user editing
+    # the SCRIPT changes both; mirror that here.
+    monkeypatch.setitem(enc._RUN_DEFAULTS, "TEMP2_DIR", str(staging))
     monkeypatch.setattr(enc, "_clean_staging", lambda d: calls.append(d))
     monkeypatch.setattr(sys, "argv",
                         ["jxl_tiff_encoder.py", str(photos), "--mode", "0",

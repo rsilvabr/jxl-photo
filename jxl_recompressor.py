@@ -775,6 +775,31 @@ SHARPEN_THRESHOLD = None
 DERIVATIVE = False           # --output-icc OR resize OR sharpen
 _DERIVED_LABEL = None        # jxlphoto-derived:<recipe> for this run
 
+# Script defaults for every global the CLI mutates, captured at import. main()
+# resets run-scoped state UNCONDITIONALLY at entry (a second in-process run used
+# to inherit the first one's armed --delete-source / --overwrite / --staging —
+# the same class as the encoder's #431), and the reset must restore THESE values
+# and not hardcoded literals: a user who edits a setting in the file must not
+# have it silently revert at the top of every run. New parameters go last.
+_RUN_DEFAULTS = {
+    "OVERWRITE": OVERWRITE,
+    "DELETE_SOURCE": DELETE_SOURCE,
+    "DELETE_CONFIRM": DELETE_CONFIRM,
+    "DELETE_SKIPPED": DELETE_SKIPPED,
+    "VERIFY_ROUNDTRIP": VERIFY_ROUNDTRIP,
+    "KEEP_SMALLER": KEEP_SMALLER,
+    "ON_DOWNGRADE": ON_DOWNGRADE,
+    "ON_REGENERATION": ON_REGENERATION,
+    "ON_UNKNOWN": ON_UNKNOWN,
+    "JBRD_POLICY": JBRD_POLICY,
+    "ENCODE_TAG_MODE": ENCODE_TAG_MODE,
+    "CJXL_DISTANCE": CJXL_DISTANCE,
+    "CJXL_EFFORT": CJXL_EFFORT,
+    "CJXL_BUFFERING": CJXL_BUFFERING,
+    "PROVENANCE_CHECK": PROVENANCE_CHECK,
+    "TEMP2_DIR": TEMP2_DIR,
+}
+
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
 # a recompressed archive stays provable by the DECODER's delete gates.
 SRC_PREFIX = "jxlphoto-src:"
@@ -3053,134 +3078,223 @@ def process_group(items, workers: int):
                          it["action"], it["in_place"], it["desc"],
                          it["software"], it["src_d"])
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {_submit(ex, it): it for it in items}
-        for fut in as_completed(futures):
-            it = futures[fut]
-            # One crashing future must not take the whole batch down: record
-            # the item as an error and keep settling the rest.
+    # In-place multi-page documents (jxlphoto-mpg) are replaced
+    # all-or-nothing. Only their pages wait for the group: every other in-place
+    # file is replaced the moment it settles, exactly as before — deferring
+    # EVERY file to the end of the run kept every verified re-encode on disk at
+    # once (a whole tree's worth of .tmp files, the disk-full abort far closer),
+    # and a Ctrl+C or crash threw all of that work away and left the temps
+    # behind (round 43). The markers are read once, batched, up front.
+    _in_place_items = [it for it in items if it["in_place"]]
+    _group_of = {}          # id(item) -> (folder, mpg id)
+    _group_members = {}     # (folder, mpg id) -> [items]
+    if len(_in_place_items) >= 2:
+        _mpg_of, _complete = _read_mpg_markers([it["src"] for it in _in_place_items])
+        for it in _in_place_items:
+            g = _mpg_of.get(str(it["src"]))
+            if g:
+                # Same (folder, id) keying as the delete gate: two copies of
+                # one split in different folders are different documents.
+                key = (str(it["src"].parent), g)
+                _group_of[id(it)] = key
+                _group_members.setdefault(key, []).append(it)
+    # A "group" with one page in this run has no sibling to hold together.
+    for _key in [k for k, m in _group_members.items() if len(m) < 2]:
+        for _it in _group_members.pop(_key):
+            _group_of.pop(id(_it), None)
+    _group_ready = {}       # key -> [items converted and verified, waiting]
+    _group_settled = {}     # key -> how many members have settled (any status)
+
+    def _replace_in_place(it, final_path):
+        """Swap the verified re-encode over the source, atomically.
+
+        Same volume: an atomic os.replace. Staging: a temp file in the
+        DESTINATION folder first — in place, the destination IS the only copy,
+        and a cross-volume shutil.move onto it is not atomic. A single file is
+        replaced the moment it settles; a page of a multi-page group only once
+        the whole group has (see _settle_in_place).
+        """
+        src_str = str(it["src"])
+        if staging_used:
+            # Same .tmp rule as the in-place write temps: if the promotion
+            # fails the temp stays behind (deliberately, see below) and must
+            # not be adoptable as a NEW input.
+            dest_tmp = (final_path.parent
+                        / f"{uuid.uuid4().hex}_{final_path.stem}.tmp")
             try:
-                src_str, status, final_str = fut.result()
+                shutil.move(str(it["write"]), str(dest_tmp))
+            except OSError as e:
+                logger.error(f"  REPLACE FAILED, original kept | "
+                             f"{final_path.name} | {e}")
+                try:
+                    if dest_tmp.exists():
+                        dest_tmp.unlink()
+                except OSError:
+                    pass
+                moved = False
+            else:
+                try:
+                    os.replace(str(dest_tmp), str(final_path))
+                    moved = True
+                except OSError as e:
+                    # The complete new file survives as dest_tmp; the original
+                    # is untouched. Leave the temp file in place (deleting it
+                    # would destroy the only good copy) and say where it is.
+                    logger.error(f"  REPLACE FAILED, original kept; the "
+                                 f"complete re-encode is at {dest_tmp} "
+                                 f"(rename it over the original once the "
+                                 f"problem is fixed) | {final_path.name} | {e}")
+                    moved = False
+        else:
+            try:
+                os.replace(str(it["write"]), str(final_path))
+                moved = True
+            except OSError as e:
+                logger.error(f"  REPLACE FAILED, original kept | {final_path.name} | {e}")
+                # Same cleanup as above: the original is intact, the temp is
+                # worthless bytecode next to it (and .tmp-named now, but do not
+                # leave it to rot).
+                try:
+                    it["write"].unlink()
+                except OSError:
+                    pass
+                moved = False
+        if not moved:
+            results[src_str] = ("error", str(final_path))
+            return
+        if not _verify_jxl_integrity(final_path):
+            logger.error(f"  Replaced file failed the final integrity check | {final_path.name}")
+            results[src_str] = ("error", str(final_path))
+            return
+        promoted.add(src_str)
+        logger.info(f" REPLACED (in place) | {final_path.name}")
+
+    def _release_group(key):
+        """Every page of the group has settled: replace them all, or — when any
+        page did not convert (failed, refused, kept) — none of them. The same
+        all-or-nothing rule _delete_gate applies to deletion. (A policy skip
+        never reaches process_group; main's _hold_incomplete_in_place_groups
+        demotes its runnable siblings first.)"""
+        members = _group_members[key]
+        ready = _group_ready.pop(key, [])
+        if len(ready) < len(members):
+            for it in ready:
+                try:
+                    it["write"].unlink()
+                except OSError:
+                    pass
+                results[str(it["src"])] = ("skipped", str(it["final"]))
+                logger.warning(
+                    f" GROUP HELD IN PLACE | {it['src'].name} | a sibling page of "
+                    f"the same multi-page document did not convert this run — no "
+                    f"page of the group was replaced")
+            return
+        for it in ready:
+            try:
+                _replace_in_place(it, Path(str(it["final"])))
             except Exception as e:
-                src_str, final_str = str(it["src"]), str(it["final"])
-                status = "error"
-                _error_details[src_str] = f"worker crashed: {e}"
-                logger.error(f"  WORKER CRASHED | {it['src'].name} | {e}")
-            results[src_str] = (status, final_str)
-            if status not in ("ok", "overwrite", "copied"):
-                continue
-            try:
-                final_path = Path(final_str)
-                if it["write"] == final_path:
-                    # No staging and not in place: written directly at the final path.
-                    promoted.add(src_str)
+                # Runs in THIS thread, outside convert_one's own try: an
+                # unexpected failure must settle the item, not kill the run.
+                results[str(it["src"])] = ("error", str(it["final"]))
+                _error_details[str(it["src"])] = f"promotion failed: {e}"
+                logger.error(f"  PROMOTION FAILED | {it['src'].name} | {e}")
+
+    def _settle_in_place(it, converted: bool) -> None:
+        """Called once per settled in-place item (converted or not). A single
+        file is replaced now; a group page waits until its last sibling."""
+        key = _group_of.get(id(it))
+        if key is None:
+            if converted:
+                _replace_in_place(it, Path(str(it["final"])))
+            return
+        if converted:
+            _group_ready.setdefault(key, []).append(it)
+        _group_settled[key] = _group_settled.get(key, 0) + 1
+        if _group_settled[key] == len(_group_members[key]):
+            _release_group(key)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {_submit(ex, it): it for it in items}
+            for fut in as_completed(futures):
+                it = futures[fut]
+                # One crashing future must not take the whole batch down: record
+                # the item as an error and keep settling the rest.
+                try:
+                    src_str, status, final_str = fut.result()
+                except Exception as e:
+                    src_str, final_str = str(it["src"]), str(it["final"])
+                    status = "error"
+                    _error_details[src_str] = f"worker crashed: {e}"
+                    logger.error(f"  WORKER CRASHED | {it['src'].name} | {e}")
+                results[src_str] = (status, final_str)
+                if status not in ("ok", "overwrite", "copied"):
+                    if it["in_place"]:
+                        # A page that did not convert still SETTLES: its group
+                        # must learn it, or its siblings would wait forever.
+                        _settle_in_place(it, converted=False)
                     continue
-                if not it["in_place"] and it["write"].parent == final_path.parent:
-                    # Beside-the-final uuid temp (no staging): same volume, so
-                    # os.replace is atomic and overwrites an existing output —
-                    # _promote_from_staging's shutil.move would NOT (os.rename
-                    # refuses an existing destination on Windows).
-                    try:
-                        os.replace(str(it["write"]), str(final_path))
-                        moved = True
-                    except OSError as e:
-                        logger.error(f"  REPLACE FAILED | {final_path.name} | {e}")
-                        # Remove the temp: the source is untouched (a failed
-                        # replace never destroys it), so leaving the verified
-                        # re-encode behind would only add a beside-final
-                        # orphan no sweep ever looks at. The next run
-                        # re-creates it.
-                        try:
-                            it["write"].unlink()
-                        except OSError:
-                            pass
-                        moved = False
-                    if not moved:
-                        results[src_str] = ("error", final_str)
+                try:
+                    final_path = Path(final_str)
+                    if it["write"] == final_path:
+                        # No staging and not in place: written directly at the final path.
+                        promoted.add(src_str)
                         continue
-                    promoted.add(src_str)
-                    continue
-                if it["in_place"]:
-                    # The original is replaced ONLY now — after every gate above
-                    # passed on the verified write_path. Same-volume os.replace is
-                    # atomic; staging goes through a temp file in the DESTINATION
-                    # folder first.
-                    #
-                    # Why not _promote_from_staging here: in place, the
-                    # destination file IS the only copy there is. A cross-volume
-                    # shutil.move copies ONTO it non-atomically — a failure
-                    # half-way left the original destroyed and the sole good copy
-                    # in staging under a UUID name, which --clean-staging sweeps
-                    # an hour later. Moving to a temp file in the destination
-                    # folder keeps the original intact until a same-volume
-                    # os.replace swaps it atomically.
-                    if staging_used:
-                        # Same .tmp rule as the in-place write temps: if the
-                        # promotion fails the temp stays behind (deliberately,
-                        # see below) and must not be adoptable as a NEW input.
-                        dest_tmp = (final_path.parent
-                                    / f"{uuid.uuid4().hex}_{final_path.stem}.tmp")
-                        try:
-                            shutil.move(str(it["write"]), str(dest_tmp))
-                        except OSError as e:
-                            logger.error(f"  REPLACE FAILED, original kept | "
-                                         f"{final_path.name} | {e}")
-                            try:
-                                if dest_tmp.exists():
-                                    dest_tmp.unlink()
-                            except OSError:
-                                pass
-                            moved = False
-                        else:
-                            try:
-                                os.replace(str(dest_tmp), str(final_path))
-                                moved = True
-                            except OSError as e:
-                                # The complete new file survives as dest_tmp; the
-                                # original is untouched. Leave the temp file in
-                                # place (deleting it would destroy the only good
-                                # copy) and say exactly where it is.
-                                logger.error(f"  REPLACE FAILED, original kept; the "
-                                             f"complete re-encode is at {dest_tmp} "
-                                             f"(rename it over the original once the "
-                                             f"problem is fixed) | {final_path.name} | {e}")
-                                moved = False
-                    else:
+                    if not it["in_place"] and it["write"].parent == final_path.parent:
+                        # Beside-the-final uuid temp (no staging): same volume, so
+                        # os.replace is atomic and overwrites an existing output —
+                        # _promote_from_staging's shutil.move would NOT (os.rename
+                        # refuses an existing destination on Windows).
                         try:
                             os.replace(str(it["write"]), str(final_path))
                             moved = True
                         except OSError as e:
-                            logger.error(f"  REPLACE FAILED, original kept | {final_path.name} | {e}")
-                            # Same cleanup as above: the original is intact,
-                            # the temp is worthless bytecode next to it (and
-                            # .tmp-named now, but do not leave it to rot).
+                            logger.error(f"  REPLACE FAILED | {final_path.name} | {e}")
+                            # Remove the temp: the source is untouched (a failed
+                            # replace never destroys it), so leaving the verified
+                            # re-encode behind would only add a beside-final
+                            # orphan no sweep ever looks at. The next run
+                            # re-creates it.
                             try:
                                 it["write"].unlink()
                             except OSError:
                                 pass
                             moved = False
+                        if not moved:
+                            results[src_str] = ("error", final_str)
+                            continue
+                        promoted.add(src_str)
+                        continue
+                    if it["in_place"]:
+                        # Converted and verified by convert_one: replaced now,
+                        # or — a page of a multi-page group — once the whole
+                        # group has settled.
+                        _settle_in_place(it, converted=True)
+                        continue
+                    moved = _promote_from_staging(it["write"], final_path)
                     if not moved:
                         results[src_str] = ("error", final_str)
                         continue
-                    if not _verify_jxl_integrity(final_path):
-                        logger.error(f"  Replaced file failed the final integrity check | {final_path.name}")
-                        results[src_str] = ("error", final_str)
-                        continue
                     promoted.add(src_str)
-                    logger.info(f" REPLACED (in place) | {final_path.name}")
-                    continue
-                moved = _promote_from_staging(it["write"], final_path)
-                if not moved:
+                except Exception as e:
+                    # The promotion block above runs in THIS thread, outside
+                    # convert_one's own try: an unexpected failure here used to
+                    # kill the whole run. Settle this item as an error instead.
                     results[src_str] = ("error", final_str)
-                    continue
-                promoted.add(src_str)
-            except Exception as e:
-                # The promotion block above runs in THIS thread, outside
-                # convert_one's own try: an unexpected failure here used to
-                # kill the whole run. Settle this item as an error instead.
-                results[src_str] = ("error", final_str)
-                _error_details[src_str] = f"promotion failed: {e}"
-                logger.error(f"  PROMOTION FAILED | {it['src'].name} | {e}")
+                    _error_details[src_str] = f"promotion failed: {e}"
+                    logger.error(f"  PROMOTION FAILED | {it['src'].name} | {e}")
+    finally:
+        # Interrupted (Ctrl+C) or crashed with group pages still waiting: their
+        # originals are intact, so the verified temps are only orphans now —
+        # .tmp-named, never adopted as input, but never swept either. Remove
+        # them. A normal run leaves nothing here (every group was released).
+        for _waiting in _group_ready.values():
+            for it in _waiting:
+                try:
+                    it["write"].unlink()
+                except OSError:
+                    pass
+        _group_ready.clear()
 
     return results, promoted
 
@@ -3244,6 +3358,84 @@ def _read_mpg_markers(paths: list):
                 except OSError:
                     pass
     return mpg, complete
+
+
+def _warn_foreign_overwrite(items):
+    """WARN when the run is about to overwrite an existing output whose
+    provenance markers name a DIFFERENT origin.
+
+    In the folder-preserving modes (1/3) an existing output is re-encoded over
+    on smart sync (source newer) or with --overwrite; that path carries no
+    provenance gate, so an output left there by another origin used to be
+    replaced in silence. There is no cheap proof to arbitrate — the source is
+    authoritative on the overwrite path (re-running regenerates by contract) —
+    so this is a loud note, never a block. A markerless or unreadable output is
+    the common case and says nothing.
+    """
+    targets = [it for it in items
+               if not it["in_place"]
+               and it["action"] in ("convert", "copy")
+               and it["final"].exists()
+               and not _would_skip(it["src"], it["final"])]
+    if not targets:
+        return
+    marks = _read_source_markers_batch(
+        [it["final"] for it in targets] + [it["src"] for it in targets])
+    for it in targets:
+        out_info = marks.get(str(it["final"])) or {"src": None, "srcsum": None}
+        src_info = marks.get(str(it["src"])) or {"src": None, "srcsum": None}
+        if out_info.get("src") is None and out_info.get("srcsum") is None:
+            continue    # markerless (or unreadable): nothing to compare
+        if not _markers_match(out_info, src_info, PROVENANCE_CHECK):
+            logger.warning(
+                f"Overwriting {it['final']} — its provenance markers name a "
+                f"different origin ({out_info.get('src') or out_info.get('srcsum')})")
+
+
+def _hold_incomplete_in_place_groups(items):
+    """All-or-nothing for multi-page documents REPLACED IN PLACE (mode 8, or
+    mode 0 without an output folder).
+
+    Each page of such a run is replaced by process_group, page by page; the
+    per-file gates protect the bytes, but a page that is policy-skipped
+    (downgrade/regeneration/jbrd) is left out of the batch while its siblings
+    are still re-encoded — one document spread across two generations, exactly
+    the damage the jxlphoto-mpg marker exists to prevent. The delete gate
+    already keeps a group together when its sources are deleted; this extends
+    the same rule to in-place replacement. Every runnable in-place page of an
+    incomplete group is demoted to skip (nothing is replaced).
+
+    Markers unreadable -> no group is known and nothing is vetoed (fail OPEN):
+    unlike a deletion, a replacement is individually verified, so the worst
+    case is a mixed group, never data loss.
+    """
+    in_place = [it for it in items if it["in_place"]]
+    if len(in_place) < 2:
+        return
+    mpg_of, _complete = _read_mpg_markers([it["src"] for it in in_place])
+    groups = {}
+    for it in in_place:
+        g = mpg_of.get(str(it["src"]))
+        if g:
+            # Same (folder, id) keying as the delete gate: two copies of one
+            # split in different folders are different documents.
+            groups.setdefault((str(it["src"].parent), g), []).append(it)
+    runnable = ("convert", "copy")
+    for members in groups.values():
+        if all(m["action"] in runnable for m in members):
+            continue
+        for m in members:
+            if m["action"] not in runnable:
+                continue
+            m["action"] = "skip"
+            m["reason"] = ((m.get("reason") or "")
+                           + " | in-place group held together: a sibling page "
+                             "of the same multi-page document is not being "
+                             "recompressed this run").strip(" |")
+            logger.warning(
+                f" GROUP HELD IN PLACE | {m['src'].name} | a sibling page of the "
+                f"same multi-page document is not being recompressed — leaving "
+                f"the whole group untouched")
 
 
 def _delete_gate(items, results, promoted):
@@ -3536,6 +3728,19 @@ def main():
     DERIVATIVE = False
     _DERIVED_LABEL = None
 
+    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here, before
+    # the flags are applied below. The assignments further down only fire when a
+    # flag was passed, so a second main() in the SAME process (the test suite,
+    # or anything importing this module) inherited the first run's armed state:
+    # a `--delete-source --delete-confirm-off` run left DELETE_SOURCE on with no
+    # confirmation for the next run, and `--staging` leaked TEMP2_DIR. The
+    # encoder got exactly this reset in round 34 (#431); this is the same fix.
+    # _RUN_DEFAULTS restores each global to its SCRIPT setting (captured at
+    # import), so a user-edited setting survives while cross-run leakage does
+    # not — in particular --staging must not erase a configured TEMP2_DIR.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
+
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
     parser.add_argument("input", type=Path, nargs="?", help="Input JXL file or root folder")
@@ -3818,6 +4023,10 @@ def main():
 
     log_file = setup_logger()
     _reset_abort()
+    # Same placement as the encoder (#431): the progress counter is per-run
+    # state and _reset_abort is kept as the delete-stats-only helper, so the
+    # zeroing lives here. Without it a second in-process run showed [N+1/total].
+    _counter["done"] = 0
     _floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
     _warn_distance_clamp(CJXL_DISTANCE, _floor)
 
@@ -4189,6 +4398,19 @@ def main():
                 if not args.dry_run:
                     items = [it for it in items if id(it) not in refused_ids]
                     provenance_refused = refused
+
+    # In-place multi-page documents are replaced all-or-nothing: a page that
+    # cannot take part must hold the whole group (process_group also vetoes a
+    # page that fails at CONVERSION time). Runs in a dry run too, so the preview
+    # matches the real run.
+    _hold_incomplete_in_place_groups(items)
+
+    # R-1: the folder-preserving modes re-encode over an existing output with no
+    # provenance gate; if that output's markers name a different origin, say so
+    # loudly. Warn only — the source is authoritative on the overwrite path.
+    if not args.dry_run and not _run_collapses_structure(
+            args.mode, args.output, args.input):
+        _warn_foreign_overwrite(items)
 
     # --- Dry run: report and stop ------------------------------------------
     if args.dry_run:

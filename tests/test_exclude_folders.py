@@ -54,18 +54,21 @@ def _fake_tree(root: Path):
 # ── helper unit: segment match, anchored at the root, fail-closed ───────────
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_matches_a_folder_segment(helper, tmp_path):
     assert helper(tmp_path / "_export" / "x.tif", tmp_path, ("_export",)) is True
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_match_is_case_insensitive(helper, tmp_path):
     assert helper(tmp_path / "_EXPORT" / "x.tif", tmp_path, ("_export",)) is True
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_never_matches_a_longer_name(helper, tmp_path):
     """`_export` must not bite My_EXPORT_photos: segment, not substring."""
@@ -74,6 +77,7 @@ def test_helper_never_matches_a_longer_name(helper, tmp_path):
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_never_excludes_the_root_itself_or_an_ancestor(helper, tmp_path):
     """The root's own name is above the root, so it cannot exclude."""
@@ -83,6 +87,7 @@ def test_helper_never_excludes_the_root_itself_or_an_ancestor(helper, tmp_path):
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_root_pointed_at_the_excluded_name_keeps_the_file(helper, tmp_path):
     """An empty relative path means nothing is BELOW the root."""
@@ -91,6 +96,7 @@ def test_helper_root_pointed_at_the_excluded_name_keeps_the_file(helper, tmp_pat
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_fails_closed_outside_the_root(helper, tmp_path):
     """Not under the root (should not happen): test the whole path."""
@@ -100,6 +106,7 @@ def test_helper_fails_closed_outside_the_root(helper, tmp_path):
 
 
 @pytest.mark.parametrize("helper", [enc._path_excluded_below_root,
+                                    dec._path_excluded_below_root,
                                     wp._path_excluded_below_root])
 def test_helper_without_names_or_root_is_inert(helper, tmp_path):
     assert helper(tmp_path / "_export" / "x.tif", tmp_path, ()) is False
@@ -237,17 +244,22 @@ def test_jxl_to_jxl_warns_and_omits_the_flag(menu, tmp_path, monkeypatch, capsys
 
 # ── #297-class pin: the delete panel counts what the child will see ─────────
 
-def test_count_origin_files_matches_the_finder_under_exclusion(
-        menu, tmp_path, monkeypatch):
+def test_count_origin_files_matches_the_finder_under_exclusion(menu, tmp_path):
     (tmp_path / "_EXPORT" / "TIFF16").mkdir(parents=True)
     (tmp_path / "_EXPORT" / "TIFF16" / "x.tif").write_bytes(b"x")
     (tmp_path / "f.tif").write_bytes(b"x")
     workflow = {"input_dir": str(tmp_path), "origin_format": "tiff",
                 "dest_format": "jxl", "exclude_folders": "_EXPORT"}
-    monkeypatch.setattr(enc, "EXCLUDE_FOLDERS", ("_export",))
+    # NOTE: no monkeypatch of enc.EXCLUDE_FOLDERS. The exclusion must reach the
+    # child's finder through _count_origin_files -> _with_child_marker (which
+    # sets the child global itself). Pre-setting the global made this pin
+    # vacuous: it passed even if the workflow value were never plumbed.
     assert menu._count_origin_files(workflow, 8) == 1
-    assert menu._count_origin_files(workflow, 8) == \
-        len(enc.find_tiffs_recursive(tmp_path))
+    # ...and it equals the child's finder run under the SAME exclusion, applied
+    # the same way the wrapper applies it.
+    with wp._with_child_marker(enc, None, None, None, "_EXPORT"):
+        expected = len(enc.find_tiffs_recursive(tmp_path))
+    assert menu._count_origin_files(workflow, 8) == expected
 
 
 # ── collision walk filters the excluded tree (plan §4.5) ────────────────────
