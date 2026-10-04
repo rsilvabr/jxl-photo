@@ -11,6 +11,31 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.5.0
+
+**Released 2026-10-02, superseded by v2.6.0.** Folder exclusion, and the fixes of the round-43 audit of the whole repo.
+
+### New: `--exclude-folders`
+
+`jxl_tiff_encoder.py` and `jxl_tiff_decoder.py` take a `;`-separated list of folder **names** to leave out of discovery: `--mode 8 --exclude-folders "_EXPORT;temp"` archives a shoot in place without touching its export trees. Names match whole folder segments, case-insensitive, only **below** the input folder (pointing a run AT `_EXPORT` still works); paths are refused. The wizard asks for it in the TIFF ↔ JXL directions (Enter reuses the last answer), the delete panel counts what the scripts will really see, and manifests carry an `ExcludeFolders` column (empty keeps the run's value, `-` removes it for that row).
+
+### Fixed: `--delete-skipped` could delete a master on the strength of another photo's archive (#439)
+
+The skipped path of the delete gate now requires the existing output's provenance marker to **match** the source — the encoder never read one there, the decoder only checked that one existed. The dry-run preview runs the same check. See the [notice](../README.md#notices-for-upgraders) for archives without markers.
+
+### Changed
+
+- **Delete confirmation only when something can be deleted** (encoder, decoder): a scheduled re-run of an archived folder used to wait for a token on a closed stdin and exit 3 forever.
+- **In-place recompression of multi-page documents** (mode 8): a group's pages are replaced together once the last one is verified, or none of them; single files are still replaced as they finish. Overwriting an output whose markers name another origin (modes 1/3) is logged loudly.
+- **Settings are read, never copied**: the wrapper always passes its export marker and reads each script's own output-folder names; every script starts each run from the settings at the top of its file (an in-process second run no longer inherits the first one's `--delete-source`).
+- **Decoder**: if djxl does not report the ICC probes, a lossy ICC-blob file is refused instead of decoded with wrong colours.
+- **Transcoder**: `--force-convert -d 0` JPEG archives record their checksums (a later delete run can prove them); `--dry-run` starts no subprocess; `--to-srgb`/`--icc-profile` on a JPEG → JXL encode warn that they do not apply.
+- **Wrapper**: a hand-edited session with an unknown format, a dead `ExportMarker`/`ExportJxlFolder` cell on a mode without them, a rename on the lossless JPEG recovery and invalid resize answers are refused up front; a child interrupted with Ctrl+C stops the manifest; the end-of-run summary counts entries that never started.
+
+Every fix has a regression test proven to fail against the pre-fix code, and the suite no longer depends on test order. The release was also run against real files — 16-bit ProPhoto exports, a 3-page RGB+IR film scan and JPEGs: captions carried verbatim, foreign and markerless archives kept, multi-page split → reconstruct bit-identical, in-place group replacement and veto, JPEG ↔ JXL bit-exact. Full list: [bug tracking](bug_tracking_since_v1.0.md) (round 43, #439–#469). **1921 tests.**
+
+---
+
 ## v2.4.0
 
 **Released 2026-09-27, superseded by v2.5.0.** Manifests gain per-row export control.

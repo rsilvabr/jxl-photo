@@ -89,7 +89,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 ### 5. **Manifests and scheduled runs**
 - **One CSV, many folders**: each row is a Source → Destination with its own mode, and optionally its own colour space, size, sharpening, rename *(v2.3.0)* and export marker / subfolder / output folder *(v2.4.0)*. Auto Mode generates it from your folder tree; edit it in Excel; comment a row out with `#`
 - **Checked before anything runs**: two rows writing the same output file, or any invalid cell, refuse the whole manifest up front — never halfway through. Overlapping sources, or a row whose output folder is another row's source, ask for confirmation (and are refused unattended)
-- **Run it unattended**: save the workflow as a preset (menu option 7 → `[S]`) and point Windows Task Scheduler (or cron) at `py jxl_photo.py --run-preset nightly-sync` — no menus, no prompts — several presets in order from one `.cmd` file, so masters and the copies made from them sync in one task. A preset that deletes sources or replaces them in place is refused unattended (it runs from the menu, or with `--dry-run`) ([setup guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron))
+- **Run it unattended**: save the workflow as a preset (menu option 7 → `[S]`) and point Windows Task Scheduler (or cron) at `py jxl_photo.py --run-preset nightly-sync` — no menus, no prompts — several presets in order from one `.cmd` file, so masters and the copies made from them sync in one task. Run it as `cmd /k` so the window stays open with the result: a failed night is on your screen the next morning, not only in a log nobody opens. A preset that deletes sources or replaces them in place is refused unattended (it runs from the menu, or with `--dry-run`) ([setup guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron))
 - **Built for logs**: exit codes `0` success · `1` some files failed · `2` aborted (full disk, safety abort) · `3` you declined a confirmation · `130` interrupted with Ctrl+C; `--summary-json` emits one machine-readable line per run, totalled across the manifest; a full output volume stops the run instead of failing every remaining file one by one
 - Column reference, omission rules and recipes: [docs/README_manifest.md](docs/README_manifest.md)
 
@@ -173,7 +173,7 @@ Older versions may still work, but the current versions are what we test against
 
 > **libjxl v0.12:** the scripts auto-detect the `cjxl`/`djxl` version and adapt — lossless JPEG recovery uses `djxl --reconstruct_jpeg` (authoritative lossless guarantee), and pixel encodes can opt into `--buffering 0` (best compression, ~6× slower on large lossless TIFFs; see the [v1.8.0 benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)). On libjxl < 0.12 everything behaves as before; no v0.12-only flag is ever passed.
 >
-> On v0.12 the default path streams instead of buffering the whole image, so RAM per worker is modest: measured **0.99 GB** for a 24 MP file, **1.55 GB** at 45 MP and **3.32 GB** for a 93 MP scan (lossless, effort 9). Effort barely moves memory — megapixels do, at roughly 35–40 MB per megapixel per worker. Those figures are 16-bit input; 8-bit encodes 3–7× faster but uses only 4–21 % less memory, so it does not buy you extra workers. See [RAM per worker](docs/README_jxl_tiff_encoder.md#ram-per-worker) before raising `--workers`.
+> On v0.12 the default path streams instead of buffering the whole image, so RAM per worker is modest: measured **0.99 GB** for a 24 MP file, **1.55 GB** at 45 MP and **3.32 GB** for a 93 MP scan (lossless, effort 9). Effort barely moves memory — megapixels do, at roughly 35–40 MB per megapixel per worker — **except** at effort 7 with distance ≥ 3, effort 8–9 with distance > 0.5, or effort 10, where cjxl encodes the whole image at once and needs 2.5–8× that; the encoder and the recompressor then lower `--workers` automatically to fit ([details](docs/README_jxl_tiff_encoder.md#exception-the-whole-image-threshold)). Those figures are 16-bit input; 8-bit encodes 3–7× faster but uses only 4–21 % less memory, so it does not buy you extra workers. See [RAM per worker](docs/README_jxl_tiff_encoder.md#ram-per-worker) before raising `--workers`.
 
 #### Common Download Mistakes
 
@@ -679,6 +679,15 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 
 ## Notices for upgraders
 
+### ⚠️ Upgrading to v2.6.0: `--workers` can be lowered for you
+
+The TIFF encoder and the recompressor now cap `--workers` so the parallel cjxl processes fit in memory. Nothing changes in the output; a run may just use fewer workers than you asked for, and the log says so (`--workers 30 reduced to 8`). It happens mostly at **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5** and **effort 10**, where cjxl encodes the whole image at once.
+
+- The budget is the memory the system can still **commit** when the run starts, so programs left open (a raw editor can hold 15 GB) mean fewer workers that night.
+- To get the workers back: `--buffering 1` keeps those settings on the low-memory streaming path (files ~2 % larger); or close other programs before a scheduled run.
+- `WORKER_MEMORY_FRACTION` at the top of `jxl_tiff_encoder.py` and `jxl_recompressor.py` sets the share used (default 0.8); `0` turns the cap off.
+- If you schedule presets, switch the task to `cmd /k` so a failed run stays on screen: see [Keep the window open](docs/README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen).
+
 ### ⚠️ Upgrading to v2.5.0: `--delete-skipped` needs a matching provenance marker in every mode
 
 `--delete-skipped` deletes a source whose output **already existed** — a file this run never wrote. Until v2.4.0 the TIFF encoder certified that output by name, timestamp and an integrity check, and the decoder by the mere *presence* of a marker; in the folder-preserving modes (0/1/3/8) a valid, newer JXL of a **different photo** with the same name (a camera's file counter restarting across cards, folders merged) deleted the master TIFF. v2.5.0 requires the output's `jxlphoto-src`/`jxlphoto-srcsum` marker to **match** the source, in every mode.
@@ -728,14 +737,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.5.0** (2026-10-02) — folder exclusion and the round-43 audit:
+**v2.6.0** (2026-10-05) — memory-safe parallel runs:
 
-- **New `--exclude-folders`** (TIFF encoder and decoder, wizard, `ExcludeFolders` manifest column): skip whole folder trees by name, e.g. archive a shoot in place while leaving its `_EXPORT` folders alone.
-- **`--delete-skipped` proves the pairing** in the encoder and the decoder: a same-named archive of a different photo can no longer certify deleting a master. Read the [notice](#notices-for-upgraders) — pre-v2.0.0 archives are now kept.
-- **Unattended re-runs no longer stop on a confirmation** nobody can answer: the delete prompt is charged only when the plan can actually delete.
-- **Multi-page documents recompressed in place** are replaced all-or-nothing; settings edited at the top of a script are never shadowed by the wrapper or reset to literals.
+- **`--workers` is capped by memory** in the TIFF encoder and the recompressor: at effort 7 with distance ≥ 3, effort 8–9 above distance 0.5, or effort 10, cjxl needs 2.5–8× its usual memory per worker, and the run now lowers the worker count to fit instead of failing file after file. Read the [notice](#notices-for-upgraders).
+- **No more hung recompressor workers** when memory runs out: its codec and metadata calls capture output without the reader threads that could block forever.
+- **Out-of-memory failures are named** in the recompressor's summary, and its error messages keep the line that says what failed.
+- **Scheduled runs keep their window open** (`cmd /k`) in every documented example, so a failed night is on screen the next morning.
 
-**1921 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**1977 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -743,28 +752,29 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Changelog
 
-### What's new — v2.5.0 (current stable)
+### What's new — v2.6.0 (current stable)
 
-**Released 2026-10-02.** Supersedes v2.4.0. Folder exclusion, and the fixes of the round-43 audit of the whole repo.
+**Released 2026-10-05.** Supersedes v2.5.0. `--workers` is capped by memory, a worker can no longer hang before its own timeout, and scheduled runs keep their window open.
 
-#### New: `--exclude-folders`
+#### Fixed: `--workers` could ask for more memory than the machine has (#470)
 
-`jxl_tiff_encoder.py` and `jxl_tiff_decoder.py` take a `;`-separated list of folder **names** to leave out of discovery: `--mode 8 --exclude-folders "_EXPORT;temp"` archives a shoot in place without touching its export trees. Names match whole folder segments, case-insensitive, only **below** the input folder (pointing a run AT `_EXPORT` still works); paths are refused. The wizard asks for it in the TIFF ↔ JXL directions (Enter reuses the last answer), the delete panel counts what the scripts will really see, and manifests carry an `ExcludeFolders` column (empty keeps the run's value, `-` removes it for that row).
+`cjxl` (libjxl 0.12) normally **streams**, about 1.5 GB per worker on a 45 MP photo. At **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5**, **effort 10** or **`--buffering 0`** it encodes the whole image at once: 3.6 GB per worker at effort 7, 12.4 GB at effort 8+. A scheduled recompressor preset at d=3 e=7 with 30 workers asked for ~107 GB on a 64 GB machine; 314 of 681 files failed.
 
-#### Fixed: `--delete-skipped` could delete a master on the strength of another photo's archive (#439)
+The TIFF encoder and the recompressor now estimate each worker's peak from the **largest image in the batch** and the encode settings, and lower `--workers` so the jobs fit in `WORKER_MEMORY_FRACTION` (0.8) of the memory the system can still commit (RAM + pagefile). The log shows the estimate (`Memory: ~3.8 GB per worker (whole-image encode, 45 MP, d=3.0 e=7) | 40.0 GB available | workers 8`) and warns when it lowered the count, with the remedy: `--buffering 1` keeps any setting on the streaming path for files ~2 % larger. Throughput barely grows past ~8 workers anyway (0.61 files/s at 8, 0.73 at 16). `WORKER_MEMORY_FRACTION = 0` turns the cap off. See [Memory and --workers](docs/README_jxl_recompressor.md#memory-and---workers).
 
-The skipped path of the delete gate now requires the existing output's provenance marker to **match** the source — the encoder never read one there, the decoder only checked that one existed. The dry-run preview runs the same check. See the [notice](#notices-for-upgraders) for archives without markers.
+#### Fixed: a worker could hang forever, before its subprocess timeout (#471)
 
-#### Changed
+On Windows `capture_output=True` starts two reader threads per call; when memory ran out, a thread could die while starting, and `Thread.start()` then waited forever, before `subprocess.run` had armed its timeout. That run hung 60 minutes until the wrapper's watchdog killed it, and the presets after it never ran. Output is now captured through temp files, so no thread is created, in the per-file `exiftool` calls of all four scripts and in every `djxl`/`magick`/`cjxl` call of a recompressor worker (the encoder's, decoder's and transcoder's own codec calls follow in a later release).
 
-- **Delete confirmation only when something can be deleted** (encoder, decoder): a scheduled re-run of an archived folder used to wait for a token on a closed stdin and exit 3 forever.
-- **In-place recompression of multi-page documents** (mode 8): a group's pages are replaced together once the last one is verified, or none of them; single files are still replaced as they finish. Overwriting an output whose markers name another origin (modes 1/3) is logged loudly.
-- **Settings are read, never copied**: the wrapper always passes its export marker and reads each script's own output-folder names; every script starts each run from the settings at the top of its file (an in-process second run no longer inherits the first one's `--delete-source`).
-- **Decoder**: if djxl does not report the ICC probes, a lossy ICC-blob file is refused instead of decoded with wrong colours.
-- **Transcoder**: `--force-convert -d 0` JPEG archives record their checksums (a later delete run can prove them); `--dry-run` starts no subprocess; `--to-srgb`/`--icc-profile` on a JPEG → JXL encode warn that they do not apply.
-- **Wrapper**: a hand-edited session with an unknown format, a dead `ExportMarker`/`ExportJxlFolder` cell on a mode without them, a rename on the lossless JPEG recovery and invalid resize answers are refused up front; a child interrupted with Ctrl+C stops the manifest; the end-of-run summary counts entries that never started.
+#### Fixed: out-of-memory failures said what failed, and the summary names them (#472)
 
-Every fix has a regression test proven to fail against the pre-fix code, and the suite no longer depends on test order. The release was also run against real files — 16-bit ProPhoto exports, a 3-page RGB+IR film scan and JPEGs: captions carried verbatim, foreign and markerless archives kept, multi-page split → reconstruct bit-identical, in-place group replacement and veto, JPEG ↔ JXL bit-exact. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 43, #439–#469). **1921 tests.**
+The recompressor's error messages kept the first 200 characters of a tool's output, and cjxl prints its version banner first: a third of that run's errors were logged without the line that said what failed. They now keep the last 200 characters. A run whose errors look like the system ran out of memory ends with `N error(s) look like the system ran out of memory — lower --workers or WORKER_MEMORY_FRACTION, or use --buffering 1`.
+
+#### Docs: keep a scheduled run's window open
+
+A scheduled task run with `cmd /c` closes its window the moment it ends, failures included, so a preset that starts failing goes unnoticed until someone opens the logs. Every scheduling example now uses `cmd /k`: the window stays open with the summary and any error until you close it. See [Keep the window open](docs/README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen), including why an open window makes Task Scheduler skip the next run until you close it.
+
+Every fix has a regression test proven to fail against the pre-fix code, including a real-codec check of libjxl's whole-image threshold and a test that fails if any exiftool call starts a thread. The real-photo battery (30 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 44, #470–#472). **1977 tests.**
 
 ---
 
@@ -772,7 +782,8 @@ Every fix has a regression test proven to fail against the pre-fix code, and the
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.5.0](#changelog)** | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
+| **[v2.6.0](#changelog)** | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
+| [v2.5.0](docs/version_history.md#v250) | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
 | [v2.4.0](docs/version_history.md#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
 | [v2.3.0](docs/version_history.md#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
 | [v2.2.0](docs/version_history.md#v220) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
