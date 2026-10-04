@@ -192,15 +192,17 @@ continuation does **not** work in PowerShell, and a long line pasted from a
 narrow window can arrive broken in two, so keep it on one line):
 
 ```text
-schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
+schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /k cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
 ```
 
-The `cd /d` matters — see *Start in* below. Or use the task editor: *Create
-Task → Actions → New → Start a program*:
+`cmd /k` keeps the window open when the run ends, so you see the result and any
+error the next morning — see [Keep the window open](#keep-the-window-open--or-a-failed-run-goes-unseen)
+for why that matters. The `cd /d` matters too — see *Start in* below. Or use the
+task editor: *Create Task → Actions → New → Start a program*:
 
-- **Program/script:** `py`
-- **Add arguments:** `jxl_photo.py --run-preset "nightly-sync"` — quote a name
-  that contains spaces (`--run-preset "SYNC PHOTOS"`)
+- **Program/script:** `cmd`
+- **Add arguments:** `/k py jxl_photo.py --run-preset "nightly-sync"` — quote a
+  name that contains spaces (`--run-preset "SYNC PHOTOS"`)
 - **Start in:** the folder where `jxl_photo.py` lives. **Do not leave this
   blank**: logs are written relative to it (`Logs\...`), and a blank field
   starts the run in `C:\Windows\System32` — which is where the logs then land.
@@ -215,13 +217,26 @@ must run after the masters of the same night), then a JPEG folder. Save this as
 
 ```bat
 @echo off
-rem One line per preset, in the order they must run.
+rem One block per preset, in the order they must run.
 cd /d "%~dp0"
+
+echo === %date% %time%  SYNC PHOTOS
 py jxl_photo.py --run-preset "SYNC PHOTOS"
+echo === exit code %errorlevel%
+
+echo === %date% %time%  MOBILE
 py jxl_photo.py --run-preset "MOBILE"
+echo === exit code %errorlevel%
+
 rem py jxl_photo.py --run-preset "OUTTAKES JPEG"
+echo === %date% %time%  done
 ```
 
+- **The `echo` lines are the morning report.** With the window kept open
+  (`cmd /k`, below), each preset ends in one line — `exit code 0` ran,
+  `1` something failed or was refused, `2` no such preset — so a glance at the
+  bottom of the window tells you whether to scroll up. They are optional; the
+  two `py` lines alone work the same.
 - **Order matters** when one preset reads what another writes: masters first,
   derivatives (`--output-icc`/resize/a lighter distance) after.
 - **Each line runs even if the one before failed** — every preset is its own
@@ -250,29 +265,57 @@ schtasks /Create /TN "jxl-photo" /SC WEEKLY /D SAT /ST 23:30 /RL LIMITED /TR "cm
   administrator*.
 - **Keep the path free of spaces** (`C:\tools\jxl-photo`), or the quoting
   inside `/TR` gets fiddly; the task editor (*Actions → Edit*) takes any path.
-- **`/k` vs `/c`**: `/k` keeps the window open at the end so you can read the
-  run summary the next morning (only when the task runs while you are logged
-  on); `/c` closes it. Either way the logs stay in `Logs\`.
+- **`/k`, not `/c`** — see the next section.
 - **Leave "random delay" off** in the task's trigger: with *Delay task for up
   to 1 day* the run can start any time in the 24 hours after the time you set.
 
-##### Seeing what happened
+##### Keep the window open — or a failed run goes unseen
 
-The console window of a scheduled task closes the moment `--run-preset` exits —
-**including on failure**. A run that aborts on a safety check (two files headed
-for the same output name, a refused overwrite) converts nothing and leaves no
-trace on screen; without one of the options below, you would never know:
+A scheduled run has nobody watching it. With `cmd /c` — or with **Program**
+`py` in the task editor — the console window closes the moment the run ends,
+**including when it failed**. Everything is still written to `Logs\`, but
+nobody opens the logs after every run: a preset that starts failing one night
+(a moved or unplugged drive, a full disk, a safety abort, a batch of
+out-of-memory errors) keeps failing quietly, night after night, until you
+happen to look for a file that was never written.
 
-- **Run it in a terminal yourself** when you want to watch:
-  `py jxl_photo.py --run-preset nightly-sync` — the window is yours and stays open.
-- **Make the task keep its window open:** set the program to `cmd` with
-  arguments `/k py jxl_photo.py --run-preset nightly-sync` — the `/k` leaves the
-  window open at the end. Only meaningful when the task runs while you are
-  logged on, and the window stays until closed — pointless for a 3am job.
-- **Otherwise, check the exit code** in Task Scheduler's *History* (`0x1` =
-  failed, refused or aborted) and open the [logs](#logs) — every run writes
-  one: the child's own log, plus a combined wrapper log for manifest runs. The
-  abort names its culprits there.
+That is why every example on this page uses **`cmd /k`**: the window **stays
+open** after the run, with the run summary and every error on screen, until you
+close it. The next morning the window on your desktop *is* the report — a
+failure is in front of you instead of buried in a log.
+
+Setting it up:
+
+- **New task, one line:** `/TR "cmd /k ..."`, as in the examples above.
+- **A task you already have:** `schtasks /Change /TN "<task name>" /TR "cmd /k
+  C:\tools\jxl-photo\run_scheduled_presets.cmd"` changes only what it runs —
+  or in the task editor, *Actions → Edit*: **Program/script** `cmd`, **Add
+  arguments** `/k ` followed by what it ran before.
+- **In a `.cmd` file**, the `echo === exit code %errorlevel%` line after each
+  preset (example above) gives one verdict per preset at the bottom of the
+  window.
+
+Three things to know:
+
+- **The window only appears when the task runs as you, while you are logged
+  on** — *General → Run only when user is logged on*, which is what
+  `schtasks /Create` without `/RU` sets up. A task set to *Run whether user is
+  logged on or not* runs in a hidden session: no window at all, whatever `/k`
+  says. On nights it runs, lock the screen instead of signing out.
+- **Close the window once you have read it.** While it is open the task counts
+  as *Running*, and Task Scheduler's default (*Settings → If the task is
+  already running: Do not start a new instance*) skips the next run. That is
+  as much a safeguard as a catch: a failure nobody has looked at holds the next
+  run back instead of piling up behind it. (The same tab's *Stop the task if it
+  runs longer than 3 days* closes a forgotten window eventually.)
+- **`/c` is for a machine nobody reads** — a server, an account nobody logs on
+  to. Then check the exit code in Task Scheduler's *History* (`0x1` = failed,
+  refused or aborted) and the [logs](#logs): every run writes the child's own
+  log, plus a combined wrapper log for manifest runs, and an abort names its
+  culprits there.
+
+To watch a run live, start it in a terminal yourself:
+`py jxl_photo.py --run-preset nightly-sync` — the window is yours and stays open.
 
 > **Presets that delete sources cannot run unattended — in any mode.** A preset
 > with `delete_source` on is refused with an explanation: that confirmation is a

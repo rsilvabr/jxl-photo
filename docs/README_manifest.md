@@ -408,12 +408,15 @@ paths too.
    ```
 4. **Schedule it** — one line, in `cmd` or PowerShell:
    ```text
-   schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /c cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
+   schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /k cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
    ```
    The `cd /d` matters — logs land in `Logs\` relative to it. In the task
-   editor: **Program** `py`, **arguments** `jxl_photo.py --run-preset
+   editor: **Program** `cmd`, **arguments** `/k py jxl_photo.py --run-preset
    nightly-sync`, **Start in** the folder where `jxl_photo.py` lives (never
-   blank).
+   blank). **Keep the `/k`**: it leaves the window open after the run, so a
+   night that failed is on your screen in the morning instead of only in a log
+   nobody opens — see
+   [Keep the window open](README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen).
 5. **Several manifests?** One manifest holds one direction (TIFF→JXL, JXL→JXL,
    JPEG→JXL... never mixed), so a library with several workflows has one
    preset per manifest — and one scheduled task can run them all, in order,
