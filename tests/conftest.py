@@ -103,3 +103,28 @@ def _isolate_run_globals():
         transcoder = sys.modules.get("jxl_jpeg_transcoder")
         if transcoder is not None and hasattr(transcoder, "_tool_version"):
             transcoder._tool_version.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_worker_memory_cap():
+    """The worker memory cap reads the REAL machine's free memory; existing
+    tests must not depend on it. Tests of the cap set the fraction back.
+
+    Restores by hand instead of using the `monkeypatch` fixture: depending on
+    `monkeypatch` forces it to be set up as part of this autouse fixture, which
+    moved its UNDO after the module-level `_clear_version_cache` teardown in
+    tests/test_version_gating.py and made that teardown call cache_clear() on a
+    monkeypatched plain function. Snapshot/restore keeps the original fixture
+    ordering.
+    """
+    saved = []
+    for name in ("jxl_tiff_encoder", "jxl_recompressor"):
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "WORKER_MEMORY_FRACTION"):
+            saved.append((mod, mod.WORKER_MEMORY_FRACTION))
+            mod.WORKER_MEMORY_FRACTION = 0
+    try:
+        yield
+    finally:
+        for mod, value in saved:
+            mod.WORKER_MEMORY_FRACTION = value

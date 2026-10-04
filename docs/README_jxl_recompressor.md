@@ -312,9 +312,9 @@ Guarantees, all fail-closed:
 
 Costs and notes:
 
-- Each worker holds two 16-bit PNGs plus an ImageMagick process in memory
-  (≈1 GB per worker on a 45 MP photo); above `--workers 4` the run logs a
-  warning. The intermediates live in `TEMP_DIR` and are removed per file.
+- Memory: see [Memory and --workers](#memory-and---workers) — the worker count
+  is capped automatically. The intermediates live in `TEMP_DIR` and are
+  removed per file.
 - A derivative needs `djxl` and `magick` on PATH, plus Pillow (even for
   AdobeRGB: the sRGB profile assigned to sources that decode without one comes
   from Pillow).
@@ -399,6 +399,62 @@ In-place runs (mode 8, or mode 0 without an output folder) are **refused**
 next recursive scan would pick up as a fresh input while the source is never
 replaced.
 
+## Memory and --workers
+
+Most re-encodes **stream**: `cjxl` holds a little more than one row of blocks at
+a time, so the worker count is limited by CPU, not memory. Four settings make it
+encode the **whole image at once**, and then each worker's peak jumps 2.5–8×:
+
+- **effort ≥ 10**, any distance;
+- **effort 8–9** and **distance > 0.5**;
+- **effort 7** and **distance ≥ 3**;
+- **`--buffering 0`** (any effort).
+
+Everything else streams. Measured on 45 MP 16-bit photos, libjxl 0.12.0:
+
+| Encode | Peak per worker |
+|---|---|
+| streaming (the common case) | ~1.5 GB |
+| whole image, effort 7 | ~3.6 GB |
+| whole image, effort 8+ | ~12.4 GB |
+
+**The 2026-10-04 incident.** The scheduled MOBILE preset recompressed 45 MP
+photos at **d=3, effort 7** with `--workers 30` — the whole-image path. 30 ×
+3.6 GB ≈ **107 GB**, far above the 76.6 GB commit limit of the 64 GB machine
+it ran on: 314 of 681
+files failed with `JxlEncoderProcessOutput failed` / `WinError 1455`, and one
+worker hung forever when the MemoryError landed in a subprocess reader thread.
+
+**The run caps `--workers` for you.** Before the pool starts it takes the
+**largest** file in the batch, estimates the per-worker peak from the distance,
+effort and buffering, and lowers the count so the jobs fit in the memory the
+system can still commit (RAM + pagefile) times `WORKER_MEMORY_FRACTION` (0.8).
+It logs `Memory: ~N GB per worker (...) | M GB available | workers K` and warns
+`--workers N reduced to K` with the `--buffering 1` remedy on the whole-image
+path. The worker count the pool really uses is the capped one; the startup
+`Mode: ... | workers:` line still shows what you asked for.
+
+The budget is the memory the system can still **commit** when the run starts,
+not the RAM that looks free: programs left open (a raw editor can hold 15 GB of
+commit while using 3 GB of RAM) shrink it, so the same preset can get fewer
+workers on a night when they are open. Closing them — or `--buffering 1` —
+gives the workers back.
+
+**If files still fail for lack of memory**, the summary says so:
+`N error(s) look like the system ran out of memory — lower --workers or
+WORKER_MEMORY_FRACTION, or use --buffering 1`. The failed files have no output,
+so the next run retries them.
+
+**More than ~8 workers buy almost nothing.** Measured throughput (24 files,
+JXL → d=3 e=7):
+
+| Workers | 1 | 4 | 8 | 8 + `--buffering 1` | 16 + `--buffering 1` |
+|---|---|---|---|---|---|
+| files/s | 0.23 | 0.50 | 0.61 | 0.68 | 0.73 |
+
+`--buffering 1` (or 2/3) forces the streaming path at any distance/effort for
+files only ~2 % larger — a good way to keep many workers safe by hand.
+
 ## All flags
 
 ```
@@ -470,7 +526,11 @@ Same model as the other scripts: defaults live at the top of
 ```python
 CJXL_DISTANCE = 1.0          # Target distance (0-15)
 CJXL_EFFORT = 7              # Effort: size/encode-time, NOT quality
-CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl
+CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl. None = cjxl
+                             # chooses (streaming, EXCEPT the whole-image cases
+                             # in "Memory and --workers"); 1-3 = always stream
+WORKER_MEMORY_FRACTION = 0.8 # Cap --workers so parallel cjxl processes fit in
+                             # memory; 0 disables the cap
 OVERWRITE = "smart"          # False | "smart" (source newer) | True
 ON_DOWNGRADE = "ask"         # ask/copy/skip/convert
 ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 2 + lossy request)

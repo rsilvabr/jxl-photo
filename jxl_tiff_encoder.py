@@ -588,6 +588,107 @@ def _cjxl_buffering_flag():
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
 
+# Peak private memory of ONE cjxl, in bytes per pixel of the image, measured on
+# libjxl 0.12.0 with 45 MP 16-bit photos (+~10% margin). Plan
+# 261004_Claude_plan_memoria-workers.md has the full table.
+_STREAMING_BYTES_PER_PIXEL = 40
+_WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
+_WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
+_MODULAR_LOSSY_BYTES_PER_PIXEL = 110
+_UNKNOWN_IMAGE_PIXELS = 60_000_000
+
+
+def _cjxl_whole_image(distance, effort, buffering=None):
+    """True when cjxl encodes the whole image at once instead of streaming
+    (libjxl 0.12 with buffering left to the encoder: effort 10+, effort 8-9
+    above distance 0.5, effort 7 from distance 3; --buffering 0 always,
+    1-3 never)."""
+    if buffering is not None:
+        return buffering == 0
+    return (effort >= 10 or (effort in (8, 9) and distance > 0.5)
+            or (effort == 7 and distance >= 3))
+
+
+def _cjxl_bytes_per_pixel(distance, effort, buffering=None, modular=False):
+    """Estimated peak bytes per pixel of one cjxl process."""
+    if modular and distance > 0:
+        return _MODULAR_LOSSY_BYTES_PER_PIXEL
+    if _cjxl_whole_image(distance, effort, buffering):
+        return (_WHOLE_IMAGE_E8_BYTES_PER_PIXEL if effort >= 8
+                else _WHOLE_IMAGE_E7_BYTES_PER_PIXEL)
+    return _STREAMING_BYTES_PER_PIXEL
+
+
+def _available_commit_bytes():
+    """Memory the system can still commit, in bytes, or None if unknown.
+    Windows: ullAvailPageFile (RAM + pagefile not yet committed — the limit
+    WinError 1455 reports). Linux: MemAvailable."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            st = _MemoryStatusEx()
+            st.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return None
+            return int(st.ullAvailPageFile)
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _memory_capped_workers(requested, max_pixels, distance, effort,
+                           buffering=None, modular=False):
+    """--workers lowered so `requested` parallel cjxl processes fit in memory.
+    Logs the estimate; warns when it had to lower the count."""
+    if WORKER_MEMORY_FRACTION <= 0:
+        return requested
+    pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
+    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    avail = _available_commit_bytes()
+    if avail is None:
+        logger.info("Memory: could not read the available memory — "
+                    "--workers not capped")
+        return requested
+    cap = max(1, int(avail * WORKER_MEMORY_FRACTION // per_job))
+    workers = min(requested, cap)
+    if modular and distance > 0:
+        kind = "modular"
+    elif _cjxl_whole_image(distance, effort, buffering):
+        kind = "whole-image"
+    else:
+        kind = "streaming"
+    logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{avail / 2**30:.1f} GB available | workers {workers}")
+    if cap < requested:
+        hint = ""
+        if kind == "whole-image":
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once; --buffering 1 keeps it streaming (~2.5x less memory, "
+                    "files ~2% larger).")
+        logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
+                       f"processes at ~{per_job / 2**30:.1f} GB each would not "
+                       f"fit in the {avail / 2**30:.1f} GB the system can still "
+                       f"commit (WORKER_MEMORY_FRACTION="
+                       f"{WORKER_MEMORY_FRACTION}).{hint}")
+    return workers
+
 # ─────────────────────────────────────────────
 # USER SETTINGS - GENERAL
 # ─────────────────────────────────────────────
@@ -607,13 +708,24 @@ CJXL_DISTANCE = 0.1
 
 CJXL_BUFFERING = None
 # [libjxl >= 0.12 only] Encoder buffering level passed to cjxl.
-# None (default) = do not pass the flag; cjxl uses its own default (2), which is
-#   the fast path — ~6x faster than 0 on large lossless TIFFs (45MP) with only
-#   ~1.2% larger files (measured on real 16-bit Capture One exports).
+# None (default) = do not pass the flag; cjxl chooses (-1): a streaming encode
+#   (the fast, low-memory path — ~6x faster than 0 on large lossless TIFFs
+#   with only ~1.2% larger files) EXCEPT at effort 7 with distance >= 3,
+#   effort 8-9 with distance > 0.5 and effort 10+, where it encodes the whole
+#   image at once (2.5-8x the RAM; see WORKER_MEMORY_FRACTION).
 # 0 = buffer entire image = best compression / most RAM (restores pre-0.12
 #     behavior; use for maximum density when encode time doesn't matter).
-# 2 = cjxl's v0.12 default. Ignored automatically when cjxl is < 0.12
+# 1-3 = always stream. Ignored automatically when cjxl is < 0.12
 #     (flag doesn't exist there).
+
+WORKER_MEMORY_FRACTION = 0.8
+# Caps --workers so the parallel cjxl processes fit in memory. The peak of
+# each worker is estimated from the largest image in the batch and the encode
+# settings: cjxl encodes the whole image at once (2.5-8x the memory of its
+# usual streaming encode) at effort 7 with distance >= 3, effort 8-9 with
+# distance > 0.5, effort 10+, or --buffering 0. The run then uses at most this
+# fraction of the memory the system can still commit (RAM + pagefile).
+# 0 disables the cap.
 
 CJXL_MODULAR = False
 # False (default) — lossy uses VarDCT encoder + XYB colorspace.
@@ -1550,13 +1662,45 @@ def _argfile_safe(value) -> str:
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
 
 
+# Captured at import: some tests replace this module's `subprocess` with a stub.
+_DEVNULL = subprocess.DEVNULL
+_CompletedProcess = subprocess.CompletedProcess
+
+
+def _run_captured(cmd, timeout, text=False):
+    """subprocess.run with stdout/stderr captured through temp FILES.
+
+    capture_output=True makes communicate() start two reader threads per call
+    on Windows. Under memory exhaustion a thread can fail in its bootstrap
+    (MemoryError) before it signals "started", and Thread.start() then waits
+    forever — before the timeout is even armed. The 2026-10-04 scheduled run
+    lost a manifest that way (one worker hung 60 min until the wrapper killed
+    the child). With files there is no thread: a failed spawn raises OSError,
+    which the callers already handle.
+    """
+    with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
+            tempfile.TemporaryFile(dir=TEMP_DIR) as err:
+        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
+                           timeout=timeout)
+        out.seek(0)
+        err.seek(0)
+        o = r.stdout if r.stdout is not None else out.read()
+        e = r.stderr if r.stderr is not None else err.read()
+    if text:
+        if isinstance(o, bytes):
+            o = o.decode("utf-8", "replace").replace("\r\n", "\n")
+        if isinstance(e, bytes):
+            e = e.decode("utf-8", "replace").replace("\r\n", "\n")
+    return _CompletedProcess(cmd, r.returncode, o, e)
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout decoded as UTF-8).
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -1566,10 +1710,8 @@ def _run_exiftool_argfile(args_lines, timeout=60):
             af.write(_ARGFILE_CHARSET)
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
-        return subprocess.run(
-            [_get_exiftool_cmd(), "-@", argfile],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-        )
+        return _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                             timeout, text=True)
     finally:
         if argfile:
             try:
@@ -2763,6 +2905,12 @@ def _is_thumbnail_page(page) -> bool:
     """
     return bool(page.is_reduced or page.is_subifd)
 
+# (normcase(tiff path), page index) -> width*height, filled by
+# _analyze_tiff_pages for the worker memory cap (process_group).
+_PAGE_PIXELS = {}
+_PAGE_PIXELS_LOCK = threading.Lock()
+
+
 def _analyze_tiff_pages(tiff_path: Path):
     """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
 
@@ -2778,6 +2926,12 @@ def _analyze_tiff_pages(tiff_path: Path):
                 'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
                 'samples': int(page.samplesperpixel) if page.samplesperpixel else 1,
             }
+            try:
+                _px = int(page.imagewidth or 0) * int(page.imagelength or 0)
+            except (TypeError, ValueError):
+                _px = 0
+            with _PAGE_PIXELS_LOCK:
+                _PAGE_PIXELS[(os.path.normcase(str(tiff_path)), i)] = _px
             if _is_thumbnail_page(page):
                 thumb_pages.append(i)
             else:
@@ -4481,6 +4635,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 
     results = []
     status_map: Dict = {}
+    if tasks:
+        workers = _memory_capped_workers(
+            workers,
+            max(_PAGE_PIXELS.get((os.path.normcase(str(t[0])), t[3]), 0)
+                for t in tasks),
+            CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
+            modular=bool(CJXL_MODULAR))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g, gt):
                    (t, w, f, p, th, sft, spl, g, gt)
@@ -5017,6 +5178,7 @@ def main():
     # cross-run leakage does not.
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
+    _PAGE_PIXELS.clear()
 
     # ICC cache override and clearing must be processed before any logging or conversion.
     if args.icc_cache_dir is not None:

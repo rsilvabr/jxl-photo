@@ -29,6 +29,7 @@ v2.3.0 / 2026-09-26: Rounds 41-42 released as v2.3.0, together with resize + out
 v2.4.0 / 2026-09-27: Per-row export columns in manifests (ExportMarker/ExportSubfolder/ExportJxlFolder), the generator writing them (empty) for mode-6/7 rows, the ExportSubfolder-only-on-mode-7 guard, and the collision skip-check now reading each row's marker (nested marker dirs force the scan) - see new_features_since_v1.0.md
 Round 43 / 2026-10-01: The 261001 audit of the `--exclude-folders` feature and the whole repo - the last two members of the #419 skipped-path provenance family (`--delete-skipped` in the encoder and decoder could delete a master on a foreign same-named output), the #432/#433 ports, the run-scoped-global leak in all four children, and the wrapper/manifest batch (see top section)
 v2.5.0 / 2026-10-02: Round 43 released as v2.5.0, together with --exclude-folders (encoder, decoder, wizard, manifests) - see new_features_since_v1.0.md
+Round 44 / 2026-10-04: The scheduled MOBILE run — 30 recompressor workers at d=3 e=7 ran out of memory (314 errors) and one worker hung forever in a subprocess reader thread (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -39,6 +40,22 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
+
+## Round-44 — memory (2026-10-04)
+
+The scheduled MOBILE preset recompressed 45 MP JXLs at d=3 effort 7 with 30
+workers. That distance/effort is the "whole image at once" path of libjxl 0.12:
+each cjxl peaked at ~3.6 GiB, 30 of them (~107 GiB) did not fit the machine's
+76.6 GiB commit limit, 314 files failed with `JxlEncoderProcessOutput failed` /
+`WinError 1455`, and one worker hung forever when the MemoryError landed in the
+`capture_output` reader thread's bootstrap (the run had to be killed by the
+wrapper). `tests/test_memory_workers.py` pins both fixes.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 470 | **`--workers` was never limited by memory.** cjxl encodes the WHOLE image at once (2.5–8× the usual streaming peak) at effort 7 with distance ≥ 3, effort 8–9 with distance > 0.5, effort 10+, or `--buffering 0`; the run started the requested count regardless, so a large `--workers` on that path could exhaust the commit limit and fail file after file. | encoder, recompressor | ✅ FIXED (`_memory_capped_workers` estimates each worker's peak from the largest image and the settings and lowers the count to fit the memory the system can still commit times `WORKER_MEMORY_FRACTION` (0.8; 0 = off); the encoder reads each page's pixel count (`_PAGE_PIXELS`) and the recompressor reads width×height in its batched exiftool call. It logs `Memory: ...` and warns `--workers N reduced to K` with the `--buffering 1` remedy on the whole-image path. Tests: `tests/test_memory_workers.py`) |
+| 471 | **A worker could hang forever before its subprocess timeout.** `capture_output=True` makes `communicate()` start two reader threads per call on Windows; under memory exhaustion a thread can die in its bootstrap (MemoryError) before it signals "started", and `Thread.start()` then waits with no timeout — `subprocess.run` never reaches its own timeout arm, so the manifest entry never returns (the 2026-10-04 run hung 60 min on one file until the wrapper killed the child). | recompressor (all four backends' `_run_exiftool_argfile` + the recompressor's codec calls) | ✅ FIXED (`_run_captured` captures stdout/stderr through temp FILES — no reader thread can be created, and a failed spawn raises OSError. Used by `_run_exiftool_argfile` in all four backends and by the recompressor's djxl/magick/cjxl calls. The other three scripts' codec calls still use `capture_output` — follow-up. Test: `tests/test_memory_workers.py::test_run_captured_starts_no_thread`, which monkeypatches `threading.Thread.start` to fail) |
+| 472 | **A failed encode was logged without the line that said why.** Every codec error message kept the FIRST 200 characters of stderr, and cjxl prints its version banner and an `Encoding [...]` line before the failure — 97 of the 314 errors of the 2026-10-04 run were logged as just the banner. A bare `MemoryError` (empty message) was logged as an empty string, and exiftool's `Out of memory!` was not recognised as a memory failure. | recompressor | ✅ FIXED (`_stderr_tail` keeps the LAST 200 characters, CRLF folded, in the djxl/magick/cjxl/exiftool error messages of the encode path (`convert_one`, `_derive_pixels`; the parity-pinned `_decode_jxl_for_verify` keeps its copy's form); an empty exception message is recorded as its type name in `convert_one` and in the worker-crash handler; `"out of memory"` joins the signatures of the end-of-run memory hint — on that run's log the hint recognised only 215 of the 314 errors. Tests: `tests/test_memory_workers.py::test_memory_failures_are_recognised`, `::test_memory_hint_in_summary`) |
 
 ## Round-43 — the 261001 audit (2026-10-01)
 

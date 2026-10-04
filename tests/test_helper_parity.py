@@ -67,6 +67,7 @@ SHARED_HELPERS = [
     "_is_relative_to",
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
+    "_run_captured",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.
@@ -151,6 +152,12 @@ SHARED_HELPERS = [
     "_sharpen_args",
     "_resize_label",
     "_derived_label",
+    # worker cap: the encoder and the recompressor must estimate the same
+    # memory for the same settings
+    "_cjxl_whole_image",
+    "_cjxl_bytes_per_pixel",
+    "_available_commit_bytes",
+    "_memory_capped_workers",
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:

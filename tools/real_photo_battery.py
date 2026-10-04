@@ -319,6 +319,30 @@ def recompressor_foreign_check(A1, A3, pool_jxl):
           rc == 0 and "different origin" in out, f"rc={rc}")
 
 
+def memory_cap_checks(A1, pool_jxl):
+    section("Worker memory cap")
+    e = B / "mem_enc"
+    cp(A1, e / "a.tif")
+    rc, out = run("mem_enc", [ENC, e, "--mode", "1", "--distance", "3",
+                              "--effort", "7", "--workers", "512",
+                              "--no-preflight"])
+    check("encoder: --workers 512 at d=3 e=7 is reduced, output written",
+          rc == 0 and "--workers 512 reduced to" in out
+          and len(list((e / "converted_jxl").glob("*.jxl"))) == 1, f"rc={rc}")
+    r = B / "mem_rec"
+    cp(pool_jxl / A1.with_suffix(".jxl").name, r / "p.jxl")
+    rc, out = run("mem_rec", [REC, r, "--mode", "1", "--distance", "3",
+                              "--effort", "7", "--workers", "512",
+                              "--on-unknown", "convert", "--on-regeneration",
+                              "convert", "--on-downgrade", "convert",
+                              "--no-preflight"])
+    outs = [p for p in r.rglob("*.jxl") if p.parent != r]
+    check("recompressor: --workers 512 at d=3 e=7 is reduced, output decodes",
+          rc == 0 and "--workers 512 reduced to" in out and len(outs) == 1
+          and subprocess.run(["djxl", str(outs[0]), str(B / "mem_rec.png")],
+                             capture_output=True).returncode == 0, f"rc={rc}")
+
+
 def transcoder_checks(A1, A2):
     section("Transcoder (JPEG/PNG <-> JXL)")
     t = B / "t"
@@ -402,6 +426,7 @@ def main():
         else:
             print("\n(no multi-page scan in raw_scan/: multi-page and in-place checks skipped)")
         recompressor_foreign_check(A1, A3, pool_jxl)
+        memory_cap_checks(A1, pool_jxl)
         transcoder_checks(A1, A2)
     finally:
         n_ok = sum(1 for *_, ok, _ in results if ok)

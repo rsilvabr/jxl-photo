@@ -461,13 +461,45 @@ def _argfile_safe(value) -> str:
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
 
 
+# Captured at import: some tests replace this module's `subprocess` with a stub.
+_DEVNULL = subprocess.DEVNULL
+_CompletedProcess = subprocess.CompletedProcess
+
+
+def _run_captured(cmd, timeout, text=False):
+    """subprocess.run with stdout/stderr captured through temp FILES.
+
+    capture_output=True makes communicate() start two reader threads per call
+    on Windows. Under memory exhaustion a thread can fail in its bootstrap
+    (MemoryError) before it signals "started", and Thread.start() then waits
+    forever — before the timeout is even armed. The 2026-10-04 scheduled run
+    lost a manifest that way (one worker hung 60 min until the wrapper killed
+    the child). With files there is no thread: a failed spawn raises OSError,
+    which the callers already handle.
+    """
+    with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
+            tempfile.TemporaryFile(dir=TEMP_DIR) as err:
+        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
+                           timeout=timeout)
+        out.seek(0)
+        err.seek(0)
+        o = r.stdout if r.stdout is not None else out.read()
+        e = r.stderr if r.stderr is not None else err.read()
+    if text:
+        if isinstance(o, bytes):
+            o = o.decode("utf-8", "replace").replace("\r\n", "\n")
+        if isinstance(e, bytes):
+            e = e.decode("utf-8", "replace").replace("\r\n", "\n")
+    return _CompletedProcess(cmd, r.returncode, o, e)
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess.
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -477,10 +509,8 @@ def _run_exiftool_argfile(args_lines, timeout=60):
             af.write(_ARGFILE_CHARSET)
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
-        return subprocess.run(
-            [_get_exiftool_cmd(), "-@", argfile],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-        )
+        return _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                             timeout, text=True)
     finally:
         if argfile:
             try:

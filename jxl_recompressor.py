@@ -600,10 +600,22 @@ CJXL_EFFORT = 7
 # 7 is the sweet spot for camera photos.
 
 CJXL_BUFFERING = None
-# [libjxl >= 0.12 only] --buffering flag passed to cjxl. None = cjxl default.
+# [libjxl >= 0.12 only] --buffering flag passed to cjxl. None = cjxl chooses:
+# streaming, except at effort 7 with distance >= 3, effort 8-9 with distance
+# > 0.5 and effort 10+ (whole image at once, 2.5-8x the RAM). 1 = always
+# stream (~2% larger files). See WORKER_MEMORY_FRACTION.
 
 CJXL_TIMEOUT = 900
 # Per-file cjxl/djxl timeout in seconds.
+
+WORKER_MEMORY_FRACTION = 0.8
+# Caps --workers so the parallel cjxl processes fit in memory. The peak of
+# each worker is estimated from the largest image in the batch and the encode
+# settings: cjxl encodes the whole image at once (2.5-8x the memory of its
+# usual streaming encode) at effort 7 with distance >= 3, effort 8-9 with
+# distance > 0.5, effort 10+, or --buffering 0. The run then uses at most this
+# fraction of the memory the system can still commit (RAM + pagefile).
+# 0 disables the cap.
 
 TEMP_DIR = None
 # Scratch dir for exiftool argfiles and --verify-roundtrip decodes.
@@ -754,6 +766,27 @@ _delete_stats = {"deleted": 0, "deleted_archived": 0, "kept": 0}
 # per-file log line, and the summary's failures list carried the status word).
 _error_details = {}
 
+# Lower-cased fragments of the errors a run out of memory produces (Windows
+# commit limit, Python, cjxl, exiftool's Perl). Only used for the end-of-run
+# hint. "memoryerror" matches because an empty exception message is recorded
+# as its type name (see convert_one / process_group).
+_MEMORY_ERROR_SIGNATURES = ("winerror 1455", "memoryerror", "bad_alloc",
+                            "cannot allocate memory", "out of memory",
+                            "jxlencoderprocessoutput failed",
+                            "failed to create image frame",
+                            "getting pixel data failed")
+
+
+def _stderr_tail(stderr, limit=200):
+    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
+    error message. The head is the wrong end: cjxl prints its version banner
+    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
+    of the 314 errors of the 2026-10-04 run were logged without the line that
+    said what failed."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+
 # --output-icc runtime state, reset at the top of main() (the test suite runs
 # several main()s in one process).
 _OUTPUT_ICC_LABEL = None     # "sRGB" / "AdobeRGB" / "icc-<md5>"
@@ -898,6 +931,108 @@ def _cjxl_buffering_flag():
     if CJXL_BUFFERING is not None and _tool_at_least(_get_cjxl_cmd() or "cjxl", 0, 12):
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
+
+
+# Peak private memory of ONE cjxl, in bytes per pixel of the image, measured on
+# libjxl 0.12.0 with 45 MP 16-bit photos (+~10% margin). Plan
+# 261004_Claude_plan_memoria-workers.md has the full table.
+_STREAMING_BYTES_PER_PIXEL = 40
+_WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
+_WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
+_MODULAR_LOSSY_BYTES_PER_PIXEL = 110
+_UNKNOWN_IMAGE_PIXELS = 60_000_000
+
+
+def _cjxl_whole_image(distance, effort, buffering=None):
+    """True when cjxl encodes the whole image at once instead of streaming
+    (libjxl 0.12 with buffering left to the encoder: effort 10+, effort 8-9
+    above distance 0.5, effort 7 from distance 3; --buffering 0 always,
+    1-3 never)."""
+    if buffering is not None:
+        return buffering == 0
+    return (effort >= 10 or (effort in (8, 9) and distance > 0.5)
+            or (effort == 7 and distance >= 3))
+
+
+def _cjxl_bytes_per_pixel(distance, effort, buffering=None, modular=False):
+    """Estimated peak bytes per pixel of one cjxl process."""
+    if modular and distance > 0:
+        return _MODULAR_LOSSY_BYTES_PER_PIXEL
+    if _cjxl_whole_image(distance, effort, buffering):
+        return (_WHOLE_IMAGE_E8_BYTES_PER_PIXEL if effort >= 8
+                else _WHOLE_IMAGE_E7_BYTES_PER_PIXEL)
+    return _STREAMING_BYTES_PER_PIXEL
+
+
+def _available_commit_bytes():
+    """Memory the system can still commit, in bytes, or None if unknown.
+    Windows: ullAvailPageFile (RAM + pagefile not yet committed — the limit
+    WinError 1455 reports). Linux: MemAvailable."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            st = _MemoryStatusEx()
+            st.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return None
+            return int(st.ullAvailPageFile)
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def _memory_capped_workers(requested, max_pixels, distance, effort,
+                           buffering=None, modular=False):
+    """--workers lowered so `requested` parallel cjxl processes fit in memory.
+    Logs the estimate; warns when it had to lower the count."""
+    if WORKER_MEMORY_FRACTION <= 0:
+        return requested
+    pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
+    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    avail = _available_commit_bytes()
+    if avail is None:
+        logger.info("Memory: could not read the available memory — "
+                    "--workers not capped")
+        return requested
+    cap = max(1, int(avail * WORKER_MEMORY_FRACTION // per_job))
+    workers = min(requested, cap)
+    if modular and distance > 0:
+        kind = "modular"
+    elif _cjxl_whole_image(distance, effort, buffering):
+        kind = "whole-image"
+    else:
+        kind = "streaming"
+    logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{avail / 2**30:.1f} GB available | workers {workers}")
+    if cap < requested:
+        hint = ""
+        if kind == "whole-image":
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once; --buffering 1 keeps it streaming (~2.5x less memory, "
+                    "files ~2% larger).")
+        logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
+                       f"processes at ~{per_job / 2**30:.1f} GB each would not "
+                       f"fit in the {avail / 2**30:.1f} GB the system can still "
+                       f"commit (WORKER_MEMORY_FRACTION="
+                       f"{WORKER_MEMORY_FRACTION}).{hint}")
+    return workers
 
 
 def _abort_on_duplicate_outputs(pairs):
@@ -1428,13 +1563,46 @@ def _argfile_safe(value) -> str:
 _ARGFILE_CHARSET = "-charset\nFileName=UTF8\n-charset\nUTF8\n"
 
 
+# Captured at import: some tests replace this module's `subprocess` with a stub.
+_DEVNULL = subprocess.DEVNULL
+_CompletedProcess = subprocess.CompletedProcess
+
+
+def _run_captured(cmd, timeout, text=False):
+    """subprocess.run with stdout/stderr captured through temp FILES.
+
+    capture_output=True makes communicate() start two reader threads per call
+    on Windows. Under memory exhaustion a thread can fail in its bootstrap
+    (MemoryError) before it signals "started", and Thread.start() then waits
+    forever — before the timeout is even armed. The 2026-10-04 scheduled run
+    lost a manifest that way (one worker hung 60 min until the wrapper killed
+    the child). With files there is no thread: a failed spawn raises OSError,
+    which the callers already handle.
+    """
+    with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
+            tempfile.TemporaryFile(dir=TEMP_DIR) as err:
+        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
+                           timeout=timeout)
+        out.seek(0)
+        err.seek(0)
+        o = r.stdout if r.stdout is not None else out.read()
+        e = r.stderr if r.stderr is not None else err.read()
+    if text:
+        if isinstance(o, bytes):
+            o = o.decode("utf-8", "replace").replace("\r\n", "\n")
+        if isinstance(e, bytes):
+            e = e.decode("utf-8", "replace").replace("\r\n", "\n")
+    return _CompletedProcess(cmd, r.returncode, o, e)
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout decoded as UTF-8).
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
+    through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -1444,10 +1612,8 @@ def _run_exiftool_argfile(args_lines, timeout=60):
             af.write(_ARGFILE_CHARSET)
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
-        return subprocess.run(
-            [_get_exiftool_cmd(), "-@", argfile],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-        )
+        return _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                             timeout, text=True)
     finally:
         if argfile:
             try:
@@ -1600,20 +1766,24 @@ def _merge_lineage_blocks(desc: str, software: str):
 
 def _read_encode_params_batch(paths: list) -> dict:
     """{path str: {'desc': str, 'software': str, 'params': (d,e)|None,
-    'gen': int}} with one exiftool call per 400 files — per-file spawns were
+    'gen': int, 'pixels': int}} with one exiftool call per 400 files — per-file
+    spawns were
     minutes on a library.
 
     `gen` is the reconciled generation count (max of the stored gen= token
     and the lossy chain length), read from the field that carries the record.
     Files exiftool cannot read come back with empty strings and params None,
     which classifies as 'unknown' — the ON_UNKNOWN policy decides.
+    'pixels' is width*height (0 = unknown), read in the same exiftool call for the worker memory cap.
     """
-    info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0}
+    info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0,
+                     "pixels": 0}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return info
     batch_lines = ["-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
+                   "-ImageWidth", "-ImageHeight",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = 400
     for i in range(0, len(paths), BATCH):
@@ -1668,8 +1838,14 @@ def _read_encode_params_batch(paths: list) -> dict:
                         continue
                 gen = max(merged_stored, counted) if (merged_entries
                                                       or merged_stored) else 0
+                try:
+                    pixels = int(entry.get("ImageWidth") or 0) * int(
+                        entry.get("ImageHeight") or 0)
+                except (TypeError, ValueError):
+                    pixels = 0
                 info[index[key]] = {"desc": desc, "software": software,
-                                    "params": params, "gen": gen}
+                                    "params": params, "gen": gen,
+                                    "pixels": pixels}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -2719,11 +2895,10 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
         tmp = Path(tmp)
         dec_png, conv_png = tmp / "dec.png", tmp / "conv.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
-        r = subprocess.run(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"]
-                           + icc_args,
-                           capture_output=True, timeout=CJXL_TIMEOUT)
+        r = _run_captured(["djxl", str(jxl_path), str(dec_png), "--bits_per_sample=16"]
+                          + icc_args, CJXL_TIMEOUT)
         if r.returncode != 0 or not dec_png.exists():
-            raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
         # A lossy JXL carrying a whole ICC blob (table-curve profile) decodes
         # to LINEAR sRGB, not to the file's own space: the PNG must NOT be
         # labelled with the XMP ICC. The source then becomes a float PFM
@@ -2751,12 +2926,11 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                         "— refusing to derive (decode to TIFF instead)")
                 dec_pfm = tmp / "dec.pfm"
                 float_icc = tmp / "float_out.icc"
-                r = subprocess.run(["djxl", str(jxl_path), str(dec_pfm),
-                                    f"--icc_out={float_icc}"],
-                                   capture_output=True, timeout=CJXL_TIMEOUT)
+                r = _run_captured(["djxl", str(jxl_path), str(dec_pfm),
+                                   f"--icc_out={float_icc}"], CJXL_TIMEOUT)
                 if r.returncode != 0 or not dec_pfm.exists():
                     raise RuntimeError(
-                        f"djxl float decode: {(r.stderr or b'').decode(errors='replace')[:200]}")
+                        f"djxl float decode: {_stderr_tail(r.stderr)}")
                 logger.info(f"  >ICC blob in a lossy file: deriving from the "
                             f"float decode, CONVERTED from djxl's linear output "
                             f"| {jxl_path.name}")
@@ -2806,12 +2980,12 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                         args += ["+profile", "*", "-profile", str(src_path)]
                     elif "iCCP" in chunks:
                         src_path = tmp / "src_iccp.icc"
-                        _r = subprocess.run(["magick", str(dec_png), str(src_path)],
-                                            capture_output=True, timeout=CJXL_TIMEOUT)
+                        _r = _run_captured(["magick", str(dec_png), str(src_path)],
+                                           CJXL_TIMEOUT)
                         if _r.returncode != 0 or not src_path.exists():
                             raise RuntimeError(
                                 f"magick could not extract the source ICC: "
-                                f"{(_r.stderr or b'').decode(errors='replace')[:200]}")
+                                f"{_stderr_tail(_r.stderr)}")
                         # convert from djxl's own iCCP, no explicit assign
                     elif "sRGB" in chunks:
                         src_path = _SRGB_ICC_PATH
@@ -2844,9 +3018,9 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 args += ["-profile", str(out_profile)]
             cmd = (["magick", str(magick_in)] + args
                    + ["-depth", "16", "png:" + str(conv_png)])
-            r = subprocess.run(cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+            r = _run_captured(cmd, CJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
-                raise RuntimeError(f"magick: {(r.stderr or b'').decode(errors='replace')[:200]}")
+                raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
             if (not grey or blob) and "iCCP" not in _png_chunk_types(conv_png):
                 # Traps A1/A2: without the profile cjxl would silently tag the
                 # converted pixels as sRGB. Never let that reach the archive.
@@ -2857,9 +3031,9 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
                     + _cjxl_buffering_flag())
-        r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+        r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
         if r.returncode != 0:
-            raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+            raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
     return converted, size
 
 
@@ -2971,9 +3145,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
                          "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
                         + container_flag + _cjxl_buffering_flag())
-            r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+            r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
             if r.returncode != 0:
-                raise RuntimeError(f"cjxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+                raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
 
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
         # in CreatorTool, jxlphoto-* provenance and multi-page group markers)
@@ -2996,7 +3170,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
             # would silently miss the ICC/EXIF this whole tool exists to keep.
-            raise RuntimeError(f"exiftool metadata copy: {(r2.stderr or '')[:200]}")
+            raise RuntimeError(f"exiftool metadata copy: {_stderr_tail(r2.stderr)}")
 
         # exiftool re-appends its metadata boxes AFTER the codestream, which
         # hides the Exif/XMP from viewers that only scan the boxes before it
@@ -3055,8 +3229,11 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
     except Exception as e:
         if output_dirty:
             _delete_partial_if_written(write_path, final_path, _pre_identity)
-        _error_details[str(jxl_path)] = str(e)
-        logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {e}")
+        # A bare MemoryError has an empty message: record its type instead,
+        # or the log line is blank and the end-of-run memory hint misses it.
+        detail = str(e) or type(e).__name__
+        _error_details[str(jxl_path)] = detail
+        logger.error(f"[{n}/{total}] ERROR | {jxl_path.name} | {detail}")
         _abort_if_disk_full(write_path.parent if write_path is not None else jxl_path.parent,
                             _disk_full_need(jxl_path))
         return (str(jxl_path), "error", str(final_path))
@@ -3225,8 +3402,9 @@ def process_group(items, workers: int):
                 except Exception as e:
                     src_str, final_str = str(it["src"]), str(it["final"])
                     status = "error"
-                    _error_details[src_str] = f"worker crashed: {e}"
-                    logger.error(f"  WORKER CRASHED | {it['src'].name} | {e}")
+                    _detail = str(e) or type(e).__name__
+                    _error_details[src_str] = f"worker crashed: {_detail}"
+                    logger.error(f"  WORKER CRASHED | {it['src'].name} | {_detail}")
                 results[src_str] = (status, final_str)
                 if status not in ("ok", "overwrite", "copied"):
                     if it["in_place"]:
@@ -4091,11 +4269,6 @@ def main():
         KEEP_SMALLER = False
         logger.info("keep-smaller disabled: a verbatim copy would not be the "
                     "requested derivative")
-        if args.workers > 4:
-            logger.warning(f"Derivatives with --workers {args.workers}: each worker "
-                           f"holds two 16-bit PNGs plus an ImageMagick process in "
-                           f"memory (~1 GB per worker on a 45 MP photo). Consider "
-                           f"--workers 4.")
 
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
@@ -4269,6 +4442,7 @@ def main():
         it["software"] = info["software"]
         it["src_d"] = info["params"][0] if info["params"] else None
         it["gen"] = info["gen"]
+        it["pixels"] = info.get("pixels", 0)
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
                                                  gen=it["gen"], floor=_floor)
@@ -4582,7 +4756,13 @@ def main():
     interrupted = False
     try:
         if work_items:
-            results, promoted = process_group(work_items, args.workers)
+            workers = args.workers
+            _to_encode = [it for it in work_items if it["action"] == "convert"]
+            if _to_encode:
+                workers = _memory_capped_workers(
+                    args.workers, max(it.get("pixels", 0) for it in _to_encode),
+                    CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING)
+            results, promoted = process_group(work_items, workers)
     except KeyboardInterrupt:
         interrupted = True
         logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
@@ -4612,6 +4792,14 @@ def main():
     if n_aborted:
         done_line += f" ({n_aborted} not attempted — the run had already aborted)"
     logger.info(done_line)
+
+    _n_mem = sum(1 for _src, _detail in failures
+                 if any(s in str(_detail).lower() for s in _MEMORY_ERROR_SIGNATURES))
+    if _n_mem:
+        logger.warning(f"{_n_mem} error(s) look like the system ran out of "
+                       f"memory — lower --workers or WORKER_MEMORY_FRACTION, "
+                       f"or use --buffering 1. Sync mode retries them on the "
+                       f"next run.")
     if _aborted():
         logger.error(f"Run aborted early: {_aborted()}")
     if DELETE_SOURCE or DELETE_SKIPPED:

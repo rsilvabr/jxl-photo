@@ -122,10 +122,20 @@ CJXL_EFFORT = 7
 
 CJXL_BUFFERING = None
 # [libjxl >= 0.12 only] Encoder buffering level passed to cjxl (also --buffering CLI).
-# None = use cjxl's own default (2) — the fast path (default).
+# None = do not pass the flag; cjxl chooses: a streaming encode (the fast,
+#        low-memory path) EXCEPT at effort 7 with distance >= 3, effort 8-9
+#        with distance > 0.5 and effort 10+, where it encodes the whole image
+#        at once (2.5-8x the RAM; see "RAM per worker" below).
 # 0    = best compression, but ~6x slower on large lossless TIFFs for only
 #        ~1.2% smaller files (see the v1.8.0 release notes benchmark on GitHub).
+# 1-3  = always stream.
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
+
+WORKER_MEMORY_FRACTION = 0.8
+# Caps --workers so the parallel cjxl processes fit in memory. The peak of each
+# worker is estimated from the largest page in the batch and the encode
+# settings (see "RAM per worker"); the run then uses at most this fraction of
+# the memory the system can still commit (RAM + pagefile). 0 disables the cap.
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
@@ -798,6 +808,19 @@ noise, not a real inversion.
 costs 2–5× the time. Budget roughly **35–40 MB of RAM per megapixel, per
 worker**.
 
+#### Exception: the whole-image threshold
+
+"Megapixels drive RAM" holds only on the **streaming** path, which is what the
+default (`CJXL_BUFFERING = None`) uses. `cjxl` encodes the whole image at once —
+2.5–8× the RAM — when **effort ≥ 10**, when **effort 8–9 and distance > 0.5**,
+when **effort 7 and distance ≥ 3**, or with **`--buffering 0`**. Measured on
+45 MP 16-bit photos: 4 workers at d=1 e=9 used **47.6 GB (≈11.6 GB/worker)**,
+against about **1.3 GB/worker** at d=0.05 e=9. The run estimates this from the
+largest page and the settings and **caps `--workers` automatically** so the jobs
+fit in the commit limit × `WORKER_MEMORY_FRACTION`; it logs `Memory: ...` and
+warns `--workers N reduced to K`. Use `--buffering 1` to force streaming (files
+~2 % larger) when you need the lower peak.
+
 **The safe worker count depends on image size, not just on the machine.** On
 64 GB, at effort 9 with default buffering:
 
@@ -829,7 +852,9 @@ delivery workflows use:
 **RAM is the same as lossless**, so size `--workers` from either table. What
 collapses is time: effort 9 goes from 79.9 s to 9.4 s at 24 MP and from 168.7 s
 to 15.4 s at 45 MP (8–11× faster). Effort is nearly free here — 7 → 9 costs
-about a second and changes nothing in the output.
+about a second and changes nothing in the output. Same RAM only **below the
+threshold**: above distance 0.5 at effort 8–9 (from 3 at effort 7) RAM jumps 2.5–8× —
+see the exception above.
 
 > **Never combine `--buffering 0` with lossy.** At effort 9 it costs 7–8× the
 > RAM and ~4.7× the time **and produces a larger file** (20.6 % vs 19.4 % at
