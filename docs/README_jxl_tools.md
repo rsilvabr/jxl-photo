@@ -204,8 +204,11 @@ task editor: *Create Task → Actions → New → Start a program*:
 - **Add arguments:** `/k py jxl_photo.py --run-preset "nightly-sync"` — quote a
   name that contains spaces (`--run-preset "SYNC PHOTOS"`)
 - **Start in:** the folder where `jxl_photo.py` lives. **Do not leave this
-  blank**: logs are written relative to it (`Logs\...`), and a blank field
-  starts the run in `C:\Windows\System32` — which is where the logs then land.
+  blank**: `py jxl_photo.py` is looked up in it, so a blank field (which
+  starts the task in `C:\Windows\System32`) makes every run fail at once with
+  `can't open file ... jxl_photo.py` and exit code 2 — the same code as
+  "no such preset". The logs themselves always land in `Logs\` next to the
+  scripts.
 
 ##### Several presets in one scheduled run (a `.cmd` file)
 
@@ -854,6 +857,11 @@ a log of its own for **manifest runs** — a combined summary across all entries
 ```
 Logs/jxl_photo/YYYYMMDD_HHMMSS_<pid>.log
 ```
+
+Set the environment variable `JXLPHOTO_LOG_DIR` to move every log folder (the
+wrapper's and each script's, including `rejected_files.log`) elsewhere; the
+test suite and the real-photo battery use it so their runs never land in
+`Logs\`.
 
 * * *
 

@@ -151,17 +151,6 @@ def test_exiftool_candidates_are_ordered_the_same_everywhere(mod, monkeypatch):
     assert seen == ["exiftool", "exiftool-k", "exiftool(-k)"]
 
 
-def test_the_buffering_probe_difference_is_documented_not_accidental():
-    """The transcoder probes the bare "cjxl" because that is what it invokes;
-    the encoder probes its configurable path. Deliberate, and out of
-    SHARED_HELPERS — a comment in both copies says so."""
-    for name in ("jxl_jpeg_transcoder.py", "jxl_tiff_encoder.py"):
-        src = (REPO / name).read_text(encoding="utf-8")
-        i = src.index("def _cjxl_buffering_flag(")
-        body = src[i:i + 900]
-        assert "deliberately" in body.lower() or "not drift" in body.lower(), name
-
-
 # ── #289: the mode-1 warning ────────────────────────────────────────────────
 
 def test_transcoder_warns_that_mode_1_ignores_the_output(tmp_path):

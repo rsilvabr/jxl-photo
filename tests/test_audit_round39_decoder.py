@@ -94,12 +94,6 @@ def _reset_globals():
     yield
     dec._reset_abort()
     getattr(dec, "_mpg_marker_failures", set()).clear()
-    dec.TEMP2_DIR = None
-    dec.DELETE_SOURCE = False
-    dec.DELETE_SKIPPED = False
-    dec.OVERWRITE = "smart"
-    dec.USE_MATRIX_MODE = False
-    dec.ADD_JPEG_PREVIEW = True
 
 
 # ===========================================================================

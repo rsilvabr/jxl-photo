@@ -410,7 +410,8 @@ paths too.
    ```text
    schtasks /Create /TN "jxl-photo nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /k cd /d C:\tools\jxl-photo && py jxl_photo.py --run-preset nightly-sync"
    ```
-   The `cd /d` matters — logs land in `Logs\` relative to it. In the task
+   The `cd /d` matters — `py jxl_photo.py` is looked up in that folder (a task
+   started elsewhere fails with exit code 2). In the task
    editor: **Program** `cmd`, **arguments** `/k py jxl_photo.py --run-preset
    nightly-sync`, **Start in** the folder where `jxl_photo.py` lives (never
    blank). **Keep the `/k`**: it leaves the window open after the run, so a

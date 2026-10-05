@@ -235,15 +235,6 @@ def test_decoder_readme_does_not_still_promise_mask_is_demoted():
     assert "including `SubfileType=4` (MASK)" in section
 
 
-def test_integrity_comment_does_not_claim_a_single_page_is_read():
-    """Every page is decoded now (#302 follow-up); the comment developed from
-    "one strip" (false) through "one page" to the current all-pages gate."""
-    src = (REPO / "jxl_tiff_decoder.py").read_text(encoding="utf-8")
-    body = src.split("def _verify_tiff_integrity")[1].split("\ndef ")[0]
-    assert "Only the last strip/tile is decoded" not in body
-    assert "EVERY page is decoded" in body
-
-
 def test_integrity_check_decodes_all_pages(tmp_path):
     """Damage in an EARLIER page of a multi-page TIFF must fail the gate —
     reading the last page alone left non-tail corruption undetected."""

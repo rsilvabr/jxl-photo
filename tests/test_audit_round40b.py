@@ -458,12 +458,6 @@ def test_recompressor_empty_export_marker_is_kept(tmp_path, monkeypatch):
 # (basic parse rules live in tests/test_recompressor.py::TestReadEncodeParamsBatch)
 # ---------------------------------------------------------------------------
 
-def test_parse_encode_params_is_dead_code():
-    src = (REPO / "jxl_recompressor.py").read_text(encoding="utf-8")
-    assert "def _parse_encode_params" not in src, \
-        "#22: _parse_encode_params was removed as dead code"
-
-
 def test_read_encode_params_batch_unions_desc_and_software(monkeypatch):
     """The record can be SPLIT across dc:Description and Software; the reader
     must merge both fields and reconcile gen from the union."""

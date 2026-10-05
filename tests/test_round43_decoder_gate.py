@@ -30,6 +30,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jxl_tiff_decoder as dec
 
+# The script's own settings, captured before any test runs: "run 2 falls back
+# to the defaults" must compare against what the user wrote at the top of the
+# script, never against a literal copy of the shipped default.
+_SCRIPT_SETTINGS = {name: getattr(dec, name) for name in (
+    "DELETE_SOURCE", "DELETE_SKIPPED", "DELETE_CONFIRM", "ADD_JPEG_PREVIEW",
+    "USE_MATRIX_MODE")}
+
 pytestmark = pytest.mark.usefixtures("leave_globals_clean")
 
 _JXL_SIG = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
@@ -281,11 +288,16 @@ def test_main_globals_reset_between_runs(tmp_path, monkeypatch):
     assert dec.DELETE_CONFIRM is False
 
     _run_dec_main(monkeypatch, tmp_path, tmp_path / "run2", [])
-    assert dec.DELETE_SOURCE is False, "DELETE_SOURCE leaked into run 2"
-    assert dec.DELETE_SKIPPED is False, "DELETE_SKIPPED leaked into run 2"
-    assert dec.DELETE_CONFIRM is True, "DELETE_CONFIRM leaked into run 2"
-    assert dec.ADD_JPEG_PREVIEW is True, "ADD_JPEG_PREVIEW leaked into run 2"
-    assert dec.USE_MATRIX_MODE is False, "USE_MATRIX_MODE leaked into run 2"
+    assert dec.DELETE_SOURCE == _SCRIPT_SETTINGS["DELETE_SOURCE"], \
+        "DELETE_SOURCE leaked into run 2"
+    assert dec.DELETE_SKIPPED == _SCRIPT_SETTINGS["DELETE_SKIPPED"], \
+        "DELETE_SKIPPED leaked into run 2"
+    assert dec.DELETE_CONFIRM == _SCRIPT_SETTINGS["DELETE_CONFIRM"], \
+        "DELETE_CONFIRM leaked into run 2"
+    assert dec.ADD_JPEG_PREVIEW == _SCRIPT_SETTINGS["ADD_JPEG_PREVIEW"], \
+        "ADD_JPEG_PREVIEW leaked into run 2"
+    assert dec.USE_MATRIX_MODE == _SCRIPT_SETTINGS["USE_MATRIX_MODE"], \
+        "USE_MATRIX_MODE leaked into run 2"
 
 
 def test_empty_export_marker_is_honored(tmp_path, monkeypatch):

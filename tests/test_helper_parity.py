@@ -68,6 +68,7 @@ SHARED_HELPERS = [
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_run_captured",
+    "_stderr_tail",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.

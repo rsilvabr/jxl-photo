@@ -38,6 +38,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jxl_jpeg_transcoder as tr
 
+# The script's own settings, captured before any test runs: "run 2 falls back
+# to the defaults" must compare against what the user wrote at the top of the
+# script, never against a literal copy of the shipped default.
+_SCRIPT_SETTINGS = {name: getattr(tr, name) for name in (
+    "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "PROVENANCE_CHECK",
+    "EXPORT_MARKER", "EXPORT_JPEG_SUBFOLDER", "AUTO_REPAIR_JBRD", "STORE_MD5")}
+
 
 class _FakeRun:
     def __init__(self, stdout="", stderr="", returncode=0):
@@ -85,15 +92,6 @@ def _reset_globals():
     tr._run_summary.clear()
     yield
     tr._tool_version.cache_clear()
-    tr.DELETE_SOURCE = False
-    tr.DELETE_CONFIRM = True
-    tr.DELETE_SKIPPED = False
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
-    tr.PROVENANCE_CHECK = "path"
-    tr.EXPORT_MARKER = "_EXPORT"
-    tr.EXPORT_JPEG_SUBFOLDER = ""
-    tr.AUTO_REPAIR_JBRD = False
     tr._reset_abort()
     tr._FORCE_REDERIVE.clear()
     if hasattr(tr, "_delete_stats"):
@@ -285,14 +283,14 @@ def test_second_main_run_resets_run_scoped_globals(monkeypatch, tmp_path):
     plain = [str(tmp_path), "--dry-run"]
     _main_argv(monkeypatch, plain)
     tr.main()
-    assert tr.DELETE_SOURCE is False
-    assert tr.DELETE_CONFIRM is True
-    assert tr.DELETE_SKIPPED is False
-    assert tr.PROVENANCE_CHECK == "path"
-    assert tr.EXPORT_MARKER == "_EXPORT"
-    assert tr.EXPORT_JPEG_SUBFOLDER == ""
-    assert tr.AUTO_REPAIR_JBRD is False
-    assert tr.STORE_MD5 is True
+    assert tr.DELETE_SOURCE == _SCRIPT_SETTINGS["DELETE_SOURCE"]
+    assert tr.DELETE_CONFIRM == _SCRIPT_SETTINGS["DELETE_CONFIRM"]
+    assert tr.DELETE_SKIPPED == _SCRIPT_SETTINGS["DELETE_SKIPPED"]
+    assert tr.PROVENANCE_CHECK == _SCRIPT_SETTINGS["PROVENANCE_CHECK"]
+    assert tr.EXPORT_MARKER == _SCRIPT_SETTINGS["EXPORT_MARKER"]
+    assert tr.EXPORT_JPEG_SUBFOLDER == _SCRIPT_SETTINGS["EXPORT_JPEG_SUBFOLDER"]
+    assert tr.AUTO_REPAIR_JBRD == _SCRIPT_SETTINGS["AUTO_REPAIR_JBRD"]
+    assert tr.STORE_MD5 == _SCRIPT_SETTINGS["STORE_MD5"]
 
 
 def test_main_keeps_the_settings_edited_in_the_script(monkeypatch, tmp_path):

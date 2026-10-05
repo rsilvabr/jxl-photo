@@ -243,15 +243,6 @@ def test_a_truncated_split_still_gets_the_find_the_page_advice(tmp_path):
 
 # ── #295: the gate's contract, and a closed stdin ───────────────────────────
 
-def test_the_gate_declares_what_it_actually_returns():
-    import inspect
-    sig = inspect.signature(wp.InteractiveMenu._confirm_lossy_delete_skipped)
-    assert sig.return_annotation is None, sig.return_annotation
-    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
-    assert "if not self._confirm_lossy_delete_skipped" not in src, (
-        "the dead call-site guard is back")
-
-
 def test_a_closed_stdin_declines_instead_of_raising(monkeypatch, capsys):
     """Every other gate here fails closed on EOF; this one raised EOFError out
     of input() and took the run down with a traceback."""

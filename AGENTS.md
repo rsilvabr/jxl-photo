@@ -144,6 +144,10 @@
 ## Verification
 - After editing any script, run `python -m py_compile` on the changed files.
 - Tests: `pytest tests/`
+- The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
+  test writes to `Logs\`. Every subprocess call in the four backends goes
+  through `_run_captured` except the version probes (`_tool_version`,
+  `_warn_if_libjxl_too_old`); `tests/test_subprocess_capture.py` enforces it.
 - Prefer verifying real behavior against real photos over reasoning alone — the
   test suite is synthetic/mocked, so codec-path bugs (ICC, bit depth,
   multi-page, channel counts) only show up against actual files.

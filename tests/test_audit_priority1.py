@@ -67,7 +67,7 @@ def _stub_exiftool_value(monkeypatch, value):
     monkeypatch.setattr(enc, "_get_exiftool_cmd", lambda: "exiftool")
     monkeypatch.setattr(enc, "subprocess",
                         SimpleNamespace(run=lambda *a, **k: SimpleNamespace(
-                            returncode=0, stdout=value)))
+                            returncode=0, stdout=value, stderr="")))
     enc.get_exif_software.cache_clear()
 
 

@@ -845,7 +845,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False):
+def _run_captured(cmd, timeout, text=False, input=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -855,11 +855,16 @@ def _run_captured(cmd, timeout, text=False):
     lost a manifest that way (one worker hung 60 min until the wrapper killed
     the child). With files there is no thread: a failed spawn raises OSError,
     which the callers already handle.
+
+    `input` (bytes) goes to the child's stdin, written from THIS thread:
+    communicate() starts reader threads only for PIPE stdout/stderr, never
+    for stdin.
     """
+    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
-                           timeout=timeout)
+        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                           **stdin_kw)
         out.seek(0)
         err.seek(0)
         o = r.stdout if r.stdout is not None else out.read()
@@ -872,13 +877,25 @@ def _run_captured(cmd, timeout, text=False):
     return _CompletedProcess(cmd, r.returncode, o, e)
 
 
+def _stderr_tail(stderr, limit=200):
+    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
+    error message. The head is the wrong end: cjxl prints its version banner
+    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
+    of the 314 errors of the 2026-10-04 run were logged without the line that
+    said what failed."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured through temp files — see _run_captured).
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
+    through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -1020,9 +1037,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -1095,9 +1111,8 @@ def _read_derived_markers_batch(paths: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Derivative check: could not read markers for a batch "
                                f"of {len(chunk)} file(s) (rc={r.returncode})")
@@ -1301,7 +1316,11 @@ FORCE_CONTAINER_FOR_LOSSY = True
 # --------------------------------------------─
 
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
+# JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
+# the test suite and the real-photo battery set it so their runs never
+# land in Logs\ next to the scripts.
+LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
+           else SCRIPT_DIR / "Logs") / Path(__file__).stem
 # Module-level logger (same pattern as the other scripts): resolvers must be
 # safe to call before setup_logger() (tests, isolated imports).
 logger = logging.getLogger("jxl_jpeg_transcoder")
@@ -1433,7 +1452,7 @@ _rejected_log_lock = threading.Lock()
 def _log_rejected_file(file_path, reason):
     """Log rejected files to Logs/jxl_jpeg_transcoder/rejected_files.log for easy review."""
     try:
-        rej_dir = SCRIPT_DIR / "Logs" / "jxl_jpeg_transcoder"
+        rej_dir = LOG_DIR
         rej_dir.mkdir(parents=True, exist_ok=True)
         rej_file = rej_dir / "rejected_files.log"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2117,13 +2136,13 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             raise RuntimeError(f"encode_one_transcode received a non-JPEG input: {src_path.name}")
 
         output_dirty = True
-        r = subprocess.run(
+        r = _run_captured(
             ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
              "--effort", str(effort)],
-            capture_output=True, timeout=CODEC_TIMEOUT
+            CODEC_TIMEOUT
         )
         if r.returncode != 0:
-            raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
+            raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
 
         # WHICH source made this output. Written BEFORE reorder_jxl_boxes:
         # every exiftool edit re-appends its boxes after the codestream, so
@@ -2265,7 +2284,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
             elif write_path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
                 djxl_cmd.insert(1, "--output_format=png")
         output_dirty = True
-        r = subprocess.run(djxl_cmd, capture_output=True, timeout=CODEC_TIMEOUT)
+        r = _run_captured(djxl_cmd, CODEC_TIMEOUT)
         repaired_copy = None
         if (r.returncode != 0 and is_jxl_decode and AUTO_REPAIR_JBRD
                 and _tool_at_least("djxl", 0, 12)):
@@ -2279,10 +2298,10 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                                f"itself is unchanged — heal the archive with "
                                f"--repair-jbrd) | {jxl_path.name}")
                 try:
-                    r = subprocess.run(["djxl", "--reconstruct_jpeg",
-                                        "--output_format=jpeg",
-                                        str(repaired_copy), str(write_path)],
-                                       capture_output=True, timeout=CODEC_TIMEOUT)
+                    r = _run_captured(["djxl", "--reconstruct_jpeg",
+                                       "--output_format=jpeg",
+                                       str(repaired_copy), str(write_path)],
+                                      CODEC_TIMEOUT)
                 finally:
                     shutil.rmtree(repaired_copy.parent, ignore_errors=True)
         if r.returncode != 0:
@@ -2294,7 +2313,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
                         "only replaces a file when the repair provably reconstructs). "
                         "Or re-run with --auto-repair-jbrd to decode from a repaired "
                         "copy without touching the JXL at all")
-            raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}{hint}")
+            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}{hint}")
 
         # Validate the decoded output itself (rc=0 does not guarantee a
         # well-formed file). The MD5 comparison below is an even stronger
@@ -2429,9 +2448,9 @@ def _jxl_reconstruct_md5(jxl_path: Path) -> Optional[str]:
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
-            capture_output=True, timeout=CODEC_TIMEOUT)
+            CODEC_TIMEOUT)
         if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             return None
         return md5_of_file(tmp)
@@ -2473,9 +2492,9 @@ def _jxl_reconstructs_to(jxl_path: Path, jpeg_path: Path) -> bool:
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
-            capture_output=True, timeout=CODEC_TIMEOUT)
+            CODEC_TIMEOUT)
         if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             return False
         return md5_of_file(tmp) == md5_of_file(jpeg_path)
@@ -2531,9 +2550,9 @@ def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
-            capture_output=True, timeout=CODEC_TIMEOUT)
+            CODEC_TIMEOUT)
         if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             return False
         rec_md5 = md5_of_file(tmp)
@@ -3671,9 +3690,9 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         cmd += _cjxl_buffering_flag()
 
         output_dirty = True
-        r = subprocess.run(cmd, capture_output=True, timeout=CODEC_TIMEOUT)
+        r = _run_captured(cmd, CODEC_TIMEOUT)
         if r.returncode != 0:
-            raise RuntimeError(f"cjxl: {r.stderr.decode(errors='replace')[:200]}")
+            raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
 
         src_md5 = md5_of_file(src_path) if STORE_MD5 else None
         # Preserve EXIF/XMP/IPTC metadata that cjxl may drop in lossy mode —
@@ -3962,11 +3981,11 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
     if "iCCP" in chunks:
         # magick converts from the profile djxl wrote, no explicit assign.
         path = tmp_dir / "src_iccp.icc"
-        r = subprocess.run(["magick", str(png_path), str(path)],
-                           capture_output=True, timeout=CODEC_TIMEOUT)
+        r = _run_captured(["magick", str(png_path), str(path)],
+                          CODEC_TIMEOUT)
         if r.returncode != 0 or not path.exists():
             raise RuntimeError(f"magick could not extract the source ICC profile: "
-                               f"{(r.stderr or b'').decode(errors='replace')[:200]}")
+                               f"{_stderr_tail(r.stderr)}")
         return ([], path)
     if "sRGB" in chunks:
         path = _get_srgb_icc_path()
@@ -4415,68 +4434,70 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         if (output_icc and MAGICK_AVAILABLE) or derivative:
             with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                 tmp_png = Path(tmp) / "tmp.png"
-                try:
-                    _decode_bits = 16 if derivative else bit_depth
-                    icc_args, out_icc, orig_icc = _djxl_icc_args(Path(tmp))
-                    subprocess.run(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                    # A lossy JXL carrying a whole ICC blob decodes to LINEAR
-                    # sRGB, not to the file's own space: the intermediate must
-                    # be the float PFM with djxl's own profile assigned, never
-                    # the PNG labelled with the XMP ICC.
-                    float_src = None
-                    magick_in = tmp_png
-                    if _decoded_in_original_space(out_icc, orig_icc) is False:
-                        if _png_has_alpha(tmp_png):
-                            # The float PFM has no alpha, and alpha is not
-                            # colour-managed: merging it back through the
-                            # recipe is not implemented. Fail closed rather
-                            # than silently dropping the channel.
-                            raise RuntimeError(
-                                "lossy ICC blob with an alpha channel: the "
-                                "correct decode goes through a float PFM, which "
-                                "has no alpha — refusing to convert")
-                        pfm_path = Path(tmp) / "dec.pfm"
-                        float_icc = Path(tmp) / "float_out.icc"
-                        subprocess.run(["djxl", str(jxl_path), str(pfm_path),
-                                        f"--icc_out={float_icc}"],
-                                       check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                        creator, _tokens = _read_creator_and_relation(jxl_path)
-                        # Grey: djxl's own original profile, always single-
-                        # channel (an XMP ICC could be RGB).
-                        _xmp_icc = (None if _png_is_grayscale(tmp_png)
-                                    else _xmp_icc_from_creator_tool(creator))
-                        if _xmp_icc:
-                            orig_target = Path(tmp) / "orig_target.icc"
-                            orig_target.write_bytes(_xmp_icc)
-                        else:
-                            orig_target = orig_icc
-                        float_src = (pfm_path, float_icc, orig_target)
-                        magick_in = pfm_path
-                        logger.info(f"  >ICC blob in a lossy file: converting from "
-                                    f"the float decode (djxl's linear output), not "
-                                    f"from the XMP-labelled PNG | {jxl_path.name}")
-                    magick_output, size, grey, _converted = _output_magick_args(
-                        jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
-                        quality, is_png, float_src=float_src)
-                    logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
-                    subprocess.run(["magick", str(magick_in)] + magick_output + [_magick_out], check=True, capture_output=True, timeout=CODEC_TIMEOUT)
-                    if not grey:
-                        _verify_profile_in_output(actual_out, is_png=is_png)
-                except subprocess.CalledProcessError as cpe:
-                    err = (cpe.stderr or b"").decode(errors="replace")[:200] if isinstance(cpe.stderr, bytes) else str(cpe.stderr or "")[:200]
-                    raise RuntimeError(f"{cpe.cmd[0]}: {err}") from cpe
+                _decode_bits = 16 if derivative else bit_depth
+                icc_args, out_icc, orig_icc = _djxl_icc_args(Path(tmp))
+                r = _run_captured(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, CODEC_TIMEOUT)
+                if r.returncode != 0:
+                    raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+                # A lossy JXL carrying a whole ICC blob decodes to LINEAR
+                # sRGB, not to the file's own space: the intermediate must
+                # be the float PFM with djxl's own profile assigned, never
+                # the PNG labelled with the XMP ICC.
+                float_src = None
+                magick_in = tmp_png
+                if _decoded_in_original_space(out_icc, orig_icc) is False:
+                    if _png_has_alpha(tmp_png):
+                        # The float PFM has no alpha, and alpha is not
+                        # colour-managed: merging it back through the
+                        # recipe is not implemented. Fail closed rather
+                        # than silently dropping the channel.
+                        raise RuntimeError(
+                            "lossy ICC blob with an alpha channel: the "
+                            "correct decode goes through a float PFM, which "
+                            "has no alpha — refusing to convert")
+                    pfm_path = Path(tmp) / "dec.pfm"
+                    float_icc = Path(tmp) / "float_out.icc"
+                    r = _run_captured(["djxl", str(jxl_path), str(pfm_path),
+                                       f"--icc_out={float_icc}"],
+                                      CODEC_TIMEOUT)
+                    if r.returncode != 0:
+                        raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+                    creator, _tokens = _read_creator_and_relation(jxl_path)
+                    # Grey: djxl's own original profile, always single-
+                    # channel (an XMP ICC could be RGB).
+                    _xmp_icc = (None if _png_is_grayscale(tmp_png)
+                                else _xmp_icc_from_creator_tool(creator))
+                    if _xmp_icc:
+                        orig_target = Path(tmp) / "orig_target.icc"
+                        orig_target.write_bytes(_xmp_icc)
+                    else:
+                        orig_target = orig_icc
+                    float_src = (pfm_path, float_icc, orig_target)
+                    magick_in = pfm_path
+                    logger.info(f"  >ICC blob in a lossy file: converting from "
+                                f"the float decode (djxl's linear output), not "
+                                f"from the XMP-labelled PNG | {jxl_path.name}")
+                magick_output, size, grey, _converted = _output_magick_args(
+                    jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
+                    quality, is_png, float_src=float_src)
+                logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
+                r = _run_captured(["magick", str(magick_in)] + magick_output + [_magick_out], CODEC_TIMEOUT)
+                if r.returncode != 0:
+                    raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
+                if not grey:
+                    _verify_profile_in_output(actual_out, is_png=is_png)
         elif is_png:
             # Direct djxl to PNG (explicit format: the temp may end in .tmp)
-            r = subprocess.run(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], capture_output=True, timeout=CODEC_TIMEOUT)
+            r = _run_captured(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], CODEC_TIMEOUT)
             if r.returncode != 0:
-                raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
         else:
             # Direct djxl to JPG (preserves embedded ICC; explicit format:
             # the temp may end in .tmp)
             quality_flag = f"--jpeg_quality={quality}"
-            r = subprocess.run(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], capture_output=True, timeout=CODEC_TIMEOUT)
+            r = _run_captured(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], CODEC_TIMEOUT)
             if r.returncode != 0:
-                raise RuntimeError(f"djxl: {r.stderr.decode(errors='replace')[:200]}")
+                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
 
         # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop. A
         # derivative gets the provenance markers REMOVED in the same breath

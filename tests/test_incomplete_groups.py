@@ -20,11 +20,13 @@ test_thumbnail_gap_is_not_incomplete is the guard on that.
 --allow-incomplete-groups is the way out for someone whose page really is gone.
 """
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tifffile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -60,11 +62,36 @@ def _real_thumb_real(path: Path):
 
 
 def _encode_split(tmp_path, tiff_maker, *extra):
+    """Encode the split once per argument combination (the module fixture
+    pre-encodes them) and copy the folder — copytree/copy2 preserves the
+    mtimes the smart-sync reads. A combination with no template — arguments
+    no other test shares — still encodes alone here."""
+    template = _SPLIT_TEMPLATES.get((tiff_maker, extra))
+    if template is not None:
+        shutil.copytree(template, tmp_path, dirs_exist_ok=True)
+        return sorted((tmp_path / "jxl").glob("*.jxl"))
     tiff_maker(tmp_path / "src" / "scan.tif")
     r = _run(ENCODER, "src", "jxl", "--mode", "2", "--distance", "0", "--effort", "1",
              "--multipage-mode", "split", *extra, cwd=tmp_path)
     assert r.returncode == 0, r.stdout
     return sorted((tmp_path / "jxl").glob("*.jxl"))
+
+
+_SPLIT_TEMPLATES = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _split_templates(tmp_path_factory):
+    """The encoder runs REAL cjxl over the same 3-page TIFF for every test
+    (~6 s each, ~70 s for the module). Each (tiff_maker, extra) combination
+    used in this file is encoded ONCE here; the tests copy the template."""
+    for tiff_maker, extra in ((_three_real_pages, ()),
+                              (_real_thumb_real, ("--thumbnail-mode", "exclude"))):
+        base = tmp_path_factory.mktemp("split_template")
+        _encode_split(base, tiff_maker, *extra)   # encodes alone: no template yet
+        _SPLIT_TEMPLATES[(tiff_maker, extra)] = base
+    yield _SPLIT_TEMPLATES
+    _SPLIT_TEMPLATES.clear()
 
 
 def _markers(jxl: Path):

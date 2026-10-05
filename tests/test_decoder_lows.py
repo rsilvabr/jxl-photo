@@ -43,10 +43,6 @@ def _reset_globals():
     dec._reset_abort()
     yield
     dec._reset_abort()
-    dec.TEMP2_DIR = None
-    dec.DELETE_SOURCE = False
-    dec.OVERWRITE = "smart"
-    dec.ADD_JPEG_PREVIEW = True
 
 
 def _jxl_stub(path: Path):

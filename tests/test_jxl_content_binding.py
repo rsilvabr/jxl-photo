@@ -42,15 +42,6 @@ class _FakeRun:
         self.returncode = returncode
 
 
-@pytest.fixture(autouse=True)
-def _reset_globals():
-    yield
-    tr.DELETE_SOURCE = False
-    tr.DELETE_SKIPPED = False
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
-
-
 ORIGINAL_JPEG = b"\xff\xd8" + b"original-jpeg-payload" + b"\xff\xd9"
 REAL_JXL = b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"real-jxl-bytes"
 SWAPPED_JXL = b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"swapped-different-jxl"

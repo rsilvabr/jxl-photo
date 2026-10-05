@@ -466,7 +466,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False):
+def _run_captured(cmd, timeout, text=False, input=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -476,11 +476,16 @@ def _run_captured(cmd, timeout, text=False):
     lost a manifest that way (one worker hung 60 min until the wrapper killed
     the child). With files there is no thread: a failed spawn raises OSError,
     which the callers already handle.
+
+    `input` (bytes) goes to the child's stdin, written from THIS thread:
+    communicate() starts reader threads only for PIPE stdout/stderr, never
+    for stdin.
     """
+    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
-                           timeout=timeout)
+        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                           **stdin_kw)
         out.seek(0)
         err.seek(0)
         o = r.stdout if r.stdout is not None else out.read()
@@ -493,13 +498,25 @@ def _run_captured(cmd, timeout, text=False):
     return _CompletedProcess(cmd, r.returncode, o, e)
 
 
+def _stderr_tail(stderr, limit=200):
+    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
+    error message. The head is the wrong end: cjxl prints its version banner
+    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
+    of the 314 errors of the 2026-10-04 run were logged without the line that
+    said what failed."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured through temp files — see _run_captured).
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
+    through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -681,9 +698,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -1070,7 +1086,11 @@ EXPORT_JXL_SUBFOLDER = ""
 # ─────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR = SCRIPT_DIR / "Logs" / Path(__file__).stem
+# JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
+# the test suite and the real-photo battery set it so their runs never
+# land in Logs\ next to the scripts.
+LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
+           else SCRIPT_DIR / "Logs") / Path(__file__).stem
 logger = logging.getLogger("jxl_decode")
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
@@ -1467,9 +1487,9 @@ def decode_auto_png(jxl_path, output_png, extra_args=None):
     Raises RuntimeError on failure.
     """
     cmd = ["djxl", str(jxl_path), str(output_png)] + list(extra_args or [])
-    r = subprocess.run(cmd, capture_output=True, timeout=DJXL_TIMEOUT)
+    r = _run_captured(cmd, DJXL_TIMEOUT)
     if r.returncode != 0:
-        err = (r.stderr or b"").decode(errors='replace')[:200]
+        err = _stderr_tail(r.stderr)
         raise RuntimeError(f"djxl auto failed: {err}")
     return True
 
@@ -1642,9 +1662,9 @@ def decode_rec2020_linear(jxl_path, output_ppm, icc_out_path):
         "--color_space=RGB_D65_202_Per_Lin",   # libjxl token for Rec.2020/BT.2100 primaries is "202"
         f"--icc_out={icc_out_path}",
     ]
-    r = subprocess.run(cmd, capture_output=True, timeout=DJXL_TIMEOUT)
+    r = _run_captured(cmd, DJXL_TIMEOUT)
     if r.returncode != 0:
-        err = (r.stderr or b"").decode(errors='replace')[:200]
+        err = _stderr_tail(r.stderr)
         raise RuntimeError(f"djxl Rec.2020 failed: {err}")
     return True
 
@@ -2557,11 +2577,10 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
                     "decoding it correctly needs ImageMagick (magick) on PATH")
             pfm_path = tmp_dir / "decoded.pfm"
             float_icc = tmp_dir / "float_out.icc"
-            r = subprocess.run(["djxl", str(jxl_path), str(pfm_path),
-                                f"--icc_out={float_icc}"],
-                               capture_output=True, timeout=DJXL_TIMEOUT)
+            r = _run_captured(["djxl", str(jxl_path), str(pfm_path),
+                               f"--icc_out={float_icc}"], DJXL_TIMEOUT)
             if r.returncode != 0 or not pfm_path.exists():
-                err = (r.stderr or b"").decode(errors='replace')[:200]
+                err = _stderr_tail(r.stderr)
                 raise RuntimeError(f"djxl float decode failed: {err}")
             if original_icc:
                 target_path = tmp_dir / "orig_target.icc"
@@ -2571,14 +2590,14 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
                 target_path = orig_icc
                 final_icc = orig_icc.read_bytes()
             conv_png = tmp_dir / "converted.png"
-            r = subprocess.run(["magick", str(pfm_path),
-                                "-profile", str(float_icc),
-                                "-intent", "Relative",
-                                "-profile", str(target_path),
-                                "-depth", "16", "png:" + str(conv_png)],
-                               capture_output=True, timeout=DJXL_TIMEOUT)
+            r = _run_captured(["magick", str(pfm_path),
+                               "-profile", str(float_icc),
+                               "-intent", "Relative",
+                               "-profile", str(target_path),
+                               "-depth", "16", "png:" + str(conv_png)],
+                              DJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
-                err = (r.stderr or b"").decode(errors='replace')[:200]
+                err = _stderr_tail(r.stderr)
                 raise RuntimeError(f"magick ICC conversion failed: {err}")
             rgb, _ = read_png_to_numpy(conv_png, target_depth=target_depth)
             # The PFM has no alpha channel, and alpha is not colour-managed:
@@ -3573,9 +3592,8 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                     af.write("-j\n-s\n-s\n-XMP-dc:Relation\n-charset\nFileName=UTF8\n-charset\nUTF8\n")
                     for j in chunk:
                         af.write(str(j) + "\n")
-                r = subprocess.run(
-                    [exe, "-@", argfile],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
+                r = _run_captured(
+                    [exe, "-@", argfile], 120, text=True
                 )
             finally:
                 if argfile:

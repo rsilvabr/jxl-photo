@@ -220,6 +220,20 @@ def test_encoder_records_page_pixels(tmp_path):
     assert enc._PAGE_PIXELS[(os.path.normcase(str(p)), 0)] == 64 * 48 == 3072
 
 
+def test_encoder_ignore_mode_records_page_pixels(tmp_path, monkeypatch):
+    """--multipage-mode ignore still records page 0's size for the cap.
+
+    Ignore encodes page 0 only; without this the cap fell back to the 60 MP
+    `_UNKNOWN_IMAGE_PIXELS` default and lowered `--workers` for no reason.
+    """
+    p = tmp_path / "a.tif"
+    tifffile.imwrite(p, np.zeros((48, 64, 3), dtype=np.uint16), photometric="rgb")
+    monkeypatch.setattr(enc, "MULTIPAGE_TIFF_MODE", "ignore")
+    enc._PAGE_PIXELS.clear()
+    enc.convert_multipage(p, tmp_path / "out", 0)
+    assert enc._PAGE_PIXELS[(os.path.normcase(str(p)), 0)] == 64 * 48 == 3072
+
+
 # ---------------------------------------------------------------------------
 # 10-11: _run_captured never starts a reader thread; text/timeout behavior
 # ---------------------------------------------------------------------------

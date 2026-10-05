@@ -60,15 +60,6 @@ def _args(tmp_path, **kw):
     return argparse.Namespace(**base)
 
 
-@pytest.fixture(autouse=True)
-def _reset_globals():
-    yield
-    tr.DELETE_SOURCE = False
-    tr.DELETE_CONFIRM = True
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
-
-
 # ---------------------------------------------------------------------------
 # 1. #267 — every dry run of an armed delete run must say so
 # ---------------------------------------------------------------------------

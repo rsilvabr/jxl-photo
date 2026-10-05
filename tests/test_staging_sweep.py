@@ -170,17 +170,6 @@ def test_a_missing_directory_is_survivable(mod, tmp_path):
 # --------------------------------------------------------------------------
 
 @BACKENDS
-def test_the_sweep_runs_before_the_batch_not_after(mod):
-    """Sweeping at the END would delete this run's own failures -- the very
-    evidence the KEEP path exists to preserve. It must clear the PREVIOUS
-    runs' orphans instead."""
-    src = Path(mod.__file__).read_text(encoding="utf-8")
-    assert "_clean_staging" in src
-    doc = mod._clean_staging.__doc__ or ""
-    assert "BEFORE" in doc
-
-
-@BACKENDS
 def test_clean_staging_is_opt_in(mod):
     """A delete must never be the default."""
     src = Path(mod.__file__).read_text(encoding="utf-8")

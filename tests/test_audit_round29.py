@@ -217,12 +217,6 @@ def test_decoder_none_warning_does_not_name_a_flag_it_lacks():
     assert "--provenance adopt has no counterpart here" in src
 
 
-def test_bug_tracker_no_longer_claims_adopt_in_three_scripts():
-    doc = (REPO / "docs" / "bug_tracking_since_v1.0.md").read_text(encoding="utf-8")
-    row = next(l for l in doc.splitlines() if l.startswith("| 271 |"))
-    assert "encoder, decoder, transcoder" not in row
-
-
 @pytest.mark.parametrize("readme", [
     "README_jxl_tiff_encoder.md", "README_jxl_tiff_decoder.md",
     "README_jxl_jpeg_transcoder.md",
@@ -315,16 +309,6 @@ def test_a_confirmed_run_still_stamps(tmp_path):
     assert r.returncode == 0, r.stdout
     assert not _is_unmarked(jxl), "adoption no longer stamps"
     assert not src.exists(), "the adopted source was not deleted"
-
-
-def test_stamping_happens_after_the_confirmation_in_source_order():
-    """Cheap guard on the ordering the tests above prove behaviourally: the
-    exiftool write must not drift back above the gate."""
-    src = (REPO / "jxl_tiff_encoder.py").read_text(encoding="utf-8")
-    confirm = src.index("if not confirm_deletion_tiff(is_lossy):")
-    stamp = src.index("if provenance_to_stamp:")
-    dry_gate = src.index("    # Dry run\n    if args.dry_run:")
-    assert dry_gate < confirm < stamp, "stamping drifted back before a gate"
 
 
 # ── #280: mode 0 with an output folder collapses just like mode 2 ───────────

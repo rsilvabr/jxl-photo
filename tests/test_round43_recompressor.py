@@ -17,6 +17,7 @@ import argparse
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import jxl_recompressor as rec
+
+# The script's own settings, captured before any test runs: "run 2 falls back
+# to the defaults" must compare against what the user wrote at the top of the
+# script, never against a literal copy of the shipped default.
+_SCRIPT_SETTINGS = {name: getattr(rec, name) for name in (
+    "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "OVERWRITE",
+    "TEMP2_DIR")}
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -230,11 +238,15 @@ def test_r2_second_main_does_not_inherit_armed_state(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as second:
         rec.main()
     assert second.value.code == 0
-    assert rec.DELETE_SOURCE is False, "second run inherited --delete-source"
-    assert rec.DELETE_CONFIRM is True, "second run inherited --delete-confirm-off"
-    assert rec.DELETE_SKIPPED is False
-    assert rec.OVERWRITE == "smart", "second run inherited --overwrite"
-    assert rec.TEMP2_DIR is None, "second run inherited --staging"
+    assert rec.DELETE_SOURCE == _SCRIPT_SETTINGS["DELETE_SOURCE"], \
+        "second run inherited --delete-source"
+    assert rec.DELETE_CONFIRM == _SCRIPT_SETTINGS["DELETE_CONFIRM"], \
+        "second run inherited --delete-confirm-off"
+    assert rec.DELETE_SKIPPED == _SCRIPT_SETTINGS["DELETE_SKIPPED"]
+    assert rec.OVERWRITE == _SCRIPT_SETTINGS["OVERWRITE"], \
+        "second run inherited --overwrite"
+    assert rec.TEMP2_DIR == _SCRIPT_SETTINGS["TEMP2_DIR"], \
+        "second run inherited --staging"
 
 
 def test_r3_progress_counter_is_zeroed_per_run(tmp_path, monkeypatch):
@@ -336,6 +348,17 @@ def _in_place_singles(tmp_path, monkeypatch, names, mpg_of=None, on_convert=None
     return items, srcs
 
 
+def _read_settled(path, tries=40):
+    """Antivirus scanners briefly lock a file that was just renamed into
+    place (Errno 13 on Windows); the product never re-reads it, the test does."""
+    for _ in range(tries - 1):
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            time.sleep(0.05)
+    return path.read_bytes()
+
+
 def test_r4_single_file_is_replaced_the_moment_it_settles(tmp_path, monkeypatch):
     """Only multi-page pages wait for their group. A plain in-place file is
     replaced as soon as it settles — deferring every file to the end of the
@@ -345,7 +368,7 @@ def test_r4_single_file_is_replaced_the_moment_it_settles(tmp_path, monkeypatch)
     def on_convert(src):
         if src.name == "b.jxl":
             # a.jxl settled before b.jxl was even converted (1 worker).
-            seen["a_when_b_converts"] = (tmp_path / "a.jxl").read_bytes()
+            seen["a_when_b_converts"] = _read_settled(tmp_path / "a.jxl")
 
     items, srcs = _in_place_singles(tmp_path, monkeypatch, ["a.jxl", "b.jxl"],
                                     on_convert=on_convert)

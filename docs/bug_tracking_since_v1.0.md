@@ -30,6 +30,7 @@ v2.4.0 / 2026-09-27: Per-row export columns in manifests (ExportMarker/ExportSub
 Round 43 / 2026-10-01: The 261001 audit of the `--exclude-folders` feature and the whole repo - the last two members of the #419 skipped-path provenance family (`--delete-skipped` in the encoder and decoder could delete a master on a foreign same-named output), the #432/#433 ports, the run-scoped-global leak in all four children, and the wrapper/manifest batch (see top section)
 v2.5.0 / 2026-10-02: Round 43 released as v2.5.0, together with --exclude-folders (encoder, decoder, wizard, manifests) - see new_features_since_v1.0.md
 Round 44 / 2026-10-04: The scheduled MOBILE run — 30 recompressor workers at d=3 e=7 ran out of memory (314 errors) and one worker hung forever in a subprocess reader thread (see top section)
+Round 45 / 2026-10-05: subprocess capture without reader threads in every backend, the ignore-mode page size, logs out of the repository, the Start-in note (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -40,6 +41,25 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
+
+## Round-45 — subprocess without reader threads, the ignore-mode page size, logs out of the repository (2026-10-05)
+
+The follow-up round to Round 44: #471's `_run_captured` (temp-file capture, no
+`communicate()` reader threads) is extended to every remaining `subprocess.run`
+call in the four backends and to the transcoder's `check=True` decode calls,
+the encoder's `--multipage-mode ignore` records the page size so the memory cap
+stops assuming the 60 MP fallback, and the test suite plus the real-photo
+battery route their logs out of the repository with `JXLPHOTO_LOG_DIR`
+(`tests/test_subprocess_capture.py`, `tests/test_log_dir.py` pin it). #476
+corrects the *Start in* note the docs got wrong. Nothing here changes what the
+tools convert; without the environment variable set, behaviour is identical.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 473 | **Codec calls still used `subprocess.run(capture_output=True)` — the Round-44 fix covered only `_run_exiftool_argfile` and the recompressor.** `capture_output` makes `communicate()` start reader threads (the #471 hang class) in every backend's djxl/magick/cjxl path, and the transcoder's `decode_to_image` ran three calls with `check=True` whose `CalledProcessError` handler kept the FIRST 200 characters of stderr — djxl's version banner — so the line that said what failed was cut off. | encoder, decoder, transcoder, recompressor | ✅ FIXED (every call goes through `_run_captured`, which now also accepts `input=` (written from the calling thread — stdin never starts a reader thread), so the `convert_one` stdin path keeps `--ram` behaviour; `_stderr_tail` is shared by the four parity-pinned copies and the codec error messages keep the LAST 200 characters; the three `check=True` calls in `decode_to_image` became plain `_run_captured` + `returncode` checks raising `RuntimeError("djxl: ...")`/`("magick: ...")`. The version probes (`_tool_version`, `_warn_if_libjxl_too_old`) keep `capture_output` deliberately — an unusable temp capture must fail the probe into "version unknown", never silently disable the libjxl 0.12 paths. Test: `tests/test_subprocess_capture.py` — the AST sweep `test_no_subprocess_call_outside_the_capture_helper` and the real-run `test_a_real_run_starts_no_reader_thread` fail against the pre-fix code) |
+| 474 | **The memory cap read the fallback 60 MP in `--multipage-mode ignore`.** `convert_multipage`'s ignore branch never recorded a page's pixel count into `_PAGE_PIXELS`, so every ignore-mode worker was estimated at `_UNKNOWN_IMAGE_PIXELS` and `--workers` was reduced below what the real (small) pages need. | encoder | ✅ FIXED (the ignore branch records `imagewidth × imagelength` for page 0 like the other modes. Test: `tests/test_memory_workers.py::test_encoder_ignore_mode_records_page_pixels` — fails against the pre-fix code with a KeyError) |
+| 475 | **The test suite wrote its logs into the repository.** `LOG_DIR` is computed at import relative to the script, and scripts run as subprocesses could not be redirected by monkeypatching — every test run grew `Logs\` next to the scripts (~25 700 files, synced by OneDrive), and `rejected_files.log` ignored the script's own `LOG_DIR` and sat in `SCRIPT_DIR / "Logs"` by name. | encoder, decoder, transcoder, recompressor, wrapper | ✅ FIXED (`JXLPHOTO_LOG_DIR` (environment variable) moves every log folder — set in `tests/conftest.py` at import time to a temp folder removed at session end, after `logging.shutdown()` closes the log files Windows would not let it delete (before any test imports a script; subprocesses inherit it) and by the real-photo battery's `run()`; `rejected_files.log` writes to `LOG_DIR`. Unset, behaviour is identical. Tests: `tests/test_log_dir.py` — each script's `LOG_DIR` in a subprocess with the variable set, `_log_rejected_file` under a monkeypatched `LOG_DIR`, and a suite-level check that the log dir is outside the repository) |
+| 476 | **The scheduled-run docs explained *Start in* wrongly: they claimed a blank field "is where the logs then land".** Logs are relative to the SCRIPT folder, never to the working directory — what a blank *Start in* really does is start the task in `C:\Windows\System32`, where `py jxl_photo.py` cannot find the script and every run dies with `can't open file ...` and exit code 2, indistinguishable from "no such preset". | wrapper (docs) | ✅ FIXED (`docs/README_jxl_tools.md`'s *Start in* bullet and the manifest README's step 4 now say what happens — the `.cmd` example with `cd /d "%~dp0"` and its bullet were already correct) |
 
 ## Round-44 — memory (2026-10-04)
 

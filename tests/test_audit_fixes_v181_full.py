@@ -17,6 +17,7 @@ Regression tests for the v1.8.1 audit fixes (full-audit rounds):
 
 import argparse
 import json
+import logging
 import os
 import sys
 import threading
@@ -38,18 +39,6 @@ class _FakeRun:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
-
-
-@pytest.fixture(autouse=True)
-def _reset_globals():
-    yield
-    enc.OVERWRITE = "smart"
-    enc.TEMP2_DIR = None
-    enc.DELETE_SOURCE = False
-    tr.DELETE_SOURCE = False
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
-    dec.TEMP2_DIR = None
 
 
 # ---------------------------------------------------------------------------
@@ -1157,7 +1146,7 @@ def test_finders_exclude_only_decode_outputs_from_encode_scans(tmp_path):
     assert [f.name for f in enc.find_tiffs_recursive(tmp_path)] == ["photo.tif"]
 
 
-def test_roundtrip_mode7_decoder_finds_encoder_output(tmp_path):
+def test_roundtrip_mode7_decoder_finds_encoder_output(tmp_path, monkeypatch):
     """Regression for the 9f40d3d breakage: encoder mode 7 writes
     _EXPORT/16B_JXL/photo.jxl; the decoder mode 7 must FIND it."""
     session = tmp_path / "c1" / "Kyoto" / "_EXPORT"
@@ -1166,7 +1155,6 @@ def test_roundtrip_mode7_decoder_finds_encoder_output(tmp_path):
                      np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
 
     enc.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(enc, "OVERWRITE", True)
     monkeypatch.setattr(enc, "TEMP2_DIR", None)
     # Run the encoder planning+finder exactly as main() does (mode 7)
@@ -1182,7 +1170,6 @@ def test_roundtrip_mode7_decoder_finds_encoder_output(tmp_path):
     found = dec.find_jxls_mode7(tmp_path / "c1")
     assert [f.name for f in found] == ["photo.jxl"], \
         f"decoder lost the encoder's output: {found}"
-    monkeypatch.undo()
 
 
 def test_magick_icc_args_srgb_uses_profile():
@@ -1251,7 +1238,7 @@ def test_grayscale_flag_from_array_not_metadata(monkeypatch, tmp_path):
     assert gray_calls == []
 
 
-def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
+def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path, monkeypatch):
     """add_jpeg_preview on a gray+alpha TIFF: preview written (not LA-fail)
     and never larger than the source."""
     pytest.importorskip("imagecodecs")
@@ -1261,7 +1248,6 @@ def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
     with tifffile.TiffWriter(str(la_tiff)) as t:
         t.write(img, photometric="minisblack", extrasamples=["unassalpha"])
     dec.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
     dec.add_jpeg_preview(la_tiff, tmp_path, None)
     with tifffile.TiffFile(str(la_tiff)) as t:
@@ -1269,7 +1255,6 @@ def test_la_preview_no_upscale_and_no_la_jpeg(tmp_path):
         prev = t.pages[1]
         assert prev.imagewidth <= 64 and prev.imagelength <= 48, \
             f"preview upscaled: {prev.imagewidth}x{prev.imagelength}"
-    monkeypatch.undo()
 
 
 # ---------------------------------------------------------------------------
@@ -1405,18 +1390,16 @@ def test_icc_warn_only_on_encode_direction(monkeypatch, tmp_path):
     assert any("ignored" in m.lower() for m in seen), f"no encode-ignore warning: {seen}"
 
 
-def test_decode_to_image_fails_without_magick(tmp_path):
+def test_decode_to_image_fails_without_magick(tmp_path, monkeypatch):
     jxl = tmp_path / "a.jxl"
     jxl.write_bytes(b"\x00" * 32)
     out = tmp_path / "a.jpg"
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "MAGICK_AVAILABLE", False)
     monkeypatch.setattr(tr, "should_process", lambda *a, **k: True)
     (_s, status, msg, _) = tr.decode_to_image(jxl, out, out, 95, "jpeg", 8, "sRGB", True, False, False)
     assert status == "error"
     assert "ImageMagick" in msg
-    monkeypatch.undo()
 
 
 def test_mode7_recommend_single_vs_multiple_subfolders(tmp_path):
@@ -1502,14 +1485,13 @@ def test_zero_byte_output_no_md5_entry(monkeypatch, tmp_path):
     assert not (tmp_path / "checksums.md5").exists(), "md5 entry written for invalid output"
 
 
-def test_decode_delete_requires_md5_on_old_djxl(tmp_path):
+def test_decode_delete_requires_md5_on_old_djxl(tmp_path, monkeypatch):
     """djxl < 0.12 + no stored MD5 -> source kept even when output looks fine."""
     src = tmp_path / "a.jxl"
     src.write_bytes(b"\x00" * 32)
     final = tmp_path / "a.jpg"
     final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
     monkeypatch.setattr(tr, "STORE_MD5", True)
     monkeypatch.setattr(tr, "DELETE_SOURCE", True)
@@ -1518,7 +1500,6 @@ def test_decode_delete_requires_md5_on_old_djxl(tmp_path):
     monkeypatch.setattr(tr, "decode_one_transcode", lambda *a, **k: results[0])
     tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
     assert src.exists(), "source deleted without MD5 on old djxl"
-    monkeypatch.undo()
 
 
 def test_mode4_token_replace():
@@ -1590,7 +1571,7 @@ def test_thumbnail_ignore_sources_kept_in_mode8(tmp_path, monkeypatch):
 # twelfth-pass fixes
 # ---------------------------------------------------------------------------
 
-def test_no_verify_with_stored_wrong_md5_keeps_source(tmp_path):
+def test_no_verify_with_stored_wrong_md5_keeps_source(tmp_path, monkeypatch):
     """--no-verify + djxl<0.12: an 'ok' result with NO md5 verification must
     NOT allow deletion — even if a (wrong) MD5 entry exists on disk."""
     src = tmp_path / "photo.jxl"
@@ -1599,7 +1580,6 @@ def test_no_verify_with_stored_wrong_md5_keeps_source(tmp_path):
     final = tmp_path / "photo.jpg"
     final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)  # simulate djxl 0.11
     monkeypatch.setattr(tr, "DELETE_SOURCE", True)
     monkeypatch.setattr(tr, "TEMP2_DIR", None)
@@ -1608,17 +1588,15 @@ def test_no_verify_with_stored_wrong_md5_keeps_source(tmp_path):
                         lambda *a, **k: (str(src), "ok", str(final), None))
     tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
     assert src.exists(), "source deleted without a passing MD5 verification"
-    monkeypatch.undo()
 
 
-def test_md5_verified_result_allows_delete_on_old_djxl(tmp_path):
+def test_md5_verified_result_allows_delete_on_old_djxl(tmp_path, monkeypatch):
     """djxl<0.12 + MD5 PASS this run (result[3] is truthy) -> deletion allowed."""
     src = tmp_path / "photo.jxl"
     src.write_bytes(b"\x00" * 32)
     final = tmp_path / "photo.jpg"
     final.write_bytes(b"\xff\xd8" + b"\x00" * 100 + b"\xff\xd9")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "_tool_at_least", lambda *a: False)
     monkeypatch.setattr(tr, "DELETE_SOURCE", True)
     monkeypatch.setattr(tr, "TEMP2_DIR", None)
@@ -1626,7 +1604,6 @@ def test_md5_verified_result_allows_delete_on_old_djxl(tmp_path):
                         lambda *a, **k: (str(src), "ok", str(final), True))
     tr.process_group_transcode([(src, final)], 1, True, False, 8, False, False)
     assert not src.exists(), "MD5-verified recovery should allow deletion"
-    monkeypatch.undo()
 
 
 def test_ppm_single_line_header(tmp_path):
@@ -1642,14 +1619,13 @@ def test_wrapper_mode4_preview_matches_token_rule():
     assert wp._replace_suffix_token("Export_TIFF", "tiff", "JXL") == "Export_JXL"
 
 
-def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path):
+def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path, monkeypatch):
     """add_jpeg_preview must write metadata=None/software='' so the TIFF
     carries no tifffile default Software/ImageDescription."""
     pytest.importorskip("imagecodecs")
     src_tiff = tmp_path / "x.tif"
     tifffile.imwrite(src_tiff, np.zeros((32, 32, 3), dtype=np.uint16), photometric="rgb")
     dec.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", True)
     dec.add_jpeg_preview(src_tiff, tmp_path, None)
     with tifffile.TiffFile(str(src_tiff)) as t:
@@ -1658,7 +1634,6 @@ def test_preview_rewrite_has_no_tifffile_default_tags(tmp_path):
         desc = pg.tags.get('ImageDescription')
         assert sw is None, f"tifffile Software tag leaked: {sw and sw.value!r}"
         assert desc is None, f"shaped-JSON ImageDescription leaked"
-    monkeypatch.undo()
 
 
 def test_bare_codestream_rejected_at_gates(tmp_path):
@@ -1752,18 +1727,21 @@ def test_identity_helper_deletes_changed_and_keeps_unchanged(tmp_path):
     assert not f.exists()
 
 
-def test_encoder_single_file_modes_3_4_5(monkeypatch, tmp_path):
+def test_encoder_single_file_modes_3_4_5(monkeypatch, tmp_path, caplog):
     src = tmp_path / "photo.tif"
     tifffile.imwrite(src, np.zeros((8, 8, 3), dtype=np.uint16), photometric="rgb")
     enc.setup_logger()
     for mode in (3, 4, 5):
         monkeypatch.setattr(sys, "argv",
                             ["jxl_tiff_encoder.py", str(src), "--mode", str(mode), "--dry-run"])
-        enc.main()  # must NOT find 0 files / crash
+        with caplog.at_level(logging.INFO, logger=enc.logger.name):
+            enc.main()  # must NOT find 0 files / crash
+        assert "Files found: 1" in caplog.text, mode
+        caplog.clear()
 
 
 @pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches wp.Confirm which requires rich")
-def test_manifest_empty_destination_falls_back_to_source(tmp_path):
+def test_manifest_empty_destination_falls_back_to_source(tmp_path, monkeypatch):
     import csv
     manifest = tmp_path / "m.csv"
     with open(manifest, "w", newline="", encoding="utf-8") as f:
@@ -1774,12 +1752,10 @@ def test_manifest_empty_destination_falls_back_to_source(tmp_path):
     menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
     menu._pick_manifest = lambda: str(manifest)
     workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    monkeypatch.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
     assert menu._wizard_run_from_manifest(workflow) is True
     assert workflow["manifest_entries"][0][1] == str(tmp_path), \
         "empty Destination must fall back to Source, never Path('.')"
-    monkey.undo()
 
 
 # ---------------------------------------------------------------------------
@@ -1834,7 +1810,7 @@ def test_thumbnail_helpers_safe_with_empty_suffix(monkeypatch):
     assert dec._parse_jxl_page_suffix("photo") == ("photo", 0, False)
 
 
-def test_encode_delete_gate_requires_jbrd(tmp_path):
+def test_encode_delete_gate_requires_jbrd(tmp_path, monkeypatch):
     """Encode direction: a structurally valid JXL WITHOUT jbrd must not
     authorize deleting the source JPEG (it is not recoverable)."""
     src = tmp_path / "a.jpg"
@@ -1843,7 +1819,6 @@ def test_encode_delete_gate_requires_jbrd(tmp_path):
     # structurally valid container with jxlc but NO jbrd
     final.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + (8).to_bytes(4, "big") + b"jxlc")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "DELETE_SOURCE", True)
     monkeypatch.setattr(tr, "STORE_MD5", True)
     monkeypatch.setattr(tr, "TEMP2_DIR", None)
@@ -1851,7 +1826,6 @@ def test_encode_delete_gate_requires_jbrd(tmp_path):
     monkeypatch.setattr(tr, "encode_one_transcode", lambda *a, **k: results[0])
     tr.process_group_transcode([(src, final)], 1, False, False, 8, False, False)
     assert src.exists(), "source deleted for a JXL without jbrd"
-    monkeypatch.undo()
 
 
 def test_ppm_comment_on_magic_line(tmp_path):
@@ -1922,14 +1896,13 @@ def test_png_lossless_convert_produces_container():
         assert tr._verify_file_integrity(out)
 
 
-def test_jbrd_gate_independent_of_md5_setting(tmp_path):
+def test_jbrd_gate_independent_of_md5_setting(tmp_path, monkeypatch):
     """--no-md5 must NOT disable the jbrd check on the encode delete gate."""
     src = tmp_path / "a.jpg"
     src.write_bytes(b"\xff\xd8fake")
     final = tmp_path / "a.jxl"
     final.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + (8).to_bytes(4, "big") + b"jxlc")
     tr.setup_logger()
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(tr, "DELETE_SOURCE", True)
     monkeypatch.setattr(tr, "STORE_MD5", False)  # --no-md5
     monkeypatch.setattr(tr, "TEMP2_DIR", None)
@@ -1937,15 +1910,13 @@ def test_jbrd_gate_independent_of_md5_setting(tmp_path):
     monkeypatch.setattr(tr, "encode_one_transcode", lambda *a, **k: results[0])
     tr.process_group_transcode([(src, final)], 1, False, False, 8, False, False)
     assert src.exists(), "jbrd-less JXL authorized delete under --no-md5"
-    monkeypatch.undo()
 
 
-def test_dry_run_does_not_ask_hhmm(tmp_path):
+def test_dry_run_does_not_ask_hhmm(tmp_path, monkeypatch):
     """With the HHMM gate at execution time, a dry-run never charges the token."""
     cfg = wp.ConfigManager()
     menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
     called = {"n": 0}
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(menu, "_confirm_archive_mode", lambda: called.__setitem__("n", 1) or True)
     workflow = {
         'mode': 8, 'advanced_options': {'delete_source': True}, 'dry_run': True,
@@ -1957,7 +1928,6 @@ def test_dry_run_does_not_ask_hhmm(tmp_path):
     monkeypatch.setattr(menu, "_run_subprocess", lambda cmd: 0)
     menu.execute_workflow(workflow, {})
     assert called["n"] == 0, "HHMM was asked for a dry-run"
-    monkeypatch.undo()
 
 
 def test_la_tiff_roundtrip_png_channels():
@@ -1999,13 +1969,12 @@ def test_preview_does_not_reattach_icc_on_inherited_page(monkeypatch, tmp_path):
         assert 34675 not in t.pages[0].tags, "inherited page got an ICC tag via the preview rewrite"
 
 
-def test_repeat_path_has_single_hhmm_gate(tmp_path):
+def test_repeat_path_has_single_hhmm_gate(tmp_path, monkeypatch):
     """execute_workflow owns the single execution-time HHMM gate; the repeat
     path must NOT ask twice."""
     cfg = wp.ConfigManager()
     menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
     calls = {"n": 0}
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(menu, "_confirm_archive_mode",
                         lambda: calls.__setitem__("n", calls["n"] + 1) or True)
     monkeypatch.setattr(menu, "_run_subprocess", lambda cmd: 0)
@@ -2018,7 +1987,6 @@ def test_repeat_path_has_single_hhmm_gate(tmp_path):
     }
     menu.execute_workflow(workflow, {})
     assert calls["n"] == 1, f"HHMM asked {calls['n']} times"
-    monkeypatch.undo()
 
 
 def test_mode_config_filtered_by_mode_in_repeat():

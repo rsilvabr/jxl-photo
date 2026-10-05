@@ -41,15 +41,6 @@ def _args(tmp_path, **kw):
     return argparse.Namespace(**base)
 
 
-@pytest.fixture(autouse=True)
-def _reset_globals():
-    yield
-    tr.DELETE_SOURCE = False
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
-    tr.DELETE_CONFIRM = True
-
-
 # ---------------------------------------------------------------------------
 # duplicate output abort
 # ---------------------------------------------------------------------------

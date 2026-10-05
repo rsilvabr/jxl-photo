@@ -753,7 +753,11 @@ DELETE_CONFIRM = True
 # passes --delete-confirm-off.
 
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR = SCRIPT_DIR / "Logs" / "jxl_recompressor"
+# JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
+# the test suite and the real-photo battery set it so their runs never
+# land in Logs\ next to the scripts.
+LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
+           else SCRIPT_DIR / "Logs") / "jxl_recompressor"
 
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
@@ -775,17 +779,6 @@ _MEMORY_ERROR_SIGNATURES = ("winerror 1455", "memoryerror", "bad_alloc",
                             "jxlencoderprocessoutput failed",
                             "failed to create image frame",
                             "getting pixel data failed")
-
-
-def _stderr_tail(stderr, limit=200):
-    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
-    error message. The head is the wrong end: cjxl prints its version banner
-    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
-    of the 314 errors of the 2026-10-04 run were logged without the line that
-    said what failed."""
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode(errors="replace")
-    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
 
 # --output-icc runtime state, reset at the top of main() (the test suite runs
 # several main()s in one process).
@@ -1174,7 +1167,7 @@ _rejected_log_lock = threading.Lock()
 def _log_rejected_file(file_path, reason):
     """Log rejected files to Logs/jxl_recompressor/rejected_files.log for easy review."""
     try:
-        rej_dir = SCRIPT_DIR / "Logs" / "jxl_recompressor"
+        rej_dir = LOG_DIR
         rej_dir.mkdir(parents=True, exist_ok=True)
         rej_file = rej_dir / "rejected_files.log"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1412,9 +1405,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -1487,9 +1479,8 @@ def _read_derived_markers_batch(paths: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Derivative check: could not read markers for a batch "
                                f"of {len(chunk)} file(s) (rc={r.returncode})")
@@ -1568,7 +1559,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False):
+def _run_captured(cmd, timeout, text=False, input=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -1578,11 +1569,16 @@ def _run_captured(cmd, timeout, text=False):
     lost a manifest that way (one worker hung 60 min until the wrapper killed
     the child). With files there is no thread: a failed spawn raises OSError,
     which the callers already handle.
+
+    `input` (bytes) goes to the child's stdin, written from THIS thread:
+    communicate() starts reader threads only for PIPE stdout/stderr, never
+    for stdin.
     """
+    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
-                           timeout=timeout)
+        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                           **stdin_kw)
         out.seek(0)
         err.seek(0)
         o = r.stdout if r.stdout is not None else out.read()
@@ -1593,6 +1589,17 @@ def _run_captured(cmd, timeout, text=False):
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
     return _CompletedProcess(cmd, r.returncode, o, e)
+
+
+def _stderr_tail(stderr, limit=200):
+    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
+    error message. The head is the wrong end: cjxl prints its version banner
+    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
+    of the 314 errors of the 2026-10-04 run were logged without the line that
+    said what failed."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
 
 
 def _run_exiftool_argfile(args_lines, timeout=60):
@@ -1796,9 +1803,8 @@ def _read_encode_params_batch(paths: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Encode-tag read failed for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode}) — "
@@ -2085,10 +2091,9 @@ def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path):
     """Decode a JXL back to pixels. Raises on any failure — a verification that
     cannot run must never read as a verification that passed."""
     png_path = tmp_dir / "verify.png"
-    r = subprocess.run(["djxl", str(jxl_path), str(png_path)],
-                       capture_output=True, timeout=CJXL_TIMEOUT)
+    r = _run_captured(["djxl", str(jxl_path), str(png_path)], CJXL_TIMEOUT)
     if r.returncode != 0 or not png_path.exists():
-        raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+        raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
@@ -3506,9 +3511,8 @@ def _read_mpg_markers(paths: list):
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if r.returncode != 0 or not r.stdout:
                 complete = False
                 continue

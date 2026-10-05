@@ -812,7 +812,11 @@ _CHILD_USAGE_ERROR_RE = re.compile(r"^\s*(\S+\.py): error: (.+)$")
 # Where the wrapper writes its own combined log for a manifest run. Each entry
 # is a separate child with its own log file, so before this there was no single
 # place holding the totals or the full failure list.
-WRAPPER_LOG_DIR = SCRIPT_DIR / "Logs" / "jxl_photo"
+# JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
+# the test suite and the real-photo battery set it so their runs never
+# land in Logs\ next to the scripts.
+WRAPPER_LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
+                   else SCRIPT_DIR / "Logs") / "jxl_photo"
 
 
 @dataclass

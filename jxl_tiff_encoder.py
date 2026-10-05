@@ -1196,7 +1196,11 @@ STRIP_METADATA = False
 # Can also be set via --strip CLI flag.
 
 SCRIPT_DIR = Path(__file__).parent
-LOG_DIR    = SCRIPT_DIR / "Logs" / Path(__file__).stem
+# JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
+# the test suite and the real-photo battery set it so their runs never
+# land in Logs\ next to the scripts.
+LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_DIR")
+           else SCRIPT_DIR / "Logs") / Path(__file__).stem
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0,
@@ -1486,7 +1490,7 @@ _rejected_log_lock = threading.Lock()
 def _log_rejected_file(file_path, reason):
     """Log rejected files to Logs/jxl_tiff_encoder/rejected_files.log for easy review."""
     try:
-        rej_dir = SCRIPT_DIR / "Logs" / "jxl_tiff_encoder"
+        rej_dir = LOG_DIR
         rej_dir.mkdir(parents=True, exist_ok=True)
         rej_file = rej_dir / "rejected_files.log"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1667,7 +1671,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False):
+def _run_captured(cmd, timeout, text=False, input=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -1677,11 +1681,16 @@ def _run_captured(cmd, timeout, text=False):
     lost a manifest that way (one worker hung 60 min until the wrapper killed
     the child). With files there is no thread: a failed spawn raises OSError,
     which the callers already handle.
+
+    `input` (bytes) goes to the child's stdin, written from THIS thread:
+    communicate() starts reader threads only for PIPE stdout/stderr, never
+    for stdin.
     """
+    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdin=_DEVNULL, stdout=out, stderr=err,
-                           timeout=timeout)
+        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                           **stdin_kw)
         out.seek(0)
         err.seek(0)
         o = r.stdout if r.stdout is not None else out.read()
@@ -1694,13 +1703,25 @@ def _run_captured(cmd, timeout, text=False):
     return _CompletedProcess(cmd, r.returncode, o, e)
 
 
+def _stderr_tail(stderr, limit=200):
+    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
+    error message. The head is the wrong end: cjxl prints its version banner
+    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
+    of the 314 errors of the 2026-10-04 run were logged without the line that
+    said what failed."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
     Using an argfile instead of raw argv avoids two Windows pitfalls:
     paths containing [ ] being treated as wildcards, and non-ASCII paths
     being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured through temp files — see _run_captured).
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
+    through temp files — see _run_captured).
     """
     argfile = None
     try:
@@ -1723,7 +1744,7 @@ def _run_exiftool_argfile(args_lines, timeout=60):
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
-    r = subprocess.run([_get_exiftool_cmd(), "-@", str(arg_file)], capture_output=True, timeout=60)
+    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg_file)], 60)
     if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
         p = tmp_dir / f"{tiff_path.stem}.exif.bin"
         p.write_bytes(r.stdout)
@@ -1743,9 +1764,8 @@ def get_exif_software(tiff_path_str):
         with tempfile.TemporaryDirectory(prefix="exiftmp_") as tmp:
             arg_file = Path(tmp) / "args.txt"
             arg_file.write_text(f"{_ARGFILE_CHARSET}-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-            r = subprocess.run(
-                [_get_exiftool_cmd(), "-@", str(arg_file)],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10
+            r = _run_captured(
+                [_get_exiftool_cmd(), "-@", str(arg_file)], 10, text=True
             )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -1997,16 +2017,16 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
         if CJXL_MODULAR and CJXL_DISTANCE > 0:
             cmd.append("--modular=1")
 
-        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        r = _run_captured(cmd, 120)
         if r.returncode != 0:
-            logger.debug(f"Cautious ICC test encode failed at {depth}-bit: {r.stderr.decode(errors='replace')[:200]}")
+            logger.debug(f"Cautious ICC test encode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
             return False
 
         out_png = tmp / "out.png"
         icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
-        r = subprocess.run(["djxl", str(jxl_path), str(out_png)] + icc_args, capture_output=True, timeout=120)
+        r = _run_captured(["djxl", str(jxl_path), str(out_png)] + icc_args, 120)
         if r.returncode != 0 or not out_png.exists():
-            logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {r.stderr.decode(errors='replace')[:200]}")
+            logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
             return False
 
         if CJXL_DISTANCE > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
@@ -2167,9 +2187,9 @@ def extract_xmp_original(tiff_path, tmp_dir):
     # Correct order: -o output.xmp -b -XMP input.tif
     arg_file = tmp_dir / "xmp_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-o\n{xmp_path}\n-b\n-XMP\n{tiff_path}\n", encoding="utf-8")
-    subprocess.run(
+    _run_captured(
         [_get_exiftool_cmd(), "-@", str(arg_file)],
-        capture_output=True, timeout=60
+        60
     )
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
         return xmp_path
@@ -2543,7 +2563,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # (keeping any unrelated text, e.g. a real editor name).
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: a failed Software read cannot tell a
             # stale chain from no chain, and -tagsfromfile -exif:all would
@@ -2587,7 +2607,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # Instead, we update the EXIF Software field.
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: same stale-chain contamination as the
             # "xmp" branch above — an unread Software field would leave the
@@ -2647,7 +2667,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
             args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = subprocess.run([_get_exiftool_cmd(), "-@", str(sw_arg)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: "off" must be a DELIBERATE discard of
             # the lineage, not an accident of a failed read (the stale chain
@@ -3041,7 +3061,7 @@ def _sample_one_ratio(tiff_path: Path, distance: float, effort: int):
         # under-report the space a --modular run needs.
         if CJXL_MODULAR and distance > 0:
             cmd.append("--modular=1")
-        r = subprocess.run(cmd, capture_output=True, timeout=300)
+        r = _run_captured(cmd, 300)
         if r.returncode != 0 or not jxl.exists():
             return None
         den = crop_tif.stat().st_size
@@ -3317,9 +3337,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -3445,10 +3464,9 @@ def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path) -> np.ndarray:
     """Decode a JXL back to pixels. Raises on any failure — a verification that
     cannot run must never read as a verification that passed."""
     png_path = tmp_dir / "verify.png"
-    r = subprocess.run(["djxl", str(jxl_path), str(png_path)],
-                       capture_output=True, timeout=CJXL_TIMEOUT)
+    r = _run_captured(["djxl", str(jxl_path), str(png_path)], CJXL_TIMEOUT)
     if r.returncode != 0 or not png_path.exists():
-        raise RuntimeError(f"djxl: {(r.stderr or b'').decode(errors='replace')[:200]}")
+        raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
@@ -3803,7 +3821,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
-                r = subprocess.run(cjxl_cmd, input=png_input, capture_output=True, timeout=CJXL_TIMEOUT)
+                r = _run_captured(cjxl_cmd, CJXL_TIMEOUT, input=png_input)
                 del png_input
             else:
                 png_path = tmp_dir / f"{tiff_path.stem}.png"
@@ -3813,10 +3831,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del png_bytes
                 cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
                 output_dirty = True
-                r = subprocess.run(cjxl_cmd, capture_output=True, timeout=CJXL_TIMEOUT)
+                r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
 
             if r.returncode != 0:
-                err = (r.stderr or b"").decode(errors='replace')[:200]
+                err = _stderr_tail(r.stderr)
                 raise RuntimeError(f"cjxl: {err}")
 
             # 6. Build and execute unified metadata injection (CORRECTED - replaces old steps 5+7)
@@ -3829,8 +3847,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 src_path_id=_src_path_id, src_content_id=_src_content_id
             )
             
-            r2 = subprocess.run([_get_exiftool_cmd(), "-@", str(inject_args)],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+            r2 = _run_captured([_get_exiftool_cmd(), "-@", str(inject_args)],
+                              60, text=True)
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
@@ -4175,6 +4193,13 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                 # read the real value from _analyze_tiff_pages).
                 subfiletype = (int(tif.pages[0].subfiletype)
                                if tif.pages[0].subfiletype else 0)
+                try:
+                    _px = (int(tif.pages[0].imagewidth or 0)
+                           * int(tif.pages[0].imagelength or 0))
+                except (TypeError, ValueError):
+                    _px = 0
+                with _PAGE_PIXELS_LOCK:
+                    _PAGE_PIXELS[(os.path.normcase(str(tiff_path)), 0)] = _px
                 # Counting the IFD chain only follows offsets (no pixel decode),
                 # and this is the ONLY place that can tell the user pages are
                 # being dropped: "ignore" encodes page 0 and discards the rest,
@@ -4410,9 +4435,8 @@ def _read_group_markers_batch(outputs: list) -> dict:
                 af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
                 af.write(chr(10))
                 argfile = af.name
-            r = subprocess.run([_get_exiftool_cmd(), "-@", argfile],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=180)
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              180, text=True)
             if not r.stdout:
                 continue
             for entry in json.loads(r.stdout):

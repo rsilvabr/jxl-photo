@@ -30,9 +30,27 @@ import-time values are captured instead (`_RUN_DEFAULTS` / the decoder's
 pre-run record), so even that test cannot leak its flags.
 """
 
+import logging
+import os
+import shutil
 import sys
+import tempfile
 
 import pytest
+
+# Every log the suite produces — in-process main() runs and scripts run as
+# subprocesses — goes to a throwaway folder instead of Logs\ next to the
+# scripts (that folder had grown to ~25 700 files, synced by OneDrive).
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="jxlphoto_test_logs_")
+os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # The scripts' FileHandlers keep their last log open, and Windows cannot
+    # delete an open file: close them first or the folder is left behind.
+    logging.shutdown()
+    shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
+
 
 # Reset inline at the top of the transcoder's main(), outside _RUN_DEFAULTS.
 _TRANSCODER_EXTRA_GLOBALS = (

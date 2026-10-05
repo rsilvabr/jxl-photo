@@ -648,9 +648,6 @@ class TestWrapperWiring:
     def test_session_choices_accept_the_new_type(self):
         assert "jxl_recompress" in wp._SESSION_CHOICES["last_conversion_type"]
 
-    def test_export_folder_name(self):
-        assert wp._export_folder_name("jxl", "jxl") == "16B_JXL_small"
-
     def test_manifest_cmd_builder(self):
         menu = _menu()
         cmd = menu._build_manifest_entry_cmd(

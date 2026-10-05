@@ -109,10 +109,6 @@ def _args(tmp_path, **kw):
 def _reset_globals():
     tr._run_summary.clear()
     yield
-    tr.DELETE_SOURCE = False
-    tr.DELETE_CONFIRM = True
-    tr.TEMP2_DIR = None
-    tr.STORE_MD5 = True
     tr._reset_abort()
     tr._delete_stats.update({"deleted": 0, "deleted_archived": 0, "kept": 0})
     tr._auto_repaired.clear()

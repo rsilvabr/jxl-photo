@@ -572,7 +572,7 @@ def test_reconstruct_temp_honors_temp_dir(tmp_path, monkeypatch):
 # B10 — wrapper mirrors the real finders; repair needs no cjxl
 # ---------------------------------------------------------------------------
 
-def test_mode6_collision_mirror_matches_the_real_finder(tmp_path):
+def test_mode6_collision_mirror_matches_the_real_finder(tmp_path, monkeypatch):
     """The real mode-6 finder skips decoder-output folders UNCONDITIONALLY
     (honor_requested_subfolder=False); the mirror exempted the requested
     subfolder and reported a collision the child would never produce."""
@@ -585,11 +585,9 @@ def test_mode6_collision_mirror_matches_the_real_finder(tmp_path):
     b.write_bytes(b"x")
     # Sanity: the child's own finder skips the decoder-output folder even
     # with the subfolder explicitly requested.
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(enc, "EXPORT_MARKER", "_EXPORT")
     monkeypatch.setattr(enc, "EXPORT_TIFF_SUBFOLDER", "16B_TIFF")
     found = [f.name for f in enc.find_tiffs_mode6(root)]
-    monkeypatch.undo()
     assert found == ["x.tif"] and len(found) == 1
 
     menu = _menu()

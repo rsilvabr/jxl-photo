@@ -46,6 +46,14 @@ _OVERRIDE = os.environ.get("JXL_ENCODER_UNDER_TEST")
 sys.path.insert(0, str(Path(_OVERRIDE).resolve().parent) if _OVERRIDE else str(_REPO))
 import jxl_tiff_encoder as enc
 
+# The script's own settings, captured before any test runs: "run 2 falls back
+# to the defaults" must compare against what the user wrote at the top of the
+# script, never against a literal copy of the shipped default.
+_SCRIPT_SETTINGS = {name: getattr(enc, name) for name in (
+    "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "VERIFY_ROUNDTRIP",
+    "STRIP_METADATA", "PROVENANCE_CHECK", "ADOPT_SCAN", "EMBED_JPEG_THUMBNAIL",
+    "EXPORT_MARKER", "TEMP2_DIR", "OVERWRITE")}
+
 _JXL_SIG = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
 
 # Run-scoped globals this file can arm through in-process main() calls.
@@ -572,14 +580,17 @@ def test_second_main_run_falls_back_to_defaults(tmp_path, monkeypatch):
                         ["jxl_tiff_encoder.py", str(src_dir), "--mode", "8",
                          "--no-preflight"])
     enc.main()
-    assert enc.DELETE_SOURCE is False, "--delete-source leaked into run 2"
-    assert enc.DELETE_CONFIRM is True, "--delete-confirm-off leaked into run 2"
-    assert enc.DELETE_SKIPPED is False
-    assert enc.VERIFY_ROUNDTRIP is False
-    assert enc.STRIP_METADATA is False
-    assert enc.PROVENANCE_CHECK == "path"
-    assert enc.ADOPT_SCAN is True
-    assert enc.EMBED_JPEG_THUMBNAIL is False
-    assert enc.EXPORT_MARKER == "_EXPORT"
-    assert enc.TEMP2_DIR is None, "--staging leaked into run 2"
-    assert enc.OVERWRITE == "smart"
+    assert enc.DELETE_SOURCE == _SCRIPT_SETTINGS["DELETE_SOURCE"], \
+        "--delete-source leaked into run 2"
+    assert enc.DELETE_CONFIRM == _SCRIPT_SETTINGS["DELETE_CONFIRM"], \
+        "--delete-confirm-off leaked into run 2"
+    assert enc.DELETE_SKIPPED == _SCRIPT_SETTINGS["DELETE_SKIPPED"]
+    assert enc.VERIFY_ROUNDTRIP == _SCRIPT_SETTINGS["VERIFY_ROUNDTRIP"]
+    assert enc.STRIP_METADATA == _SCRIPT_SETTINGS["STRIP_METADATA"]
+    assert enc.PROVENANCE_CHECK == _SCRIPT_SETTINGS["PROVENANCE_CHECK"]
+    assert enc.ADOPT_SCAN == _SCRIPT_SETTINGS["ADOPT_SCAN"]
+    assert enc.EMBED_JPEG_THUMBNAIL == _SCRIPT_SETTINGS["EMBED_JPEG_THUMBNAIL"]
+    assert enc.EXPORT_MARKER == _SCRIPT_SETTINGS["EXPORT_MARKER"]
+    assert enc.TEMP2_DIR == _SCRIPT_SETTINGS["TEMP2_DIR"], \
+        "--staging leaked into run 2"
+    assert enc.OVERWRITE == _SCRIPT_SETTINGS["OVERWRITE"]

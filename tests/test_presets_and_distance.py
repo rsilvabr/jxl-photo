@@ -364,7 +364,7 @@ def test_menu_disables_repeat_when_the_manifest_is_gone(tmp_path, monkeypatch):
     assert choice == "0", "entry [2] must be rejected while its CSV is missing"
 
 
-def test_menu_offers_the_manifest_by_name(tmp_path, monkeypatch):
+def test_menu_offers_the_manifest_by_name(tmp_path, monkeypatch, capsys):
     src = tmp_path / "shoot"
     src.mkdir()
     manifest = _write_manifest(tmp_path / "manifest_20260727.csv", [(str(src), str(src), 6)])
@@ -375,6 +375,7 @@ def test_menu_offers_the_manifest_by_name(tmp_path, monkeypatch):
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=["2"]):
         menu.show_main_menu(True)
+    assert "(manifest: manifest_20260727.csv)" in capsys.readouterr().out
 
 
 def test_a_normal_run_clears_the_stored_manifest(tmp_path, monkeypatch):

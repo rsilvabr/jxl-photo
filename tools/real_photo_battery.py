@@ -27,6 +27,7 @@ every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,7 +65,8 @@ def run(tag, args, timeout=7200):
     t = time.time()
     r = subprocess.run([PY] + [str(a) for a in args], stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=timeout, cwd=str(B))
+                       errors="replace", timeout=timeout, cwd=str(B),
+                       env={**os.environ, "JXLPHOTO_LOG_DIR": str(B / "_script_logs")})
     out = (r.stdout or "") + (r.stderr or "")
     (LOGS / f"{tag}.log").write_text(
         f"$ {' '.join(map(str, args))}\nrc={r.returncode} ({time.time() - t:.0f}s)\n\n{out}",
@@ -321,6 +323,8 @@ def recompressor_foreign_check(A1, A3, pool_jxl):
 
 def memory_cap_checks(A1, pool_jxl):
     section("Worker memory cap")
+    with tifffile.TiffFile(A1) as _t:
+        _mp_expected = (f"{int(_t.pages[0].imagewidth) * int(_t.pages[0].imagelength) / 1e6:.0f}")
     e = B / "mem_enc"
     cp(A1, e / "a.tif")
     rc, out = run("mem_enc", [ENC, e, "--mode", "1", "--distance", "3",
@@ -329,6 +333,10 @@ def memory_cap_checks(A1, pool_jxl):
     check("encoder: --workers 512 at d=3 e=7 is reduced, output written",
           rc == 0 and "--workers 512 reduced to" in out
           and len(list((e / "converted_jxl").glob("*.jxl"))) == 1, f"rc={rc}")
+    _m = re.search(r"Memory: ~[\d.]+ GB per worker \([a-z-]+ encode, (\d+) MP", out)
+    check(f"encoder: the cap read the real image size ({_mp_expected} MP)",
+          bool(_m) and _m.group(1) == _mp_expected,
+          f"log={_m.group(1) if _m else 'none'} expected={_mp_expected}")
     r = B / "mem_rec"
     cp(pool_jxl / A1.with_suffix(".jxl").name, r / "p.jxl")
     rc, out = run("mem_rec", [REC, r, "--mode", "1", "--distance", "3",
@@ -341,6 +349,10 @@ def memory_cap_checks(A1, pool_jxl):
           rc == 0 and "--workers 512 reduced to" in out and len(outs) == 1
           and subprocess.run(["djxl", str(outs[0]), str(B / "mem_rec.png")],
                              capture_output=True).returncode == 0, f"rc={rc}")
+    _m = re.search(r"Memory: ~[\d.]+ GB per worker \([a-z-]+ encode, (\d+) MP", out)
+    check(f"recompressor: the cap read the real image size ({_mp_expected} MP)",
+          bool(_m) and _m.group(1) == _mp_expected,
+          f"log={_m.group(1) if _m else 'none'} expected={_mp_expected}")
 
 
 def transcoder_checks(A1, A2):
@@ -408,6 +420,8 @@ def main():
         shutil.rmtree(B)
     LOGS = B / "logs"
     LOGS.mkdir(parents=True)
+    logs_before = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
+                   if (REPO / "Logs").is_dir() else 0)
     t0 = time.time()
     try:
         section("Pool")
@@ -429,6 +443,10 @@ def main():
         memory_cap_checks(A1, pool_jxl)
         transcoder_checks(A1, A2)
     finally:
+        logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
+                      if (REPO / "Logs").is_dir() else 0)
+        check("no script wrote to the repository's Logs\\",
+              logs_before == logs_after, f"{logs_before} -> {logs_after}")
         n_ok = sum(1 for *_, ok, _ in results if ok)
         lines = [f"# Real-photo battery — {time.strftime('%Y-%m-%d %H:%M')}", "",
                  f"**{n_ok}/{len(results)} passed** in {time.time() - t0:.0f}s · "
