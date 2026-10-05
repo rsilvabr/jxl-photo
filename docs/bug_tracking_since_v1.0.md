@@ -33,6 +33,7 @@ Round 44 / 2026-10-04: The scheduled MOBILE run — 30 recompressor workers at d
 Round 45 / 2026-10-05: subprocess capture without reader threads in every backend, the ignore-mode page size, logs out of the repository, the Start-in note (see top section)
 Round 46 / 2026-10-05: the recompressor's silent planning phase (see top section)
 Round 47 / 2026-10-06: per-file exiftool timeouts too short under load, reported as codec timeouts (see top section)
+v2.7.0 / 2026-10-06: Round 47 released as v2.7.0, together with the recompressor's re-derive on distance/effort change - see new_features_since_v1.0.md
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in

@@ -11,6 +11,25 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.6.2
+
+**Released 2026-10-05, superseded by v2.7.0.** One fix to the recompressor's log; nothing changes in what the tools write.
+
+### Fixed: the recompressor planned for minutes with nothing on screen (#477)
+
+Before the first `[1/N]` line the recompressor decides what to do with every file: it reads each JXL's encode record with exiftool, walks its boxes for a `jbrd` (a JPEG that must stay bit-exact recoverable) and checks the outputs that already exist. Every file is opened at least twice, and on a hard disk that costs ~0.15–0.25 s per file. The scheduled runs over a photo library on an HDD sat after `JXLs found` for 3 minutes (681 files) and 13 minutes (3 327 files) with nothing on screen — indistinguishable from a hang. The log now announces the phase and reports where the time went — measured on the same hard disk:
+
+```text
+Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
+Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
+```
+
+Practically all of it is the exiftool read of each file's record. See [Planning takes a while on a hard disk](README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk). The encoder's and decoder's real logs showed no such gap, so they are unchanged.
+
+The fix has a real-codec regression test proven to fail against the pre-fix code. The real-photo battery (33 checks) passes. Full list: [bug tracking](bug_tracking_since_v1.0.md) (round 46, #477). **1998 tests.**
+
+---
+
 ## v2.6.1
 
 **Released 2026-10-05, superseded by v2.6.2.** The fix for hung workers reaches every script, error messages keep the line that says what failed, and the test suite stops filling `Logs\`. Nothing changes in what the tools write.

@@ -1,6 +1,6 @@
 # New Features Since v1.0
 
-## v2.7.0 (unreleased)
+## v2.7.0 (2026-10-06)
 
 ### Derivatives re-derived when distance/effort change (recompressor)
 

@@ -737,13 +737,14 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.6.2** (2026-10-05) — the recompressor says what it is doing before it starts:
+**v2.7.0** (2026-10-06) — derivatives follow your distance/effort, and a busy disk no longer fails good files:
 
-- **No more minutes of silence before the first file.** The recompressor reads every JXL's history and checks its boxes before converting anything — on a hard disk ~0.15–0.25 s per file, 13 minutes for a 3 327-file folder, with nothing on screen. It now announces that phase and logs how long each part of it took.
+- **Change a preset's distance or effort, and its derivatives follow.** The recompressor's colour/resize/sharpen derivatives now record the distance and effort they were encoded with, and a sync run re-derives them when those change — as it already did when the recipe changed. Before, they were skipped forever with the old settings.
+- **A stalled exiftool no longer turns a good file into an error.** Every per-file metadata call in the four scripts now gets the codec's 15-minute patience instead of 15–180 s, and the recompressor names the tool that actually timed out.
 
-Still from v2.6.1: no subprocess can hang a worker in any of the four scripts, and codec errors keep the line that says what failed. Still from v2.6.0: `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
+Still from v2.6.x: the recompressor announces its planning phase, no subprocess can hang a worker, and `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
 
-**1998 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**2028 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -751,22 +752,27 @@ Still from v2.6.1: no subprocess can hang a worker in any of the four scripts, a
 
 ## Changelog
 
-### What's new — v2.6.2 (current stable)
+### What's new — v2.7.0 (current stable)
 
-**Released 2026-10-05.** Supersedes v2.6.1. One fix to the recompressor's log; nothing changes in what the tools write.
+**Released 2026-10-06.** Supersedes v2.6.2. One new recompressor option and one fix in all four scripts.
 
-#### Fixed: the recompressor planned for minutes with nothing on screen (#477)
+#### New: derivatives are re-derived when distance/effort change
 
-Before the first `[1/N]` line the recompressor decides what to do with every file: it reads each JXL's encode record with exiftool, walks its boxes for a `jbrd` (a JPEG that must stay bit-exact recoverable) and checks the outputs that already exist. Every file is opened at least twice, and on a hard disk that costs ~0.15–0.25 s per file. The scheduled runs over a photo library on an HDD sat after `JXLs found` for 3 minutes (681 files) and 13 minutes (3 327 files) with nothing on screen — indistinguishable from a hang. The log now announces the phase and reports where the time went — measured on the same hard disk:
+A recompressor derivative (`--output-icc`, `--resize-*`, `--sharpen`) records its recipe in `XMP-dc:Relation` as `jxlphoto-derived:<recipe>`, and a `--sync` run re-derives it when the recipe changes. Distance and effort were not part of that record, so changing a preset from d=3 e=7 to d=4 e=9 left every existing derivative with the old settings: the sync skipped them all. The record now ends in the encode settings (`jxlphoto-derived:sRGB/d4e9`), and a sync run re-derives a derivative whose distance or effort differ from this run's.
 
-```text
-Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
-Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
-```
+- `REDERIVE_ON_ENCODE_CHANGE` (default `True`) at the top of `jxl_recompressor.py`, or `--rederive-on-encode-change` / `--no-rederive-on-encode-change` per run. The wizard asks in Step 6A and presets remember the answer.
+- A distance below cjxl's floor is recorded as the floor, so 0.01 and 0.05 are not "a change".
+- **Derivatives written before v2.7.0 carry no distance/effort and are never re-derived for it.** The run says how many it saw; one `--overwrite` run refreshes them.
 
-Practically all of it is the exiftool read of each file's record. See [Planning takes a while on a hard disk](docs/README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk). The encoder's and decoder's real logs showed no such gap, so they are unchanged.
+See [Derivatives: colour conversion, resize and sharpening](docs/README_jxl_recompressor.md#derivatives-colour-conversion-resize-and-sharpening).
 
-The fix has a real-codec regression test proven to fail against the pre-fix code. The real-photo battery (33 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 46, #477). **1998 tests.**
+#### Fixed: a stalled exiftool turned good files into errors, reported as a codec timeout (#478)
+
+Every per-file exiftool call (metadata copy, source-profile read, markers, thumbnail) ran with a fixed 15–180 s limit, while the codecs get 900 s. A scheduled run of 17 recompressor workers on 45 MP files over a hard disk lost twelve consecutive derivatives within 40 seconds of each other, during a few minutes when the whole machine slowed down. The recompressor reported each one as `codec timed out after 900s`, although what had timed out was exiftool, at 60 or 120 s. No partial output was left, and the next sync run converts them.
+
+All four scripts now give those calls `EXIFTOOL_TIMEOUT`, a new setting at the top of each script defined as its codec timeout, so editing the codec timeout moves both. The planning-time batch reads keep their own limit. The recompressor's error now names the tool and the limit that fired (`exiftool timed out after 120s`).
+
+Both changes have regression tests proven to fail against the pre-fix code, including a real-codec run of the re-derive sequence. The real-photo battery (36 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 47, #478) and [new features](docs/new_features_since_v1.0.md). **2028 tests.**
 
 ---
 
@@ -774,7 +780,8 @@ The fix has a real-codec regression test proven to fail against the pre-fix code
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.6.2](#changelog)** | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
+| **[v2.7.0](#changelog)** | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts) |
+| [v2.6.2](docs/version_history.md#v262) | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
 | [v2.6.1](docs/version_history.md#v261) | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
 | [v2.6.0](docs/version_history.md#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
 | [v2.5.0](docs/version_history.md#v250) | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
