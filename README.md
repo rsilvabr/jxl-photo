@@ -737,16 +737,13 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.6.1** (2026-10-05) — no hung worker in any script:
+**v2.6.2** (2026-10-05) — the recompressor says what it is doing before it starts:
 
-- **No subprocess can hang a worker any more**, in any of the four scripts: the TIFF encoder's, decoder's and JPEG transcoder's codec calls now capture their output through temp files too, without the reader threads that could block forever when memory ran out (v2.6.0 covered the recompressor and every `exiftool` call).
-- **Codec error messages keep the line that says what failed** in all four scripts, not the tool's version banner.
-- **`--multipage-mode ignore` no longer lowers `--workers` for nothing**: the memory cap reads the real page size instead of assuming 60 MP.
-- **`JXLPHOTO_LOG_DIR`** moves every log folder elsewhere; the test suite and the real-photo battery use it and no longer write into `Logs\`.
+- **No more minutes of silence before the first file.** The recompressor reads every JXL's history and checks its boxes before converting anything — on a hard disk ~0.15–0.25 s per file, 13 minutes for a 3 327-file folder, with nothing on screen. It now announces that phase and logs how long each part of it took.
 
-Still from v2.6.0: `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
+Still from v2.6.1: no subprocess can hang a worker in any of the four scripts, and codec errors keep the line that says what failed. Still from v2.6.0: `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
 
-**1992 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**1998 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -754,40 +751,22 @@ Still from v2.6.0: `--workers` is capped by memory in the TIFF encoder and the r
 
 ## Changelog
 
-### What's new — v2.6.1 (current stable)
+### What's new — v2.6.2 (current stable)
 
-**Released 2026-10-05.** Supersedes v2.6.0. The fix for hung workers reaches every script, error messages keep the line that says what failed, and the test suite stops filling `Logs\`. Nothing changes in what the tools write.
+**Released 2026-10-05.** Supersedes v2.6.1. One fix to the recompressor's log; nothing changes in what the tools write.
 
-#### Fixed: the encoder, decoder and transcoder could still hang on a codec call (#473)
+#### Fixed: the recompressor planned for minutes with nothing on screen (#477)
 
-v2.6.0 stopped `capture_output=True` from starting reader threads, which can block forever when memory runs out, in the recompressor and in every `exiftool` call. The codec calls of the other three scripts still used it: the TIFF encoder's `cjxl` (including the `--ram` path that pipes the image through stdin), the decoder's `djxl`/`magick` and the transcoder's `cjxl`/`djxl`/`magick`. Every one of them now captures its output through temp files, so no thread is created. The only calls left on `capture_output` are the one-time version probes at startup, on purpose: if they failed they would only report "version unknown", but that would quietly switch off the libjxl 0.12 paths (`--reconstruct_jpeg`, `--buffering`).
+Before the first `[1/N]` line the recompressor decides what to do with every file: it reads each JXL's encode record with exiftool, walks its boxes for a `jbrd` (a JPEG that must stay bit-exact recoverable) and checks the outputs that already exist. Every file is opened at least twice, and on a hard disk that costs ~0.15–0.25 s per file. The scheduled runs over a photo library on an HDD sat after `JXLs found` for 3 minutes (681 files) and 13 minutes (3 327 files) with nothing on screen — indistinguishable from a hang. The log now announces the phase and reports where the time went — measured on the same hard disk:
 
-#### Fixed: error messages showed the tool's banner instead of the error (#473)
+```text
+Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
+Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
+```
 
-When `cjxl`, `djxl` or `magick` fails, the error message in all four scripts now keeps the last 200 characters of the tool's output, not the first. cjxl and djxl print their version banner first, so the line that said what failed used to be cut off. This includes the transcoder's JXL → JPEG/PNG conversions that go through ImageMagick.
+Practically all of it is the exiftool read of each file's record. See [Planning takes a while on a hard disk](docs/README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk). The encoder's and decoder's real logs showed no such gap, so they are unchanged.
 
-#### Fixed: `--multipage-mode ignore` lowered `--workers` for nothing (#474)
-
-The memory cap of v2.6.0 sizes each worker from the largest image in the batch. In `ignore` mode the encoder never recorded the page size, so the cap assumed 60 MP for every file and could lower `--workers` far below what small pages need. It now reads the real size.
-
-#### New: `JXLPHOTO_LOG_DIR`, and the test suite no longer writes into `Logs\` (#475)
-
-Set the environment variable `JXLPHOTO_LOG_DIR` to move every log folder (the wrapper's and each script's, including `rejected_files.log`) elsewhere. Unset, logs land in `Logs\` next to the scripts as before. The test suite and the real-photo battery set it, so running them no longer adds hundreds of files to `Logs\` (it had grown to ~26 000, synced by OneDrive along with the repository). Those old test logs can be deleted by hand.
-
-#### Docs: what a blank *Start in* really does (#476)
-
-The scheduling guide said a blank *Start in* field puts the logs in `C:\Windows\System32`. It doesn't: the logs always land next to the scripts. What happens is that the task cannot find `jxl_photo.py` and every run fails at once with exit code 2, the same code as "no such preset". The [guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron) now says so.
-
-The test suite was also cleaned up:
-
-- tests that compared settings against the shipped defaults now read the values at the top of the scripts, so editing a setting no longer breaks them;
-- patches that leaked when a test failed now undo themselves;
-- two tests now check what their names promise;
-- eight tests that only checked comments or removed code are gone;
-- one test that failed when antivirus held a file now waits for it;
-- the multi-page tests encode their scan once instead of twelve times.
-
-Every fix has a regression test proven to fail against the pre-fix code, including a real run of all four scripts that fails if any codec call starts a reader thread. The real-photo battery (33 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 45, #473–#476). **1992 tests.**
+The fix has a real-codec regression test proven to fail against the pre-fix code. The real-photo battery (33 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 46, #477). **1998 tests.**
 
 ---
 
@@ -795,7 +774,8 @@ Every fix has a regression test proven to fail against the pre-fix code, includi
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.6.1](#changelog)** | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
+| **[v2.6.2](#changelog)** | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
+| [v2.6.1](docs/version_history.md#v261) | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
 | [v2.6.0](docs/version_history.md#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
 | [v2.5.0](docs/version_history.md#v250) | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
 | [v2.4.0](docs/version_history.md#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |

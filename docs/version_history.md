@@ -11,6 +11,43 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.6.1
+
+**Released 2026-10-05, superseded by v2.6.2.** The fix for hung workers reaches every script, error messages keep the line that says what failed, and the test suite stops filling `Logs\`. Nothing changes in what the tools write.
+
+### Fixed: the encoder, decoder and transcoder could still hang on a codec call (#473)
+
+v2.6.0 stopped `capture_output=True` from starting reader threads, which can block forever when memory runs out, in the recompressor and in every `exiftool` call. The codec calls of the other three scripts still used it: the TIFF encoder's `cjxl` (including the `--ram` path that pipes the image through stdin), the decoder's `djxl`/`magick` and the transcoder's `cjxl`/`djxl`/`magick`. Every one of them now captures its output through temp files, so no thread is created. The only calls left on `capture_output` are the one-time version probes at startup, on purpose: if they failed they would only report "version unknown", but that would quietly switch off the libjxl 0.12 paths (`--reconstruct_jpeg`, `--buffering`).
+
+### Fixed: error messages showed the tool's banner instead of the error (#473)
+
+When `cjxl`, `djxl` or `magick` fails, the error message in all four scripts now keeps the last 200 characters of the tool's output, not the first. cjxl and djxl print their version banner first, so the line that said what failed used to be cut off. This includes the transcoder's JXL → JPEG/PNG conversions that go through ImageMagick.
+
+### Fixed: `--multipage-mode ignore` lowered `--workers` for nothing (#474)
+
+The memory cap of v2.6.0 sizes each worker from the largest image in the batch. In `ignore` mode the encoder never recorded the page size, so the cap assumed 60 MP for every file and could lower `--workers` far below what small pages need. It now reads the real size.
+
+### New: `JXLPHOTO_LOG_DIR`, and the test suite no longer writes into `Logs\` (#475)
+
+Set the environment variable `JXLPHOTO_LOG_DIR` to move every log folder (the wrapper's and each script's, including `rejected_files.log`) elsewhere. Unset, logs land in `Logs\` next to the scripts as before. The test suite and the real-photo battery set it, so running them no longer adds hundreds of files to `Logs\` (it had grown to ~26 000, synced by OneDrive along with the repository). Those old test logs can be deleted by hand.
+
+### Docs: what a blank *Start in* really does (#476)
+
+The scheduling guide said a blank *Start in* field puts the logs in `C:\Windows\System32`. It doesn't: the logs always land next to the scripts. What happens is that the task cannot find `jxl_photo.py` and every run fails at once with exit code 2, the same code as "no such preset". The [guide](README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron) now says so.
+
+The test suite was also cleaned up:
+
+- tests that compared settings against the shipped defaults now read the values at the top of the scripts, so editing a setting no longer breaks them;
+- patches that leaked when a test failed now undo themselves;
+- two tests now check what their names promise;
+- eight tests that only checked comments or removed code are gone;
+- one test that failed when antivirus held a file now waits for it;
+- the multi-page tests encode their scan once instead of twelve times.
+
+Every fix has a regression test proven to fail against the pre-fix code, including a real run of all four scripts that fails if any codec call starts a reader thread. The real-photo battery (33 checks) passes. Full list: [bug tracking](bug_tracking_since_v1.0.md) (round 45, #473–#476). **1992 tests.**
+
+---
+
 ## v2.6.0
 
 **Released 2026-10-05, superseded by v2.6.1.** `--workers` is capped by memory, a worker can no longer hang before its own timeout, and scheduled runs keep their window open.
