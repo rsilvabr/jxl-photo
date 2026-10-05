@@ -1807,11 +1807,17 @@ def _merge_lineage_blocks(desc: str, software: str):
     return entries, stored
 
 
+# Files per exiftool call when reading the encode records. 100 rather than
+# 400: on a hard disk a batch takes ~20-30 s, so the planning progress line
+# moves; each extra exiftool start costs ~0.14 s (~3.5 s over 3 327 files).
+_ENCODE_RECORD_BATCH = 100
+
+
 def _read_encode_params_batch(paths: list) -> dict:
     """{path str: {'desc': str, 'software': str, 'params': (d,e)|None,
-    'gen': int, 'pixels': int}} with one exiftool call per 400 files — per-file
-    spawns were
-    minutes on a library.
+    'gen': int, 'pixels': int}} with one exiftool call per
+    _ENCODE_RECORD_BATCH files — per-file spawns were minutes on a library.
+    A slow read reports its progress (paced like the directory scan).
 
     `gen` is the reconciled generation count (max of the stored gen= token
     and the lossy chain length), read from the field that carries the record.
@@ -1828,7 +1834,12 @@ def _read_encode_params_batch(paths: list) -> dict:
     batch_lines = ["-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
                    "-ImageWidth", "-ImageHeight",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
+    BATCH = _ENCODE_RECORD_BATCH
+    # Quiet while it is fast (a warm cache); then a line per batch, at the
+    # directory scan's growing gap, so a 3 327-file plan is not a wall of lines.
+    _t0 = time.monotonic()
+    _next = _t0 + _SCAN_QUIET_SECONDS
+    _gap = _SCAN_REPORT_EVERY
     for i in range(0, len(paths), BATCH):
         chunk = paths[i:i + BATCH]
         argfile = None
@@ -1897,6 +1908,13 @@ def _read_encode_params_batch(paths: list) -> dict:
                     os.unlink(argfile)
                 except OSError:
                     pass
+            _done = min(i + BATCH, len(paths))
+            _now = time.monotonic()
+            if _done < len(paths) and _now >= _next:
+                logger.info(f"  Encode records: {_done}/{len(paths)} read "
+                            f"({_fmt_secs(_now - _t0)})")
+                _gap = min(_gap * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
+                _next = _now + _gap
     return info
 
 

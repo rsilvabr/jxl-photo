@@ -63,3 +63,43 @@ def test_planning_is_announced_and_timed(tmp_path, monkeypatch, caplog):
     # Order: announced after discovery, reported before the plan is printed.
     assert (text.index("JXLs found") < text.index("Planning 1 file(s)")
             < text.index("Planned in") < text.index(" DRY | "))
+
+
+def _slow_disk(monkeypatch, secs_per_batch):
+    """Every exiftool batch 'takes' secs_per_batch on a fake clock."""
+    from types import SimpleNamespace
+    clock = {"t": 1000.0}
+    calls = []
+
+    def fake_run(cmd, timeout, text=False, input=None):
+        calls.append(cmd)
+        clock["t"] += secs_per_batch
+        return rec._CompletedProcess(cmd, 0, "[]", "")
+
+    monkeypatch.setattr(rec, "_run_captured", fake_run)
+    monkeypatch.setattr(rec, "time", SimpleNamespace(monotonic=lambda: clock["t"]))
+    return calls
+
+
+def test_slow_encode_record_read_reports_progress(monkeypatch, caplog):
+    # A hard disk: ~0.25 s per file, so a batch of 100 is ~25-30 s. The plan
+    # said nothing for minutes between "Planning N file(s)" and "Planned in".
+    calls = _slow_disk(monkeypatch, 30.0)
+    paths = [f"F:/x/{n:04d}.jxl" for n in range(350)]
+    with caplog.at_level(logging.INFO, logger=rec.logger.name):
+        info = rec._read_encode_params_batch(paths)
+    assert len(info) == 350
+    assert len(calls) == -(-350 // rec._ENCODE_RECORD_BATCH)
+    lines = re.findall(r"Encode records: (\d+)/350 read \((\S+)\)", caplog.text)
+    assert lines, caplog.text
+    assert lines[0] == ("100", "30s"), lines
+    # Never a line for the last batch: "Planned in" closes the phase.
+    assert all(int(done) < 350 for done, _ in lines), lines
+
+
+def test_fast_encode_record_read_stays_quiet(monkeypatch, caplog):
+    _slow_disk(monkeypatch, 0.1)   # a warm cache
+    paths = [f"F:/x/{n:04d}.jxl" for n in range(350)]
+    with caplog.at_level(logging.INFO, logger=rec.logger.name):
+        rec._read_encode_params_batch(paths)
+    assert "Encode records:" not in caplog.text, caplog.text

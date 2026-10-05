@@ -741,10 +741,11 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 - **Change a preset's distance or effort, and its derivatives follow.** The recompressor's colour/resize/sharpen derivatives now record the distance and effort they were encoded with, and a sync run re-derives them when those change — as it already did when the recipe changed. Before, they were skipped forever with the old settings.
 - **A stalled exiftool no longer turns a good file into an error.** Every per-file metadata call in the four scripts now gets the codec's 15-minute patience instead of 15–180 s, and the recompressor names the tool that actually timed out.
+- **The recompressor's planning phase counts as it goes.** On a hard disk it reads every file's history for minutes before converting; the log now shows `Encode records: 400/1355 read (1m10s)` instead of one line and a long wait.
 
 Still from v2.6.x: the recompressor announces its planning phase, no subprocess can hang a worker, and `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
 
-**2028 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**2030 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -754,7 +755,7 @@ Still from v2.6.x: the recompressor announces its planning phase, no subprocess 
 
 ### What's new — v2.7.0 (current stable)
 
-**Released 2026-10-06.** Supersedes v2.6.2. One new recompressor option and one fix in all four scripts.
+**Released 2026-10-06.** Supersedes v2.6.2. One new recompressor option, one fix in all four scripts and one to the recompressor's log.
 
 #### New: derivatives are re-derived when distance/effort change
 
@@ -772,7 +773,22 @@ Every per-file exiftool call (metadata copy, source-profile read, markers, thumb
 
 All four scripts now give those calls `EXIFTOOL_TIMEOUT`, a new setting at the top of each script defined as its codec timeout, so editing the codec timeout moves both. The planning-time batch reads keep their own limit. The recompressor's error now names the tool and the limit that fired (`exiftool timed out after 120s`).
 
-Both changes have regression tests proven to fail against the pre-fix code, including a real-codec run of the re-derive sequence. The real-photo battery (36 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 47, #478) and [new features](docs/new_features_since_v1.0.md). **2028 tests.**
+#### Fixed: the planning phase was announced, but still silent for minutes (#479)
+
+v2.6.2 announced the planning phase and timed it, but in between the recompressor read the encode records in exiftool batches of 400 with nothing on screen: a 681-file run on a hard disk still sat ~4 minutes on one line. It now counts them, paced like the folder scan (quiet while it is fast, then at a growing interval up to 60 s):
+
+```text
+Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
+  Encode records: 100/1355 read (18s)
+  Encode records: 200/1355 read (35s)
+  ...
+  Encode records: 1200/1355 read (3m31s)
+Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
+```
+
+Batches are now 100 files, so the count moves every 20–30 s on a hard disk; the extra exiftool starts add ~3.5 s over 3 327 files.
+
+Every change has a regression test proven to fail against the pre-fix code, including a real-codec run of the re-derive sequence. The real-photo battery (36 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 47, #478–#479) and [new features](docs/new_features_since_v1.0.md). **2030 tests.**
 
 ---
 
@@ -780,7 +796,7 @@ Both changes have regression tests proven to fail against the pre-fix code, incl
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.7.0](#changelog)** | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts) |
+| **[v2.7.0](#changelog)** | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
 | [v2.6.2](docs/version_history.md#v262) | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
 | [v2.6.1](docs/version_history.md#v261) | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
 | [v2.6.0](docs/version_history.md#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
