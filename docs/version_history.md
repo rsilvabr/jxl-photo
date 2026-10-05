@@ -11,6 +11,32 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.6.0
+
+**Released 2026-10-05, superseded by v2.6.1.** `--workers` is capped by memory, a worker can no longer hang before its own timeout, and scheduled runs keep their window open.
+
+### Fixed: `--workers` could ask for more memory than the machine has (#470)
+
+`cjxl` (libjxl 0.12) normally **streams**, about 1.5 GB per worker on a 45 MP photo. At **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5**, **effort 10** or **`--buffering 0`** it encodes the whole image at once: 3.6 GB per worker at effort 7, 12.4 GB at effort 8+. A scheduled recompressor preset at d=3 e=7 with 30 workers asked for ~107 GB on a 64 GB machine; 314 of 681 files failed.
+
+The TIFF encoder and the recompressor now estimate each worker's peak from the **largest image in the batch** and the encode settings, and lower `--workers` so the jobs fit in `WORKER_MEMORY_FRACTION` (0.8) of the memory the system can still commit (RAM + pagefile). The log shows the estimate (`Memory: ~3.8 GB per worker (whole-image encode, 45 MP, d=3.0 e=7) | 40.0 GB available | workers 8`) and warns when it lowered the count, with the remedy: `--buffering 1` keeps any setting on the streaming path for files ~2 % larger. Throughput barely grows past ~8 workers anyway (0.61 files/s at 8, 0.73 at 16). `WORKER_MEMORY_FRACTION = 0` turns the cap off. See [Memory and --workers](README_jxl_recompressor.md#memory-and---workers).
+
+### Fixed: a worker could hang forever, before its subprocess timeout (#471)
+
+On Windows `capture_output=True` starts two reader threads per call; when memory ran out, a thread could die while starting, and `Thread.start()` then waited forever, before `subprocess.run` had armed its timeout. That run hung 60 minutes until the wrapper's watchdog killed it, and the presets after it never ran. Output is now captured through temp files, so no thread is created, in the per-file `exiftool` calls of all four scripts and in every `djxl`/`magick`/`cjxl` call of a recompressor worker (the encoder's, decoder's and transcoder's own codec calls follow in a later release).
+
+### Fixed: out-of-memory failures said what failed, and the summary names them (#472)
+
+The recompressor's error messages kept the first 200 characters of a tool's output, and cjxl prints its version banner first: a third of that run's errors were logged without the line that said what failed. They now keep the last 200 characters. A run whose errors look like the system ran out of memory ends with `N error(s) look like the system ran out of memory — lower --workers or WORKER_MEMORY_FRACTION, or use --buffering 1`.
+
+### Docs: keep a scheduled run's window open
+
+A scheduled task run with `cmd /c` closes its window the moment it ends, failures included, so a preset that starts failing goes unnoticed until someone opens the logs. Every scheduling example now uses `cmd /k`: the window stays open with the summary and any error until you close it. See [Keep the window open](README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen), including why an open window makes Task Scheduler skip the next run until you close it.
+
+Every fix has a regression test proven to fail against the pre-fix code, including a real-codec check of libjxl's whole-image threshold and a test that fails if any exiftool call starts a thread. The real-photo battery (30 checks) passes. Full list: [bug tracking](bug_tracking_since_v1.0.md) (round 44, #470–#472). **1977 tests.**
+
+---
+
 ## v2.5.0
 
 **Released 2026-10-02, superseded by v2.6.0.** Folder exclusion, and the fixes of the round-43 audit of the whole repo.

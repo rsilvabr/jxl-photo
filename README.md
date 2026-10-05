@@ -737,14 +737,16 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.6.0** (2026-10-05) — memory-safe parallel runs:
+**v2.6.1** (2026-10-05) — no hung worker in any script:
 
-- **`--workers` is capped by memory** in the TIFF encoder and the recompressor: at effort 7 with distance ≥ 3, effort 8–9 above distance 0.5, or effort 10, cjxl needs 2.5–8× its usual memory per worker, and the run now lowers the worker count to fit instead of failing file after file. Read the [notice](#notices-for-upgraders).
-- **No more hung recompressor workers** when memory runs out: its codec and metadata calls capture output without the reader threads that could block forever.
-- **Out-of-memory failures are named** in the recompressor's summary, and its error messages keep the line that says what failed.
-- **Scheduled runs keep their window open** (`cmd /k`) in every documented example, so a failed night is on screen the next morning.
+- **No subprocess can hang a worker any more**, in any of the four scripts: the TIFF encoder's, decoder's and JPEG transcoder's codec calls now capture their output through temp files too, without the reader threads that could block forever when memory ran out (v2.6.0 covered the recompressor and every `exiftool` call).
+- **Codec error messages keep the line that says what failed** in all four scripts, not the tool's version banner.
+- **`--multipage-mode ignore` no longer lowers `--workers` for nothing**: the memory cap reads the real page size instead of assuming 60 MP.
+- **`JXLPHOTO_LOG_DIR`** moves every log folder elsewhere; the test suite and the real-photo battery use it and no longer write into `Logs\`.
 
-**1977 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+Still from v2.6.0: `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
+
+**1992 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -752,29 +754,40 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Changelog
 
-### What's new — v2.6.0 (current stable)
+### What's new — v2.6.1 (current stable)
 
-**Released 2026-10-05.** Supersedes v2.5.0. `--workers` is capped by memory, a worker can no longer hang before its own timeout, and scheduled runs keep their window open.
+**Released 2026-10-05.** Supersedes v2.6.0. The fix for hung workers reaches every script, error messages keep the line that says what failed, and the test suite stops filling `Logs\`. Nothing changes in what the tools write.
 
-#### Fixed: `--workers` could ask for more memory than the machine has (#470)
+#### Fixed: the encoder, decoder and transcoder could still hang on a codec call (#473)
 
-`cjxl` (libjxl 0.12) normally **streams**, about 1.5 GB per worker on a 45 MP photo. At **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5**, **effort 10** or **`--buffering 0`** it encodes the whole image at once: 3.6 GB per worker at effort 7, 12.4 GB at effort 8+. A scheduled recompressor preset at d=3 e=7 with 30 workers asked for ~107 GB on a 64 GB machine; 314 of 681 files failed.
+v2.6.0 stopped `capture_output=True` from starting reader threads, which can block forever when memory runs out, in the recompressor and in every `exiftool` call. The codec calls of the other three scripts still used it: the TIFF encoder's `cjxl` (including the `--ram` path that pipes the image through stdin), the decoder's `djxl`/`magick` and the transcoder's `cjxl`/`djxl`/`magick`. Every one of them now captures its output through temp files, so no thread is created. The only calls left on `capture_output` are the one-time version probes at startup, on purpose: if they failed they would only report "version unknown", but that would quietly switch off the libjxl 0.12 paths (`--reconstruct_jpeg`, `--buffering`).
 
-The TIFF encoder and the recompressor now estimate each worker's peak from the **largest image in the batch** and the encode settings, and lower `--workers` so the jobs fit in `WORKER_MEMORY_FRACTION` (0.8) of the memory the system can still commit (RAM + pagefile). The log shows the estimate (`Memory: ~3.8 GB per worker (whole-image encode, 45 MP, d=3.0 e=7) | 40.0 GB available | workers 8`) and warns when it lowered the count, with the remedy: `--buffering 1` keeps any setting on the streaming path for files ~2 % larger. Throughput barely grows past ~8 workers anyway (0.61 files/s at 8, 0.73 at 16). `WORKER_MEMORY_FRACTION = 0` turns the cap off. See [Memory and --workers](docs/README_jxl_recompressor.md#memory-and---workers).
+#### Fixed: error messages showed the tool's banner instead of the error (#473)
 
-#### Fixed: a worker could hang forever, before its subprocess timeout (#471)
+When `cjxl`, `djxl` or `magick` fails, the error message in all four scripts now keeps the last 200 characters of the tool's output, not the first. cjxl and djxl print their version banner first, so the line that said what failed used to be cut off. This includes the transcoder's JXL → JPEG/PNG conversions that go through ImageMagick.
 
-On Windows `capture_output=True` starts two reader threads per call; when memory ran out, a thread could die while starting, and `Thread.start()` then waited forever, before `subprocess.run` had armed its timeout. That run hung 60 minutes until the wrapper's watchdog killed it, and the presets after it never ran. Output is now captured through temp files, so no thread is created, in the per-file `exiftool` calls of all four scripts and in every `djxl`/`magick`/`cjxl` call of a recompressor worker (the encoder's, decoder's and transcoder's own codec calls follow in a later release).
+#### Fixed: `--multipage-mode ignore` lowered `--workers` for nothing (#474)
 
-#### Fixed: out-of-memory failures said what failed, and the summary names them (#472)
+The memory cap of v2.6.0 sizes each worker from the largest image in the batch. In `ignore` mode the encoder never recorded the page size, so the cap assumed 60 MP for every file and could lower `--workers` far below what small pages need. It now reads the real size.
 
-The recompressor's error messages kept the first 200 characters of a tool's output, and cjxl prints its version banner first: a third of that run's errors were logged without the line that said what failed. They now keep the last 200 characters. A run whose errors look like the system ran out of memory ends with `N error(s) look like the system ran out of memory — lower --workers or WORKER_MEMORY_FRACTION, or use --buffering 1`.
+#### New: `JXLPHOTO_LOG_DIR`, and the test suite no longer writes into `Logs\` (#475)
 
-#### Docs: keep a scheduled run's window open
+Set the environment variable `JXLPHOTO_LOG_DIR` to move every log folder (the wrapper's and each script's, including `rejected_files.log`) elsewhere. Unset, logs land in `Logs\` next to the scripts as before. The test suite and the real-photo battery set it, so running them no longer adds hundreds of files to `Logs\` (it had grown to ~26 000, synced by OneDrive along with the repository). Those old test logs can be deleted by hand.
 
-A scheduled task run with `cmd /c` closes its window the moment it ends, failures included, so a preset that starts failing goes unnoticed until someone opens the logs. Every scheduling example now uses `cmd /k`: the window stays open with the summary and any error until you close it. See [Keep the window open](docs/README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen), including why an open window makes Task Scheduler skip the next run until you close it.
+#### Docs: what a blank *Start in* really does (#476)
 
-Every fix has a regression test proven to fail against the pre-fix code, including a real-codec check of libjxl's whole-image threshold and a test that fails if any exiftool call starts a thread. The real-photo battery (30 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 44, #470–#472). **1977 tests.**
+The scheduling guide said a blank *Start in* field puts the logs in `C:\Windows\System32`. It doesn't: the logs always land next to the scripts. What happens is that the task cannot find `jxl_photo.py` and every run fails at once with exit code 2, the same code as "no such preset". The [guide](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron) now says so.
+
+The test suite was also cleaned up:
+
+- tests that compared settings against the shipped defaults now read the values at the top of the scripts, so editing a setting no longer breaks them;
+- patches that leaked when a test failed now undo themselves;
+- two tests now check what their names promise;
+- eight tests that only checked comments or removed code are gone;
+- one test that failed when antivirus held a file now waits for it;
+- the multi-page tests encode their scan once instead of twelve times.
+
+Every fix has a regression test proven to fail against the pre-fix code, including a real run of all four scripts that fails if any codec call starts a reader thread. The real-photo battery (33 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 45, #473–#476). **1992 tests.**
 
 ---
 
@@ -782,7 +795,8 @@ Every fix has a regression test proven to fail against the pre-fix code, includi
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.6.0](#changelog)** | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
+| **[v2.6.1](#changelog)** | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
+| [v2.6.0](docs/version_history.md#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
 | [v2.5.0](docs/version_history.md#v250) | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
 | [v2.4.0](docs/version_history.md#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
 | [v2.3.0](docs/version_history.md#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
