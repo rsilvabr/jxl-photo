@@ -89,6 +89,20 @@ accepts:
 - **skip** — leave the file out of the run
 - **convert** — re-encode anyway
 
+### Planning takes a while on a hard disk
+
+All of this is decided **before** the first file is converted. The run reads
+each source's record with exiftool, walks its boxes for a `jbrd`, and checks
+the existing outputs. Every file is opened at least twice. On a hard disk that
+costs roughly 0.15–0.25 s per file: a folder of 3 327 JXLs once planned for
+13 minutes before the first `[1/N]` line. The log says so as it starts, and its
+last planning line says where the time went:
+
+```text
+Planning 3327 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
+Planned in <total> (encode records <time>, jbrd check <time>, output checks <time>)
+```
+
 ### JXLs transcoded from JPEG (jbrd box)
 
 A JXL produced by `jxl_jpeg_transcoder.py` carries a **jbrd box**: the

@@ -391,6 +391,12 @@ _STAGING_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 _STAGING_MIN_AGE_SECONDS = 3600
 
 
+def _fmt_secs(s):
+    """Seconds as "42s" or "7m46s" for the planning timings."""
+    s = int(round(s))
+    return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
+
+
 def _fmt_size(n):
     """Human size that stays informative below a gigabyte.
 
@@ -4439,7 +4445,17 @@ def main():
         sys.exit(0)
 
     # Classification reads the encoder's d=/e= record (batched) and the jbrd box.
+    # Planning opens every file at least twice before the first [n/total] line:
+    # on a hard disk that is ~0.15-0.25 s per file, and a 3327-file folder sat
+    # almost 8 minutes with nothing on screen after "JXLs found". Announce the
+    # phase, and time each part so the log shows where a slow plan went.
+    _t_plan = time.monotonic()
+    logger.info(f"Planning {len(items)} file(s): reading each one's encode record "
+                f"and checking for a jbrd box — on a hard disk this can take "
+                f"several minutes...")
     param_info = _read_encode_params_batch([it["src"] for it in items])
+    _t_records = time.monotonic() - _t_plan
+    _t_jbrd = 0.0
     for it in items:
         info = param_info[str(it["src"])]
         it["desc"] = info["desc"]
@@ -4450,7 +4466,9 @@ def main():
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
                                                  gen=it["gen"], floor=_floor)
+        _t0 = time.monotonic()
         it["jbrd"] = has_jbrd_box(it["src"])
+        _t_jbrd += time.monotonic() - _t0
         if it["jbrd"] and JBRD_POLICY != "convert":
             it["reason"] = ("jbrd box present: the original JPEG is bit-exact "
                             "recoverable from this file; recompressing would "
@@ -4502,6 +4520,10 @@ def main():
     _abort_on_duplicate_outputs(
         [(it["src"], it["final"]) for it in items
          if it["action"] in ("convert", "copy")])
+
+    # Timed from here, not from _t_plan: the batch prompt above waits on a
+    # person, and that wait is not planning.
+    _t_out0 = time.monotonic()
 
     # Cross-run provenance: in a collapsing mode with deletion armed, an
     # existing output must record the SAME origin as the source replacing it —
@@ -4589,6 +4611,11 @@ def main():
     if not args.dry_run and not _run_collapses_structure(
             args.mode, args.output, args.input):
         _warn_foreign_overwrite(items)
+
+    _t_outputs = time.monotonic() - _t_out0
+    logger.info(f"Planned in {_fmt_secs(_t_records + _t_jbrd + _t_outputs)} "
+                f"(encode records {_fmt_secs(_t_records)}, jbrd check "
+                f"{_fmt_secs(_t_jbrd)}, output checks {_fmt_secs(_t_outputs)})")
 
     # --- Dry run: report and stop ------------------------------------------
     if args.dry_run:

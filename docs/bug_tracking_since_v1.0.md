@@ -31,6 +31,7 @@ Round 43 / 2026-10-01: The 261001 audit of the `--exclude-folders` feature and t
 v2.5.0 / 2026-10-02: Round 43 released as v2.5.0, together with --exclude-folders (encoder, decoder, wizard, manifests) - see new_features_since_v1.0.md
 Round 44 / 2026-10-04: The scheduled MOBILE run — 30 recompressor workers at d=3 e=7 ran out of memory (314 errors) and one worker hung forever in a subprocess reader thread (see top section)
 Round 45 / 2026-10-05: subprocess capture without reader threads in every backend, the ignore-mode page size, logs out of the repository, the Start-in note (see top section)
+Round 46 / 2026-10-05: the recompressor's silent planning phase (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -41,6 +42,12 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
+
+## Round-46 — the recompressor's silent planning phase (2026-10-05)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 477 | **The recompressor planned for minutes with nothing on screen.** Between `JXLs found: N` and the first `[n/total]` line it reads every source's encode record with exiftool, walks its boxes for a `jbrd` and checks the existing outputs, opening each file at least twice. On a hard disk that is ~0.15–0.25 s per file, and the scheduled MOBILE runs on `G:` sat silent for 105 s (681 files), 285 s (1 248) and 466 s (3 327): it looks like a hang. | recompressor | ✅ FIXED (a `Planning N file(s): ...` line announces the phase, and `Planned in X (encode records A, jbrd check B, output checks C)` reports where the time went; a batch-prompt wait is not counted. The encoder and decoder logs showed no silent planning gap of 15 s or more and are unchanged. Test: `tests/test_planning_progress.py`, which fails against the pre-fix code) |
 
 ## Round-45 — subprocess without reader threads, the ignore-mode page size, logs out of the repository (2026-10-05)
 
