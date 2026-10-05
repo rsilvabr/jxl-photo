@@ -792,7 +792,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 
-**CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (max compression on libjxl ≥ 0.12), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
+**CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
 
 #### jxl_tiff_decoder.py
 | Variable | Default | What it does |
@@ -838,6 +838,20 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
+
+**Heavy settings and `--buffering 1` (encoder and recompressor).** At
+**effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5** and
+**effort 10**, cjxl (libjxl 0.12) stops streaming and encodes the whole image at
+once. Each worker then needs ~3.6 GB (effort 7) or ~12.4 GB (effort 8+) on a
+45 MP photo instead of ~1.5 GB, and the run lowers `--workers` to fit in memory
+— an e9 preset can drop to a handful of workers. Putting **`--buffering 1`** in
+**Expert flags** (Step 6B) keeps those settings on the streaming path, with the
+memory and worker count of a light setting, for files only ~2 % larger. The
+flag is saved with the preset (it is what a light, high-effort phone-copy
+preset wants). Measured at effort 7 and d=3: 0.61 files/s with 8 workers, 0.68
+with 8 + `--buffering 1`, 0.73 with 16 + `--buffering 1`. Details:
+[Memory and --workers](README_jxl_recompressor.md#memory-and---workers) and
+[the whole-image threshold](README_jxl_tiff_encoder.md#exception-the-whole-image-threshold).
 
 * * *
 
