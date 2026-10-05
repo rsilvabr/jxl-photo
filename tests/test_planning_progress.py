@@ -90,11 +90,21 @@ def test_slow_encode_record_read_reports_progress(monkeypatch, caplog):
         info = rec._read_encode_params_batch(paths)
     assert len(info) == 350
     assert len(calls) == -(-350 // rec._ENCODE_RECORD_BATCH)
-    lines = re.findall(r"Encode records: (\d+)/350 read \((\S+)\)", caplog.text)
+    lines = re.findall(r"Encode records: (\d+)/350 read \((\S+), ~(\S+) left\)",
+                       caplog.text)
     assert lines, caplog.text
-    assert lines[0] == ("100", "30s"), lines
+    # 100 files in 30 s -> the other 250 at the same rate: 75 s, "1m".
+    assert lines[0] == ("100", "30s", "1m"), lines
     # Never a line for the last batch: "Planned in" closes the phase.
-    assert all(int(done) < 350 for done, _ in lines), lines
+    assert all(int(done) < 350 for done, _, _ in lines), lines
+
+
+@pytest.mark.parametrize("secs,text", [
+    (0, "0s"), (-3, "0s"), (42.4, "42s"), (59.4, "59s"), (75, "1m"),
+    (89, "1m"), (90, "2m"), (362, "6m"),
+])
+def test_fmt_eta(secs, text):
+    assert rec._fmt_eta(secs) == text
 
 
 def test_fast_encode_record_read_stays_quiet(monkeypatch, caplog):

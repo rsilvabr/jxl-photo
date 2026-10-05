@@ -96,19 +96,19 @@ each source's record with exiftool, walks its boxes for a `jbrd`, and checks
 the existing outputs. Every file is opened at least twice. On a hard disk that
 costs roughly 0.15–0.25 s per file: a folder of 3 327 JXLs once planned for
 13 minutes before the first `[1/N]` line. The log says so as it starts, counts
-the records while it reads them (quiet when they come fast, then at a growing
-interval, like the folder scan), and its last planning line says where the time
+the records while it reads them, with an estimate of the time left (quiet when
+they come fast, then at a growing interval, like the folder scan), and its last planning line says where the time
 went. At the rate measured on a 20 TB SATA hard disk:
 
 ```text
 Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
-  Encode records: 100/1355 read (18s)
-  Encode records: 200/1355 read (35s)
-  Encode records: 300/1355 read (53s)
-  Encode records: 400/1355 read (1m10s)
-  Encode records: 600/1355 read (1m46s)
-  Encode records: 800/1355 read (2m21s)
-  Encode records: 1200/1355 read (3m31s)
+  Encode records: 100/1355 read (18s, ~4m left)
+  Encode records: 200/1355 read (35s, ~3m left)
+  Encode records: 300/1355 read (53s, ~3m left)
+  Encode records: 400/1355 read (1m10s, ~3m left)
+  Encode records: 600/1355 read (1m46s, ~2m left)
+  Encode records: 800/1355 read (2m21s, ~2m left)
+  Encode records: 1200/1355 read (3m31s, ~27s left)
 Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
 ```
 

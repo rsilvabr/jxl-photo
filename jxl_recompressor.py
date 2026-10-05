@@ -397,6 +397,13 @@ def _fmt_secs(s):
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
+def _fmt_eta(s):
+    """A remaining-time estimate as "40s" or "6m": whole minutes above one,
+    so an extrapolation from the rate so far does not look exact."""
+    s = max(0, s)
+    return f"{int(round(s))}s" if s < 60 else f"{int(round(s / 60))}m"
+
+
 def _fmt_size(n):
     """Human size that stays informative below a gigabyte.
 
@@ -1911,8 +1918,11 @@ def _read_encode_params_batch(paths: list) -> dict:
             _done = min(i + BATCH, len(paths))
             _now = time.monotonic()
             if _done < len(paths) and _now >= _next:
+                # Remaining time at the rate so far (the jbrd walk and the
+                # output checks after it are seconds: see "Planned in").
+                _eta = (_now - _t0) / _done * (len(paths) - _done)
                 logger.info(f"  Encode records: {_done}/{len(paths)} read "
-                            f"({_fmt_secs(_now - _t0)})")
+                            f"({_fmt_secs(_now - _t0)}, ~{_fmt_eta(_eta)} left)")
                 _gap = min(_gap * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
                 _next = _now + _gap
     return info
