@@ -614,6 +614,14 @@ CJXL_BUFFERING = None
 CJXL_TIMEOUT = 900
 # Per-file cjxl/djxl timeout in seconds.
 
+EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
+# Timeout (seconds) for each per-file exiftool call (metadata read/copy,
+# markers). Same patience as the codec: with many workers on a busy hard disk
+# a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
+# good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
+# reported as a codec timeout). The planning-time batch reads keep their own
+# per-batch timeout.
+
 WORKER_MEMORY_FRACTION = 0.8
 # Caps --workers so the parallel cjxl processes fit in memory. The peak of
 # each worker is estimated from the largest image in the batch and the encode
@@ -1618,6 +1626,16 @@ def _stderr_tail(stderr, limit=200):
     if isinstance(stderr, bytes):
         stderr = stderr.decode(errors="replace")
     return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+
+
+def _timeout_detail(exc) -> str:
+    """'<tool> timed out after <N>s': the tool and the limit that actually
+    fired. Every timeout used to read "codec timed out after CJXL_TIMEOUT" —
+    the twelve 120 s exiftool timeouts of the 2026-10-06 run were reported as
+    900 s codec timeouts."""
+    cmd = exc.cmd if isinstance(exc.cmd, (list, tuple)) else [exc.cmd]
+    tool = Path(str(cmd[0])).stem if cmd and cmd[0] else "subprocess"
+    return f"{tool} timed out after {exc.timeout:g}s"
 
 
 def _run_exiftool_argfile(args_lines, timeout=60):
@@ -2919,7 +2937,7 @@ def _read_creator_and_relation(jxl_path: Path):
     """(creator_tool str, [relation tokens]) of one file. Raises on failure:
     a derivative whose source profile cannot be read must not be produced."""
     r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
-                               "-XMP-dc:Relation", str(jxl_path)], timeout=60)
+                               "-XMP-dc:Relation", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
     if not r.stdout:
         raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
     entry = json.loads(r.stdout)[0]
@@ -3132,7 +3150,7 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
         lines.append(f"-ExifImageHeight={nh}")
         r = _run_exiftool_argfile(
             ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
-             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=60)
+             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
         if r is not None and r.stdout:
             entry = json.loads(r.stdout)[0]
             if entry.get("PixelXDimension") is not None:
@@ -3229,7 +3247,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
              "-exif:all", "-xmp:all", "-iptc:all"]
             + _restamp_args(desc, software, label=jxl_path.name)
             + _extra
-            + [str(write_path)], timeout=120)
+            + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
             # would silently miss the ICC/EXIF this whole tool exists to keep.
@@ -3283,11 +3301,11 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "overwrite" if overwritten and status == "ok" else status,
                 str(final_path))
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         if output_dirty:
             _delete_partial_if_written(write_path, final_path, _pre_identity)
-        _error_details[str(jxl_path)] = f"codec timed out after {CJXL_TIMEOUT}s"
-        logger.error(f"[{n}/{total}] TIMEOUT | {jxl_path.name}")
+        _error_details[str(jxl_path)] = _timeout_detail(e)
+        logger.error(f"[{n}/{total}] TIMEOUT | {jxl_path.name} | {_timeout_detail(e)}")
         return (str(jxl_path), "error", str(final_path))
     except Exception as e:
         if output_dirty:

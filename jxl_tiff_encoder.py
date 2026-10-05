@@ -766,6 +766,14 @@ CJXL_TIMEOUT = 900
 # lossless TIFFs (45-100MP) with many workers competing for CPU/disk; a timeout
 # becomes a per-file error (output cleaned up), never a hung batch.
 
+EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
+# Timeout (seconds) for each per-file exiftool call (metadata read/copy,
+# markers). Same patience as the codec: with many workers on a busy hard disk
+# a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
+# good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
+# reported as a codec timeout). The planning-time batch reads keep their own
+# per-batch timeout.
+
 TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
 # None -> disabled: JXLs are written directly to their final destination.
@@ -1744,7 +1752,7 @@ def _run_exiftool_argfile(args_lines, timeout=60):
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
-    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg_file)], 60)
+    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg_file)], EXIFTOOL_TIMEOUT)
     if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
         p = tmp_dir / f"{tiff_path.stem}.exif.bin"
         p.write_bytes(r.stdout)
@@ -1765,7 +1773,7 @@ def get_exif_software(tiff_path_str):
             arg_file = Path(tmp) / "args.txt"
             arg_file.write_text(f"{_ARGFILE_CHARSET}-s\n-Software\n{tiff_path}\n", encoding="utf-8")
             r = _run_captured(
-                [_get_exiftool_cmd(), "-@", str(arg_file)], 10, text=True
+                [_get_exiftool_cmd(), "-@", str(arg_file)], EXIFTOOL_TIMEOUT, text=True
             )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -2189,7 +2197,7 @@ def extract_xmp_original(tiff_path, tmp_dir):
     arg_file.write_text(f"{_ARGFILE_CHARSET}-o\n{xmp_path}\n-b\n-XMP\n{tiff_path}\n", encoding="utf-8")
     _run_captured(
         [_get_exiftool_cmd(), "-@", str(arg_file)],
-        60
+        EXIFTOOL_TIMEOUT
     )
     if xmp_path.exists() and xmp_path.stat().st_size > 0:
         return xmp_path
@@ -2399,7 +2407,7 @@ def read_existing_description(xmp_path):
         # "Description                     : value", and returning that line
         # verbatim seeded the tag name into the new dc:Description (round 43).
         r = _run_exiftool_argfile(
-            ["-s3", "-XMP-dc:Description", str(xmp_path)], timeout=15
+            ["-s3", "-XMP-dc:Description", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -2438,7 +2446,7 @@ def read_existing_relation(xmp_path):
         return []
     try:
         r = _run_exiftool_argfile(
-            ["-j", "-XMP-dc:Relation", str(xmp_path)], timeout=15
+            ["-j", "-XMP-dc:Relation", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode != 0 or not r.stdout:
             return []
@@ -2463,7 +2471,7 @@ def read_existing_creator_tool(xmp_path):
         return ""
     try:
         r = _run_exiftool_argfile(
-            ["-s", "-XMP-xmp:CreatorTool", str(xmp_path)], timeout=15
+            ["-s", "-XMP-xmp:CreatorTool", str(xmp_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode == 0 and r.stdout:
             stdout = r.stdout.strip()
@@ -2563,7 +2571,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # (keeping any unrelated text, e.g. a real editor name).
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: a failed Software read cannot tell a
             # stale chain from no chain, and -tagsfromfile -exif:all would
@@ -2607,7 +2615,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # Instead, we update the EXIF Software field.
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: same stale-chain contamination as the
             # "xmp" branch above — an unread Software field would leave the
@@ -2667,7 +2675,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
             args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
         sw_arg = tmp_dir / "sw_read.args"
         sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], 60, text=True)
+        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
         if r_sw.returncode != 0:
             # Fail CLOSED on the file: "off" must be a DELIBERATE discard of
             # the lineage, not an accident of a failed read (the stale chain
@@ -3848,7 +3856,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             )
             
             r2 = _run_captured([_get_exiftool_cmd(), "-@", str(inject_args)],
-                              60, text=True)
+                              EXIFTOOL_TIMEOUT, text=True)
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
@@ -3897,7 +3905,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         # Inject thumbnail into JXL
                         r_thumb = _run_exiftool_argfile(
                             ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                            timeout=30
+                            timeout=EXIFTOOL_TIMEOUT
                         )
                         if r_thumb.returncode == 0:
                             logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
@@ -3963,7 +3971,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                             # Inject thumbnail into JXL
                             r_thumb = _run_exiftool_argfile(
                                 ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                                timeout=30
+                                timeout=EXIFTOOL_TIMEOUT
                             )
                             if r_thumb.returncode == 0:
                                 logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
@@ -4000,7 +4008,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         relation_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
                     r_mark = _run_exiftool_argfile(
                         ["-overwrite_original"] + relation_args + [str(write_path)],
-                        timeout=30
+                        timeout=EXIFTOOL_TIMEOUT
                     )
                     # A failed marker write must not be silent: without the marker
                     # the decoder can never reconstruct this multi-page TIFF.
@@ -4039,7 +4047,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                         solo_args.append("-XMP-dc:Relation+=" + SUBFILETYPE_XMP_PREFIX + str(subfiletype))
                     r_solo = _run_exiftool_argfile(
                         ["-overwrite_original"] + solo_args + [str(write_path)],
-                        timeout=30
+                        timeout=EXIFTOOL_TIMEOUT
                     )
                     if r_solo.returncode != 0:
                         err_msg = (r_solo.stderr or r_solo.stdout or "no output")[:200]
@@ -4058,7 +4066,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     r_gray = _run_exiftool_argfile(
                         ["-overwrite_original",
                          "-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG, str(write_path)],
-                        timeout=30
+                        timeout=EXIFTOOL_TIMEOUT
                     )
                     if r_gray.returncode != 0:
                         err_msg = (r_gray.stderr or r_gray.stdout or "no output")[:200]
@@ -5973,7 +5981,7 @@ def main():
                 try:
                     _r = _run_exiftool_argfile(
                         ["-overwrite_original"] + _provenance_marker_args(_t)
-                        + [str(_j)], timeout=60)
+                        + [str(_j)], timeout=EXIFTOOL_TIMEOUT)
                     if _r.returncode == 0:
                         _stamped += 1
                 except Exception as _e:

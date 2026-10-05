@@ -108,6 +108,11 @@
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
   same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
   block deletion, never be waved through.
+- **Per-file exiftool calls use `EXIFTOOL_TIMEOUT`** (each script defines it
+  as its codec timeout), never a literal: a 60/120 s limit turned twelve good
+  45 MP files into errors under a 17-worker load on 2026-10-06. Only the
+  planning-time `*_batch` reads keep their per-batch limit.
+  `tests/test_exiftool_timeouts.py` scans every call.
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.

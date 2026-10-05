@@ -691,6 +691,14 @@ CODEC_TIMEOUT = 900
 # for very large images (45-100MP) with many workers competing for CPU/disk;
 # a timeout becomes a per-file error (output cleaned up), never a hung batch.
 
+EXIFTOOL_TIMEOUT = CODEC_TIMEOUT
+# Timeout (seconds) for each per-file exiftool call (metadata read/copy,
+# markers). Same patience as the codec: with many workers on a busy hard disk
+# a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
+# good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
+# reported as a codec timeout). The planning-time batch reads keep their own
+# per-batch timeout.
+
 TEMP2_DIR = None
 # Staging directory for output files during conversion
 # Example: r"E:\staging_jxl"
@@ -1162,7 +1170,7 @@ def _read_all_source_marker_values(jxl_path: Path):
     srcs, srcsums = [], []
     try:
         r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-dc:Relation",
-                                   str(jxl_path)], timeout=60)
+                                   str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
         data = json.loads(r.stdout) if r.stdout else []
     except Exception:
         return [], []
@@ -1228,13 +1236,13 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(src_path),
              "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
-            timeout=120
+            timeout=EXIFTOOL_TIMEOUT
         )
         # Strip ICC:<base64> segments from CreatorTool (same logic as the
         # TIFF decoder's cleanup_xmp_icc).
         try:
             r = _run_exiftool_argfile(
-                ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(dst_path)], timeout=30
+                ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(dst_path)], timeout=EXIFTOOL_TIMEOUT
             )
             if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
                 content = r.stdout.strip()
@@ -1262,7 +1270,7 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                      # multi-line CreatorTool copied from another program would
                      # split into several bogus arguments here.
                      f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(dst_path)],
-                    timeout=60
+                    timeout=EXIFTOOL_TIMEOUT
                 )
         except Exception:
             pass
@@ -2158,7 +2166,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             if not has_jbrd_box(write_path):
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(src_path)
-                    + [str(write_path)], timeout=60)
+                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
 
@@ -2612,7 +2620,7 @@ def _strip_provenance_markers(jxl_path: Path, info: dict):
     last_err = ""
     for extra in ([], ["-m"]):
         try:
-            r = _run_exiftool_argfile(extra + lines + [str(jxl_path)], timeout=60)
+            r = _run_exiftool_argfile(extra + lines + [str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as e:
             last_err = str(e)
             continue
@@ -3713,7 +3721,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                 _copy_metadata(src_path, write_path)
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(src_path)
-                    + [str(write_path)], timeout=60)
+                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
 
@@ -3851,7 +3859,7 @@ def _read_creator_and_relation(jxl_path: Path):
     """(creator_tool str, [relation tokens]) of one file. Raises on failure:
     a derivative whose source profile cannot be read must not be produced."""
     r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
-                               "-XMP-dc:Relation", str(jxl_path)], timeout=60)
+                               "-XMP-dc:Relation", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
     if not r.stdout:
         raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
     entry = json.loads(r.stdout)[0]
@@ -4011,7 +4019,7 @@ def _verify_profile_in_output(path: Path, is_png: bool) -> None:
                                "profile — refusing to encode it as the wrong colour space")
         return
     r = _run_exiftool_argfile(
-        ["-j", "-s", "-s", "-ICC_Profile:ProfileDescription", str(path)], timeout=60)
+        ["-j", "-s", "-s", "-ICC_Profile:ProfileDescription", str(path)], timeout=EXIFTOOL_TIMEOUT)
     if not r.stdout:
         raise RuntimeError(f"exiftool could not read the output profile (rc={r.returncode})")
     entry = json.loads(r.stdout)[0]
@@ -4243,7 +4251,7 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
         lines.append(f"-ExifImageHeight={nh}")
         r = _run_exiftool_argfile(
             ["-j", "-s", "-s", "-XMP-exif:PixelXDimension",
-             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=60)
+             "-XMP-exif:PixelYDimension", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
         if r is not None and r.stdout:
             entry = json.loads(r.stdout)[0]
             if entry.get("PixelXDimension") is not None:
@@ -4510,20 +4518,20 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             # copied jxlphoto-src must not survive `=` + `+=` in one call.
             rc = _run_exiftool_argfile(
                 ["-overwrite_original", "-XMP-dc:Relation=", str(actual_out)],
-                timeout=60)
+                timeout=EXIFTOOL_TIMEOUT)
             if rc.returncode != 0:
                 raise RuntimeError(f"derivative metadata clear: {(rc.stderr or '')[:200]}")
             r2 = _run_exiftool_argfile(
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
-                + [str(actual_out)], timeout=120)
+                + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r2.returncode != 0:
                 raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
         else:
             try:
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(jxl_path)
-                    + [str(actual_out)], timeout=60)
+                    + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             except Exception as _e_prov:
                 logger.debug(f"Provenance marker skipped: {_e_prov}")
 

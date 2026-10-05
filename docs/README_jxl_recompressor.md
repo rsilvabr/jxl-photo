@@ -580,6 +580,11 @@ REDERIVE_ON_ENCODE_CHANGE = True
                              # --rederive-on-encode-change /
                              # --no-rederive-on-encode-change)
 ENCODE_TAG_MODE = "xmp"      # xmp/software/off
+CJXL_TIMEOUT = 900           # Per-file cjxl/djxl/magick timeout (seconds)
+EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
+                             # Per-file exiftool calls (metadata copy, source
+                             # profile read): same patience as the codec — a
+                             # busy hard disk can stall them for minutes
 VERIFY_ROUNDTRIP = False     # Pixel comparison before any delete
 DELETE_SOURCE = False        # Delete sources after verification
 DELETE_SKIPPED = False       # Also delete already-archived sources

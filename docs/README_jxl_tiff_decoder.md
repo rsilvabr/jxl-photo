@@ -249,6 +249,15 @@ CLEANUP_XMP_ICC_MARKER = True
 # True  → cleans up CreatorTool, keeping only human-readable text (default)
 # False → leaves CreatorTool unchanged
 
+DJXL_TIMEOUT = 900
+# Timeout (seconds) for each djxl invocation; a timeout is a per-file error.
+
+EXIFTOOL_TIMEOUT = DJXL_TIMEOUT
+# Timeout for each per-file exiftool call (metadata copy into the TIFF, tag
+# cleanup). Same patience as the codec: many workers on a busy hard disk can
+# stall a metadata rewrite for minutes. Planning-time batch reads keep their
+# own limit.
+
 TEMP2_DIR = None
 # Staging SSD for output TIFFs. Separates read I/O (HDD with JXLs) from write I/O.
 # None (default) → write directly to the final destination.

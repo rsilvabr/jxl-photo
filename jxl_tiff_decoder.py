@@ -939,6 +939,14 @@ DJXL_TIMEOUT = 900
 # JXLs (45-100MP) with many workers competing for CPU/disk; a timeout becomes
 # a per-file error (output cleaned up), never a hung batch.
 
+EXIFTOOL_TIMEOUT = DJXL_TIMEOUT
+# Timeout (seconds) for each per-file exiftool call (metadata read/copy,
+# markers). Same patience as the codec: with many workers on a busy hard disk
+# a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
+# good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
+# reported as a codec timeout). The planning-time batch reads keep their own
+# per-batch timeout.
+
 TEMP2_DIR = None
 # Staging directory for output TIFFs during conversion.
 # None → disabled: TIFFs written directly to final destination
@@ -1262,7 +1270,7 @@ def extract_icc_from_xmp(jxl_path):
     """
     try:
         r = _run_exiftool_argfile(
-            ["-b", "-XMP-xmp:CreatorTool", str(jxl_path)], timeout=30
+            ["-b", "-XMP-xmp:CreatorTool", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -1309,7 +1317,7 @@ def extract_icc_native(jxl_path, tmp_dir):
         except OSError:
             pass
         r = _run_exiftool_argfile(
-            ["-o", str(icc_path), "-b", "-ICC_Profile", str(jxl_path)], timeout=30
+            ["-o", str(icc_path), "-b", "-ICC_Profile", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode == 0 and icc_path.exists() and icc_path.stat().st_size > 128:
             data = icc_path.read_bytes()
@@ -2007,11 +2015,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # dropped metadata on big files).
         r_exif = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
-             "-exif:all", str(tiff_path)], timeout=180
+             "-exif:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         r_xmp = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
-             "-xmp:all", "-iptc:all", str(tiff_path)], timeout=180
+             "-xmp:all", "-iptc:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         copied = True
         for r in (r_exif, r_xmp):
@@ -2026,34 +2034,34 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # and must keep its metadata, so we only clear on single-page files.
         if not is_multipage:
             _run_exiftool_argfile(
-                ["-overwrite_original", "-ifd1:Software=", str(tiff_path)], timeout=60
+                ["-overwrite_original", "-ifd1:Software=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
             _run_exiftool_argfile(
-                ["-overwrite_original", "-ifd1:ImageDescription=", str(tiff_path)], timeout=60
+                ["-overwrite_original", "-ifd1:ImageDescription=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
         # Clear the page-0 Software tag if it still holds tifffile's default.
         # The main image is IFD0 (a JPEG preview, when present, is IFD1);
         # tifffile's default Software string can survive on IFD0, so only clear
         # it when the JXL didn't supply its own (i.e. it still reads "tifffile").
         r_sw = _run_exiftool_argfile(
-            ["-s", "-s", "-s", "-IFD0:Software", str(tiff_path)], timeout=30
+            ["-s", "-s", "-s", "-IFD0:Software", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r_sw.returncode == 0 and r_sw.stdout and 'tifffile' in r_sw.stdout:
             _run_exiftool_argfile(
-                ["-overwrite_original", "-IFD0:Software=", str(tiff_path)], timeout=60
+                ["-overwrite_original", "-IFD0:Software=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
         # Also fix ImageDescription if it holds tifffile's shaped-JSON metadata.
         # Match the actual tifffile pattern (JSON starting with "shape") — a
         # substring check would wipe legitimate user captions like "Beautiful
         # shapes at dawn".
         r = _run_exiftool_argfile(
-            ["-ImageDescription", str(tiff_path)], timeout=30
+            ["-ImageDescription", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode == 0 and r.stdout:
             _desc_value = r.stdout.split(":", 1)[1].strip() if ":" in r.stdout else r.stdout.strip()
             if _desc_value.startswith('{"shape"') or _desc_value.startswith("{'shape'"):
                 _run_exiftool_argfile(
-                    ["-overwrite_original", "-ImageDescription=", str(tiff_path)], timeout=60
+                    ["-overwrite_original", "-ImageDescription=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
                 )
 
         # Strip the internal multi-page marker from dc:Relation but keep any
@@ -2064,7 +2072,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # (e.g. "Smith, John").
         try:
             rr = _run_exiftool_argfile(
-                ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=30
+                ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
             kept = []
             if rr.returncode == 0 and rr.stdout:
@@ -2108,7 +2116,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             # test_decoder_markers_do_not_leak_into_the_tiff).
             if has_internal:
                 _run_exiftool_argfile(
-                    ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=60
+                    ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
                 )
             # ...but everything that gets ADDED fits in one call: the user's own
             # Relation values and the provenance markers together. Two calls
@@ -2125,7 +2133,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 add_lines += _provenance_marker_args(list(provenance_sources))
             if len(add_lines) > 1:
                 add_lines.append(str(tiff_path))
-                r_rel = _run_exiftool_argfile(add_lines, timeout=60)
+                r_rel = _run_exiftool_argfile(add_lines, timeout=EXIFTOOL_TIMEOUT)
                 if r_rel.returncode != 0:
                     # The provenance marker is what a LATER run uses to tell
                     # this output from an original master (_provenance_ok, and
@@ -2162,7 +2170,7 @@ def cleanup_xmp_icc(tiff_path):
         return
     try:
         r = _run_exiftool_argfile(
-            ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(tiff_path)], timeout=30
+            ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
             content = r.stdout.strip()
@@ -2180,7 +2188,7 @@ def cleanup_xmp_icc(tiff_path):
                 clean = "jxl_tiff_decoder"
             _run_exiftool_argfile(
                 ["-overwrite_original",
-                 f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(tiff_path)], timeout=60
+                 f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
             logger.debug(f" >Cleaned up XMP CreatorTool")
     except Exception as e:
@@ -2988,7 +2996,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # from the source JXL must survive.
                 r_exif = _run_exiftool_argfile(
                     ["-overwrite_original", "-tagsfromfile", str(main_jxl),
-                     "-exif:all", str(write_path)], timeout=180
+                     "-exif:all", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
                 if r_exif.returncode != 0:
                     # Same rule as copy_metadata: a failed metadata copy is a
@@ -2999,20 +3007,20 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                     logger.error(f" METADATA COPY FAILED (None mode) | "
                                  f"{main_jxl.name} | {_err.strip()}")
                 r_sw0 = _run_exiftool_argfile(
-                    ["-s", "-s", "-s", "-IFD0:Software", str(write_path)], timeout=30
+                    ["-s", "-s", "-s", "-IFD0:Software", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
                 if r_sw0.returncode == 0 and r_sw0.stdout and 'tifffile' in r_sw0.stdout:
                     _run_exiftool_argfile(
-                        ["-overwrite_original", "-IFD0:Software=", "-Software=", str(write_path)], timeout=60
+                        ["-overwrite_original", "-IFD0:Software=", "-Software=", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                     )
                 r_id0 = _run_exiftool_argfile(
-                    ["-ImageDescription", str(write_path)], timeout=30
+                    ["-ImageDescription", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
                 if r_id0.returncode == 0 and r_id0.stdout:
                     _desc0 = r_id0.stdout.split(":", 1)[1].strip() if ":" in r_id0.stdout else r_id0.stdout.strip()
                     if _desc0.startswith('{"shape"') or _desc0.startswith("{'shape'"):
                         _run_exiftool_argfile(
-                            ["-overwrite_original", "-IFD1:ImageDescription=", "-ImageDescription=", str(write_path)], timeout=60
+                            ["-overwrite_original", "-IFD1:ImageDescription=", "-ImageDescription=", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                         )
 
             # Validate EVERY successful output, not just mode-8 delete gates:

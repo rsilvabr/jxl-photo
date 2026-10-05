@@ -32,6 +32,7 @@ v2.5.0 / 2026-10-02: Round 43 released as v2.5.0, together with --exclude-folder
 Round 44 / 2026-10-04: The scheduled MOBILE run — 30 recompressor workers at d=3 e=7 ran out of memory (314 errors) and one worker hung forever in a subprocess reader thread (see top section)
 Round 45 / 2026-10-05: subprocess capture without reader threads in every backend, the ignore-mode page size, logs out of the repository, the Start-in note (see top section)
 Round 46 / 2026-10-05: the recompressor's silent planning phase (see top section)
+Round 47 / 2026-10-06: per-file exiftool timeouts too short under load, reported as codec timeouts (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -42,6 +43,12 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
+
+## Round-47 — per-file exiftool timeouts (2026-10-06)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 478 | **A good file became an error when exiftool stalled under load, and the error blamed the codec.** Every per-file exiftool call (metadata copy, source-profile read, markers, thumbnail) ran with a fixed 15–180 s limit, while the codecs get 900 s. The scheduled MOBILE run of 2026-10-06 (17 workers at d=3 e=9 on 45 MP files, `G:` hard disk) lost twelve consecutive derivatives within 40 s of each other, about 3 minutes after they started, while throughput dropped from ~17 to 3–5 files a minute: a transient stall, not the files (same size as their neighbours, which converted). The recompressor reported each one as `codec timed out after 900s`, whatever had actually timed out — here exiftool at 60/120 s. No partial output was left. | all four backends | ✅ FIXED (new setting `EXIFTOOL_TIMEOUT`, defined as the script's codec timeout, used by all 52 per-file exiftool calls; the planning-time batch reads keep their per-batch limit. The recompressor's TIMEOUT line and error summary name the tool and the limit that fired: `exiftool timed out after 120s`. Test: `tests/test_exiftool_timeouts.py`, which fails against the pre-fix code) |
 
 ## Round-46 — the recompressor's silent planning phase (2026-10-05)
 

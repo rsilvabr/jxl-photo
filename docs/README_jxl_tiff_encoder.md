@@ -213,6 +213,14 @@ PIL_MAX_IMAGE_PIXELS = None
 # N     → Maximum number of pixels (e.g., 500_000_000 for ~500MP limit)
 # The default PIL limit (~89MP) is too low for large panoramas. Set to None for photography workflows.
 
+CJXL_TIMEOUT = 900
+# Timeout (seconds) for each cjxl invocation; a timeout is a per-file error.
+
+EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
+# Timeout for each per-file exiftool call (metadata copy, markers, thumbnail).
+# Same patience as the codec: many workers on a busy hard disk can stall a
+# metadata rewrite for minutes. Planning-time batch reads keep their own limit.
+
 TEMP2_DIR = None
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
 # None (default) → write directly to the final destination.

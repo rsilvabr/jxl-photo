@@ -165,6 +165,15 @@ CJXL_BUFFERING = None
 # ~1.2% smaller files (see the v1.8.0 release notes benchmark on GitHub).
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
 
+CODEC_TIMEOUT = 900
+# Timeout (seconds) for each cjxl/djxl/magick invocation; a timeout is a
+# per-file error.
+
+EXIFTOOL_TIMEOUT = CODEC_TIMEOUT
+# Timeout for each per-file exiftool call (metadata copy, markers). Same
+# patience as the codec: many workers on a busy hard disk can stall a metadata
+# rewrite for minutes. Planning-time batch reads keep their own limit.
+
 # ── Paths ─────────────────────────────────────────────────────────
 TEMP2_DIR = None
 # Staging directory for output files during conversion.
