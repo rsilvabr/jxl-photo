@@ -418,6 +418,9 @@ paths too.
    night that failed is on your screen in the morning instead of only in a log
    nobody opens — see
    [Keep the window open](README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen).
+   To start the task right away instead of waiting for 03:00 (to test it, or
+   to catch up a skipped night): `schtasks /Run /TN "jxl-photo nightly"`. See
+   [Run it now](README_jxl_tools.md#run-it-now-without-waiting-for-the-schedule).
 5. **Several manifests?** One manifest holds one direction (TIFF→JXL, JXL→JXL,
    JPEG→JXL... never mixed), so a library with several workflows has one
    preset per manifest — and one scheduled task can run them all, in order,

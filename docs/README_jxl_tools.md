@@ -317,8 +317,36 @@ Three things to know:
   log, plus a combined wrapper log for manifest runs, and an abort names its
   culprits there.
 
-To watch a run live, start it in a terminal yourself:
-`py jxl_photo.py --run-preset nightly-sync` — the window is yours and stays open.
+##### Run it now, without waiting for the schedule
+
+To test a new task, or to catch up after a night it skipped, start the **task
+itself**. It runs exactly what the schedule would, with the same program, the
+same folder and the same `cmd /k` window:
+
+```text
+schtasks /Run /TN "jxl-photo"
+```
+
+You can also do it from Task Scheduler: right-click the task → **Run**.
+
+- **Close the window of the previous run first.** While that window is open the
+  task still counts as *Running*, and Task Scheduler silently ignores the new
+  start (*Do not start a new instance*, above). `schtasks /Query /TN
+  "jxl-photo"` shows `Running` or `Ready`.
+- **`SUCCESS: Attempted to run` only means the task was started.** The result
+  is in the window it opens, and in the logs.
+
+To run without the task, or to watch a run live, start it in a terminal
+yourself. The window is yours and stays open:
+
+```text
+cd /d C:\tools\jxl-photo
+run_scheduled_presets.cmd
+```
+
+To run a single preset instead, use `py jxl_photo.py --run-preset nightly-sync`.
+Add `--dry-run` to that line to see what the preset would convert without
+writing anything.
 
 > **Presets that delete sources cannot run unattended — in any mode.** A preset
 > with `delete_source` on is refused with an explanation: that confirmation is a
