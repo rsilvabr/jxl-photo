@@ -34,6 +34,7 @@ Round 45 / 2026-10-05: subprocess capture without reader threads in every backen
 Round 46 / 2026-10-05: the recompressor's silent planning phase (see top section)
 Round 47 / 2026-10-06: per-file exiftool timeouts too short under load, reported as codec timeouts; the planning phase counts its progress (see top section)
 v2.7.0 / 2026-10-06: Round 47 released as v2.7.0, together with the recompressor's re-derive on distance/effort change - see new_features_since_v1.0.md
+Round 48 / 2026-10-06: `--buffering 1` measured — the "~2 % larger" advice was wrong at effort 8–9 (see top section)
 
 **The round headings below are NOT releases.** v1.9.1 was the last published
 version before v2.0.0, and the version numbers these rounds carried while in
@@ -44,6 +45,12 @@ Scripts: `jxl_photo.py`, `jxl_photo_v2.py`, `jxl_tiff_encoder.py`, `jxl_tiff_dec
 **Note:** `jxl_tiff_decoder.py` was completely rebuilt in v1.3 (improved Windows Explorer support, file integrity checks, Python 3.8 compatibility). The v1 decoder is recoverable from the repository history (`git log jxl_tiff_decoder.py`, before the v1.3 rebuild); `deprecated/` keeps only the retired JXL → JPG/PNG converter.
 
 ---
+
+## Round-48 — what `--buffering 1` really costs (2026-10-06)
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 480 | **The `--buffering 1` advice was wrong at effort 8–9.** Since v2.6.0 the memory-cap warning, the docs and the wrapper README recommended `--buffering 1` for any whole-image setting, "files ~2 % larger" — a size measured at effort 7 only; quality was never measured. Measured now with cjxl 0.12.0 on four real photos (SSIMULACRA2 + Butteraugli): at effort 7 / d=3, streaming is the same image ~1.5 % larger (the advice holds); at effort 9 / d=3, a streamed encode is **effort 7's file** (identical metrics, sizes within 0.3 %) — the extra effort is not used — while the default whole-image effort-9 encode is 7–10 % smaller. The scheduled MOBILE preset (d=3, e=9, `--buffering 1`) was paying for effort 9 and getting effort 7. | encoder, recompressor, docs | ✅ FIXED (the memory-cap warning is effort-aware: at effort 8+ it says a streamed encode is effort 7's file and suggests effort 7; at effort 7 it keeps the `--buffering 1` advice with the measured cost. Docs: [Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured) with the full results and the cjxl version; `tools/buffering_benchmark.py` re-runs the measurement. Test: `tests/test_memory_workers.py::test_cap_hint_depends_on_effort`, which fails against the pre-fix code) |
 
 ## Round-47 — per-file exiftool timeouts, planning progress (2026-10-06)
 

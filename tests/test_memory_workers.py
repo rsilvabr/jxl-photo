@@ -100,6 +100,25 @@ def test_cap_whole_image_mobile(mod, monkeypatch, caplog):
 
 
 @pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+@pytest.mark.parametrize("effort,says,never", [
+    # effort 7: streaming is the same image, ~1.5 % larger -> suggest it.
+    (7, "files ~1.5% larger, same quality", "use effort 7 instead"),
+    # effort 9: a streamed encode is effort 7's file (measured, cjxl 0.12) —
+    # suggesting --buffering 1 as a cheap fix was misleading.
+    (9, "use effort 7 instead", "same quality"),
+])
+def test_cap_hint_depends_on_effort(mod, monkeypatch, caplog, effort, says, never):
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)
+    monkeypatch.setattr(mod, "_available_commit_bytes", lambda: AVAIL_40)
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        mod._memory_capped_workers(30, MP45, 3.0, effort)
+    assert "reduced to" in caplog.text
+    assert says in caplog.text, caplog.text
+    assert never not in caplog.text, caplog.text
+    assert "~2% larger" not in caplog.text
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
 def test_cap_streaming_no_buffering_hint(mod, monkeypatch, caplog):
     """d=1 e=7 streams: 40 GiB / 1.8 GiB per job -> 18, no buffering hint."""
     monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)

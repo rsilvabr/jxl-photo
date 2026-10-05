@@ -826,8 +826,11 @@ when **effort 7 and distance ≥ 3**, or with **`--buffering 0`**. Measured on
 against about **1.3 GB/worker** at d=0.05 e=9. The run estimates this from the
 largest page and the settings and **caps `--workers` automatically** so the jobs
 fit in the commit limit × `WORKER_MEMORY_FRACTION`; it logs `Memory: ...` and
-warns `--workers N reduced to K`. Use `--buffering 1` to force streaming (files
-~2 % larger) when you need the lower peak.
+warns `--workers N reduced to K`. Use `--buffering 1` to force streaming when
+you need the lower peak: at effort 7 the files come out ~1.5 % larger with the
+same quality, but at effort 8–9 streaming gives effort 7's result — measured in
+[Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured)
+(cjxl 0.12.0). Masters at d ≤ 0.5 stream at effort 8–9 anyway.
 
 **The safe worker count depends on image size, not just on the machine.** On
 64 GB, at effort 9 with default buffering:

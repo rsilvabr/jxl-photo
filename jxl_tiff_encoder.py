@@ -678,10 +678,17 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
                 f"{avail / 2**30:.1f} GB available | workers {workers}")
     if cap < requested:
         hint = ""
-        if kind == "whole-image":
+        if kind == "whole-image" and effort >= 8:
+            # Measured (cjxl 0.12, docs/README_jxl_recompressor.md, "Streaming
+            # vs whole-image"): streaming skips the extra effort-9 work.
             hint = (" This distance/effort makes cjxl encode the whole image at "
-                    "once; --buffering 1 keeps it streaming (~2.5x less memory, "
-                    "files ~2% larger).")
+                    "once. --buffering 1 would stream it, but a streamed effort "
+                    "8+ encode is effort 7's file (~8% larger): for a light run "
+                    "use effort 7 instead.")
+        elif kind == "whole-image":
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once; --buffering 1 keeps it streaming (~3x less memory, "
+                    "files ~1.5% larger, same quality).")
         logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
                        f"processes at ~{per_job / 2**30:.1f} GB each would not "
                        f"fit in the {avail / 2**30:.1f} GB the system can still "
@@ -715,7 +722,9 @@ CJXL_BUFFERING = None
 #   image at once (2.5-8x the RAM; see WORKER_MEMORY_FRACTION).
 # 0 = buffer entire image = best compression / most RAM (restores pre-0.12
 #     behavior; use for maximum density when encode time doesn't matter).
-# 1-3 = always stream. Ignored automatically when cjxl is < 0.12
+# 1-3 = always stream. On a lossy encode at effort 8-9 that gives the file
+#     effort 7 would (cjxl 0.12, measured: docs/README_jxl_recompressor.md,
+#     "Streaming vs whole-image"). Ignored automatically when cjxl is < 0.12
 #     (flag doesn't exist there).
 
 WORKER_MEMORY_FRACTION = 0.8

@@ -684,7 +684,7 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 The TIFF encoder and the recompressor now cap `--workers` so the parallel cjxl processes fit in memory. Nothing changes in the output; a run may just use fewer workers than you asked for, and the log says so (`--workers 30 reduced to 8`). It happens mostly at **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5** and **effort 10**, where cjxl encodes the whole image at once.
 
 - The budget is the memory the system can still **commit** when the run starts, so programs left open (a raw editor can hold 15 GB) mean fewer workers that night.
-- To get the workers back: `--buffering 1` keeps those settings on the low-memory streaming path (files ~2 % larger); or close other programs before a scheduled run.
+- To get the workers back: `--buffering 1` keeps those settings on the low-memory streaming path — at effort 7 for files ~1.5 % larger and the same quality, but at effort 8–9 it simply gives effort 7's file (see [Streaming vs whole-image](docs/README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured), measured with cjxl 0.12.0); or close other programs before a scheduled run.
 - `WORKER_MEMORY_FRACTION` at the top of `jxl_tiff_encoder.py` and `jxl_recompressor.py` sets the share used (default 0.8); `0` turns the cap off.
 - If you schedule presets, switch the task to `cmd /k` so a failed run stays on screen: see [Keep the window open](docs/README_jxl_tools.md#keep-the-window-open--or-a-failed-run-goes-unseen).
 

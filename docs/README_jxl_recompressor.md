@@ -489,8 +489,66 @@ JXL → d=3 e=7):
 |---|---|---|---|---|---|
 | files/s | 0.23 | 0.50 | 0.61 | 0.68 | 0.73 |
 
-`--buffering 1` (or 2/3) forces the streaming path at any distance/effort for
-files only ~2 % larger — a good way to keep many workers safe by hand.
+`--buffering 1` (or 2/3) forces the streaming path at any distance/effort. What
+that costs depends on the effort — measured below.
+
+### Streaming vs whole-image: what `--buffering 1` costs (measured)
+
+**Tested with cjxl v0.12.0** (`4128790`, AVX2, Windows 11, 32 threads, 64 GB).
+cjxl's choice between the two paths is libjxl's own rule
+([`CanDoStreamingEncoding`](https://github.com/libjxl/libjxl/blob/v0.12.0/lib/jxl/enc_frame.cc))
+and may change in another version — re-measure with
+`tools/buffering_benchmark.py` after an upgrade.
+
+Four real photos (three 45.4 MP Nikon Z8, one 24.4 MP), converted from the
+16-bit ProPhoto TIFF masters to 16-bit sRGB PNG — the input of an sRGB
+derivative. Each encoded at distance 3 with cjxl's default and with
+`--buffering 1`, then compared with the reference by
+[SSIMULACRA2](https://github.com/cloudinary/ssimulacra2) (higher is better;
+~70 is "high quality") and Butteraugli (lower is better).
+
+**Effort 7, d = 3** (the default is whole-image from d = 3 up):
+
+| | default (whole image) | `--buffering 1` (streaming) |
+|---|---|---|
+| File size | — | **+1.2 to +2.0 %** |
+| SSIMULACRA2 | — | −0.001 to +0.016 (no difference) |
+| Butteraugli max / 3-norm | — | identical |
+| Peak memory per file (45 MP) | 2.9–3.1 GB | ~1.0 GB |
+| Time per file | ~4 s | ~4 s |
+
+At effort 7 the two paths produce **the same image**; whole-image only packs it
+~1.5 % tighter. Below d = 3 effort 7 already streams (d = 2.5 gave byte-identical
+files either way).
+
+**Effort 9, d = 3** (the default is whole-image above d = 0.5):
+
+| | default (whole image) | `--buffering 1` (streaming) |
+|---|---|---|
+| File size | — | **+7.2 to +10.3 %** |
+| SSIMULACRA2 at the same distance | — | +0.4 to +2.2 |
+| Peak memory per file (45 MP) | **11.4–11.8 GB** | ~1.0 GB |
+| Time per file (wall / CPU) | 60–67 s / 124 s | 6 s / 40 s |
+
+And the decisive row: **effort 9 with `--buffering 1` gives effort 7's file** —
+identical SSIMULACRA2 and Butteraugli to three decimals, sizes within 0.3 %. In
+streaming mode the extra effort-9 work does not happen. Whole-image effort 9 is
+a genuinely different encode: smaller and a little softer at the same distance.
+**At the same file size** (interpolated on the effort-7 curve, d = 3 to 3.5) it
+scores +0.05 to +1.1 SSIMULACRA2 above effort 7 — real but small, for 3× the CPU
+and 11× the memory.
+
+**Recommendations**
+
+- **Effort 7** is the sensible batch setting. At d ≥ 3, `--buffering 1` costs
+  ~1.5 % in size and nothing measurable in quality — use it whenever the memory
+  cap lowers your workers.
+- **Effort 8–9 only on the whole-image path**: ~8 % smaller files and a slightly
+  better quality-per-byte, at ~3× the CPU and ~11.5 GB per 45 MP worker (the
+  run will cap `--workers` to fit).
+- **Never combine effort 8–9 with `--buffering 1`**: you get effort 7's result
+  and pay a little more time for it. Choose effort 7 instead.
+- Masters (d ≤ 0.5) are not affected: there effort 8–9 streams by default.
 
 ## All flags
 

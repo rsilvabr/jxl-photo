@@ -616,7 +616,9 @@ CJXL_BUFFERING = None
 # [libjxl >= 0.12 only] --buffering flag passed to cjxl. None = cjxl chooses:
 # streaming, except at effort 7 with distance >= 3, effort 8-9 with distance
 # > 0.5 and effort 10+ (whole image at once, 2.5-8x the RAM). 1 = always
-# stream (~2% larger files). See WORKER_MEMORY_FRACTION.
+# stream: at effort 7 ~1.5% larger files, same quality; at effort 8-9 the file
+# effort 7 would give (cjxl 0.12, measured: docs/README_jxl_recompressor.md,
+# "Streaming vs whole-image"). See WORKER_MEMORY_FRACTION.
 
 CJXL_TIMEOUT = 900
 # Per-file cjxl/djxl timeout in seconds.
@@ -1049,10 +1051,17 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
                 f"{avail / 2**30:.1f} GB available | workers {workers}")
     if cap < requested:
         hint = ""
-        if kind == "whole-image":
+        if kind == "whole-image" and effort >= 8:
+            # Measured (cjxl 0.12, docs/README_jxl_recompressor.md, "Streaming
+            # vs whole-image"): streaming skips the extra effort-9 work.
             hint = (" This distance/effort makes cjxl encode the whole image at "
-                    "once; --buffering 1 keeps it streaming (~2.5x less memory, "
-                    "files ~2% larger).")
+                    "once. --buffering 1 would stream it, but a streamed effort "
+                    "8+ encode is effort 7's file (~8% larger): for a light run "
+                    "use effort 7 instead.")
+        elif kind == "whole-image":
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once; --buffering 1 keeps it streaming (~3x less memory, "
+                    "files ~1.5% larger, same quality).")
         logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
                        f"processes at ~{per_job / 2**30:.1f} GB each would not "
                        f"fit in the {avail / 2**30:.1f} GB the system can still "

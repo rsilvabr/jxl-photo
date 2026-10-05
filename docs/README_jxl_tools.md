@@ -851,10 +851,20 @@ once. Each worker then needs ~3.6 GB (effort 7) or ~12.4 GB (effort 8+) on a
 45 MP photo instead of ~1.5 GB, and the run lowers `--workers` to fit in memory
 — an e9 preset can drop to a handful of workers. Putting **`--buffering 1`** in
 **Expert flags** (Step 6B) keeps those settings on the streaming path, with the
-memory and worker count of a light setting, for files only ~2 % larger. The
-flag is saved with the preset (it is what a light, high-effort phone-copy
-preset wants). Measured at effort 7 and d=3: 0.61 files/s with 8 workers, 0.68
+memory and worker count of a light setting; the flag is saved with the preset.
+What it costs depends on the effort (measured with cjxl 0.12.0 on 45 MP
+photos, d=3):
+
+- **effort 7**: files ~1.5 % larger, the same image (identical SSIMULACRA2 and
+  Butteraugli) — a good trade whenever the memory cap lowers your workers;
+- **effort 8–9**: the file effort 7 would have produced — the extra effort is
+  simply not used while streaming. Pick **effort 7** for a light preset, or keep
+  effort 9 **without** `--buffering 1` for ~8 % smaller files at ~3× the CPU
+  and ~11.5 GB per worker.
+
+Measured throughput at effort 7 and d=3: 0.61 files/s with 8 workers, 0.68
 with 8 + `--buffering 1`, 0.73 with 16 + `--buffering 1`. Details:
+[Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured),
 [Memory and --workers](README_jxl_recompressor.md#memory-and---workers) and
 [the whole-image threshold](README_jxl_tiff_encoder.md#exception-the-whole-image-threshold).
 
