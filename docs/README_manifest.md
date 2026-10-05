@@ -129,6 +129,10 @@ The safety rules of a direct run apply per row:
 - The duplicate-output guard sees the **renamed** names, so a rename that would
   land two rows on the same file aborts before anything is written.
 
+There is **no manifest column for re-deriving on distance/effort change**: the
+wizard's / preset's answer (`REDERIVE_ON_ENCODE_CHANGE` and its CLI flags)
+applies to every derivative row of a run.
+
 ### Export columns — marker, subfolder and output folder per row
 
 | Column | Directions | Effect on that row |

@@ -692,6 +692,17 @@ OUTPUT_ICC = None
 # written in place, never deletes anything, and never proves that the
 # original TIFF is archived (its jxlphoto-src/srcsum markers are removed).
 
+REDERIVE_ON_ENCODE_CHANGE = True
+# Derivatives only (--output-icc / --resize-* / --sharpen). Each derivative
+# records its recipe AND the distance/effort it was encoded with
+# (jxlphoto-derived:sRGB/d4e9). True -> a sync run re-derives an existing
+# derivative whose recorded distance/effort differ from this run's, exactly as
+# it already does when the colour/size/sharpening recipe changes.
+# False -> only a recipe change re-derives; new distance/effort apply to new
+# files only. Derivatives written before v2.7.0 record no distance/effort and
+# are never re-derived for it (run once with --overwrite to refresh them).
+# Can also be set via --rederive-on-encode-change / --no-rederive-on-encode-change.
+
 ENCODE_TAG_MODE = "xmp"
 # Where to record the NEW encoding parameters, mirroring jxl_tiff_encoder.py:
 # "xmp"      -> XMP-dc:Description (default; the new cjxl d=/e= is APPENDED to
@@ -820,6 +831,7 @@ _RUN_DEFAULTS = {
     "DELETE_SKIPPED": DELETE_SKIPPED,
     "VERIFY_ROUNDTRIP": VERIFY_ROUNDTRIP,
     "KEEP_SMALLER": KEEP_SMALLER,
+    "REDERIVE_ON_ENCODE_CHANGE": REDERIVE_ON_ENCODE_CHANGE,
     "ON_DOWNGRADE": ON_DOWNGRADE,
     "ON_REGENERATION": ON_REGENERATION,
     "ON_UNKNOWN": ON_UNKNOWN,
@@ -2832,6 +2844,46 @@ def _derived_label(icc_label, resize_mode=None, resize_value=None,
             + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
 
 
+# The derived label's encode record: "sRGB@long2048+screen/d4e9". A suffix,
+# appended in main() — never inside _derived_label, which is parity-pinned
+# with the transcoder (its derivatives carry no distance/effort).
+_ENCODE_SUFFIX_RE = re.compile(r"/d([0-9.]+)e(\d+)$")
+
+
+def _encode_suffix(distance, effort, floor):
+    """'/d<d>e<e>' for the label. A lossy distance below this cjxl's floor is
+    recorded AS the floor: cjxl clamps it to the same output, so 0.01 and 0.05
+    must not count as a change."""
+    d = float(distance)
+    if 0 < d < floor:
+        d = floor
+    return f"/d{d:g}e{int(effort)}"
+
+
+def _split_encode_suffix(label):
+    """(recipe, (distance, effort)) — or (label, None) for a label written
+    before the suffix existed."""
+    m = _ENCODE_SUFFIX_RE.search(label or "")
+    if not m:
+        return label, None
+    return label[:m.start()], (float(m.group(1)), int(m.group(2)))
+
+
+def _rederive_reason(stored, wanted, check_encode):
+    """Why an existing derivative must be re-derived, or None to keep it.
+    A recipe change always wins; distance/effort only count when both labels
+    record them and check_encode (REDERIVE_ON_ENCODE_CHANGE) is on."""
+    s_recipe, s_enc = _split_encode_suffix(stored)
+    w_recipe, w_enc = _split_encode_suffix(wanted)
+    if s_recipe != w_recipe:
+        return f"derivative recipe changed ({s_recipe} -> {w_recipe})"
+    if (check_encode and s_enc is not None and w_enc is not None
+            and (abs(s_enc[0] - w_enc[0]) > 1e-9 or s_enc[1] != w_enc[1])):
+        return (f"encode settings changed (d={s_enc[0]:g} e={s_enc[1]} -> "
+                f"d={w_enc[0]:g} e={w_enc[1]})")
+    return None
+
+
 def _xmp_icc_from_creator_tool(text: str):
     """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
     rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
@@ -3891,6 +3943,7 @@ def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
+    global REDERIVE_ON_ENCODE_CHANGE
     global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
     global OUTPUT_ICC
     global _gen_divergence_logged, _error_details
@@ -3973,6 +4026,16 @@ def main():
     parser.add_argument("--no-keep-smaller", dest="no_keep_smaller", action="store_true",
                         help="Keep the re-encoded file even when it is not smaller "
                              "than the source (default: fall back to a verbatim copy)")
+    _rd = parser.add_mutually_exclusive_group()
+    _rd.add_argument("--rederive-on-encode-change", dest="rederive_on_encode_change",
+                     action="store_const", const=True, default=None,
+                     help="Derivatives: re-derive an existing output whose recorded "
+                          "distance/effort differ from this run's (default: "
+                          "REDERIVE_ON_ENCODE_CHANGE setting, True)")
+    _rd.add_argument("--no-rederive-on-encode-change", dest="rederive_on_encode_change",
+                     action="store_const", const=False,
+                     help="Derivatives: re-derive only when the colour/size/"
+                          "sharpening recipe changes, never for distance/effort")
     parser.add_argument("--output-icc", type=str, default=None,
                         help="Write a colour-converted DERIVATIVE: sRGB, AdobeRGB, or a "
                              "path to an RGB .icc file. 16-bit, converted from the "
@@ -4070,6 +4133,8 @@ def main():
         JBRD_POLICY = args.jbrd_policy
     if args.no_keep_smaller:
         KEEP_SMALLER = False
+    if args.rederive_on_encode_change is not None:
+        REDERIVE_ON_ENCODE_CHANGE = args.rederive_on_encode_change
     if args.output_icc is not None:
         OUTPUT_ICC = args.output_icc.strip() or None
     if args.encode_tag is not None:
@@ -4218,6 +4283,9 @@ def main():
     _floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
     _warn_distance_clamp(CJXL_DISTANCE, _floor)
 
+    if DERIVATIVE:
+        _DERIVED_LABEL += _encode_suffix(CJXL_DISTANCE, CJXL_EFFORT, _floor)
+
     if args.export_jxl_folder is not None and args.mode not in (6, 7):
         logger.warning(f"--export-jxl-folder only applies to modes 6/7 — ignored in "
                        f"mode {args.mode}.")
@@ -4279,6 +4347,10 @@ def main():
         KEEP_SMALLER = False
         logger.info("keep-smaller disabled: a verbatim copy would not be the "
                     "requested derivative")
+    if not DERIVATIVE and args.rederive_on_encode_change is not None:
+        logger.warning("--rederive-on-encode-change/--no-rederive-on-encode-change "
+                       "only apply to derivatives (--output-icc/--resize-*/--sharpen) "
+                       "— ignored")
 
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
@@ -4286,7 +4358,8 @@ def main():
     if DERIVATIVE:
         logger.info(f"Derivative: {_DERIVED_LABEL} | resize: "
                     f"{_resize_label(RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE) or 'none'}"
-                    f" | sharpen: {SHARPEN}")
+                    f" | sharpen: {SHARPEN}"
+                    f" | re-derive on distance/effort change: {REDERIVE_ON_ENCODE_CHANGE}")
     logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
@@ -4544,6 +4617,7 @@ def main():
                     if it["action"] in ("convert",) and it["final"].exists()]
         if existing:
             labels = _read_derived_markers_batch([it["final"] for it in existing])
+            _n_unrecorded = 0
             for it in existing:
                 lab = labels.get(str(it["final"]), False)
                 if lab is False or lab is None:
@@ -4558,10 +4632,21 @@ def main():
                     else:
                         logger.error(f"REFUSED | {it['src'].name} | {reason}")
                         _log_rejected_file(str(it["src"]), f"derivative: {reason}")
-                elif lab != _DERIVED_LABEL:
-                    _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
-                    logger.info(f" derivative recipe changed ({lab} -> {_DERIVED_LABEL}): "
-                                f"re-deriving | {it['src'].name}")
+                else:
+                    _why = _rederive_reason(lab, _DERIVED_LABEL,
+                                            REDERIVE_ON_ENCODE_CHANGE)
+                    if _why:
+                        _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
+                        logger.info(f" {_why}: re-deriving | {it['src'].name}")
+                    elif (REDERIVE_ON_ENCODE_CHANGE and OVERWRITE is not True
+                          and _split_encode_suffix(lab)[1] is None):
+                        # --overwrite rewrites them anyway: the "run once
+                        # with --overwrite" hint would be false there.
+                        _n_unrecorded += 1
+            if _n_unrecorded:
+                logger.info(f"{_n_unrecorded} existing derivative(s) predate the "
+                            f"distance/effort record and keep their old encode "
+                            f"settings — run once with --overwrite to refresh them")
             if derived_refused:
                 _ids = {id(it) for it in derived_refused}
                 items = [it for it in items if id(it) not in _ids]

@@ -395,7 +395,10 @@ Choose the output format based on the source:
   lossy encoder output is born at `gen=1`, so its first recompression is the
   normal case) trigger the regeneration policy (`--on-regeneration`), and a
   re-encode that comes out *larger* keeps the original bytes. JPEG-recoverable
-  JXLs (jbrd) are copied verbatim by default.
+  JXLs (jbrd) are copied verbatim by default. Derivatives (a colour/resize/
+  sharpening recipe) record their distance/effort too; Step 6A asks whether an
+  existing derivative must be re-derived when those change (default: the
+  recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting).
 
   **Modes 0 and 8 REPLACE the source JXLs** here (the recompressor writes the
   new file over the old one; nothing stays "side by side"). The wizard says so
@@ -752,6 +755,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Skip validation | 6A | JPEG↔JXL (risky) |
 | Output suffix | 6A | JPEG↔JXL |
 | Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
+| Re-derive when distance/effort change | 6A | JXL→JXL derivatives only (colour/resize/sharpen runs): default = the recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting |
 | Output folder under the marker | Step 5 | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
 | Output colour space (derivative) | Step 6 | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
 | Rename in output file names | Step 6 | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
@@ -836,6 +840,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `ON_UNKNOWN` | `"convert"` | Policy for files with no `cjxl d=/e=` record |
 | `JBRD_POLICY` | `"copy"` | Policy for JPEG-recoverable JXLs (jbrd box) |
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
+| `REDERIVE_ON_ENCODE_CHANGE` | `True` | Derivatives: re-derive when the recorded distance/effort differ (also `--rederive-on-encode-change` / `--no-rederive-on-encode-change`) |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
 

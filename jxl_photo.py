@@ -2214,6 +2214,19 @@ def _child_setting(module: str, name: str, fallback):
     return value if value else fallback
 
 
+def _child_bool_setting(module: str, name: str, fallback: bool) -> bool:
+    """_child_setting for a BOOLEAN: False is a real value, not "unset"
+    (_child_setting's `value if value else fallback` would turn a user's
+    False into the fallback). `fallback` only when the child cannot be
+    imported or lacks the setting."""
+    try:
+        mod = importlib.import_module(module)
+    except Exception:
+        return fallback
+    value = getattr(mod, name, None)
+    return fallback if value is None else bool(value)
+
+
 class InteractiveMenu:
     def __init__(self, config_manager: ConfigManager,
                  dependency_checker: DependencyChecker):
@@ -4954,6 +4967,7 @@ class InteractiveMenu:
         def _carry_recompress_policies(target: Dict) -> None:
             for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
                        'jbrd_policy', 'no_keep_smaller',
+                       'rederive_on_encode_change',
                        'output_icc', 'rename_from', 'rename_to',
                        'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
                 if _k in _prev_adv:
@@ -5270,6 +5284,7 @@ class InteractiveMenu:
             _is_recompress = workflow.get('conversion_type') == 'jxl_recompress'
             on_unknown = None
             jbrd_policy = None
+            rederive = None
             if RICH_AVAILABLE and console:
                 if _is_recompress:
                     on_unknown = Prompt.ask(
@@ -5278,6 +5293,11 @@ class InteractiveMenu:
                     jbrd_policy = Prompt.ask(
                         "JXL carrying a lossless JPEG reconstruction (jbrd)",
                         choices=["copy", "skip", "convert"], default="copy")
+                    rederive = Confirm.ask(
+                        "Re-derive existing derivatives when distance/effort change? "
+                        "(colour/resize/sharpen runs only)",
+                        default=_child_bool_setting(
+                            'jxl_recompressor', 'REDERIVE_ON_ENCODE_CHANGE', True))
                     no_md5 = no_verify = False
                     auto_repair = False
                     output_suffix = ""
@@ -5299,6 +5319,13 @@ class InteractiveMenu:
                     on_unknown = ou_input if ou_input in ("convert", "copy", "skip") else "convert"
                     jp_input = input("JXL with a lossless JPEG reconstruction (jbrd): copy/skip/convert [copy]: ").strip().lower()
                     jbrd_policy = jp_input if jp_input in ("copy", "skip", "convert") else "copy"
+                    _rd_def = _child_bool_setting(
+                        'jxl_recompressor', 'REDERIVE_ON_ENCODE_CHANGE', True)
+                    rd_input = input(
+                        "Re-derive existing derivatives when distance/effort change? "
+                        f"[{'Y/n' if _rd_def else 'y/N'}]: ").strip().lower()
+                    rederive = (True if rd_input.startswith('y') else
+                                False if rd_input.startswith('n') else _rd_def)
                     no_md5 = no_verify = False
                     auto_repair = False
                     output_suffix = ""
@@ -5328,6 +5355,7 @@ class InteractiveMenu:
             else:
                 advanced_options['on_unknown'] = on_unknown
                 advanced_options['jbrd_policy'] = jbrd_policy
+                advanced_options['rederive_on_encode_change'] = rederive
             if auto_repair:
                 advanced_options['auto_repair_jbrd'] = True
             advanced_options['overwrite'] = overwrite
@@ -5555,6 +5583,10 @@ class InteractiveMenu:
                 table.add_row("If already re-encoded:", _rg or "copy (child default: ask)")
                 _adv = workflow.get('advanced_options', {})
                 table.add_row("Output colour space:", _adv.get('output_icc') or "keep source")
+                if (_adv.get('rederive_on_encode_change') is not None
+                        and _has_derivative_options(_adv)):
+                    table.add_row("Re-derive on distance/effort change:",
+                                  "Yes" if _adv['rederive_on_encode_change'] else "No")
                 if _adv.get('rename_from'):
                     table.add_row("Rename:",
                                   f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
@@ -5630,6 +5662,10 @@ class InteractiveMenu:
                 print(f"If already re-encoded: {_rg or 'copy (child default: ask)'}")
                 _adv = workflow.get('advanced_options', {})
                 print(f"Output colour space: {_adv.get('output_icc') or 'keep source'}")
+                if (_adv.get('rederive_on_encode_change') is not None
+                        and _has_derivative_options(_adv)):
+                    print("Re-derive on distance/effort change:",
+                          "Yes" if _adv['rederive_on_encode_change'] else "No")
                 if _adv.get('rename_from'):
                     print(f"Rename: '{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
             # Resize/sharpening are a derivative recipe the user must see before
@@ -7487,6 +7523,14 @@ class InteractiveMenu:
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
                 cmd.append('--no-keep-smaller')
+            # Derivatives only: on a plain recompression the child would
+            # ignore the flag with a warning on every run.
+            _rd = (advanced.get('rederive_on_encode_change')
+                   if _has_derivative_options(advanced) else None)
+            if _rd is True:
+                cmd.append('--rederive-on-encode-change')
+            elif _rd is False:
+                cmd.append('--no-rederive-on-encode-change')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
             # resize/sharpening: the recompressor's other derivative recipes
@@ -8162,6 +8206,14 @@ class InteractiveMenu:
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
                 cmd.append('--no-keep-smaller')
+            # Derivatives only: on a plain recompression the child would
+            # ignore the flag with a warning on every run.
+            _rd = (advanced.get('rederive_on_encode_change')
+                   if _has_derivative_options(advanced) else None)
+            if _rd is True:
+                cmd.append('--rederive-on-encode-change')
+            elif _rd is False:
+                cmd.append('--no-rederive-on-encode-change')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
             # resize/sharpening: the recompressor's other derivative recipes

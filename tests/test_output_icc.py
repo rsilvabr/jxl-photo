@@ -301,6 +301,11 @@ def _relation_tokens(path: Path) -> list:
     return [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
 
 
+def _label_suffix(distance: float) -> str:
+    floor = rec._min_effective_distance(rec._get_cjxl_cmd() or "cjxl")
+    return rec._encode_suffix(distance, rec.CJXL_EFFORT, floor)
+
+
 def _psnr(a: Path, b: Path) -> float:
     r = subprocess.run(["magick", "compare", "-metric", "PSNR",
                         str(a), str(b), "null:"],
@@ -323,7 +328,7 @@ def test_real_derive_to_srgb_pixels_and_markers(tmp_path):
     assert "16-bit" in info, info
 
     tokens = _relation_tokens(out)
-    assert "jxlphoto-derived:sRGB" in tokens
+    assert "jxlphoto-derived:sRGB" + _label_suffix(1.0) in tokens
     assert not any(t.startswith("jxlphoto-src:") for t in tokens), tokens
 
     desc = _exif_value(out, "-XMP-dc:Description")
@@ -367,7 +372,7 @@ def test_real_derive_to_adobergb_keeps_native_primaries(tmp_path):
     m = re.search(r"red\(x=([0-9.]+)", info)
     assert m, info
     assert abs(float(m.group(1)) - 0.64) < 0.001, info
-    assert "jxlphoto-derived:AdobeRGB" in _relation_tokens(out)
+    assert "jxlphoto-derived:AdobeRGB" + _label_suffix(1.0) in _relation_tokens(out)
 
     adobe = tmp_path / "adobe.icc"
     adobe.write_bytes(rec._adobe_rgb_icc_bytes())
@@ -392,9 +397,9 @@ def test_real_derive_re_derives_when_the_target_changes(tmp_path):
     _make_master(tmp_path)
     _run_derive(tmp_path, "sRGB")
     out = tmp_path / "recompressed_jxl" / "master.jxl"
-    assert "jxlphoto-derived:sRGB" in _relation_tokens(out)
+    assert "jxlphoto-derived:sRGB" + _label_suffix(1.0) in _relation_tokens(out)
     _run_derive(tmp_path, "AdobeRGB", extra=("--sync",))
-    assert "jxlphoto-derived:AdobeRGB" in _relation_tokens(out)
+    assert "jxlphoto-derived:AdobeRGB" + _label_suffix(1.0) in _relation_tokens(out)
 
 
 @real
@@ -446,5 +451,5 @@ def test_real_grey_jxl_without_marker_keeps_its_creator_tool(tmp_path):
     out = tmp_path / "recompressed_jxl" / "grey.jxl"
     assert out.exists()
     assert _exif_value(out, "-XMP-xmp:CreatorTool") == "Other App"
-    assert "jxlphoto-derived:sRGB" in _relation_tokens(out)
+    assert "jxlphoto-derived:sRGB" + _label_suffix(1.0) in _relation_tokens(out)
 

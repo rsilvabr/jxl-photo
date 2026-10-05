@@ -1,5 +1,35 @@
 # New Features Since v1.0
 
+## v2.7.0 (unreleased)
+
+### Derivatives re-derived when distance/effort change (recompressor)
+
+A derivative (`--output-icc`, `--resize-*`, `--sharpen`) already records its
+recipe in `XMP-dc:Relation` as `jxlphoto-derived:<recipe>` (`sRGB`, `keep@long2048+screen`, …).
+It now records the encode too: the label ends in `/d<distance>e<effort>`
+(e.g. `sRGB/d4e9`). With `REDERIVE_ON_ENCODE_CHANGE` (default True) a `--sync`
+run re-derives an existing derivative whose recorded distance/effort differ
+from this run's — exactly as it already does when the colour/size/sharpening
+recipe changes. Before, changing the preset's `--distance`/`--effort` (e.g.
+MOBILE d=3 e=7 → d=4 e=9) made every sync SKIP the derivatives, which kept the
+old encode settings forever.
+
+- A distance below this cjxl's floor is recorded AS the floor: cjxl clamps it
+  to the same output, so 0.01 and 0.05 are not "a change".
+- Labels written before v2.7.0 carry no encode record and are never re-derived
+  for distance/effort; the run logs how many it saw and suggests one
+  `--overwrite` pass to refresh them.
+- `--rederive-on-encode-change` / `--no-rederive-on-encode-change` override the
+  setting per run (mutually exclusive; on a plain recompression they are
+  ignored with a warning).
+- **Wrapper**: the recompression branch of Step 6A asks "Re-derive existing
+  derivatives when distance/effort change?" (default: the recompressor's
+  setting), the answer is carried through the wizard/preset like the other
+  recompressor policies, and on a derivative run both command builders pass the
+  matching flag and the pre-YES summary shows it (a plain recompression gets
+  neither). There is no manifest column — the answer applies to
+  every derivative row of a run.
+
 ## v2.5.0 (2026-10-02)
 
 ### `--exclude-folders`: leave folder trees out of discovery (encoder, decoder, wrapper)

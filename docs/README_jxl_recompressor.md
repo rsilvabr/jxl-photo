@@ -314,9 +314,20 @@ Guarantees, all fail-closed:
 - **Re-derives when the recipe changes.** Each output records
   `jxlphoto-derived:<recipe>` (`sRGB` / `AdobeRGB` / `icc-<md5[:12]>` / `keep`
   for no conversion, plus `@long2048`/`@short1080`/`@pct50` (`+up` when an
-  upscale was allowed) and `+screen`/`+print`). A run with another recipe
+  upscale was allowed) and `+screen`/`+print`), followed by the encode record
+  `/d<distance>e<effort>` (e.g. `sRGB/d4e9`). A run with another recipe
   re-derives instead of trusting (and skipping) the old file. An identical
   re-run with `--sync` SKIPs normally.
+  A distance below this cjxl's floor is recorded AS the floor (cjxl clamps it
+  to the same output, so 0.01 and 0.05 are the same encode). With
+  `REDERIVE_ON_ENCODE_CHANGE` (default True) a `--sync` run also re-derives
+  when the recorded distance/effort differ from this run's — changing the
+  preset's `--distance`/`--effort` refreshes existing derivatives. Labels
+  written before v2.7.0 carry no encode record and are NEVER re-derived for
+  distance/effort (the run logs how many it saw and suggests one
+  `--overwrite` pass to refresh them); use
+  `--no-rederive-on-encode-change` to apply a new distance/effort to new files
+  only.
 - **Removes the archive provenance**: `jxlphoto-src:`/`jxlphoto-srcsum:` are
   dropped (a derivative must never prove the original TIFF is archived — the
   encoder would otherwise accept it under `--delete-skipped`), and the
@@ -492,6 +503,15 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --on-unknown POL      ask/copy/skip/convert for files with no d=/e= record (default: convert)
 --jbrd-policy POL     copy/skip/convert for JPEG-recoverable JXLs (default: copy)
 --no-keep-smaller     Keep the re-encoded file even when it is not smaller
+--rederive-on-encode-change
+--no-rederive-on-encode-change
+                      Derivatives only: re-derive an existing output whose
+                      recorded distance/effort differ from this run's
+                      (--rederive-on-encode-change: default,
+                      REDERIVE_ON_ENCODE_CHANGE = True), or only when the
+                      colour/resize/sharpening recipe changes
+                      (--no-rederive-on-encode-change). Ignored, with a
+                      warning, on plain recompressions
 --output-icc TARGET   sRGB / AdobeRGB / path to an RGB .icc: write a
                       16-bit colour-converted derivative instead of a plain
                       recompression. Never in place, never with --delete-source.
@@ -554,6 +574,11 @@ ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 2 + lossy request)
 ON_UNKNOWN = "convert"       # ask/copy/skip/convert
 JBRD_POLICY = "copy"         # copy/skip/convert
 KEEP_SMALLER = True          # Verbatim copy when the re-encode is not smaller
+REDERIVE_ON_ENCODE_CHANGE = True
+                             # Derivatives: a sync run re-derives when the
+                             # recorded distance/effort differ (also
+                             # --rederive-on-encode-change /
+                             # --no-rederive-on-encode-change)
 ENCODE_TAG_MODE = "xmp"      # xmp/software/off
 VERIFY_ROUNDTRIP = False     # Pixel comparison before any delete
 DELETE_SOURCE = False        # Delete sources after verification

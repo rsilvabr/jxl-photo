@@ -355,6 +355,36 @@ def memory_cap_checks(A1, pool_jxl):
           f"log={_m.group(1) if _m else 'none'} expected={_mp_expected}")
 
 
+def derivative_rederive_checks(A1, pool_jxl):
+    section("Derivative re-derive on encode change")
+    r = B / "rederive"
+    cp(pool_jxl / A1.with_suffix(".jxl").name, r / "p.jxl")
+    common = ["--mode", "1", "--output-icc", "sRGB", "--effort", "3", "--sync",
+              "--no-preflight", "--on-unknown", "convert",
+              "--on-regeneration", "convert", "--on-downgrade", "convert"]
+    run("red_d2", [REC, r] + common + ["--distance", "2"])
+    outs = [p for p in r.rglob("*.jxl") if p.parent != r]
+    rel = exif(["-s3", "-XMP-dc:Relation", outs[0]]) if outs else ""
+    check("recompressor: the derivative records its distance/effort",
+          len(outs) == 1 and "jxlphoto-derived:sRGB/d2e3" in rel, rel[:160])
+    if len(outs) != 1:
+        check("recompressor: a new distance re-derives on sync", False,
+              "no derivative from the first run")
+        check("recompressor: --no-rederive-on-encode-change keeps the derivative",
+              False, "no derivative from the first run")
+        return
+    rc, out = run("red_d3", [REC, r] + common + ["--distance", "3"])
+    rel = exif(["-s3", "-XMP-dc:Relation", outs[0]])
+    check("recompressor: a new distance re-derives on sync",
+          rc == 0 and "encode settings changed" in out and "/d3e3" in rel, rel[:160])
+    after3 = outs[0].stat().st_mtime_ns
+    rc, _ = run("red_d4_off", [REC, r] + common + ["--distance", "4",
+                                                   "--no-rederive-on-encode-change"])
+    rel = exif(["-s3", "-XMP-dc:Relation", outs[0]])
+    check("recompressor: --no-rederive-on-encode-change keeps the derivative",
+          rc == 0 and outs[0].stat().st_mtime_ns == after3 and "/d3e3" in rel, rel[:160])
+
+
 def transcoder_checks(A1, A2):
     section("Transcoder (JPEG/PNG <-> JXL)")
     t = B / "t"
@@ -441,6 +471,7 @@ def main():
             print("\n(no multi-page scan in raw_scan/: multi-page and in-place checks skipped)")
         recompressor_foreign_check(A1, A3, pool_jxl)
         memory_cap_checks(A1, pool_jxl)
+        derivative_rederive_checks(A1, pool_jxl)
         transcoder_checks(A1, A2)
     finally:
         logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())

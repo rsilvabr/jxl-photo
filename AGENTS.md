@@ -57,8 +57,12 @@
   `--sharpen`. All of them: never in place, never deleting, refuse to
   overwrite any destination file that is not one of their own derivatives
   (even with `--overwrite`), re-derive when the recorded recipe
-  (`_DERIVED_LABEL`) changes, and drop the `jxlphoto-src`/`jxlphoto-srcsum`
-  markers (a derivative must never prove the TIFF is archived). `--output-icc`
+  (`_DERIVED_LABEL`) changes — including the distance/effort suffix
+  `/d<d>e<e>` (`REDERIVE_ON_ENCODE_CHANGE`, default True; labels written
+  before it carry no suffix and never re-derive for it; `_derived_label`
+  itself stays parity-pinned, the suffix is appended in main()) — and drop
+  the `jxlphoto-src`/`jxlphoto-srcsum` markers (a derivative must never prove
+  the TIFF is archived). `--output-icc`
   replaces the `ICC:<b64>` in CreatorTool with the target profile; resize/
   sharpen without it keep the source profile and CreatorTool ICC (assigned
   explicitly before the ImageMagick pass, re-assigned after the Lab sharpening

@@ -96,6 +96,11 @@ def _relation_tokens(path: Path) -> list:
     return [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
 
 
+def _label_suffix(distance: float) -> str:
+    floor = rec._min_effective_distance(rec._get_cjxl_cmd() or "cjxl")
+    return rec._encode_suffix(distance, rec.CJXL_EFFORT, floor)
+
+
 def _jxlinfo(path: Path) -> str:
     return subprocess.run(["jxlinfo", str(path)], capture_output=True, text=True,
                           timeout=120).stdout
@@ -160,7 +165,7 @@ def test_resize_without_output_icc_keeps_the_source_colour_space(tmp_path):
     assert re.search(r"red\(x=0\.73", info), info          # original primaries
 
     tokens = _relation_tokens(out)
-    assert "jxlphoto-derived:keep@long320" in tokens, tokens
+    assert "jxlphoto-derived:keep@long320" + _label_suffix(1.0) in tokens, tokens
     assert not any(t.startswith("jxlphoto-src:") for t in tokens), tokens
     assert not any(t.startswith("jxlphoto-srcsum:") for t in tokens), tokens
 
@@ -177,7 +182,8 @@ def test_resize_and_sharpen_with_srgb_target(tmp_path):
     out = tmp_path / "recompressed_jxl" / "master.jxl"
     info = _jxlinfo(out)
     assert "Primaries: sRGB" in info, info
-    assert "jxlphoto-derived:sRGB@long320+screen" in _relation_tokens(out)
+    assert ("jxlphoto-derived:sRGB@long320+screen" + _label_suffix(1.0)
+            in _relation_tokens(out))
     assert _size_of(out) == (320, 240)
 
 
@@ -186,14 +192,14 @@ def test_changing_only_the_resize_re_derives_on_sync(tmp_path):
     _make_master(tmp_path)
     _run(tmp_path, "--resize-long", "320", "--sync")
     out = tmp_path / "recompressed_jxl" / "master.jxl"
-    assert "jxlphoto-derived:keep@long320" in _relation_tokens(out)
+    assert "jxlphoto-derived:keep@long320" + _label_suffix(1.0) in _relation_tokens(out)
 
     r = _run(tmp_path, "--resize-long", "320", "--sync")
     assert "SKIP" in r.stdout, r.stdout
 
     r = _run(tmp_path, "--resize-long", "200", "--sync")
     assert "recipe changed" in r.stdout + r.stderr, r.stdout + r.stderr
-    assert "jxlphoto-derived:keep@long200" in _relation_tokens(out)
+    assert "jxlphoto-derived:keep@long200" + _label_suffix(1.0) in _relation_tokens(out)
     assert _size_of(out) == (200, 150)
 
 
