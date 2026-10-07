@@ -268,7 +268,12 @@ must-fix / should-fix items and a commit verdict.
   absent-vs-empty-vs-filled semantics, guards, recipes, scheduling. The wrapper
   README keeps only a summary and links here — do not re-document columns there
 - `docs/jxl_color_internals.md` — XYB, ICC blobs vs native primaries
-- `docs/bug_tracking_since_v1.0.md` — every fix since v1.0
+- `docs/bug_tracking_since_v1.0.md` — every fix since v1.0, newest round
+  first (bugs #1–#171 in their original format: `docs/bug_tracking_archive.md`).
+  A new bug takes the header's "Next free number" (then bump it), goes in its
+  round's table, and the round's row in the index table is updated;
+  `tests/test_bug_tracker_numbers.py` fails on a reused number, a stale next
+  number, an out-of-order round or a stale index row
 - `docs/version_history.md` — detailed notes for all superseded releases
   (the README keeps only the current version's changelog in full, plus the
   summary table)
