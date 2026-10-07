@@ -1,5 +1,13 @@
 # Code Quality & Refactoring Log
 
+> **Frozen at v1.8.1.** Since then every internal change is filed as a
+> numbered entry in [bug_tracking_since_v1.0.md](bug_tracking_since_v1.0.md)
+> (e.g. #473 subprocess capture without reader threads, #475 logs out of the
+> repository) or recorded in the commit history, and the architecture rules
+> in force (duplicated helpers pinned by parity tests, settings never
+> hardcoded, run-scoped globals reset from `_RUN_DEFAULTS`) live in
+> [AGENTS.md](../AGENTS.md). This log is kept for its v1.x history.
+
 This document tracks changes that improve code maintainability, compatibility, and clarity **without changing user-facing behavior**. These are not bugs or features — they are internal improvements, cleanups, and backports.
 
 ---

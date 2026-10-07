@@ -398,7 +398,9 @@ Choose the output format based on the source:
   JXLs (jbrd) are copied verbatim by default. Derivatives (a colour/resize/
   sharpening recipe) record their distance/effort too; Step 6A asks whether an
   existing derivative must be re-derived when those change (default: the
-  recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting).
+  recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting) and, after a yes, whether
+  a LOWER effort at the same distance re-derives too (default: no — the
+  existing file is the smaller one; `REDERIVE_ON_LOWER_EFFORT`).
 
   **Modes 0 and 8 REPLACE the source JXLs** here (the recompressor writes the
   new file over the old one; nothing stays "side by side"). The wizard says so
@@ -756,6 +758,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Output suffix | 6A | JPEG↔JXL |
 | Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
 | Re-derive when distance/effort change | 6A | JXL→JXL derivatives only (colour/resize/sharpen runs): default = the recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting |
+| ...also on a lower effort (same distance) | 6A | Asked only after a yes above: default = the recompressor's `REDERIVE_ON_LOWER_EFFORT` setting (no) |
 | Output folder under the marker | Step 5 | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
 | Output colour space (derivative) | Step 6 | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
 | Rename in output file names | Step 6 | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
@@ -794,6 +797,8 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
+| `WORKER_MEMORY_FRACTION` | `0.8` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
+| `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 
 **CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
@@ -843,6 +848,8 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `REDERIVE_ON_ENCODE_CHANGE` | `True` | Derivatives: re-derive when the recorded distance/effort differ (also `--rederive-on-encode-change` / `--no-rederive-on-encode-change`) |
 | `REDERIVE_ON_LOWER_EFFORT` | `False` | Derivatives: at the same distance only a higher effort re-derives; `True` also re-derives on a lower one (also `--rederive-on-lower-effort` / `--no-rederive-on-lower-effort`; the wizard asks right after the question above) |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
+| `WORKER_MEMORY_FRACTION` | `0.8` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
+| `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
 
 **Heavy settings and `--buffering 1` (encoder and recompressor).** At
@@ -951,4 +958,4 @@ MIT License — feel free to use, modify, and distribute.
 - [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling
 - [tifffile](https://github.com/cgohlke/tifffile) by Christoph Gohlke for TIFF I/O
-- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion
+- [Claude](https://www.anthropic.com/claude) (Anthropic) and [DeepSeek](https://www.deepseek.com), among other AI tools, for code assistance, reviews and technical discussion

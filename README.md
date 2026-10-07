@@ -439,7 +439,7 @@ py jxl_recompressor.py "F:\Photos\Archive" --mode 8 --distance 1.0 --verify-roun
 py jxl_recompressor.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync --rename-from ProPhoto-g22 --rename-to sRGB
 ```
 
-A derivative is built from the master JXL, not the TIFF — measured on a real ProPhoto export, the extra generation costs 0.017 dB against a direct encode of the TIFF, at the same size. See [Colour-converted derivatives](docs/README_jxl_recompressor.md#colour-converted-derivatives---output-icc).
+A derivative is built from the master JXL, not the TIFF — measured on a real ProPhoto export, the extra generation costs 0.017 dB against a direct encode of the TIFF, at the same size. See [Colour-converted derivatives](docs/README_jxl_recompressor.md#derivatives-colour-conversion-resize-and-sharpening).
 
 ### After conversion
 Depending on your needs, three common approaches:
@@ -671,9 +671,15 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 | [docs/version_history.md](docs/version_history.md) | Detailed notes for all superseded releases |
 | [docs/bug_tracking_since_v1.0.md](docs/bug_tracking_since_v1.0.md) | Every bug fix since v1.0, numbered and dated |
 | [docs/new_features_since_v1.0.md](docs/new_features_since_v1.0.md) | Every new feature since v1.0 |
-| [docs/code_quality_refactoring.md](docs/code_quality_refactoring.md) | Internal cleanups and compatibility notes |
-| [docs/README_testbench.md](docs/README_testbench.md) | The automated testbench (`tests/testbench.py`) |
+| [docs/code_quality_refactoring.md](docs/code_quality_refactoring.md) | Internal cleanups and compatibility notes (frozen at v1.8.1) |
 | [deprecated/README_jxl_to_jpg_png.md](deprecated/README_jxl_to_jpg_png.md) | Deprecated — JXL → JPG/PNG (superseded by jxl_jpeg_transcoder.py) |
+
+### Testing
+
+| Tool | What it checks |
+|------|----------------|
+| `pytest tests/` | The test suite: synthetic files, plus real-codec tests that skip when `cjxl`/`djxl`/`exiftool` are missing |
+| [tools/real_photo_battery.py](tools/real_photo_battery.py) | The four scripts end to end on **copies of your own photos** (`py tools/real_photo_battery.py --fixtures <folder>`): delete gates, markers, ICC and pixels against an independent decode, multi-page, JPEG ↔ JXL bit-exact. Run it before every release; the fixture layout is in the script's docstring |
 
 ---
 
@@ -834,7 +840,7 @@ Every change has a regression test proven to fail against the pre-fix code, incl
 - [Version history](docs/version_history.md) — detailed notes for all superseded releases
 - [Bug Tracking (v1.0 → current)](docs/bug_tracking_since_v1.0.md) — bugs fixed since v1.0
 - [New Features (v1.0 → current)](docs/new_features_since_v1.0.md) — genuinely new features
-- [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code
+- [Code Quality & Refactoring](docs/code_quality_refactoring.md) — internal cleanups, compatibility backports, dead code (frozen at v1.8.1)
 
 ---
 

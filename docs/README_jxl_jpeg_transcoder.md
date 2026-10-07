@@ -958,6 +958,6 @@ MIT License — feel free to use, modify, and distribute.
 
 ## Acknowledgments
 
-- libjxl team for JPEG XL implementation
-- ExifTool by Phil Harvey for metadata handling
-- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion
+- [libjxl](https://github.com/libjxl/libjxl) team for JPEG XL implementation
+- [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling
+- [Claude](https://www.anthropic.com/claude) (Anthropic) and [DeepSeek](https://www.deepseek.com), among other AI tools, for code assistance, reviews and technical discussion
