@@ -4967,7 +4967,7 @@ class InteractiveMenu:
         def _carry_recompress_policies(target: Dict) -> None:
             for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
                        'jbrd_policy', 'no_keep_smaller',
-                       'rederive_on_encode_change',
+                       'rederive_on_encode_change', 'rederive_on_lower_effort',
                        'output_icc', 'rename_from', 'rename_to',
                        'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
                 if _k in _prev_adv:
@@ -5285,6 +5285,7 @@ class InteractiveMenu:
             on_unknown = None
             jbrd_policy = None
             rederive = None
+            rederive_lower = None
             if RICH_AVAILABLE and console:
                 if _is_recompress:
                     on_unknown = Prompt.ask(
@@ -5298,6 +5299,12 @@ class InteractiveMenu:
                         "(colour/resize/sharpen runs only)",
                         default=_child_bool_setting(
                             'jxl_recompressor', 'REDERIVE_ON_ENCODE_CHANGE', True))
+                    if rederive:
+                        rederive_lower = Confirm.ask(
+                            "  ...also when only the effort goes DOWN (same distance)? "
+                            "(the existing file is the smaller one)",
+                            default=_child_bool_setting(
+                                'jxl_recompressor', 'REDERIVE_ON_LOWER_EFFORT', False))
                     no_md5 = no_verify = False
                     auto_repair = False
                     output_suffix = ""
@@ -5326,6 +5333,14 @@ class InteractiveMenu:
                         f"[{'Y/n' if _rd_def else 'y/N'}]: ").strip().lower()
                     rederive = (True if rd_input.startswith('y') else
                                 False if rd_input.startswith('n') else _rd_def)
+                    if rederive:
+                        _rl_def = _child_bool_setting(
+                            'jxl_recompressor', 'REDERIVE_ON_LOWER_EFFORT', False)
+                        rl_input = input(
+                            "  ...also when only the effort goes DOWN (same distance)? "
+                            f"[{'Y/n' if _rl_def else 'y/N'}]: ").strip().lower()
+                        rederive_lower = (True if rl_input.startswith('y') else
+                                          False if rl_input.startswith('n') else _rl_def)
                     no_md5 = no_verify = False
                     auto_repair = False
                     output_suffix = ""
@@ -5356,6 +5371,8 @@ class InteractiveMenu:
                 advanced_options['on_unknown'] = on_unknown
                 advanced_options['jbrd_policy'] = jbrd_policy
                 advanced_options['rederive_on_encode_change'] = rederive
+                if rederive_lower is not None:
+                    advanced_options['rederive_on_lower_effort'] = rederive_lower
             if auto_repair:
                 advanced_options['auto_repair_jbrd'] = True
             advanced_options['overwrite'] = overwrite
@@ -5587,6 +5604,10 @@ class InteractiveMenu:
                         and _has_derivative_options(_adv)):
                     table.add_row("Re-derive on distance/effort change:",
                                   "Yes" if _adv['rederive_on_encode_change'] else "No")
+                if (_adv.get('rederive_on_lower_effort') is not None
+                        and _has_derivative_options(_adv)):
+                    table.add_row("  ...also on a lower effort:",
+                                  "Yes" if _adv['rederive_on_lower_effort'] else "No")
                 if _adv.get('rename_from'):
                     table.add_row("Rename:",
                                   f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
@@ -5666,6 +5687,10 @@ class InteractiveMenu:
                         and _has_derivative_options(_adv)):
                     print("Re-derive on distance/effort change:",
                           "Yes" if _adv['rederive_on_encode_change'] else "No")
+                if (_adv.get('rederive_on_lower_effort') is not None
+                        and _has_derivative_options(_adv)):
+                    print("  ...also on a lower effort:",
+                          "Yes" if _adv['rederive_on_lower_effort'] else "No")
                 if _adv.get('rename_from'):
                     print(f"Rename: '{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
             # Resize/sharpening are a derivative recipe the user must see before
@@ -7531,6 +7556,12 @@ class InteractiveMenu:
                 cmd.append('--rederive-on-encode-change')
             elif _rd is False:
                 cmd.append('--no-rederive-on-encode-change')
+            _rl = (advanced.get('rederive_on_lower_effort')
+                   if _has_derivative_options(advanced) else None)
+            if _rl is True:
+                cmd.append('--rederive-on-lower-effort')
+            elif _rl is False:
+                cmd.append('--no-rederive-on-lower-effort')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
             # resize/sharpening: the recompressor's other derivative recipes
@@ -8214,6 +8245,12 @@ class InteractiveMenu:
                 cmd.append('--rederive-on-encode-change')
             elif _rd is False:
                 cmd.append('--no-rederive-on-encode-change')
+            _rl = (advanced.get('rederive_on_lower_effort')
+                   if _has_derivative_options(advanced) else None)
+            if _rl is True:
+                cmd.append('--rederive-on-lower-effort')
+            elif _rl is False:
+                cmd.append('--no-rederive-on-lower-effort')
             if advanced.get('output_icc'):
                 cmd.extend(['--output-icc', advanced['output_icc']])
             # resize/sharpening: the recompressor's other derivative recipes

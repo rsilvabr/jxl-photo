@@ -1,5 +1,30 @@
 # New Features Since v1.0
 
+## Unreleased
+
+### Derivatives: a lower effort no longer re-derives (recompressor)
+
+With `REDERIVE_ON_ENCODE_CHANGE` on, v2.7.0 re-derived a derivative on ANY
+distance/effort change. At one distance cjxl aims at the same quality and a
+higher effort only buys a smaller file, so lowering the effort (e.g. MOBILE
+e9 → e7 to run faster) re-encoded every derivative into a LARGER file. Now, at
+the same distance, only a better-ranked encode re-derives; a worse one keeps
+the existing file and the run logs how many it kept. A distance change still
+re-derives in either direction.
+
+- The encode record marks a streamed encode with an `s` (`sRGB/d3e9s`). A
+  streamed effort 8-9 encode is effort 7's file (cjxl 0.12, measured), so the
+  ranking is e7s = e8s = e9s < e7 < e8 < e9: a whole-image e9 run re-derives
+  the derivatives made with `--buffering 1`. Records without the `s` read as
+  whole-image, including those written before the mark existed.
+- `REDERIVE_ON_LOWER_EFFORT` (default False) or
+  `--rederive-on-lower-effort` / `--no-rederive-on-lower-effort` per run
+  restores the any-change behaviour.
+- **Wrapper**: when Step 6A's re-derive answer is yes, it asks
+  "...also when only the effort goes DOWN?" (default: the recompressor's
+  setting); presets carry the answer and both command builders pass the flag
+  on derivative runs only.
+
 ## v2.7.0 (2026-10-06)
 
 ### Derivatives re-derived when distance/effort change (recompressor)

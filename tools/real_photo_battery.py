@@ -383,6 +383,20 @@ def derivative_rederive_checks(A1, pool_jxl):
     rel = exif(["-s3", "-XMP-dc:Relation", outs[0]])
     check("recompressor: --no-rederive-on-encode-change keeps the derivative",
           rc == 0 and outs[0].stat().st_mtime_ns == after3 and "/d3e3" in rel, rel[:160])
+    # Same distance, LOWER effort: the existing (smaller) file is kept. The
+    # last --effort on the command line wins over the one in `common`.
+    rc, out = run("red_e1_kept", [REC, r] + common + ["--distance", "3",
+                                                      "--effort", "1"])
+    rel = exif(["-s3", "-XMP-dc:Relation", outs[0]])
+    check("recompressor: a lower effort at the same distance keeps the derivative",
+          rc == 0 and outs[0].stat().st_mtime_ns == after3 and "/d3e3" in rel
+          and "kept: already encoded at a higher effort" in out, rel[:160])
+    rc, out = run("red_e5_up", [REC, r] + common + ["--distance", "3",
+                                                    "--effort", "5"])
+    rel = exif(["-s3", "-XMP-dc:Relation", outs[0]])
+    check("recompressor: a higher effort at the same distance re-derives",
+          rc == 0 and outs[0].stat().st_mtime_ns != after3 and "/d3e5" in rel
+          and "encode settings changed" in out, rel[:160])
 
 
 def transcoder_checks(A1, A2):

@@ -720,6 +720,24 @@ REDERIVE_ON_ENCODE_CHANGE = True
 # are never re-derived for it (run once with --overwrite to refresh them).
 # Can also be set via --rederive-on-encode-change / --no-rederive-on-encode-change.
 
+REDERIVE_ON_LOWER_EFFORT = False
+# Derivatives only, and only while REDERIVE_ON_ENCODE_CHANGE is True: what to
+# do when this run asks for the SAME distance as the existing derivative but a
+# LOWER effort. At one distance cjxl aims at the same quality; a higher effort
+# only buys a smaller file. So:
+# False -> keep the existing derivative (default): re-encoding it would cost
+#          CPU time and return a larger file. A higher effort still re-derives.
+# True  -> re-derive on any distance/effort change, in either direction.
+# A distance change always re-derives (a lower distance is a larger, finer
+# file: neither direction is "better").
+# Streamed encodes carry an "s" in the record (sRGB/d3e9s). cjxl 0.12 streams
+# below effort 7, at effort 7 under distance 3, at effort 8-9 up to distance
+# 0.5, and always with --buffering 1-3; a streamed lossy effort 8-9 encode is
+# effort 7's file (measured, see CJXL_BUFFERING). So e9s ranks as e7s, below a
+# whole-image e7, and a whole-image e9 replaces it. Records without the "s"
+# (whole image, or written before the mark existed) read as whole-image.
+# Can also be set via --rederive-on-lower-effort / --no-rederive-on-lower-effort.
+
 ENCODE_TAG_MODE = "xmp"
 # Where to record the NEW encoding parameters, mirroring jxl_tiff_encoder.py:
 # "xmp"      -> XMP-dc:Description (default; the new cjxl d=/e= is APPENDED to
@@ -859,6 +877,7 @@ _RUN_DEFAULTS = {
     "CJXL_BUFFERING": CJXL_BUFFERING,
     "PROVENANCE_CHECK": PROVENANCE_CHECK,
     "TEMP2_DIR": TEMP2_DIR,
+    "REDERIVE_ON_LOWER_EFFORT": REDERIVE_ON_LOWER_EFFORT,
 }
 
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
@@ -2899,43 +2918,78 @@ def _derived_label(icc_label, resize_mode=None, resize_value=None,
             + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
 
 
-# The derived label's encode record: "sRGB@long2048+screen/d4e9". A suffix,
-# appended in main() — never inside _derived_label, which is parity-pinned
-# with the transcoder (its derivatives carry no distance/effort).
-_ENCODE_SUFFIX_RE = re.compile(r"/d([0-9.]+)e(\d+)$")
+# The derived label's encode record: "sRGB@long2048+screen/d4e9", "/d2e7s"
+# when cjxl streamed the encode. A suffix, appended in main() — never inside
+# _derived_label, which is parity-pinned with the transcoder (its derivatives
+# carry no distance/effort).
+_ENCODE_SUFFIX_RE = re.compile(r"/d([0-9.]+)e(\d+)(s?)$")
+
+# A streamed lossy encode above this effort is this effort's file (cjxl 0.12,
+# measured: docs/README_jxl_recompressor.md, "Streaming vs whole-image").
+_STREAMED_EFFORT_CAP = 7
 
 
-def _encode_suffix(distance, effort, floor):
-    """'/d<d>e<e>' for the label. A lossy distance below this cjxl's floor is
-    recorded AS the floor: cjxl clamps it to the same output, so 0.01 and 0.05
-    must not count as a change."""
+def _encode_suffix(distance, effort, floor, buffering=None):
+    """'/d<d>e<e>' for the label, plus 's' when cjxl streams the encode
+    (`buffering` = the --buffering value cjxl receives, None when it chooses).
+    A lossy distance below this cjxl's floor is recorded AS the floor: cjxl
+    clamps it to the same output, so 0.01 and 0.05 must not count as a change."""
     d = float(distance)
     if 0 < d < floor:
         d = floor
-    return f"/d{d:g}e{int(effort)}"
+    streamed = not _cjxl_whole_image(d, int(effort), buffering)
+    return f"/d{d:g}e{int(effort)}" + ("s" if streamed else "")
 
 
 def _split_encode_suffix(label):
-    """(recipe, (distance, effort)) — or (label, None) for a label written
-    before the suffix existed."""
+    """(recipe, (distance, effort, streamed)) — or (label, None) for a label
+    written before the suffix existed. No 's' reads as a whole-image encode."""
     m = _ENCODE_SUFFIX_RE.search(label or "")
     if not m:
         return label, None
-    return label[:m.start()], (float(m.group(1)), int(m.group(2)))
+    return label[:m.start()], (float(m.group(1)), int(m.group(2)),
+                               m.group(3) == "s")
 
 
-def _rederive_reason(stored, wanted, check_encode):
+def _encode_rank(enc):
+    """Orders two encodes at the SAME distance: higher = a smaller file for the
+    same quality target. A streamed lossy encode ranks at most as effort 7 (it
+    is that file); at one effort a whole-image encode beats a streamed one."""
+    d, e, streamed = enc
+    if streamed and d > 0:
+        e = min(e, _STREAMED_EFFORT_CAP)
+    return (e, not streamed)
+
+
+def _format_encode(enc):
+    return f"d={enc[0]:g} e={enc[1]}" + (" streamed" if enc[2] else "")
+
+
+def _rederive_reason(stored, wanted, check_encode, lower_effort=False):
     """Why an existing derivative must be re-derived, or None to keep it.
     A recipe change always wins; distance/effort only count when both labels
-    record them and check_encode (REDERIVE_ON_ENCODE_CHANGE) is on."""
+    record them and check_encode (REDERIVE_ON_ENCODE_CHANGE) is on. At the same
+    distance only a better-ranked encode re-derives, unless lower_effort
+    (REDERIVE_ON_LOWER_EFFORT) also accepts a worse one."""
     s_recipe, s_enc = _split_encode_suffix(stored)
     w_recipe, w_enc = _split_encode_suffix(wanted)
     if s_recipe != w_recipe:
         return f"derivative recipe changed ({s_recipe} -> {w_recipe})"
-    if (check_encode and s_enc is not None and w_enc is not None
-            and (abs(s_enc[0] - w_enc[0]) > 1e-9 or s_enc[1] != w_enc[1])):
-        return (f"encode settings changed (d={s_enc[0]:g} e={s_enc[1]} -> "
-                f"d={w_enc[0]:g} e={w_enc[1]})")
+    if not check_encode or s_enc is None or w_enc is None:
+        return None
+    change = (f"encode settings changed ({_format_encode(s_enc)} -> "
+              f"{_format_encode(w_enc)})")
+    if abs(s_enc[0] - w_enc[0]) > 1e-9:
+        return change
+    s_rank, w_rank = _encode_rank(s_enc), _encode_rank(w_enc)
+    if w_rank > s_rank:
+        return change
+    # Same rank = the same file (e9s and e7s): never worth an encode. Same
+    # effort, recorded whole-image, now streamed: a record without the 's' may
+    # predate the mark and BE that streamed encode — keep it.
+    if (lower_effort and w_rank < s_rank
+            and not (s_enc[1] == w_enc[1] and not s_enc[2] and w_enc[2])):
+        return change
     return None
 
 
@@ -3998,7 +4052,7 @@ def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
-    global REDERIVE_ON_ENCODE_CHANGE
+    global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
     global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
     global OUTPUT_ICC
     global _gen_divergence_logged, _error_details
@@ -4091,6 +4145,16 @@ def main():
                      action="store_const", const=False,
                      help="Derivatives: re-derive only when the colour/size/"
                           "sharpening recipe changes, never for distance/effort")
+    _rl = parser.add_mutually_exclusive_group()
+    _rl.add_argument("--rederive-on-lower-effort", dest="rederive_on_lower_effort",
+                     action="store_const", const=True, default=None,
+                     help="Derivatives: also re-derive when this run's effort is "
+                          "LOWER than the recorded one at the same distance "
+                          "(default: REDERIVE_ON_LOWER_EFFORT setting, False)")
+    _rl.add_argument("--no-rederive-on-lower-effort", dest="rederive_on_lower_effort",
+                     action="store_const", const=False,
+                     help="Derivatives: keep an existing derivative encoded at a "
+                          "higher effort than this run's at the same distance")
     parser.add_argument("--output-icc", type=str, default=None,
                         help="Write a colour-converted DERIVATIVE: sRGB, AdobeRGB, or a "
                              "path to an RGB .icc file. 16-bit, converted from the "
@@ -4190,6 +4254,8 @@ def main():
         KEEP_SMALLER = False
     if args.rederive_on_encode_change is not None:
         REDERIVE_ON_ENCODE_CHANGE = args.rederive_on_encode_change
+    if args.rederive_on_lower_effort is not None:
+        REDERIVE_ON_LOWER_EFFORT = args.rederive_on_lower_effort
     if args.output_icc is not None:
         OUTPUT_ICC = args.output_icc.strip() or None
     if args.encode_tag is not None:
@@ -4339,7 +4405,10 @@ def main():
     _warn_distance_clamp(CJXL_DISTANCE, _floor)
 
     if DERIVATIVE:
-        _DERIVED_LABEL += _encode_suffix(CJXL_DISTANCE, CJXL_EFFORT, _floor)
+        # The buffering cjxl actually receives: below 0.12 the flag is dropped.
+        _DERIVED_LABEL += _encode_suffix(
+            CJXL_DISTANCE, CJXL_EFFORT, _floor,
+            CJXL_BUFFERING if _cjxl_buffering_flag() else None)
 
     if args.export_jxl_folder is not None and args.mode not in (6, 7):
         logger.warning(f"--export-jxl-folder only applies to modes 6/7 — ignored in "
@@ -4406,6 +4475,13 @@ def main():
         logger.warning("--rederive-on-encode-change/--no-rederive-on-encode-change "
                        "only apply to derivatives (--output-icc/--resize-*/--sharpen) "
                        "— ignored")
+    if not DERIVATIVE and args.rederive_on_lower_effort is not None:
+        logger.warning("--rederive-on-lower-effort/--no-rederive-on-lower-effort "
+                       "only apply to derivatives (--output-icc/--resize-*/--sharpen) "
+                       "— ignored")
+    elif (DERIVATIVE and args.rederive_on_lower_effort and not REDERIVE_ON_ENCODE_CHANGE):
+        logger.warning("--rederive-on-lower-effort has no effect while re-deriving "
+                       "on distance/effort change is off")
 
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
@@ -4414,7 +4490,8 @@ def main():
         logger.info(f"Derivative: {_DERIVED_LABEL} | resize: "
                     f"{_resize_label(RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE) or 'none'}"
                     f" | sharpen: {SHARPEN}"
-                    f" | re-derive on distance/effort change: {REDERIVE_ON_ENCODE_CHANGE}")
+                    f" | re-derive on distance/effort change: {REDERIVE_ON_ENCODE_CHANGE}"
+                    f" (also on a lower effort: {REDERIVE_ON_LOWER_EFFORT})")
     logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
@@ -4673,6 +4750,7 @@ def main():
         if existing:
             labels = _read_derived_markers_batch([it["final"] for it in existing])
             _n_unrecorded = 0
+            _n_better = 0
             for it in existing:
                 lab = labels.get(str(it["final"]), False)
                 if lab is False or lab is None:
@@ -4689,10 +4767,17 @@ def main():
                         _log_rejected_file(str(it["src"]), f"derivative: {reason}")
                 else:
                     _why = _rederive_reason(lab, _DERIVED_LABEL,
-                                            REDERIVE_ON_ENCODE_CHANGE)
+                                            REDERIVE_ON_ENCODE_CHANGE,
+                                            REDERIVE_ON_LOWER_EFFORT)
                     if _why:
                         _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
                         logger.info(f" {_why}: re-deriving | {it['src'].name}")
+                    elif (REDERIVE_ON_ENCODE_CHANGE and not REDERIVE_ON_LOWER_EFFORT
+                          and OVERWRITE is not True
+                          and _rederive_reason(lab, _DERIVED_LABEL, True, True)):
+                        # Kept only because the existing encode is the better
+                        # one; the lower-effort setting would re-derive it.
+                        _n_better += 1
                     elif (REDERIVE_ON_ENCODE_CHANGE and OVERWRITE is not True
                           and _split_encode_suffix(lab)[1] is None):
                         # --overwrite rewrites them anyway: the "run once
@@ -4702,6 +4787,10 @@ def main():
                 logger.info(f"{_n_unrecorded} existing derivative(s) predate the "
                             f"distance/effort record and keep their old encode "
                             f"settings — run once with --overwrite to refresh them")
+            if _n_better:
+                logger.info(f"{_n_better} existing derivative(s) kept: already encoded "
+                            f"at a higher effort than this run's at the same distance "
+                            f"(--rederive-on-lower-effort re-derives them)")
             if derived_refused:
                 _ids = {id(it) for it in derived_refused}
                 items = [it for it in items if id(it) not in _ids]

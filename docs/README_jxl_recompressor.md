@@ -337,6 +337,24 @@ Guarantees, all fail-closed:
   `--overwrite` pass to refresh them); use
   `--no-rederive-on-encode-change` to apply a new distance/effort to new files
   only.
+  **Only an upgrade re-derives at the same distance.** At one distance cjxl
+  aims at the same quality, and a higher effort only buys a smaller file. So a
+  run that asks for a LOWER effort than the derivative records keeps the
+  existing file (re-encoding would cost CPU time and return a larger one), and
+  a higher effort re-derives it. A distance change re-derives in either
+  direction. The run logs how many it kept this way;
+  `REDERIVE_ON_LOWER_EFFORT = True` or `--rederive-on-lower-effort` re-derives
+  on any change instead.
+  A streamed encode is marked with an `s` (`sRGB/d3e9s`): cjxl 0.12 streams by
+  default below effort 7, at effort 7 under distance 3 and at effort 8-9 up to
+  distance 0.5, and always with `--buffering 1`-`3`. A streamed effort 8-9
+  encode is effort 7's file (see "Streaming vs whole-image" below), so the
+  ranking is e7 streamed = e8/e9 streamed < e7 whole-image < e8 < e9. In
+  practice: derivatives made with `--buffering 1` at e9 are re-derived by a
+  whole-image e9 run, and switching from e9 to e7 keeps them. A record without
+  the `s` reads as whole-image — including labels written before the mark
+  existed, even when that encode was really streamed: refresh those with one
+  `--overwrite` pass.
 - **Removes the archive provenance**: `jxlphoto-src:`/`jxlphoto-srcsum:` are
   dropped (a derivative must never prove the original TIFF is archived — the
   encoder would otherwise accept it under `--delete-skipped`), and the
@@ -579,6 +597,15 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       colour/resize/sharpening recipe changes
                       (--no-rederive-on-encode-change). Ignored, with a
                       warning, on plain recompressions
+--rederive-on-lower-effort
+--no-rederive-on-lower-effort
+                      Derivatives only, with re-derive on encode change on:
+                      also re-derive when this run's effort is LOWER than
+                      the recorded one at the same distance
+                      (--rederive-on-lower-effort), or keep the existing,
+                      better-encoded file (--no-rederive-on-lower-effort:
+                      default, REDERIVE_ON_LOWER_EFFORT = False). Ignored,
+                      with a warning, on plain recompressions
 --output-icc TARGET   sRGB / AdobeRGB / path to an RGB .icc: write a
                       16-bit colour-converted derivative instead of a plain
                       recompression. Never in place, never with --delete-source.
@@ -646,6 +673,11 @@ REDERIVE_ON_ENCODE_CHANGE = True
                              # recorded distance/effort differ (also
                              # --rederive-on-encode-change /
                              # --no-rederive-on-encode-change)
+REDERIVE_ON_LOWER_EFFORT = False
+                             # Derivatives: also re-derive when only the
+                             # effort goes DOWN at the same distance (also
+                             # --rederive-on-lower-effort /
+                             # --no-rederive-on-lower-effort)
 ENCODE_TAG_MODE = "xmp"      # xmp/software/off
 CJXL_TIMEOUT = 900           # Per-file cjxl/djxl/magick timeout (seconds)
 EXIFTOOL_TIMEOUT = CJXL_TIMEOUT

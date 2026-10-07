@@ -841,6 +841,7 @@ These are hardcoded global variables at the top of each script. To change them, 
 | `JBRD_POLICY` | `"copy"` | Policy for JPEG-recoverable JXLs (jbrd box) |
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
 | `REDERIVE_ON_ENCODE_CHANGE` | `True` | Derivatives: re-derive when the recorded distance/effort differ (also `--rederive-on-encode-change` / `--no-rederive-on-encode-change`) |
+| `REDERIVE_ON_LOWER_EFFORT` | `False` | Derivatives: at the same distance only a higher effort re-derives; `True` also re-derives on a lower one (also `--rederive-on-lower-effort` / `--no-rederive-on-lower-effort`; the wizard asks right after the question above) |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
 

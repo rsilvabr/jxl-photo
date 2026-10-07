@@ -36,27 +36,60 @@ real = pytest.mark.skipif(
 
 def test_encode_suffix_clamps_below_the_floor():
     assert rec._encode_suffix(4.0, 9, 0.05) == "/d4e9"
-    assert rec._encode_suffix(0.01, 7, 0.05) == "/d0.05e7"
-    assert rec._encode_suffix(0, 9, 0.05) == "/d0e9"
+    assert rec._encode_suffix(0.01, 7, 0.05) == "/d0.05e7s"
+    assert rec._encode_suffix(0, 9, 0.05) == "/d0e9s"
+
+
+def test_encode_suffix_marks_a_streamed_encode():
+    # cjxl's own choice (buffering None): whole image at e7 from d=3, at e8-9
+    # above d=0.5; streamed below that and under every effort 1-6.
+    assert rec._encode_suffix(3, 7, 0.05) == "/d3e7"
+    assert rec._encode_suffix(2.9, 7, 0.05) == "/d2.9e7s"
+    assert rec._encode_suffix(3, 6, 0.05) == "/d3e6s"
+    assert rec._encode_suffix(3, 9, 0.05) == "/d3e9"
+    # --buffering 1 streams everything, --buffering 0 never streams.
+    assert rec._encode_suffix(3, 9, 0.05, 1) == "/d3e9s"
+    assert rec._encode_suffix(1, 3, 0.05, 0) == "/d1e3"
 
 
 def test_split_encode_suffix():
     assert rec._split_encode_suffix("sRGB") == ("sRGB", None)
     assert rec._split_encode_suffix("keep@long320+screen/d1e7") == \
-        ("keep@long320+screen", (1.0, 7))
+        ("keep@long320+screen", (1.0, 7, False))
+    assert rec._split_encode_suffix("sRGB/d3e9s") == ("sRGB", (3.0, 9, True))
 
 
-@pytest.mark.parametrize("stored,wanted,check,expected", [
-    ("sRGB/d1e7", "AdobeRGB/d1e7", True, "recipe changed"),
-    ("sRGB", "AdobeRGB/d1e7", True, "recipe changed"),
-    ("sRGB/d1e7", "sRGB/d2e7", True, "encode settings changed"),
-    ("sRGB/d1e7", "sRGB/d1e9", True, "encode settings changed"),
-    ("sRGB/d1e7", "sRGB/d2e7", False, None),
-    ("sRGB", "sRGB/d4e7", True, None),
-    ("sRGB/d1e7", "sRGB/d1e7", True, None),
+@pytest.mark.parametrize("stored,wanted,check,lower,expected", [
+    ("sRGB/d1e7", "AdobeRGB/d1e7", True, False, "recipe changed"),
+    ("sRGB", "AdobeRGB/d1e7", True, False, "recipe changed"),
+    ("sRGB/d1e7", "sRGB/d2e7", True, False, "encode settings changed"),
+    ("sRGB/d1e7", "sRGB/d1e9", True, False, "encode settings changed"),
+    ("sRGB/d1e7", "sRGB/d2e7", False, False, None),
+    ("sRGB", "sRGB/d4e7", True, False, None),
+    ("sRGB/d1e7", "sRGB/d1e7", True, False, None),
+    # Same distance, LOWER effort: kept by default, re-derived on request.
+    ("sRGB/d3e9", "sRGB/d3e7", True, False, None),
+    ("sRGB/d3e9", "sRGB/d3e7", True, True, "encode settings changed"),
+    ("sRGB/d3e9", "sRGB/d3e7", False, True, None),
+    # A distance change re-derives in both directions, whatever the effort.
+    ("sRGB/d3e9", "sRGB/d2e7s", True, False, "encode settings changed"),
+    ("sRGB/d2e9", "sRGB/d3e7", True, False, "encode settings changed"),
+    # Streamed e8-9 is e7's file: a whole-image e9 re-derives it, a whole
+    # e7 too (same pixels, smaller file); a streamed e7 is the same file.
+    ("sRGB/d3e9s", "sRGB/d3e9", True, False, "encode settings changed"),
+    ("sRGB/d3e9s", "sRGB/d3e7", True, False, "encode settings changed"),
+    ("sRGB/d3e9s", "sRGB/d3e7s", True, True, None),
+    ("sRGB/d3e7s", "sRGB/d3e9s", True, False, None),
+    ("sRGB/d3e9", "sRGB/d3e9s", True, False, None),
+    # A record without the 's' may predate the mark: never re-derived just
+    # because this run streams the same effort, even on request.
+    ("sRGB/d2e7", "sRGB/d2e7s", True, True, None),
+    # Lossless: streaming does not cap the effort.
+    ("sRGB/d0e7s", "sRGB/d0e9s", True, False, "encode settings changed"),
+    ("sRGB/d0e9s", "sRGB/d0e7s", True, False, None),
 ])
-def test_rederive_reason(stored, wanted, check, expected):
-    reason = rec._rederive_reason(stored, wanted, check)
+def test_rederive_reason(stored, wanted, check, lower, expected):
+    reason = rec._rederive_reason(stored, wanted, check, lower)
     if expected is None:
         assert reason is None
     else:
@@ -193,9 +226,69 @@ def test_real_derivative_rederives_on_encode_change(tmp_path):
     assert "predate the distance/effort record" not in r.stdout, r.stdout
 
 
+@real
+def test_real_derivative_kept_on_a_lower_effort(tmp_path):
+    pytest.importorskip("PIL.ImageCms")
+    _make_master(tmp_path)
+    out = tmp_path / rec.CONVERTED_JXL_FOLDER / "master.jxl"
+    floor = rec._min_effective_distance(rec._get_cjxl_cmd() or "cjxl")
+
+    def expected(effort):
+        return "jxlphoto-derived:sRGB" + rec._encode_suffix(1.0, effort, floor)
+
+    # 1. d=1 e=7 -> the first derivative.
+    _run_derive(tmp_path, 1.0, ("--effort", "7"))
+    assert expected(7) in _relation_tokens(out)
+
+    # 2. same distance, LOWER effort -> kept untouched, and the log says so.
+    before = out.stat().st_mtime_ns
+    r = _run_derive(tmp_path, 1.0, ("--effort", "3"))
+    assert out.stat().st_mtime_ns == before
+    assert expected(7) in _relation_tokens(out)
+    assert "1 existing derivative(s) kept: already encoded at a higher effort" \
+        in r.stdout, r.stdout
+
+    # 3. the same, opted in -> re-derived at e3.
+    r = _run_derive(tmp_path, 1.0, ("--effort", "3", "--rederive-on-lower-effort"))
+    assert out.stat().st_mtime_ns != before
+    assert expected(3) in _relation_tokens(out)
+    assert "encode settings changed (d=1 e=7" in r.stdout, r.stdout
+
+    # 4. a HIGHER effort re-derives by default.
+    before = out.stat().st_mtime_ns
+    r = _run_derive(tmp_path, 1.0, ("--effort", "9"))
+    assert out.stat().st_mtime_ns != before
+    assert expected(9) in _relation_tokens(out)
+    assert "kept: already encoded" not in r.stdout, r.stdout
+
+
 # ---------------------------------------------------------------------------
 # T3 - CLI
 # ---------------------------------------------------------------------------
+
+def test_cli_lower_effort_flags_are_mutually_exclusive(tmp_path):
+    (tmp_path / "a.jxl").write_bytes(
+        b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"\x00" * 32)
+    r = subprocess.run([sys.executable, str(REPO / "jxl_recompressor.py"),
+                        str(tmp_path), "--mode", "1", "--dry-run",
+                        "--rederive-on-lower-effort",
+                        "--no-rederive-on-lower-effort"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "not allowed with argument" in r.stderr, r.stderr
+
+
+def test_cli_lower_effort_flag_on_a_non_derivative_run_warns(tmp_path):
+    (tmp_path / "a.jxl").write_bytes(
+        b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"\x00" * 32)
+    r = subprocess.run([sys.executable, str(REPO / "jxl_recompressor.py"),
+                        str(tmp_path), "--mode", "1", "--dry-run",
+                        "--rederive-on-lower-effort"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--rederive-on-lower-effort/--no-rederive-on-lower-effort only apply" \
+        in r.stdout + r.stderr, r.stdout + r.stderr
+
 
 def test_cli_rederive_flags_are_mutually_exclusive(tmp_path):
     (tmp_path / "a.jxl").write_bytes(
@@ -365,3 +458,68 @@ def test_wizard_rederive_default_comes_from_the_child(monkeypatch):
     # Empty answers to the three recompressor questions keep their defaults,
     # and the new question's default came from the child's setting: False.
     assert workflow["advanced_options"]["rederive_on_encode_change"] is False
+
+
+# ---------------------------------------------------------------------------
+# T7 - the lower-effort policy through the wrapper
+# ---------------------------------------------------------------------------
+
+def test_manifest_cmd_carries_lower_effort_flag():
+    cmd = _manifest_cmd({"rederive_on_lower_effort": True, "output_icc": "sRGB"})
+    assert "--rederive-on-lower-effort" in cmd
+    assert "--no-rederive-on-lower-effort" not in cmd
+    cmd = _manifest_cmd({"rederive_on_lower_effort": False, "sharpen": "screen"})
+    assert "--no-rederive-on-lower-effort" in cmd
+    assert "--rederive-on-lower-effort" not in cmd
+    # A plain recompression never gets it.
+    cmd = _manifest_cmd({"rederive_on_lower_effort": True})
+    assert "--rederive-on-lower-effort" not in cmd
+
+
+def test_direct_cmd_carries_lower_effort_flag(tmp_path, monkeypatch):
+    menu = _menu()
+    calls = []
+    monkeypatch.setattr(menu, "_stream_child",
+                        lambda cmd: calls.append([str(c) for c in cmd]) or 0)
+    workflow = {
+        'mode': 1, 'origin_format': 'jxl', 'dest_format': 'jxl',
+        'conversion_type': 'jxl_recompress',
+        'input_dir': str(tmp_path), 'workers': 2,
+        'distance': 1.0, 'effort': 7,
+        'advanced_options': {"rederive_on_lower_effort": True,
+                             "output_icc": "sRGB"},
+        'mode_config': {}, 'expert_flags': '', 'dry_run': True,
+    }
+    menu.execute_workflow(workflow, {})
+    assert "--rederive-on-lower-effort" in calls[-1]
+
+
+def test_wizard_asks_lower_effort_after_a_yes(monkeypatch):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    # advanced? y | on_unknown | jbrd | re-derive (default yes) | lower: y
+    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "", "y"]))
+    menu = _menu()
+    workflow = _recompress_workflow()
+    menu._wizard_parameters_advanced(workflow, {})
+    adv = workflow["advanced_options"]
+    assert adv["rederive_on_encode_change"] is True
+    assert adv["rederive_on_lower_effort"] is True
+
+
+def test_wizard_lower_effort_default_comes_from_the_child(monkeypatch):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "", ""]))
+    monkeypatch.setattr(rec, "REDERIVE_ON_LOWER_EFFORT", True)
+    menu = _menu()
+    workflow = _recompress_workflow()
+    menu._wizard_parameters_advanced(workflow, {})
+    assert workflow["advanced_options"]["rederive_on_lower_effort"] is True
+
+
+def test_wizard_skips_lower_effort_after_a_no(monkeypatch):
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "n"]))
+    menu = _menu()
+    workflow = _recompress_workflow()
+    menu._wizard_parameters_advanced(workflow, {})
+    assert "rederive_on_lower_effort" not in workflow["advanced_options"]
