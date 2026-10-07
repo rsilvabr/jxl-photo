@@ -58,6 +58,16 @@ def _jxl_stub(path: Path):
     path.write_bytes(b"\x00\x00\x00\x0cJXL \r\n\x87\n" + b"\x00" * 32)
 
 
+@pytest.fixture(autouse=True)
+def _ample_physical_ram(monkeypatch):
+    """The cap budgets from min(commit, physical RAM) by default. The tests
+    below pin the COMMIT arithmetic, so the machine's real RAM must never be
+    the smaller one; the WORKER_MEMORY_LIMIT tests override this."""
+    for mod in (enc, rec):
+        monkeypatch.setattr(mod, "_available_physical_bytes", lambda: 10 ** 15)
+        monkeypatch.setattr(mod, "WORKER_MEMORY_LIMIT", "both")
+
+
 # ---------------------------------------------------------------------------
 # 1-7: the estimator and the cap itself
 # ---------------------------------------------------------------------------
@@ -132,9 +142,10 @@ def test_cap_streaming_no_buffering_hint(mod, monkeypatch, caplog):
 
 @pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
 def test_cap_unknown_memory(mod, monkeypatch, caplog):
-    """Unknown commit limit: do not cap, log why."""
+    """Neither commit nor RAM readable: do not cap, log why."""
     monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)
     monkeypatch.setattr(mod, "_available_commit_bytes", lambda: None)
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: None)
     with caplog.at_level(logging.INFO, logger=mod.logger.name):
         assert mod._memory_capped_workers(30, MP45, 3.0, 7) == 30
     assert "could not read" in caplog.text
@@ -149,6 +160,7 @@ def test_cap_disabled(mod, monkeypatch):
         raise AssertionError("the cap read the machine's memory while disabled")
 
     monkeypatch.setattr(mod, "_available_commit_bytes", _boom)
+    monkeypatch.setattr(mod, "_available_physical_bytes", _boom)
     assert mod._memory_capped_workers(30, MP45, 3.0, 7) == 30
 
 
@@ -167,6 +179,91 @@ def test_cap_unknown_pixels_assumes_60mp(mod, monkeypatch):
 def test_available_commit_bytes_real(mod):
     v = mod._available_commit_bytes()
     assert isinstance(v, int) and v > 0
+
+
+# ---------------------------------------------------------------------------
+# 7b: WORKER_MEMORY_LIMIT — the budget is min(commit, physical RAM) by default
+# ---------------------------------------------------------------------------
+
+def _boom():
+    raise AssertionError("read a memory figure this WORKER_MEMORY_LIMIT excludes")
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_limit_both_takes_the_smaller_physical(mod, monkeypatch, caplog):
+    """The 2026-10-07 case inverted: a large pagefile leaves 40 GiB to commit
+    but only 20 GiB of RAM — the RAM decides, or the run pages to disk."""
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.9)
+    monkeypatch.setattr(mod, "_available_commit_bytes", lambda: AVAIL_40)
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: 20 * GIB)
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        workers = mod._memory_capped_workers(30, MP45, 3.0, 9)
+    assert workers == int(20 * GIB * 0.9 // (MP45 * 320)) == 1
+    assert "20.0 GB available (physical)" in caplog.text, caplog.text
+    assert "of physical RAM still available" in caplog.text, caplog.text
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_limit_both_takes_the_smaller_commit(mod, monkeypatch, caplog):
+    """The measured 2026-10-07 machine: 32 GiB to commit, 39 GiB of RAM free
+    (a 13.7 GB pagefile and browsers that reserve more than they use)."""
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.9)
+    monkeypatch.setattr(mod, "_available_commit_bytes", lambda: 32 * GIB)
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: 39 * GIB)
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        workers = mod._memory_capped_workers(30, MP45, 3.0, 9)
+    assert workers == int(32 * GIB * 0.9 // (MP45 * 320)) == 2
+    assert "32.0 GB available (commit)" in caplog.text, caplog.text
+    assert "the system can still commit" in caplog.text, caplog.text
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+@pytest.mark.parametrize("limit,commit,physical,expected", [
+    ("commit", lambda: AVAIL_40, _boom, int(AVAIL_40 * 0.8 // (MP45 * 90))),
+    ("physical", _boom, lambda: 20 * GIB, int(20 * GIB * 0.8 // (MP45 * 90))),
+])
+def test_limit_single_reading(mod, monkeypatch, limit, commit, physical, expected):
+    """"commit"/"physical" read ONLY their own figure."""
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)
+    monkeypatch.setattr(mod, "WORKER_MEMORY_LIMIT", limit)
+    monkeypatch.setattr(mod, "_available_commit_bytes", commit)
+    monkeypatch.setattr(mod, "_available_physical_bytes", physical)
+    assert mod._memory_capped_workers(30, MP45, 3.0, 7) == expected
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_limit_both_with_one_reading_unknown(mod, monkeypatch):
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)
+    monkeypatch.setattr(mod, "_available_commit_bytes", lambda: None)
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: 20 * GIB)
+    assert mod._available_memory_bytes() == (20 * GIB, "physical")
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: None)
+    assert mod._available_memory_bytes() == (None, None)
+
+
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_limit_unknown_value_counts_as_both(mod, monkeypatch, caplog):
+    monkeypatch.setattr(mod, "WORKER_MEMORY_FRACTION", 0.8)
+    monkeypatch.setattr(mod, "WORKER_MEMORY_LIMIT", "ram")
+    monkeypatch.setattr(mod, "_available_commit_bytes", lambda: AVAIL_40)
+    monkeypatch.setattr(mod, "_available_physical_bytes", lambda: 20 * GIB)
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        workers = mod._memory_capped_workers(30, MP45, 3.0, 7)
+    assert workers == int(20 * GIB * 0.8 // (MP45 * 90))
+    assert "WORKER_MEMORY_LIMIT = 'ram' is not one of" in caplog.text, caplog.text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GlobalMemoryStatusEx")
+@pytest.mark.parametrize("mod", [enc, rec], ids=["encoder", "recompressor"])
+def test_available_physical_bytes_real(mod, monkeypatch):
+    # Undo the autouse double: this one reads the real machine.
+    monkeypatch.undo()
+    phys = mod._available_physical_bytes()
+    commit = mod._available_commit_bytes()
+    assert isinstance(phys, int) and phys > 0
+    # Physical RAM available can never exceed the total commit headroom by
+    # more than the RAM itself; sanity: both readings are plausible numbers.
+    assert phys < 2 ** 50 and commit < 2 ** 50
 
 
 # ---------------------------------------------------------------------------
@@ -466,3 +563,5 @@ def test_constants_agree():
     # Equal, but NOT pinned to a value: it is a user setting, and editing it at
     # the top of both scripts must not break the suite.
     assert val_enc == val_rec
+    pat = re.compile(r"^WORKER_MEMORY_LIMIT = (.+)$", re.M)
+    assert pat.search(src_enc).group(1) == pat.search(src_rec).group(1)

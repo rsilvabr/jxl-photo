@@ -159,6 +159,10 @@ SHARED_HELPERS = [
     "_cjxl_bytes_per_pixel",
     "_available_commit_bytes",
     "_memory_capped_workers",
+    "_windows_memory_status",
+    "_linux_mem_available",
+    "_available_physical_bytes",
+    "_available_memory_bytes",
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:

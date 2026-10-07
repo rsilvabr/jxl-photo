@@ -619,37 +619,84 @@ def _cjxl_bytes_per_pixel(distance, effort, buffering=None, modular=False):
     return _STREAMING_BYTES_PER_PIXEL
 
 
+def _windows_memory_status():
+    """GlobalMemoryStatusEx as (ullAvailPhys, ullAvailPageFile), or None."""
+    import ctypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    st = _MemoryStatusEx()
+    st.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+        return None
+    return int(st.ullAvailPhys), int(st.ullAvailPageFile)
+
+
+def _linux_mem_available():
+    """/proc/meminfo MemAvailable in bytes, or None."""
+    with open("/proc/meminfo", encoding="ascii") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    return None
+
+
 def _available_commit_bytes():
     """Memory the system can still commit, in bytes, or None if unknown.
     Windows: ullAvailPageFile (RAM + pagefile not yet committed — the limit
     WinError 1455 reports). Linux: MemAvailable."""
     try:
         if sys.platform == "win32":
-            import ctypes
-
-            class _MemoryStatusEx(ctypes.Structure):
-                _fields_ = [("dwLength", ctypes.c_ulong),
-                            ("dwMemoryLoad", ctypes.c_ulong),
-                            ("ullTotalPhys", ctypes.c_ulonglong),
-                            ("ullAvailPhys", ctypes.c_ulonglong),
-                            ("ullTotalPageFile", ctypes.c_ulonglong),
-                            ("ullAvailPageFile", ctypes.c_ulonglong),
-                            ("ullTotalVirtual", ctypes.c_ulonglong),
-                            ("ullAvailVirtual", ctypes.c_ulonglong),
-                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-            st = _MemoryStatusEx()
-            st.dwLength = ctypes.sizeof(_MemoryStatusEx)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-                return None
-            return int(st.ullAvailPageFile)
-        with open("/proc/meminfo", encoding="ascii") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+            st = _windows_memory_status()
+            return st[1] if st else None
+        return _linux_mem_available()
     except Exception:
         return None
-    return None
+
+
+def _available_physical_bytes():
+    """Physical RAM still available (free + standby cache), in bytes, or None
+    if unknown. Windows: ullAvailPhys. Linux: MemAvailable (no commit limit by
+    default there, so both readings are the same)."""
+    try:
+        if sys.platform == "win32":
+            st = _windows_memory_status()
+            return st[0] if st else None
+        return _linux_mem_available()
+    except Exception:
+        return None
+
+
+_MEMORY_LIMITS = ("both", "commit", "physical")
+# How the cap's log and warning name the budget it used.
+_MEMORY_BUDGET_TEXT = {"commit": "the system can still commit (RAM + pagefile)",
+                       "physical": "of physical RAM still available"}
+
+
+def _available_memory_bytes():
+    """(bytes, "commit"|"physical") the worker cap budgets from, per
+    WORKER_MEMORY_LIMIT: the smaller of the two ("both"), or just one. A reading
+    that fails is left out; (None, None) when nothing could be read. An unknown
+    setting counts as "both", the stricter budget."""
+    limit = WORKER_MEMORY_LIMIT if WORKER_MEMORY_LIMIT in _MEMORY_LIMITS else "both"
+    readings = []
+    if limit in ("both", "commit"):
+        readings.append((_available_commit_bytes(), "commit"))
+    if limit in ("both", "physical"):
+        readings.append((_available_physical_bytes(), "physical"))
+    readings = [r for r in readings if r[0] is not None]
+    if not readings:
+        return None, None
+    return min(readings, key=lambda r: r[0])
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,
@@ -658,9 +705,12 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
     Logs the estimate; warns when it had to lower the count."""
     if WORKER_MEMORY_FRACTION <= 0:
         return requested
+    if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
+        logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
+                       f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
     per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
-    avail = _available_commit_bytes()
+    avail, budget = _available_memory_bytes()
     if avail is None:
         logger.info("Memory: could not read the available memory — "
                     "--workers not capped")
@@ -675,7 +725,7 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
         kind = "streaming"
     logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
                 f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
-                f"{avail / 2**30:.1f} GB available | workers {workers}")
+                f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
     if cap < requested:
         hint = ""
         if kind == "whole-image" and effort >= 8:
@@ -691,9 +741,10 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
                     "files ~1.5% larger, same quality).")
         logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
                        f"processes at ~{per_job / 2**30:.1f} GB each would not "
-                       f"fit in the {avail / 2**30:.1f} GB the system can still "
-                       f"commit (WORKER_MEMORY_FRACTION="
-                       f"{WORKER_MEMORY_FRACTION}).{hint}")
+                       f"fit in the {avail / 2**30:.1f} GB "
+                       f"{_MEMORY_BUDGET_TEXT[budget]} (WORKER_MEMORY_FRACTION="
+                       f"{WORKER_MEMORY_FRACTION}, WORKER_MEMORY_LIMIT="
+                       f"{WORKER_MEMORY_LIMIT}).{hint}")
     return workers
 
 # ─────────────────────────────────────────────
@@ -733,8 +784,21 @@ WORKER_MEMORY_FRACTION = 0.8
 # settings: cjxl encodes the whole image at once (2.5-8x the memory of its
 # usual streaming encode) at effort 7 with distance >= 3, effort 8-9 with
 # distance > 0.5, effort 10+, or --buffering 0. The run then uses at most this
-# fraction of the memory the system can still commit (RAM + pagefile).
+# fraction of the memory WORKER_MEMORY_LIMIT picks (by default the smaller of
+# what the system can still commit and the physical RAM still available).
 # 0 disables the cap.
+
+WORKER_MEMORY_LIMIT = "both"
+# What the --workers cap budgets from (WORKER_MEMORY_FRACTION of it):
+# "both"     -> the smaller of the two below (default).
+# "commit"   -> memory the system can still commit (RAM + pagefile). The hard
+#               limit: past it cjxl fails (WinError 1455). Alone, with a large
+#               pagefile, it can allow more workers than the RAM holds, and the
+#               run then pages to disk.
+# "physical" -> physical RAM still available (free + standby cache). Alone it
+#               ignores the commit limit: with a small pagefile and programs
+#               that reserve more than they use (browsers), cjxl can fail.
+# On Linux both read MemAvailable.
 
 CJXL_MODULAR = False
 # False (default) — lossy uses VarDCT encoder + XYB colorspace.

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Worker cap: the smaller of commit and physical RAM (encoder, recompressor)
+
+The `--workers` cap budgeted only from the memory the system can still commit
+(RAM + pagefile). With a small pagefile that is the right limit (past it cjxl
+fails with WinError 1455), but with a large one it allowed more workers than
+the physical RAM holds, and the run paged to disk. `WORKER_MEMORY_LIMIT`
+(default `"both"`) now budgets from the smaller of the two readings; `"commit"`
+restores the old behaviour and `"physical"` uses only the RAM. The `Memory:`
+line says which one decided. Measured on the 64 GB machine: one cjxl at d=3
+e=9 on 45 MP peaks at 11.8 GiB of commit (the cap estimates 13.4).
+
 ### Derivatives: a lower effort no longer re-derives (recompressor)
 
 With `REDERIVE_ON_ENCODE_CHANGE` on, v2.7.0 re-derived a derivative on ANY

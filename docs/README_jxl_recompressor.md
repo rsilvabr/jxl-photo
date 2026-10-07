@@ -482,18 +482,32 @@ worker hung forever when the MemoryError landed in a subprocess reader thread.
 
 **The run caps `--workers` for you.** Before the pool starts it takes the
 **largest** file in the batch, estimates the per-worker peak from the distance,
-effort and buffering, and lowers the count so the jobs fit in the memory the
-system can still commit (RAM + pagefile) times `WORKER_MEMORY_FRACTION` (0.8).
-It logs `Memory: ~N GB per worker (...) | M GB available | workers K` and warns
-`--workers N reduced to K` with the `--buffering 1` remedy on the whole-image
-path. The worker count the pool really uses is the capped one; the startup
-`Mode: ... | workers:` line still shows what you asked for.
+effort and buffering, and lowers the count so the jobs fit in the memory budget
+times `WORKER_MEMORY_FRACTION` (0.8).
+It logs `Memory: ~N GB per worker (...) | M GB available (commit|physical) |
+workers K` and warns `--workers N reduced to K` with the `--buffering 1` remedy
+on the whole-image path. The worker count the pool really uses is the capped
+one; the startup `Mode: ... | workers:` line still shows what you asked for.
 
-The budget is the memory the system can still **commit** when the run starts,
-not the RAM that looks free: programs left open (a raw editor can hold 15 GB of
-commit while using 3 GB of RAM) shrink it, so the same preset can get fewer
-workers on a night when they are open. Closing them — or `--buffering 1` —
-gives the workers back.
+The budget (`WORKER_MEMORY_LIMIT`, default `"both"`) is the **smaller** of two
+readings taken when the run starts:
+
+- **commit** — what the system can still commit (RAM + pagefile). The hard
+  limit: past it cjxl fails with WinError 1455. Programs left open shrink it by
+  more than the RAM they use (a raw editor can hold 15 GB of commit while using
+  3 GB of RAM; a browser with many tabs, ~10 GB for ~5 GB). With a small
+  pagefile this is the one that decides.
+- **physical** — physical RAM still available (free + standby cache). With a
+  large pagefile the commit limit alone would allow more workers than the RAM
+  holds, and the run would page to disk.
+
+`"commit"` or `"physical"` uses only that reading. Measured on the 64 GB
+machine (2026-10-07, cjxl 0.12, 45 MP at d=3 e=9: **11.8 GiB of commit per
+cjxl**, estimated 13.4): with the automatic 13.7 GB pagefile and a desktop
+open, ~32 GB could still be committed while ~39 GB of RAM was free — 2
+workers. A fixed 32 GB pagefile raises the commit budget to ~51 GB, so RAM
+decides and the same run gets 3. Closing other programs — or `--buffering 1` —
+also gives workers back.
 
 **If files still fail for lack of memory**, the summary says so:
 `N error(s) look like the system ran out of memory — lower --workers or
@@ -662,6 +676,8 @@ CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl. None = cjx
                              # in "Memory and --workers"); 1-3 = always stream
 WORKER_MEMORY_FRACTION = 0.8 # Cap --workers so parallel cjxl processes fit in
                              # memory; 0 disables the cap
+WORKER_MEMORY_LIMIT = "both" # Budget of the cap: "both" (smaller of commit and
+                             # physical RAM), "commit" or "physical"
 OVERWRITE = "smart"          # False | "smart" (source newer) | True
 ON_DOWNGRADE = "ask"         # ask/copy/skip/convert
 ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 2 + lossy request)
