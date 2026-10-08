@@ -296,7 +296,10 @@ must-fix / should-fix items and a commit verdict.
   whether they need to do anything; the mechanism, reproductions and numbers
   belong in `docs/version_history.md` and the bug tracker. An action the
   user really must take goes in `docs/upgrading.md` and gets one clear line
-  in the notes.
+  in the notes. Doc housekeeping (a shorter README, pages moved or split) is
+  not a change to announce: it stays out of the release notes, the README's
+  "What's new" and the release tables — one plain line in
+  `docs/version_history.md` at most.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
   `Claude-Session` trailers** (AI assistance is credited in the README's
   Acknowledgments instead, and more than one assistant is used).

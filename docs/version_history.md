@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.8.1](#v281)** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening; shorter README (round 50, 7 fixes) |
+| **[v2.8.1](#v281)** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening (round 50, 7 fixes) |
 | [v2.8.0](#v280) | 2026-10-08 | Overwrites check whose output they replace (all four scripts, every mode); scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too; round-49 audit (25 fixes) |
 | [v2.7.0](#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
 | [v2.6.2](#v262) | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
@@ -60,7 +60,7 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.8.1
 
-**Released 2026-10-08.** Supersedes v2.8.0. The low-severity findings v2.8.0 left open from the same audit (round 50, 7 fixes). None of them lost a photo; most are edge cases a normal library never meets. Plus a shorter README.
+**Released 2026-10-08.** Supersedes v2.8.0. The low-severity findings v2.8.0 left open from the same audit (round 50, 7 fixes). None of them lost a photo; most are edge cases a normal library never meets.
 
 ### A scan's 4th channel keeps its role (#521)
 
@@ -78,9 +78,7 @@ Photoshop keeps a file's XMP when it saves, so a decode you retouched still carr
 - **Wizard (#526):** with `[D]` (delete originals) chosen, Step 6 no longer offers a colour conversion, resize or sharpening — a derivative never deletes, so the run would only have been refused after the Step 7 YES.
 - **Manifest collision scan (#527):** for TIFF → JXL it now sees split pages: `foto.tif`'s second page writes `foto_page1.jxl`, the same file another row's `foto_page1.tif` writes.
 
-### Docs
-
-The README is shorter: what to check when upgrading moved to [upgrading.md](upgrading.md), the behaviour and limitations notes to [behavior_and_limitations.md](behavior_and_limitations.md), and the full changelog of every release — the current one included — lives here.
+Docs: the upgrade notes, the behaviour and limitations notes and the full changelog moved out of the README, into [upgrading.md](upgrading.md), [behavior_and_limitations.md](behavior_and_limitations.md) and this page.
 
 Every fix has a regression test that fails against v2.8.0, using the real codecs where the fix touches what they write. The real-photo battery gained two checks on a real 16-bit decode (an edited TIFF is refused, an untouched one is refreshed). **2261 tests**; battery 41/41.
 

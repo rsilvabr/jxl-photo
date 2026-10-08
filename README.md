@@ -388,7 +388,6 @@ Released 2026-10-08. It finishes the 2026-10-08 audit: v2.8.0 fixed the findings
 - **A film scan's 4th channel keeps its role.** An IR channel stored next to RGB (VueScan's RGBI layout) used to come back from the round trip tagged as transparency.
 - **A decode you edited is left alone.** The decoder no longer decodes over a TIFF you retouched since, and never deletes its JXL on the strength of it.
 - **Smaller hardening:** a stricter JXL integrity check, a more accurate decoder `--dry-run`, scanner profiles refused as a conversion target in the transcoder, and two wizard checks moved earlier.
-- **A shorter README.** Upgrade notes, limitations and the full changelog now live in their own pages.
 
 Full notes: [version history](docs/version_history.md#v281) · [bug tracker](docs/bug_tracking_since_v1.0.md) (#521–#527). **2261 tests**, and the real-photo battery passes (41 checks).
 
@@ -396,7 +395,7 @@ Full notes: [version history](docs/version_history.md#v281) · [bug tracker](doc
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.8.1** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; shorter README |
+| **v2.8.1** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; smaller hardening |
 | [v2.8.0](docs/version_history.md#v280) | 2026-10-08 | Overwrites check whose output they replace; scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too |
 | [v2.7.0](docs/version_history.md#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout |
 | [v2.6.2](docs/version_history.md#v262) | 2026-10-05 | The recompressor announces and times its planning phase |
