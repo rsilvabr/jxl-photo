@@ -11,6 +11,45 @@ For the complete list of individual fixes see
 
 ---
 
+## v2.7.0
+
+**Released 2026-10-06, superseded by v2.8.0.** Supersedes v2.6.2. One new recompressor option, one fix in all four scripts and one to the recompressor's log.
+
+### New: derivatives are re-derived when distance/effort change
+
+A recompressor derivative (`--output-icc`, `--resize-*`, `--sharpen`) records its recipe in `XMP-dc:Relation` as `jxlphoto-derived:<recipe>`, and a `--sync` run re-derives it when the recipe changes. Distance and effort were not part of that record, so changing a preset from d=3 e=7 to d=4 e=9 left every existing derivative with the old settings: the sync skipped them all. The record now ends in the encode settings (`jxlphoto-derived:sRGB/d4e9`), and a sync run re-derives a derivative whose distance or effort differ from this run's.
+
+- `REDERIVE_ON_ENCODE_CHANGE` (default `True`) at the top of `jxl_recompressor.py`, or `--rederive-on-encode-change` / `--no-rederive-on-encode-change` per run. The wizard asks in Step 6A and presets remember the answer.
+- A distance below cjxl's floor is recorded as the floor, so 0.01 and 0.05 are not "a change".
+- **Derivatives written before v2.7.0 carry no distance/effort and are never re-derived for it.** The run says how many it saw; one `--overwrite` run refreshes them.
+
+See [Derivatives: colour conversion, resize and sharpening](README_jxl_recompressor.md#derivatives-colour-conversion-resize-and-sharpening).
+
+### Fixed: a stalled exiftool turned good files into errors, reported as a codec timeout (#478)
+
+Every per-file exiftool call (metadata copy, source-profile read, markers, thumbnail) ran with a fixed 15–180 s limit, while the codecs get 900 s. A scheduled run of 17 recompressor workers on 45 MP files over a hard disk lost twelve consecutive derivatives within 40 seconds of each other, during a few minutes when the whole machine slowed down. The recompressor reported each one as `codec timed out after 900s`, although what had timed out was exiftool, at 60 or 120 s. No partial output was left, and the next sync run converts them.
+
+All four scripts now give those calls `EXIFTOOL_TIMEOUT`, a new setting at the top of each script defined as its codec timeout, so editing the codec timeout moves both. The planning-time batch reads keep their own limit. The recompressor's error now names the tool and the limit that fired (`exiftool timed out after 120s`).
+
+### Fixed: the planning phase was announced, but still silent for minutes (#479)
+
+v2.6.2 announced the planning phase and timed it, but in between the recompressor read the encode records in exiftool batches of 400 with nothing on screen: a 681-file run on a hard disk still sat ~4 minutes on one line. It now counts them and estimates the time left, paced like the folder scan (quiet while it is fast, then at a growing interval up to 60 s):
+
+```text
+Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
+  Encode records: 100/1355 read (18s, ~4m left)
+  Encode records: 200/1355 read (35s, ~3m left)
+  ...
+  Encode records: 1200/1355 read (3m31s, ~27s left)
+Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
+```
+
+Batches are now 100 files, so the count moves every 20–30 s on a hard disk; the extra exiftool starts add ~3.5 s over 3 327 files.
+
+Every change has a regression test proven to fail against the pre-fix code, including a real-codec run of the re-derive sequence. The real-photo battery (36 checks) passes. Full list: [bug tracking](bug_tracking_since_v1.0.md) (round 47, #478–#479) and [new features](new_features_since_v1.0.md). **2038 tests.**
+
+---
+
 ## v2.6.2
 
 **Released 2026-10-05, superseded by v2.7.0.** One fix to the recompressor's log; nothing changes in what the tools write.

@@ -685,6 +685,16 @@ The encoder's default `cautious` ICC strategy detects most of these and encodes 
 
 ## Notices for upgraders
 
+### ⚠️ Upgrading to v2.8.0: some overwrites are now refused
+
+A run that would overwrite an existing output whose provenance marker names a **different** source now refuses it — in every mode, with or without `--delete-source`, `--overwrite` included — and exits 1 with the file in the failures list. That is the case where an earlier run may have deleted the other photo's source, leaving the output as its only copy.
+
+- Typical causes: two photos with the same name meeting in a folder-collapsing mode (2/4/5/6/7), `foto.tif` and `foto.tiff` in one folder, or a folder **moved** together with its outputs (the recorded location changed) — for the last one re-run with `--provenance content`, or delete the stale output if it is really obsolete.
+- Transcoder: a JPEG edited in place after its lossless archive was made is refused on `--sync` (its checksum no longer matches); delete the old `.jxl` to archive it again. `--icc-profile`/`--to-srgb` with `--delete-source` exits 2 (a colour conversion is a derivative).
+- Decoder: `--none` with `--delete-source` exits 2; `--depth 8` and `--basic` decodes keep the JXLs they degrade.
+- Recompressor: a lossy file storing its ICC profile as a blob is copied verbatim, never re-encoded, and a scanner/table-curve profile is re-encoded tagged sRGB with the profile in XMP.
+- **Check your scans:** a lossless scan master recompressed with an earlier version may already be a lossy ICC blob with wrong colours (`djxl f.jxl o.png --icc_out=a.icc --orig_icc_out=b.icc`: `a.icc` and `b.icc` differ). It cannot be repaired from the file; re-archive it from the TIFF if you still have it. The decoder decodes it as well as it can and never deletes it.
+
 ### ⚠️ Upgrading to v2.6.0: `--workers` can be lowered for you
 
 The TIFF encoder and the recompressor now cap `--workers` so the parallel cjxl processes fit in memory. Nothing changes in the output; a run may just use fewer workers than you asked for, and the log says so (`--workers 30 reduced to 8`). It happens mostly at **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5** and **effort 10**, where cjxl encodes the whole image at once.
@@ -743,15 +753,16 @@ Read [Upgrading from v1.9.1](docs/version_history.md#upgrading-from-v191) before
 
 ## Current version
 
-**v2.7.0** (2026-10-06) — derivatives follow your distance/effort, and a busy disk no longer fails good files:
+**v2.8.0** (2026-10-08) — an overwrite never destroys another photo's archive, and film scans keep their colours when recompressed:
 
-- **Change a preset's distance or effort, and its derivatives follow.** The recompressor's colour/resize/sharpen derivatives now record the distance and effort they were encoded with, and a sync run re-derives them when those change — as it already did when the recipe changed. Before, they were skipped forever with the old settings.
-- **A stalled exiftool no longer turns a good file into an error.** Every per-file metadata call in the four scripts now gets the codec's 15-minute patience instead of 15–180 s, and the recompressor names the tool that actually timed out.
-- **The recompressor's planning phase counts as it goes.** On a hard disk it reads every file's history for minutes before converting; the log now shows `Encode records: 400/1355 read (1m10s, ~3m left)` instead of one line and a long wait.
+- **A sync run no longer overwrites the only file of a photo an earlier run deleted.** The cross-run guard only ran when the run itself deleted sources in a folder-collapsing mode — and every scheduled preset is a plain sync. All four scripts now refuse, in every mode and with or without `--delete-source`, to overwrite an output whose provenance marker names a different source.
+- **Recompressing a film scan keeps its colours.** A master whose ICC profile has no native JPEG XL form (scanner profiles such as SilverFast's `SFprofT`) came back at 27 dB after one recompression and 18 dB after two; it is now re-encoded the way the encoder stores it (pixels tagged sRGB, profile in XMP): 48.7 / 46.6 dB on a real scan.
+- **Eight more ways to lose a master closed:** a source re-exported during a long run, a degraded decode (`--depth 8`, `--none`, `--basic`), an unrelated same-named JPEG under lossy `--delete-skipped`, a JPEG cut in half, an image kept in a SubIFD, "Convert to sRGB" with `[D]`, an interrupted staging move over an existing output, and lossy encodes rewriting the colour under a zero 4th channel.
+- Also since v2.7.0: `--workers` is capped by the smaller of commit and physical RAM, and a lower effort no longer re-derives the derivatives.
 
-Still from v2.6.x: the recompressor announces its planning phase, no subprocess can hang a worker, and `--workers` is capped by memory in the TIFF encoder and the recompressor — read the [notice](#notices-for-upgraders).
+Some runs that used to overwrite now stop with exit 1 — read the [notice](#notices-for-upgraders).
 
-**2038 tests**, plus a real-photo battery (16-bit exports, an RGB+IR film scan, JPEGs).
+**2155 tests**, plus a real-photo battery of 39 checks (16-bit exports, an RGB+IR film scan, JPEGs).
 
 [What's new, in full](#changelog) · [Release history](#release-history) · [Notices for upgraders](#notices-for-upgraders)
 
@@ -759,42 +770,42 @@ Still from v2.6.x: the recompressor announces its planning phase, no subprocess 
 
 ## Changelog
 
-### What's new — v2.7.0 (current stable)
+### What's new — v2.8.0 (current stable)
 
-**Released 2026-10-06.** Supersedes v2.6.2. One new recompressor option, one fix in all four scripts and one to the recompressor's log.
+**Released 2026-10-08.** Supersedes v2.7.0. The 2026-10-08 audit — round 49, 25 fixes, every data-loss finding first reproduced with copies of real photos — and two features finished after v2.7.0.
 
-#### New: derivatives are re-derived when distance/effort change
+#### Fixed: a plain sync overwrote the archive of a photo an earlier run had deleted (#496–#500)
 
-A recompressor derivative (`--output-icc`, `--resize-*`, `--sharpen`) records its recipe in `XMP-dc:Relation` as `jxlphoto-derived:<recipe>`, and a `--sync` run re-derives it when the recipe changes. Distance and effort were not part of that record, so changing a preset from d=3 e=7 to d=4 e=9 left every existing derivative with the old settings: the sync skipped them all. The record now ends in the encode settings (`jxlphoto-derived:sRGB/d4e9`), and a sync run re-derives a derivative whose distance or effort differ from this run's.
+v2.0.0's fix for colliding names (#268) armed the provenance check only when the CURRENT run had `--delete-source` in a mode that collapses folders. The loss happens on the overwrite, though: run 1 archives `A/foto.tif` and deletes it; run 2 — a sync with no delete flag, which is what every scheduled preset is — writes `B/foto.tif` over `out/foto.jxl`, and photo A exists nowhere. Reproduced with real photos in all four scripts, and in mode 8 too (`foto.tif` and `foto.tiff` both write `foto.jxl`).
 
-- `REDERIVE_ON_ENCODE_CHANGE` (default `True`) at the top of `jxl_recompressor.py`, or `--rederive-on-encode-change` / `--no-rederive-on-encode-change` per run. The wizard asks in Step 6A and presets remember the answer.
-- A distance below cjxl's floor is recorded as the floor, so 0.01 and 0.05 are not "a change".
-- **Derivatives written before v2.7.0 carry no distance/effort and are never re-derived for it.** The run says how many it saw; one `--overwrite` run refreshes them.
+Every run now reads, in one batch, the markers of each output it is about to overwrite and **refuses** one whose `jxlphoto-src` names another source (`--provenance content` still accepts the same bytes): exit 1, listed in the failures, previewed by `--dry-run`, `--overwrite` included. A markerless output is overwritten as before. Also refused: a lossless JPEG archive (jbrd) at the encoder's output path, and in the transcoder a jbrd archive whose `checksums.md5` names another JPEG. The decoder's smart sync no longer treats another JXL's decode as "up to date", and the recompressor's warning about a foreign output became a refusal, in every mode.
 
-See [Derivatives: colour conversion, resize and sharpening](docs/README_jxl_recompressor.md#derivatives-colour-conversion-resize-and-sharpening).
+#### Fixed: recompressing a master with a scanner profile changed its colours (#501–#503)
 
-#### Fixed: a stalled exiftool turned good files into errors, reported as a codec timeout (#478)
+`cjxl src.jxl out.jxl` turned a lossless master whose profile has no native JPEG XL form into a "lossy ICC blob", which the toolkit decodes through linear sRGB — and an input profile with A2B tables but no B2A cannot be converted back faithfully (27 dB on a real scan); a second recompression read that file as linear sRGB and kept the old profile in XMP (18 dB). The real-photo battery ran exactly this chain on the real scan and passed, because it checked markers, not colours. Now: a lossy-blob source is copied verbatim, never re-encoded; a profile with no native form (probed once per run on a 16x16 image) is encoded tagged sRGB with the profile in XMP, as the encoder does; a derivative never converts INTO an A2B-only profile; the decoder still decodes such a blob but keeps the JXL. A new battery check decodes the in-place scan and compares it with the original (47.6 dB).
 
-Every per-file exiftool call (metadata copy, source-profile read, markers, thumbnail) ran with a fixed 15–180 s limit, while the codecs get 900 s. A scheduled run of 17 recompressor workers on 45 MP files over a hard disk lost twelve consecutive derivatives within 40 seconds of each other, during a few minutes when the whole machine slowed down. The recompressor reported each one as `codec timed out after 900s`, although what had timed out was exiftool, at 60 or 120 s. No partial output was left, and the next sync run converts them.
+#### Fixed: delete gates (#504–#507, #511–#514)
 
-All four scripts now give those calls `EXIFTOOL_TIMEOUT`, a new setting at the top of each script defined as its codec timeout, so editing the codec timeout moves both. The planning-time batch reads keep their own limit. The recompressor's error now names the tool and the limit that fired (`exiftool timed out after 120s`).
+- A source **re-exported during the run** was deleted unread: each source's size and mtime are recorded before it is read and checked before the unlink (all four scripts).
+- The decoder deleted the master after a **degraded decode**: `--none` + `--delete-source` now exits 2, and a page decoded at `--depth 8` from a deeper source, or by `--basic` with a profile other than the XMP one, keeps its JXL.
+- Lossy **`--delete-skipped`** in the transcoder deleted the master for any same-named JPEG/PNG; it now requires the output's provenance marker.
+- A **JPEG cut in half** passed the integrity check on its EXIF thumbnail's end marker; the check now walks to the end of the main image.
+- An image kept in a **SubIFD** (TIFF/EP, DNG layout) was deleted after only its preview was archived; such a source is never deleted.
+- Moving an output out of **staging** over an existing one was a truncating copy; it now goes through a temp file in the destination folder and an atomic rename (all four scripts).
+- Lossy encodes rewrote the colour wherever a **4th channel** is 0 (an RGB+IR scan's dust); cjxl's `keep_invisible` is now on for such pages.
+- A master encoded from a decoded **derivative** was marked as a derivative.
 
-#### Fixed: the planning phase was announced, but still silent for minutes (#479)
+#### Fixed: the wrapper (#509, #510, #516–#520)
 
-v2.6.2 announced the planning phase and timed it, but in between the recompressor read the encode records in exiftool batches of 400 with nothing on screen: a 681-file run on a hard disk still sat ~4 minutes on one line. It now counts them and estimates the time left, paced like the folder scan (quiet while it is fast, then at a growing interval up to 60 s):
+The `[D]` panel counted the originals before the export marker and subfolder were known (it said 3, the run deleted 2): Step 7 recounts. "Convert to sRGB?" with `[D]` deleted the 16-bit master after an 8-bit sRGB JPEG: a colour conversion is a derivative and never deletes, in the wizard and in the transcoder. Decode mode `none` with `[D]` is refused before the HHMM token. The output folder names follow the scripts' settings; the idle-timeout kill takes the codecs down with the child; the manifest recap says when a killed entry's deletions are missing from the total; Auto Mode looks at every export folder before recommending mode 7. The `--delete-skipped` texts say what really backs the delete (#508).
 
-```text
-Planning 1355 file(s): reading each one's encode record and checking for a jbrd box — on a hard disk this can take several minutes...
-  Encode records: 100/1355 read (18s, ~4m left)
-  Encode records: 200/1355 read (35s, ~3m left)
-  ...
-  Encode records: 1200/1355 read (3m31s, ~27s left)
-Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
-```
+#### New since v2.7.0
 
-Batches are now 100 files, so the count moves every 20–30 s on a hard disk; the extra exiftool starts add ~3.5 s over 3 327 files.
+- **`--workers` capped by the smaller of commit and physical RAM** (encoder, recompressor): `WORKER_MEMORY_LIMIT` = `both` (default), `commit` or `physical`; the `Memory:` line says which one decided.
+- **A lower effort no longer re-derives the derivatives** (recompressor): at the same distance only a better-ranked encode re-derives (`REDERIVE_ON_LOWER_EFFORT`, `--rederive-on-lower-effort`), and a streamed encode is marked `s` in the recipe (`sRGB/d3e9s`).
+- The measured cost of `--buffering 1` (#480): at effort 8–9 a streamed encode is effort 7's file.
 
-Every change has a regression test proven to fail against the pre-fix code, including a real-codec run of the re-derive sequence. The real-photo battery (36 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (round 47, #478–#479) and [new features](docs/new_features_since_v1.0.md). **2038 tests.**
+Every fix has a regression test proven to fail against the pre-fix code, most of them running the real codecs on real files. The real-photo battery (39 checks) passes. Full list: [bug tracking](docs/bug_tracking_since_v1.0.md) (rounds 48–49, #480, #496–#520) and [new features](docs/new_features_since_v1.0.md). **2155 tests.**
 
 ---
 
@@ -802,7 +813,8 @@ Every change has a regression test proven to fail against the pre-fix code, incl
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.7.0](#changelog)** | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
+| **[v2.8.0](#changelog)** | 2026-10-08 | An overwrite never destroys another photo's archive (all four scripts, every mode); scans keep their colours when recompressed; eight more delete gates closed; workers capped by physical RAM too; round-49 audit (25 fixes) |
+| [v2.7.0](docs/version_history.md#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
 | [v2.6.2](docs/version_history.md#v262) | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
 | [v2.6.1](docs/version_history.md#v261) | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
 | [v2.6.0](docs/version_history.md#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |

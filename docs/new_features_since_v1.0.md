@@ -1,6 +1,23 @@
 # New Features Since v1.0
 
-## Unreleased
+## v2.8.0 (2026-10-08)
+
+### Every overwrite checks provenance (all four scripts)
+
+Before overwriting an existing output, every run — any mode, with or without
+`--delete-source`, `--overwrite` included — reads its provenance marker and
+refuses (exit 1) when it names a different source. Until v2.7.0 only a
+deleting run in a folder-collapsing mode checked, and a plain sync could
+overwrite the only file of a photo an earlier run had deleted (#496–#500).
+
+### Recompressing a scanner-profile master keeps its colours (recompressor)
+
+A profile with no native JPEG XL form is re-encoded tagged sRGB with the
+profile in XMP CreatorTool (the encoder's "skip"); a lossy-ICC-blob source is
+copied verbatim; a profile with A2B tables and no B2A is never a conversion
+target (#501–#503). `jxlinfo` is used, when present, to skip the extra decode
+for files whose colour space is native.
+
 
 ### Worker cap: the smaller of commit and physical RAM (encoder, recompressor)
 
