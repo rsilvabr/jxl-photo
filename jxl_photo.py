@@ -2057,6 +2057,21 @@ def _drop_derivative_options(advanced: Dict) -> None:
         advanced.pop(_k, None)
 
 
+def _step6_delete_on(workflow: Dict) -> bool:
+    """Step 6: is a delete already requested (Step 4's [D], or expert flags)?
+    A derivative never deletes its source, so Step 6 does not offer one then
+    — the run would only be refused later, after the Step 7 YES (W7 of the
+    2026-10-08 audit)."""
+    return bool(workflow.get('delete_source')
+                or (workflow.get('advanced_options') or {}).get('delete_source')
+                or _flags_request_delete(workflow.get('expert_flags')))
+
+
+_NO_DERIVATIVE_WITH_DELETE = ("A derivative (colour conversion, resize, sharpening) never "
+                              "deletes its source, so it is not offered while [D] "
+                              "(delete originals) is on.")
+
+
 def _has_derivative_options(advanced: Dict) -> bool:
     """True when the options produce a DERIVATIVE: colour conversion, resize
     or sharpening. These never delete, never run in place and carry a
@@ -4750,6 +4765,9 @@ class InteractiveMenu:
                     # survive: the guard in execute_workflow would refuse the
                     # run for an option the user was never offered here.
                     _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+                elif _step6_delete_on(workflow):
+                    console.print(f"[dim]{_NO_DERIVATIVE_WITH_DELETE}[/dim]")
+                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
                 else:
                     console.print("[dim]A colour-converted derivative (16-bit, from the source's "
                                   "own profile) instead of a plain recompression?[/dim]")
@@ -4807,7 +4825,16 @@ class InteractiveMenu:
                 workflow['quality'] = max(1, min(quality, 100))
 
             # ICC conversion applies to both JPEG and PNG outputs
-            if origin == 'jxl' and dest in ('jpeg', 'png'):
+            if (origin == 'jxl' and dest in ('jpeg', 'png')
+                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                      'jxl_to_png')
+                    and _step6_delete_on(workflow)):
+                # The colour conversion and resize/sharpening below make a
+                # derivative (W6/W7): not offered with [D] on.
+                console.print(f"[dim]{_NO_DERIVATIVE_WITH_DELETE}[/dim]")
+                workflow.pop('icc_profile', None)
+                _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+            elif origin == 'jxl' and dest in ('jpeg', 'png'):
                 if status.get('magick'):
                     convert_icc = Confirm.ask("Convert to sRGB?", default=False)
                     if convert_icc:
@@ -4909,6 +4936,9 @@ class InteractiveMenu:
                     print("Colour conversion needs a separate output folder — not offered "
                           "in modes 0/8 (in place).")
                     _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+                elif _step6_delete_on(workflow):
+                    print(_NO_DERIVATIVE_WITH_DELETE)
+                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
                 else:
                     icc_input = input("Output colour space: keep / sRGB / AdobeRGB / path to .icc [keep]: ").strip()
                     _adv = workflow.setdefault('advanced_options', {})
@@ -4961,7 +4991,15 @@ class InteractiveMenu:
                     workflow['quality'] = max(1, min(int(quality), 100))
 
             # ICC conversion applies to both JPEG and PNG outputs
-            if origin == 'jxl' and dest in ('jpeg', 'png'):
+            if (origin == 'jxl' and dest in ('jpeg', 'png')
+                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                      'jxl_to_png')
+                    and _step6_delete_on(workflow)):
+                # Same rule as the rich branch (W6/W7).
+                print(_NO_DERIVATIVE_WITH_DELETE)
+                workflow.pop('icc_profile', None)
+                _drop_derivative_options(workflow.setdefault('advanced_options', {}))
+            elif origin == 'jxl' and dest in ('jpeg', 'png'):
                 if status.get('magick'):
                     icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
                     if icc_input.startswith('y'):
@@ -6174,6 +6212,7 @@ class InteractiveMenu:
                 row_excludes=[_w.get('exclude_folders') for _w, _a in _row_effs],
                 cross_sink=cross_out_folders,
                 conversion_type=workflow.get('conversion_type'),
+                page_options=(workflow.get('advanced_options') or {}),
             )
         if collisions:
             self._print_error(
@@ -6881,7 +6920,8 @@ class InteractiveMenu:
                                     row_export: Optional[List[Tuple]] = None,
                                     cross_sink: Optional[Dict[int, Set[str]]] = None,
                                     row_excludes: Optional[List[Optional[str]]] = None,
-                                    conversion_type: str = None) -> List:
+                                    conversion_type: str = None,
+                                    page_options: Optional[Dict] = None) -> List:
         """Find files from DIFFERENT manifest entries that would be written to
         the same output file.
 
@@ -6951,6 +6991,15 @@ class InteractiveMenu:
         direction: applying it misses real collisions (two rows, renames
         x->a and x->b, child writes x.jpg twice) and inventing it refuses
         legitimate runs. Files are probed once, with has_jbrd_box cached.
+
+        `page_options` (optional): the run's advanced options, read for
+        'multipage_mode'/'thumbnail_mode'/'thumbnail_suffix' (the encoder's
+        own settings when absent). A split TIFF writes photo_page1.jxl,
+        photo_page2_thumbnail.jxl... next to photo.jxl, and those names can
+        land on ANOTHER file's output — photo_page1.tif in a second entry
+        (W9 of the 2026-10-08 audit). Only page-shaped names next to their
+        base name are probed, so the scan reads a TIFF header only for
+        those pairs.
 
         Returns a list of (file_a, file_b, dest_folder) tuples.
         """
@@ -7321,10 +7370,53 @@ class InteractiveMenu:
                             seen[stem] = f
                         elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
                             collisions.append((prev, f, out_folder))
+            if _child is not None and _child.__name__ == 'jxl_tiff_encoder':
+                collisions.extend(self._split_page_collisions(
+                    _child, by_dest, page_options or {}))
         finally:
             if _child is not None:
                 _child.logger.disabled = _child_logger_was_disabled
         return collisions
+
+    @staticmethod
+    def _split_page_collisions(enc, by_dest: Dict[str, Dict[str, Path]],
+                               page_options: Dict) -> List:
+        """The split pages of _manifest_output_collisions (see page_options
+        there): in each output folder, a stem shaped like a page of ANOTHER
+        stem there (x_page1, x_page2_thumbnail, x_thumbnail next to x) is a
+        collision when the encoder's plan for x's TIFF writes that name."""
+        mp = (page_options.get('multipage_mode') or enc.MULTIPAGE_TIFF_MODE).lower()
+        if mp == 'ignore':
+            return []          # page 0 only: the stem scan already covers it
+        tm = page_options.get('thumbnail_mode') or enc.THUMBNAIL_MODE
+        suffix = page_options.get('thumbnail_suffix')
+        if suffix is None:
+            suffix = enc.THUMBNAIL_SUFFIX
+        page_re = re.compile(r"^(?P<base>.+?)(?:_page\d+)?(?:"
+                             + re.escape(os.path.normcase(suffix)) + r")?$")
+        found = []
+        for folder, seen in by_dest.items():
+            planned: Dict[str, set] = {}
+            for stem, f in seen.items():
+                m = page_re.match(stem)
+                base = m.group('base') if m else stem
+                if base == stem or base not in seen:
+                    continue
+                owner = seen[base]
+                if os.path.normcase(str(owner)) == os.path.normcase(str(f)):
+                    continue
+                if base not in planned:
+                    try:
+                        real, thumbs, _info = enc._analyze_tiff_pages(Path(owner))
+                        names = enc._planned_page_names(
+                            Path(owner).stem, real, thumbs, mp, tm, suffix)
+                    except Exception:
+                        names = []     # unreadable: the child reports it
+                    planned[base] = {os.path.normcase(os.path.splitext(n)[0])
+                                     for n in names}
+                if stem in planned[base]:
+                    found.append((owner, f, folder))
+        return found
 
     @staticmethod
     def _manifest_source_overlaps(manifest_entries: List) -> List:

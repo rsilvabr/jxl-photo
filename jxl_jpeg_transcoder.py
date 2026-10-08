@@ -169,9 +169,16 @@ def _verify_file_integrity(file_path: Path) -> bool:
             # Walk the box chain: every box must be well-formed and the chain
             # must end exactly at EOF. A codestream box (jxlc/jxlp) must be
             # present — a metadata-only file must never pass the delete gate.
+            # A codestream split into jxlp boxes must be WHOLE: indices count
+            # up from 0 and the last box has the high bit set (ISO/IEC
+            # 18181-2) — a file cut at a box boundary only fails this check.
+            # Same rule as the encoder/recompressor _verify_jxl_integrity.
             file_size = stat.st_size
             i = 12
             has_codestream = False
+            has_jxlc = False
+            jxlp_next = 0
+            jxlp_ended = False
             # Box walk re-opens the file only on the delete-gate path (JXL).
             with open(file_path, 'rb') as f:
                 while i < file_size:
@@ -180,21 +187,39 @@ def _verify_file_integrity(file_path: Path) -> bool:
                     f.seek(i)
                     box_header = f.read(8)
                     size = int.from_bytes(box_header[0:4], "big")
-                    if box_header[4:8] in (b"jxlc", b"jxlp"):
+                    box_type = box_header[4:8]
+                    if box_type in (b"jxlc", b"jxlp"):
                         has_codestream = True
-                    if size == 0:
-                        return has_codestream
+                    head = 8
                     if size == 1:
                         if i + 16 > file_size:
                             return False
                         size = int.from_bytes(f.read(8), "big")
                         if size < 16:
                             return False
-                    elif size < 8:
+                        head = 16
+                    elif size != 0 and size < 8:
                         return False
-                    if i + size > file_size:
+                    if size != 0 and i + size > file_size:
                         return False
+                    if box_type == b"jxlc":
+                        has_jxlc = True
+                    elif box_type == b"jxlp":
+                        end = file_size if size == 0 else i + size
+                        if jxlp_ended or end - (i + head) < 4:
+                            return False
+                        f.seek(i + head)
+                        index = int.from_bytes(f.read(4), "big")
+                        if (index & 0x7FFFFFFF) != jxlp_next:
+                            return False
+                        jxlp_next += 1
+                        jxlp_ended = bool(index & 0x80000000)
+                    if size == 0:
+                        i = file_size
+                        break
                     i += size
+            if jxlp_next and (has_jxlc or not jxlp_ended):
+                return False
             return has_codestream and i == file_size
         
         elif _is_jpeg:
@@ -6285,6 +6310,20 @@ def main():
     elif args.icc_profile and not Path(args.icc_profile).is_file():
         parser.error(f"--icc-profile: not sRGB, AdobeRGB, or an existing file: "
                      f"{args.icc_profile}")
+    elif args.icc_profile:
+        # A conversion TARGET must be invertible. An input (scanner/camera)
+        # profile with A2B tables and no B2A cannot be converted INTO
+        # faithfully — the "keep" path already refuses it per file, and the
+        # recompressor's --output-icc refuses it up front, like this.
+        try:
+            _target_bytes = Path(args.icc_profile).read_bytes()
+        except OSError as e:
+            parser.error(f"--icc-profile {args.icc_profile}: cannot read it ({e})")
+        if _icc_a2b_only(_target_bytes):
+            parser.error(f"--icc-profile {args.icc_profile}: this profile has A2B "
+                         f"tables but no B2A (an input/scanner profile), so nothing "
+                         f"can be converted INTO it faithfully — pick an output/"
+                         f"working space profile (sRGB, AdobeRGB, ProPhoto, ...)")
 
     # Determine command
     cmd, auto_decode, reason = determine_command(args.input, args.force_transcode, 

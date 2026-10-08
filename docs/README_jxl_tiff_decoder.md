@@ -360,7 +360,7 @@ an existing TIFF **without** that marker is treated as an original and is
 ```
 WARNING | [1/1] KEEP (refusing to overwrite photo.tif: this TIFF carries no jxlphoto-src marker ...) | photo.jxl
 ...
-WARNING | Refused: 1 existing TIFF(s) are not decodes of these JXLs — ORIGINAL masters (no jxlphoto-src marker) or the decode of a DIFFERENT same-named JXL — and were NOT overwritten
+WARNING | Refused: 1 existing TIFF(s) are not decodes of these JXLs — ORIGINAL masters (no jxlphoto-src marker), the decode of a DIFFERENT same-named JXL, or a decode EDITED since — and were NOT overwritten
 ```
 
 The marker must also name **these** JXLs, not merely exist: a TIFF decoded from
@@ -386,6 +386,28 @@ another folder (or, if the JXLs were MOVED, use `--provenance content`).
 - TIFFs written in **None** mode (`--none`) carry no XMP, hence no marker:
   re-decoding over them also needs `--overwrite` (the failure is in the safe
   direction). The same holds for TIFFs decoded by versions before v2.0.0.
+
+### A decode you edited afterwards is not decoded over (v2.8.1)
+
+Photoshop and most editors keep a file's XMP when they save it, so a decode
+you retouched still carries the marker that names its JXL. Since v2.8.1 each
+decode also records its pixels (`jxlphoto-pixsum:<pages>:<md5>` in
+`dc:Relation`), and before overwriting one of its own TIFFs — or letting a
+skipped TIFF certify a `--delete-skipped` deletion — the decoder compares:
+
+```
+WARNING | [1/1] KEEP (refusing to overwrite photo.tif: this TIFF was EDITED after this tool decoded it (its pixels no longer match the decode). Re-run with --overwrite to replace it anyway) | photo.jxl
+```
+
+- It is a refusal, like an original master: the JXL is not decoded and not
+  deleted. `--overwrite` replaces the TIFF if that is what you want.
+- Only the pixels count. A metadata-only edit (keywords, rating) is not an
+  edit here; a re-decode replaces it.
+- The comparison reads the whole TIFF, so it runs only where a TIFF is about
+  to be overwritten or is about to vouch for a deletion — never on an
+  ordinary "up to date" skip.
+- TIFFs decoded before v2.8.1 carry no record and behave as before.
+- `--dry-run` previews it (`would REFUSE`).
 
 ### A lossy ICC blob of a scanner profile is decoded, but never deleted
 
@@ -511,6 +533,8 @@ Options:
                      decoded at --depth 8 from a deeper source, or by --basic
                      with a profile other than the one recorded in XMP, keeps
                      its JXL ("the TIFF is a degraded copy"), like --matrix.
+                     --dry-run previews those keeps (the --basic ones as
+                     "may be KEPT": djxl decides them).
                      A JXL changed on disk since this run read it is kept too
   --provenance path|content
                      How an EXISTING output is matched to
@@ -906,6 +930,8 @@ Each reconstructed page gets its own ICC profile restored when the source page h
 Single-channel pages are restored as 2D grayscale TIFFs. Grayscale pages that inherited ICC from IFD0 are reconstructed without an ICC tag. Non-zero `SubfileType` values from the original TIFF are restored **exactly**, including `SubfileType=4` (MASK).
 
 > **Changed since v1.7.0.** MASK used to be rewritten as `PAGE` (`2`), because `tifffile` validates its own `subfiletype=` parameter against an enum that accepts only `0`/`1`/`2` and rejects `4`. Values outside that set are now written as the raw TIFF tag (254) instead, so a film scanner's IR/transparency page keeps the role it had. A lossless round trip of an RGB+IR scan returns `SubfileType` `4 → 4`, not `4 → 2`.
+
+A 2nd or 4th **channel** (grey + extra, RGB + extra — VueScan's RGBI layout keeps the IR this way) keeps its role too: JPEG XL stores it as alpha, so the encoder records the page's `ExtraSamples` (`jxlphoto-extrasamples:0` for an unspecified channel such as IR, `1` for associated alpha, `2` for unassociated alpha) and the decoder writes it back (v2.8.1). JXLs without that marker — encoded before v2.8.1, or by other tools — come back as unassociated alpha, as before.
 
 > **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
 

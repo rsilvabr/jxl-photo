@@ -81,9 +81,18 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
         # Walk the ISOBMFF box chain; every box must be well-formed and the
         # chain must end exactly at EOF. A codestream box (jxlc/jxlp) must be
         # present — a metadata-only file must never pass the delete gate.
+        #
+        # A codestream split into jxlp boxes must also be WHOLE: each jxlp
+        # starts with a 4-byte index counting up from 0, and the LAST one has
+        # the high bit set (ISO/IEC 18181-2). A file cut exactly at a box
+        # boundary is a well-formed chain that ends at EOF — only the missing
+        # "last" bit tells it from a complete one. jxlc and jxlp never mix.
         file_size = stat.st_size
         i = 12
         has_codestream = False
+        has_jxlc = False
+        jxlp_next = 0
+        jxlp_ended = False
         with open(jxl_path, 'rb') as f:
             while i < file_size:
                 if i + 8 > file_size:
@@ -91,11 +100,10 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                 f.seek(i)
                 box_header = f.read(8)
                 size = int.from_bytes(box_header[0:4], "big")
-                if box_header[4:8] in (b"jxlc", b"jxlp"):
+                box_type = box_header[4:8]
+                if box_type in (b"jxlc", b"jxlp"):
                     has_codestream = True
-                if size == 0:
-                    # Box extends to end of file; must be the last one
-                    return has_codestream
+                head = 8
                 if size == 1:
                     # Extended 64-bit size
                     if i + 16 > file_size:
@@ -104,11 +112,30 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                     size = int.from_bytes(ext, "big")
                     if size < 16:
                         return False
-                elif size < 8:
+                    head = 16
+                elif size != 0 and size < 8:
                     return False
-                if i + size > file_size:
+                if size != 0 and i + size > file_size:
                     return False
+                if box_type == b"jxlc":
+                    has_jxlc = True
+                elif box_type == b"jxlp":
+                    end = file_size if size == 0 else i + size
+                    if jxlp_ended or end - (i + head) < 4:
+                        return False
+                    f.seek(i + head)
+                    index = int.from_bytes(f.read(4), "big")
+                    if (index & 0x7FFFFFFF) != jxlp_next:
+                        return False
+                    jxlp_next += 1
+                    jxlp_ended = bool(index & 0x80000000)
+                if size == 0:
+                    # Box extends to end of file; must be the last one
+                    i = file_size
+                    break
                 i += size
+        if jxlp_next and (has_jxlc or not jxlp_ended):
+            return False
         return has_codestream and i == file_size
     except (OSError, IOError):
         return False

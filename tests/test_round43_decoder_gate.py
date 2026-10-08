@@ -115,6 +115,11 @@ def _reset_run_state(monkeypatch):
         prev.clear()
     for k in dec._delete_stats:
         dec._delete_stats[k] = 0
+    # The stub TIFFs here are not real files: the round-50 pixel check (D5,
+    # an edited decode never certifies a deletion) would read them, fail and
+    # — failing closed — keep every source. Its own real-codec tests live in
+    # test_audit_261008_leftovers.py; these pin the marker gate alone.
+    monkeypatch.setattr(dec, "_decoded_tiff_edited", lambda p: None)
 
 
 def _main_tool_mocks(monkeypatch, fake_logger, tmp_path, captured):

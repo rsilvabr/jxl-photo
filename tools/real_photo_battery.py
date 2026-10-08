@@ -251,6 +251,31 @@ def decoder_checks(A1, pool_jxl):
     check("--delete-skipped: its OWN decode certifies the source (deleted)",
           rc == 0 and not (a / "p.jxl").exists(), f"rc={rc}")
 
+    # D5 (round 50): the decode's pixel record (jxlphoto-pixsum) on a real
+    # 16-bit TIFF with its JPEG preview page — an edit saved the way Photoshop
+    # saves one (new pixels, same XMP) must not be decoded over, and an
+    # untouched decode must still be refreshed.
+    e = B / "d_edited"
+    cp(pool_jxl / A1.with_suffix(".jxl").name, e / "p.jxl")
+    run("dec_edit_decode", [DEC, e, "--mode", "1"])
+    t = e / "converted_tiff" / "p.tif"
+    touch(e / "p.jxl", 3600)
+    rc, out = run("dec_edit_untouched", [DEC, e, "--mode", "1"])
+    check("an untouched decode is refreshed when its JXL is newer",
+          rc == 0 and "reconverting" in out and "EDITED" not in out, f"rc={rc}")
+    orig = cp(t, e / "orig.tif")
+    with tifffile.TiffFile(t) as tf:
+        arr = tf.pages[0].asarray().copy()
+    arr[:64, :64] = 0
+    tifffile.imwrite(t, arr, photometric="rgb", compression="zlib", metadata=None)
+    exif(["-q", "-overwrite_original", "-tagsfromfile", orig, "-all:all", t])
+    orig.unlink()
+    touch(e / "p.jxl", 7200)
+    before = md5(t)
+    rc, out = run("dec_edit_sync", [DEC, e, "--mode", "1"])
+    check("an EDITED decode is not decoded over (JXL newer, marker intact)",
+          md5(t) == before and "EDITED" in out, f"rc={rc}")
+
 
 def multipage_and_recompressor_checks(A1, pool_jxl, scan):
     section("Multi-page scan + recompressor in place")

@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #521.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #528.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-50 — what the 261008 audit left open](#round-50--what-the-261008-audit-left-open-2026-10-08) | 2026-10-08 | v2.8.1 | #521–#527 (7) |
 | [Round-49 — the 261008 audit](#round-49--the-261008-audit-2026-10-08) | 2026-10-08 | v2.8.0 | #496–#520 (25) |
 | [Round-48 — what `--buffering 1` really costs](#round-48--what---buffering-1-really-costs-2026-10-06) | 2026-10-06 | v2.8.0 | #480 (1) |
 | [Round-47 — per-file exiftool timeouts, planning progress](#round-47--per-file-exiftool-timeouts-planning-progress-2026-10-06) | 2026-10-06 | v2.7.0 | #478–#479 (2) |
@@ -56,6 +57,28 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-50 — what the 261008 audit left open (2026-10-08)
+
+The low-severity findings v2.8.0 left for later (`AI_tools/261008_Claude_report_audit-fixes.md`,
+"O que NÃO foi feito"). None of them lost a photo; most are edge cases a
+normal library never meets. Regression tests:
+`tests/test_audit_261008_leftovers.py` (real cjxl/djxl/exiftool where the
+item touches what they write; every scenario test fails against the v2.8.0
+scripts via `JXLPHOTO_SCRIPTS_UNDER_TEST`). The real-photo battery gained
+two decoder checks (an edited decode on a real 16-bit TIFF).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 521 | **A 4th channel came back as transparency.** JPEG XL stores a TIFF's 2nd/4th channel as alpha and keeps no TIFF role for it, so the decoder wrote every such channel as unassociated alpha (ExtraSamples=2): an RGB+IR scan's IR channel (ExtraSamples=0) or an associated alpha (1) changed role in the round trip. The pixels were intact (#514 keeps them so in lossy encodes). | encoder, decoder | ✅ FIXED (the encoder records the page's ExtraSamples in `jxlphoto-extrasamples:`, and the decoder restores it on the main writer and on the JPEG-preview rewrite; JXLs without the marker keep the old default. The marker never reaches the TIFF, and a re-encode writes it once) |
+| 522 | **A decoded TIFF edited afterwards was decoded over.** Photoshop keeps the XMP, so a retouched decode still carried the `jxlphoto-src` marker naming its JXL: once the JXL was newer (recompressed, re-encoded), the smart sync decoded over the edit, and `--delete-skipped` could delete the JXL on the strength of the edited TIFF. | decoder | ✅ FIXED (every decode records its pixels in `jxlphoto-pixsum:<pages>:<md5>`; before overwriting one of its own TIFFs, and before a skipped TIFF certifies a deletion, the decoder compares — an edit is refused (status "refused"; `--overwrite` still replaces it) and keeps the JXL. TIFFs decoded before v2.8.1 carry no record and are handled as before. The dry run previews both) |
+| 523 | **A JXL cut exactly at a `jxlp` box boundary passed the integrity check.** A codestream split into `jxlp` boxes is complete only when its last box carries the "last" bit; the box walk checked the chain's shape and length, not that bit, so a file truncated between two `jxlp` boxes passed every delete gate. Never seen in a real run (cjxl and exiftool write `jxlc`); hardening. | encoder, recompressor, transcoder | ✅ FIXED (`_verify_jxl_integrity` (parity-pinned) and the transcoder's `_verify_file_integrity` read each `jxlp` index: they must count up from 0, the last must carry the high bit, and `jxlc` and `jxlp` must not mix) |
+| 524 | **The decoder's dry run promised deletions a degraded decode would not make.** v2.8.0 keeps the JXL of a `--depth 8` decode of a deeper master and of a `--basic` decode that drops the profile recorded in XMP (#505), but `--dry-run --delete-source` still counted them as "would be DELETED". | decoder | ✅ FIXED (the depth-8 keeps are counted from the depth marker; the `--basic` ones — decided only after djxl runs — are announced as "may be KEPT" from one batched read of the XMP profile) |
+| 525 | **The transcoder converted INTO a scanner profile.** `--icc-profile <file>` accepted a profile with A2B tables and no B2A (an input profile such as SilverFast's `SFprofT`), which cannot be a faithful conversion target (#502: 27 dB on a real scan); only the "keep the source profile" path refused it. | transcoder | ✅ FIXED (refused up front, exit 2, like the recompressor's `--output-icc`) |
+| 526 | **Step 6 offered a derivative after `[D]`.** With delete originals already chosen in Step 4, the wizard still asked for a colour conversion, resize or sharpening (JXL → JXL, JXL → JPEG/PNG); the combination was refused only after the Step 7 YES. | wrapper | ✅ FIXED (Step 6 skips those questions with `[D]` on, says why, and drops earlier answers) |
+| 527 | **The manifest collision scan modelled only page 0 of a split TIFF.** A split writes `foto_page1.jxl` next to `foto.jxl`; another entry's `foto_page1.tif` writes the same name. The scan compared stems only, so it passed; the child refused the overwrite (#496) and nothing was lost, but the manifest started anyway. | wrapper, encoder | ✅ FIXED (for TIFF → JXL, a page-shaped stem next to its base stem in one output folder is checked against the encoder's own page plan (`_planned_page_names`, pinned to `convert_multipage`), reading only those TIFF headers; the run's multi-page settings are honoured) |
 
 ---
 
@@ -93,7 +116,7 @@ subprocesses; the scenario tests fail against the pre-fix scripts via
 | 511 | **A master encoded from a decoded derivative was marked as a derivative.** `jxlphoto-derived:` was not among the encoder's internal dc:Relation prefixes nor the decoder's internal markers: master → sRGB derivative → decoded TIFF → encoded again gave a NEW master carrying `jxlphoto-derived:sRGB/...` AND `jxlphoto-src` — and the derivative guards ("only overwrite our own derivatives") would treat that master as one and overwrite it when the recipe changed. Reproduced with real photos. | encoder, decoder | ✅ FIXED (`DERIVED_XMP_PREFIX` defined in both, matching the recompressor's and transcoder's; the encoder never copies it into a master, the decoder never into a TIFF) |
 | 512 | **An image kept in a SubIFD was deleted unarchived.** tifffile's `pages` is the main IFD chain only; a TIFF/EP- or DNG-style file keeps a small preview in IFD0 and the full image in a SubIFD. `--multipage-mode skip/ignore/split_all` archived the preview and `--delete-source` deleted the file. | encoder | ✅ FIXED (`_note_subifd_images`: a source with SubIFDs is recorded as having discarded real pages, so no gate deletes it, and the run warns `SubIFD image(s) NOT encoded`. The SubIFDs are still not encoded) |
 | 513 | **Promoting an output out of staging over an existing one was not atomic.** `shutil.move` onto an existing file is copy2 + unlink on Windows — even on one volume — and copy2 truncates the destination first: a kill or power cut mid-copy destroyed the old archive and left a partial file with a fresh mtime that smart sync then treats as up to date. A failed copy over an existing output was even deleted by the cleanup. | encoder, decoder, transcoder, recompressor | ✅ FIXED (`_promote_from_staging`, all four copies: move to `<uuid>_<name>.tmp` in the destination folder, then `os.replace`; on failure a complete temp is put in place, a partial one removed — the final name holds the old file or the complete new one, never a mix) |
-| 514 | **Lossy encodes rewrote the colour under a zero 4th channel.** A 2nd/4th channel reaches cjxl as alpha, and lossy cjxl defaults to `--keep_invisible=0`: for an RGB+IR scan stored as 4 channels the image under the dust (IR = 0) came back 80x worse than asked (mean error 1601 vs 19 elsewhere). | encoder, recompressor | ✅ FIXED (`--keep_invisible=1` on lossy pages with 2/4 channels in the encoder, on every lossy encode in the recompressor — a no-op without such a channel; derivative bytes unchanged. The ExtraSamples type (IR vs alpha) is still written back as unassociated alpha — not fixed) |
+| 514 | **Lossy encodes rewrote the colour under a zero 4th channel.** A 2nd/4th channel reaches cjxl as alpha, and lossy cjxl defaults to `--keep_invisible=0`: for an RGB+IR scan stored as 4 channels the image under the dust (IR = 0) came back 80x worse than asked (mean error 1601 vs 19 elsewhere). | encoder, recompressor | ✅ FIXED (`--keep_invisible=1` on lossy pages with 2/4 channels in the encoder, on every lossy encode in the recompressor — a no-op without such a channel; derivative bytes unchanged. The ExtraSamples type (IR vs alpha) was still written back as unassociated alpha — fixed in v2.8.1, #521) |
 | 515 | **The encoder skipped the decoder's output folders by a literal copy of their default names.** `_DECODER_OUTPUT_FOLDERS` repeated `16B_TIFF`/`TIFF_16bits`/`converted_tiff`: a user who renamed them in `jxl_tiff_decoder.py` had modes 6/7 pick the decoded TIFFs up again — a duplicate-output abort while the original existed, or a lossy re-encode of a decode once it was gone. | encoder | ✅ FIXED (the names are read from the decoder's settings with `ast` — nothing imported or executed — plus the shipped defaults; the wrapper's mode-6 preview asks the encoder for the same set) |
 | 516 | **The wrapper named the children's default output folders, not their settings.** `_dest_folder_names` (the "About to delete originals" panel, the previews, the manifest generator) and the mode-6 preview's skip list were literals: an edited script showed the shipped folder name. | wrapper | ✅ FIXED (`_child_setting` reads CONVERTED_*_FOLDER / *_FOLDER_NAME / RECOVERED_JPEG_FOLDER from the child; the literals are only fallbacks) |
 | 517 | **The idle-timeout kill left the child's codecs running.** On Windows `Popen.kill()` terminates the Python child alone: cjxl/djxl/exiftool kept running and left their `<uuid>_name.tmp` files beside the finals, where no sweep looks. | wrapper | ✅ FIXED (`_kill_process_tree`: `taskkill /F /T` on the child's process tree, then `kill()`; used by the idle timeout, Ctrl+C and the final wait) |

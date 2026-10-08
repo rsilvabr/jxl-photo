@@ -70,9 +70,18 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
         # Walk the ISOBMFF box chain; every box must be well-formed and the
         # chain must end exactly at EOF. A codestream box (jxlc/jxlp) must be
         # present — a metadata-only file must never pass the delete gate.
+        #
+        # A codestream split into jxlp boxes must also be WHOLE: each jxlp
+        # starts with a 4-byte index counting up from 0, and the LAST one has
+        # the high bit set (ISO/IEC 18181-2). A file cut exactly at a box
+        # boundary is a well-formed chain that ends at EOF — only the missing
+        # "last" bit tells it from a complete one. jxlc and jxlp never mix.
         file_size = stat.st_size
         i = 12
         has_codestream = False
+        has_jxlc = False
+        jxlp_next = 0
+        jxlp_ended = False
         with open(jxl_path, 'rb') as f:
             while i < file_size:
                 if i + 8 > file_size:
@@ -80,11 +89,10 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                 f.seek(i)
                 box_header = f.read(8)
                 size = int.from_bytes(box_header[0:4], "big")
-                if box_header[4:8] in (b"jxlc", b"jxlp"):
+                box_type = box_header[4:8]
+                if box_type in (b"jxlc", b"jxlp"):
                     has_codestream = True
-                if size == 0:
-                    # Box extends to end of file; must be the last one
-                    return has_codestream
+                head = 8
                 if size == 1:
                     # Extended 64-bit size
                     if i + 16 > file_size:
@@ -93,11 +101,30 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
                     size = int.from_bytes(ext, "big")
                     if size < 16:
                         return False
-                elif size < 8:
+                    head = 16
+                elif size != 0 and size < 8:
                     return False
-                if i + size > file_size:
+                if size != 0 and i + size > file_size:
                     return False
+                if box_type == b"jxlc":
+                    has_jxlc = True
+                elif box_type == b"jxlp":
+                    end = file_size if size == 0 else i + size
+                    if jxlp_ended or end - (i + head) < 4:
+                        return False
+                    f.seek(i + head)
+                    index = int.from_bytes(f.read(4), "big")
+                    if (index & 0x7FFFFFFF) != jxlp_next:
+                        return False
+                    jxlp_next += 1
+                    jxlp_ended = bool(index & 0x80000000)
+                if size == 0:
+                    # Box extends to end of file; must be the last one
+                    i = file_size
+                    break
                 i += size
+        if jxlp_next and (has_jxlc or not jxlp_ended):
+            return False
         return has_codestream and i == file_size
     except (OSError, IOError):
         return False
@@ -1135,6 +1162,14 @@ SUBFILETYPE_XMP_PREFIX = "jxlphoto-subfiletype:"
 GRAYSCALE_XMP_FLAG = "jxlphoto-grayscale"
 # Marker appended to dc:Relation when a page is encoded as single-channel
 # grayscale. The decoder restores a 2D TIFF page instead of expanding it to RGB.
+
+EXTRASAMPLES_XMP_PREFIX = "jxlphoto-extrasamples:"
+# The page's TIFF ExtraSamples value(s) when it has a 2nd/4th channel
+# (0 = unspecified, e.g. a scanner's IR channel; 1 = associated alpha;
+# 2 = unassociated alpha), comma-separated. JPEG XL stores that channel as
+# alpha and keeps no TIFF role for it, so without this the decoder wrote every
+# such channel back as unassociated alpha — an IR channel came back as a
+# transparency mask (D3 of the 2026-10-08 audit).
 
 DEPTH_XMP_PREFIX = "jxlphoto-depth:"
 # Prefix for the original BitsPerSample value stored in dc:Relation. The decoder
@@ -2544,6 +2579,10 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-icc:inherited",
     "jxlphoto-grayscale",
     "jxlphoto-thumb",
+    EXTRASAMPLES_XMP_PREFIX,
+    # The decoder's record of the pixels it wrote into a TIFF (its
+    # PIXSUM_PREFIX): it describes THAT TIFF, never a master encoded from it.
+    "jxlphoto-pixsum:",
     DERIVED_XMP_PREFIX,
 )
 
@@ -3111,6 +3150,51 @@ def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
     if is_thumbnail:
         base += THUMBNAIL_SUFFIX
     return base + ".jxl"
+
+
+def _planned_page_names(stem: str, real_pages: list, thumb_pages: list,
+                        mp_mode: str = None, thumbnail_mode: str = None,
+                        thumbnail_suffix: str = None) -> list:
+    """The JXL file names convert_multipage writes for one TIFF, given its
+    page classification (_analyze_tiff_pages) — pure: no logging, no
+    counters, no file access.
+
+    Mirrors convert_multipage's page selection and naming branch by branch
+    (tests/test_audit_261008_leftovers.py pins the two together). The
+    wrapper's manifest collision scan calls it to see a split page
+    (photo_page1.jxl) landing on another entry's photo_page1.tif output (W9
+    of the 2026-10-08 audit). Unset arguments read this module's settings."""
+    mp = (mp_mode or MULTIPAGE_TIFF_MODE).lower()
+    tm = (thumbnail_mode or THUMBNAIL_MODE).lower()
+    suffix = THUMBNAIL_SUFFIX if thumbnail_suffix is None else thumbnail_suffix
+    if mp == "ignore":
+        return [f"{stem}.jxl"]
+    pages = []
+    if mp == "skip":
+        if len(real_pages) > 1 or (not real_pages and not thumb_pages):
+            return []
+        if len(real_pages) == 1:
+            pages.append((real_pages[0], real_pages[0] in thumb_pages))
+        else:
+            pages.append((0, 0 in thumb_pages))
+    elif mp == "split":
+        pages += [(i, False) for i in real_pages]
+        if tm == "include":
+            pages += [(i, True) for i in thumb_pages]
+    elif mp == "split_all":
+        pages += [(i, False) for i in real_pages]
+        pages += [(i, True) for i in thumb_pages]
+    else:
+        pages.append((0, 0 in thumb_pages))
+    single = len(pages) == 1 and not pages[0][1]
+    names = []
+    for idx, is_thumb in pages:
+        if single:
+            names.append(f"{stem}.jxl")
+            continue
+        base = stem if idx == 0 else f"{stem}_page{idx}"
+        names.append(base + (suffix if is_thumb else "") + ".jxl")
+    return names
 
 # --- Space preflight (advisory) -------------------------------------------
 # Measured, not guessed. Encoding a few small crops of the batch's OWN files
@@ -3944,6 +4028,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _log_rejected_file(str(tiff_path), f"unsupported samples-per-pixel: {spp}")
                     raise ValueError(f"Unsupported channel count: {spp}. Expected 1 (gray), 2 (gray+alpha), 3 (RGB) or 4 (RGBA).")
                 icc_original, icc_inherited = get_page_icc(tif, page_idx)
+                # The role of a 2nd/4th channel (EXTRASAMPLES_XMP_PREFIX):
+                # read here, while the page is open; written as a marker below.
+                try:
+                    _extrasamples = tuple(int(v) for v in (page.extrasamples or ()))
+                except (TypeError, ValueError):
+                    _extrasamples = ()
                 img = page.asarray()
                 # Reject float/double and other unsupported integer dtypes before casting.
                 if img.dtype.kind == 'f':
@@ -4279,21 +4369,28 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
 
             # Grayscale marker: must be written for standalone files too, otherwise
             # read_png_to_numpy returns a 3-channel RGB array and the decoder cannot
-            # restore the original single-channel TIFF page.
-            if is_grayscale and not STRIP_METADATA:
+            # restore the original single-channel TIFF page. The ExtraSamples
+            # marker rides in the same exiftool call (standalone files too: a
+            # single-page RGB+IR scan is the case it exists for).
+            page_flags = []
+            if is_grayscale:
+                page_flags.append("-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG)
+            if _channels in (2, 4) and _extrasamples:
+                page_flags.append("-XMP-dc:Relation+=" + EXTRASAMPLES_XMP_PREFIX
+                                  + ",".join(str(v) for v in _extrasamples))
+            if page_flags and not STRIP_METADATA:
                 try:
                     r_gray = _run_exiftool_argfile(
-                        ["-overwrite_original",
-                         "-XMP-dc:Relation+=" + GRAYSCALE_XMP_FLAG, str(write_path)],
+                        ["-overwrite_original"] + page_flags + [str(write_path)],
                         timeout=EXIFTOOL_TIMEOUT
                     )
                     if r_gray.returncode != 0:
                         err_msg = (r_gray.stderr or r_gray.stdout or "no output")[:200]
-                        raise RuntimeError(f"exiftool grayscale marker write failed: {err_msg.strip()}")
+                        raise RuntimeError(f"exiftool page marker write failed: {err_msg.strip()}")
                 except RuntimeError:
                     raise
                 except Exception as e_mark:
-                    raise RuntimeError(f"grayscale marker write failed: {e_mark}") from e_mark
+                    raise RuntimeError(f"page marker write failed: {e_mark}") from e_mark
 
             # Reorder JXL boxes so Exif/XMP come before the codestream. This must
             # run after all exiftool operations (metadata, thumbnail, markers)

@@ -921,6 +921,21 @@ GRAYSCALE_FLAG = "jxlphoto-grayscale"
 # Must match the encoder's GRAYSCALE_XMP_FLAG. Indicates the page was encoded as
 # single-channel grayscale and should be restored as a 2D TIFF page.
 
+EXTRASAMPLES_PREFIX = "jxlphoto-extrasamples:"
+# Must match the encoder's EXTRASAMPLES_XMP_PREFIX: the original TIFF
+# ExtraSamples of a page with a 2nd/4th channel (0 = unspecified, e.g. a
+# scanner's IR channel; 1 = associated alpha; 2 = unassociated alpha). JXLs
+# without it (older encodes, third-party files) keep the old default,
+# unassociated alpha.
+
+PIXSUM_PREFIX = "jxlphoto-pixsum:"
+# "<pages>:<md5>" of the pixel pages THIS decoder wrote into a TIFF. A TIFF
+# that still carries our jxlphoto-src marker but whose pixels no longer match
+# was edited after the decode (Photoshop keeps the XMP): the smart sync must
+# not overwrite that edit, nor let --delete-skipped delete the JXL on its
+# strength (D5 of the 2026-10-08 audit). TIFFs decoded before it existed carry
+# none and are treated as before.
+
 DEPTH_FLAG = "jxlphoto-depth:"
 # Must match the encoder's DEPTH_XMP_PREFIX. Carries the original BitsPerSample
 # value (8 or 16) for the page so the decoder can honor --depth-policy.
@@ -1310,28 +1325,72 @@ def extract_icc_from_xmp(jxl_path):
         if r.returncode != 0 or not r.stdout:
             return None
 
-        # CreatorTool may contain multiple tokens separated by '|'. Find the one
-        # that carries the ICC payload and validate it before returning.
-        for segment in r.stdout.split("|"):
-            segment = segment.strip()
-            if not segment.startswith("ICC:"):
-                continue
-            b64_data = segment[len("ICC:"):].strip()
-            if not b64_data:
-                continue
-            try:
-                data = base64.b64decode(b64_data, validate=True)
-            except Exception:
-                continue
-            if len(data) < 128:
-                continue
-            # Validate ICC magic number 'acsp' at header offset 36-39
-            if data[36:40] != b"acsp":
-                continue
-            return data
+        return _icc_from_creator_text(r.stdout)
     except Exception as e:
         logger.debug(f"XMP ICC extraction failed: {e}")
     return None
+
+
+def _icc_from_creator_text(text):
+    """The ICC profile carried in an XMP CreatorTool value, or None.
+
+    CreatorTool may contain multiple tokens separated by '|'. Find the one
+    that carries the ICC payload and validate it before returning."""
+    for segment in str(text or "").split("|"):
+        segment = segment.strip()
+        if not segment.startswith("ICC:"):
+            continue
+        b64_data = segment[len("ICC:"):].strip()
+        if not b64_data:
+            continue
+        try:
+            data = base64.b64decode(b64_data, validate=True)
+        except Exception:
+            continue
+        if len(data) < 128:
+            continue
+        # Validate ICC magic number 'acsp' at header offset 36-39
+        if data[36:40] != b"acsp":
+            continue
+        return data
+    return None
+
+
+def _xmp_icc_jxls_batch(jxls: list) -> set:
+    """normcased paths of the JXLs whose XMP CreatorTool carries an ICC
+    profile — the files a --basic decode would KEEP when djxl's profile
+    differs. Dry-run preview only (the real run decides per file, after
+    the decode); a batch that cannot be read counts its files in (the
+    preview must not promise a deletion it cannot rule out)."""
+    found = set()
+    for i in range(0, len(jxls), 400):
+        chunk = jxls[i:i + 400]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline="\n") as af:
+                argfile = af.name
+                af.write("-j\n-b\n-XMP-xmp:CreatorTool\n-charset\nFileName=UTF8\n"
+                         "-charset\nUTF8\n")
+                for j in chunk:
+                    af.write(str(j) + "\n")
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile], 180, text=True)
+            data = json.loads(r.stdout) if r.stdout else None
+            if data is None:
+                raise RuntimeError(f"exiftool rc={r.returncode}")
+            for entry in data:
+                if _icc_from_creator_text(entry.get("CreatorTool")):
+                    found.add(os.path.normcase(str(Path(entry.get("SourceFile", "")))))
+        except Exception:
+            found.update(os.path.normcase(str(j)) for j in chunk)
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return found
 
 def extract_icc_native(jxl_path, tmp_dir):
     """Extract ICC profile directly from JXL (for lossless files).
@@ -2051,12 +2110,16 @@ def _page_subfiletype_kwargs(value) -> dict:
 
 
 def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
-                  provenance_sources=None):
+                  provenance_sources=None, pixel_sum=None):
     """Copy metadata from JXL to TIFF using exiftool.
 
     provenance_sources: every JXL of the group, in page order. Recorded on
     the output so a LATER run can tell whether an existing TIFF came from
     these files — see _provenance_ok.
+
+    pixel_sum: _pixel_sum of the pages written, recorded beside the
+    provenance marker (PIXSUM_PREFIX) so a later run can tell this decode
+    from the same TIFF retouched since — see _decoded_tiff_edited.
 
     Returns False when the metadata COPY failed. exiftool answers a corrupt
     tag or a failed write with a non-zero exit code, not an exception, so
@@ -2161,6 +2224,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             # file; the TIFF (and any master encoded from it)
                             # is not a derivative (E8/D4, 2026-10-08 audit).
                             or t.startswith(DERIVED_XMP_PREFIX)
+                            # Facts about the JXL's channels / about the TIFF
+                            # an earlier decode wrote: never carried into a
+                            # NEW TIFF (the pixel sum is re-written fresh).
+                            or t.startswith(EXTRASAMPLES_PREFIX)
+                            or t.startswith(PIXSUM_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -2194,6 +2262,8 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 # whether an existing output belongs to the source about to
                 # replace it (see _provenance_ok).
                 add_lines += _provenance_marker_args(list(provenance_sources))
+                if pixel_sum:
+                    add_lines.append("-XMP-dc:Relation+=" + PIXSUM_PREFIX + pixel_sum)
             if len(add_lines) > 1:
                 add_lines.append(str(tiff_path))
                 r_rel = _run_exiftool_argfile(add_lines, timeout=EXIFTOOL_TIMEOUT)
@@ -2288,6 +2358,12 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
                 main_subfiletype = int(tif.pages[0].subfiletype or 0)
             except Exception:
                 main_subfiletype = 0
+            # ...and its ExtraSamples, which the main writer set from the
+            # jxlphoto-extrasamples marker (an IR channel is 0, not alpha).
+            try:
+                main_extrasamples = tuple(int(v) for v in (tif.pages[0].extrasamples or ()))
+            except Exception:
+                main_extrasamples = ()
             # Try to get ICC if not passed
             if icc_data is None:
                 try:
@@ -2445,7 +2521,7 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             if main_subfiletype:
                 kwargs_main.update(_page_subfiletype_kwargs(main_subfiletype))
             if main_data.ndim == 3 and main_data.shape[2] in (2, 4):
-                kwargs_main['extrasamples'] = 'UNASSALPHA'
+                kwargs_main['extrasamples'] = main_extrasamples or 'UNASSALPHA'
             if icc_data:
                 kwargs_main['iccprofile'] = icc_data
             
@@ -2804,6 +2880,74 @@ def _decode_output_is_ours(tiff_path: Path, src_paths=None) -> bool:
     return _provenance_ok(info, list(src_paths), PROVENANCE_CHECK)
 
 
+def _pixel_sum(arrays) -> str:
+    """PIXSUM_PREFIX value for pixel pages, in page order: "<pages>:<md5>".
+
+    Hashes each page's shape, dtype and samples (little-endian), so the sum
+    of the arrays this decoder writes equals the sum of the same pages read
+    back with tifffile — and an edit to any sample changes it."""
+    h = hashlib.md5()
+    n = 0
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        if a.dtype.byteorder == '>':
+            a = np.ascontiguousarray(a.astype(a.dtype.newbyteorder('<')))
+        h.update(f"{a.shape}|{a.dtype.str}|".encode("ascii"))
+        h.update(memoryview(a).cast('B'))
+        n += 1
+    return f"{n}:{h.hexdigest()}"
+
+
+def _read_pixsum_marker(tiff_path: Path):
+    """The PIXSUM_PREFIX value this TIFF carries, or None when it has none.
+    Raises when the read itself fails (the caller fails closed)."""
+    r = _run_exiftool_argfile(["-j", "-XMP-dc:Relation", str(tiff_path)],
+                              timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0 or not r.stdout:
+        raise RuntimeError(f"exiftool rc={r.returncode}: "
+                           f"{(r.stderr or 'no output').strip()[:200]}")
+    data = json.loads(r.stdout)
+    rel = data[0].get("Relation") if data else None
+    values = rel if isinstance(rel, list) else ([] if rel is None else [str(rel)])
+    for v in values:
+        v = str(v).strip()
+        if v.startswith(PIXSUM_PREFIX):
+            return v[len(PIXSUM_PREFIX):]
+    return None
+
+
+def _decoded_tiff_edited(tiff_path: Path):
+    """Why an existing TIFF of OURS (its jxlphoto-src marker names these JXLs)
+    must not be treated as this decoder's untouched output — or None.
+
+    The marker survives an edit (Photoshop keeps the XMP), so it cannot tell
+    "the decode we wrote" from "the decode, retouched since": the pixel sum
+    can (D5 of the 2026-10-08 audit). A TIFF decoded before the sum existed
+    carries none and is judged as before. Fails closed: a sum that cannot be
+    read or compared counts as an edit. Reads the whole TIFF, so it runs
+    only where a TIFF is about to be overwritten or is about to vouch for a
+    deletion."""
+    try:
+        recorded = _read_pixsum_marker(tiff_path)
+    except Exception as e:
+        return f"has a pixel record that could not be read ({e})"
+    if recorded is None:
+        return None
+    try:
+        pages = int(recorded.split(":", 1)[0])
+        with tifffile.TiffFile(str(tiff_path)) as tif:
+            if pages < 1 or len(tif.pages) < pages:
+                return (f"has {len(tif.pages)} page(s) where the decode wrote "
+                        f"{pages} — it was EDITED after this tool decoded it")
+            now = _pixel_sum(tif.pages[i].asarray() for i in range(pages))
+    except Exception as e:
+        return f"could not be read to compare with the decode ({e})"
+    if now != recorded:
+        return ("was EDITED after this tool decoded it (its pixels no longer "
+                "match the decode)")
+    return None
+
+
 def _would_overwrite_group(page_entries, final_path: Path) -> bool:
     """Would this run write OVER an existing TIFF for this group — the
     --overwrite case, or the smart sync's "JXL newer" direction? Timestamps
@@ -2958,6 +3102,18 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                                f"{final_path.name}: this TIFF "
                                f"{_not_ours_why(final_path)}) | {main_jxl.name}")
                 return str(main_jxl), "refused", str(final_path)
+            # Ours by the marker — but the marker survives a retouch, so the
+            # pixels decide (D5 of the 2026-10-08 audit): decoding over an
+            # edited TIFF would throw the edit away. Same answer as for a
+            # master: refused, and --overwrite says "replace it anyway".
+            _edited = _decoded_tiff_edited(final_path)
+            if _edited:
+                n, total = next_count()
+                logger.warning(f"[{n}/{total}] KEEP (refusing to overwrite "
+                               f"{final_path.name}: this TIFF {_edited}. Re-run "
+                               f"with --overwrite to replace it anyway) | "
+                               f"{main_jxl.name}")
+                return str(main_jxl), "refused", str(final_path)
             logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
 
     overwritten = already_exists
@@ -2996,6 +3152,9 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
         tmp_dir = Path(tmp)
         try:
             page_arrays = []
+            # (page_idx, is_thumb) -> extrasamples for a 2nd/4th channel; a
+            # page's (index, role) pair is unique within a group.
+            _page_es = {}
             page_icc = None
             strategy = "unknown"
 
@@ -3023,6 +3182,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                     jxl_path, tmp_dir, target_icc_path, target_depth=target_depth
                 )
                 page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited, subfiletype, grayscale, target_depth))
+                _page_es[(page_idx, is_thumb)] = _extrasamples_kwarg(jxl_path)
                 # Use ICC/strategy from the first (main/anchor) page for the whole TIFF
                 if not is_thumb and page_icc is None:
                     page_icc = icc_data
@@ -3053,6 +3213,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # software='' suppresses the default "tifffile.py" Software tag.
             # Both otherwise leak into the final TIFF when the source JXL has no
             # EXIF/XMP to overwrite them (e.g. consumer JXLs, None mode).
+            # The pages exactly as written, for the PIXSUM_PREFIX record.
+            _written_pages = []
             with tifffile.TiffWriter(str(write_path)) as tif_writer:
                 try:
                     write_method = tif_writer.write
@@ -3071,7 +3233,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                             if pixels.shape[2] == 2:
                                 # Grayscale + alpha: keep both, alpha as extrasample
                                 kwargs['photometric'] = 'minisblack'
-                                kwargs['extrasamples'] = 'UNASSALPHA'
+                                kwargs['extrasamples'] = _page_es.get((page_idx, is_thumb), 'UNASSALPHA')
                             else:
                                 pixels = pixels[:, :, 0]
                                 kwargs['photometric'] = 'minisblack'
@@ -3082,11 +3244,11 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         # marker (third-party files, --strip): same handling,
                         # otherwise tifffile would reject "expected 3, got 2".
                         kwargs['photometric'] = 'minisblack'
-                        kwargs['extrasamples'] = 'UNASSALPHA'
+                        kwargs['extrasamples'] = _page_es.get((page_idx, is_thumb), 'UNASSALPHA')
                     elif pixels.ndim == 3 and pixels.shape[2] == 4:
                         # Preserve RGBA (alpha channel) in the output TIFF
                         kwargs['photometric'] = 'RGB'
-                        kwargs['extrasamples'] = 'UNASSALPHA'
+                        kwargs['extrasamples'] = _page_es.get((page_idx, is_thumb), 'UNASSALPHA')
                     else:
                         kwargs['photometric'] = 'RGB'
                     # Attach ICC only to pages that carried their own ICC.
@@ -3105,6 +3267,9 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         kwargs.update(_page_subfiletype_kwargs(entry_subfiletype))
 
                     write_method(pixels, **kwargs)
+                    _written_pages.append(pixels)
+            _pixsum = _pixel_sum(_written_pages)
+            del _written_pages
 
             # JPEG preview: only for single-page, non-None groups.
             # add_jpeg_preview recreates the file via tifffile (pixels + ICC only),
@@ -3124,7 +3289,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             if strategy != 'none':
                 # Full metadata copy (order: preview already added above)
                 if copy_metadata(main_jxl, write_path, tmp_dir, is_multipage=is_multipage,
-                                 provenance_sources=[e[0] for e in page_entries]) is False:
+                                 provenance_sources=[e[0] for e in page_entries],
+                                 pixel_sum=_pixsum) is False:
                     meta_ok = False
                 cleanup_xmp_icc(write_path)
             else:
@@ -3455,6 +3621,18 @@ def process_group(group_tasks, workers, target_icc=None):
                            "; if these sources MOVED, re-run with "
                            "--provenance content"))
                     continue
+                # The marker survives a retouch: a TIFF edited since the
+                # decode is no longer a copy of these JXLs (D5).
+                _edited = _decoded_tiff_edited(final_tiff)
+                if _edited:
+                    _delete_stats["kept"] += (len(task["entries"])
+                                              + len(task.get("ignored_thumbs", [])))
+                    logger.warning(
+                        f" KEPT {len(task['entries'])} source(s) | "
+                        f"{task['main_jxl'].name} | the existing "
+                        f"{final_tiff.name} {_edited}, so it cannot prove the "
+                        f"sources are archived")
+                    continue
             # Pages of this group were not in the run. Every check above passes
             # — the single-page TIFF written is valid and complete — so this is
             # the only place that can stop the deletion. Fail closed: a page
@@ -3754,7 +3932,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None} for j in jxls}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(j)): str(j) for j in jxls}
     if not jxls:
@@ -3831,10 +4009,16 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 # and _read_source_markers_batch, which reads the same tag, has
                 # always used the whole string. The two must agree.
                 values = rel if isinstance(rel, list) else [str(rel)]
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None}
                 for token in values:
                     token = str(token).strip()
-                    if token.startswith(SRCSUM_PREFIX):
+                    if token.startswith(EXTRASAMPLES_PREFIX):
+                        try:
+                            info['extrasamples'] = tuple(
+                                int(v) for v in token[len(EXTRASAMPLES_PREFIX):].split(","))
+                        except ValueError:
+                            pass        # unreadable -> the old default
+                    elif token.startswith(SRCSUM_PREFIX):
                         # Which SOURCE BYTES made this output. Used only to tell
                         # the members of one split from leftovers of an earlier
                         # one — see _split_group_by_srcsum.
@@ -3931,6 +4115,19 @@ _unfaithful_decodes: set = set()
 # what the user asked for, but it is not the master any more, so the delete
 # gate keeps the JXL (the toolkit's rule: a derivative never deletes).
 _degraded_decodes: dict = {}
+
+# JXL (normcased) -> the ExtraSamples tuple its jxlphoto-extrasamples marker
+# recorded (see EXTRASAMPLES_PREFIX). Kept beside the page entries, like
+# srcsum_by_path, so the entry tuple does not widen at every unpack site.
+# Cleared with the sets above.
+_extrasamples_by_jxl: dict = {}
+
+
+def _extrasamples_kwarg(jxl_path):
+    """tifffile's `extrasamples` for a page with a 2nd/4th channel: the value
+    the encoder recorded, or unassociated alpha (the old, only, behaviour) for
+    a JXL without the marker."""
+    return _extrasamples_by_jxl.get(os.path.normcase(str(jxl_path))) or 'UNASSALPHA'
 
 
 def _mark_degraded(jxl_path, why: str) -> None:
@@ -4083,16 +4280,21 @@ def collect_multipage_groups(jxls: list) -> dict:
     _mpg_marker_failures.clear()
     _unfaithful_decodes.clear()
     _degraded_decodes.clear()
+    _extrasamples_by_jxl.clear()
     _pending_incomplete: list = []
 
     # Read markers first; they are needed even when reconstruction is disabled
     # so that per-file metadata (inheritance, grayscale, depth) is available.
     marker_map = _read_multipage_markers_batch(jxls)
+    for j in jxls:
+        _es = (marker_map.get(str(j)) or {}).get('extrasamples')
+        if _es:
+            _extrasamples_by_jxl[os.path.normcase(str(j))] = _es
 
     # Must carry every key _read_multipage_markers_batch produces: the callers
     # read the others by index, and a missing one here is a KeyError waiting for
     # whoever follows that pattern.
-    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None}
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None}
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
@@ -4928,6 +5130,7 @@ Examples:
         # below must exclude these groups in every mode (the delete gate
         # admits only ok/overwrite, and a refusal is neither).
         _would_refuse = []
+        _would_refuse_edited = []
         if OVERWRITE == "smart":
             _prov_refused = {_p for _p, _ in provenance_failures}
             for task in tasks:
@@ -4947,6 +5150,11 @@ Examples:
                 # must name THESE JXLs, like the real run requires.
                 if not _decode_output_is_ours(_ft, [e[0] for e in task["entries"]]):
                     _would_refuse.append(_ft)
+                elif (_would_overwrite_group(task["entries"], _ft)
+                        and _decoded_tiff_edited(_ft)):
+                    # Ours, JXL newer — but retouched since the decode: the
+                    # real run refuses to decode over the edit (D5).
+                    _would_refuse_edited.append(_ft)
             if _would_refuse:
                 logger.warning(f"Dry run: {len(_would_refuse)} existing TIFF(s) are not "
                                f"decodes of these JXLs (ORIGINAL masters with no "
@@ -4954,6 +5162,13 @@ Examples:
                                f"be REFUSED, not overwritten:")
                 for _ft in _would_refuse[:10]:
                     logger.warning(f"  would REFUSE | {_ft}")
+            if _would_refuse_edited:
+                logger.warning(f"Dry run: {len(_would_refuse_edited)} existing TIFF(s) "
+                               f"were EDITED after this tool decoded them and would be "
+                               f"REFUSED, not overwritten (--overwrite replaces them):")
+                for _ft in _would_refuse_edited[:10]:
+                    logger.warning(f"  would REFUSE | {_ft}")
+            _would_refuse += _would_refuse_edited
         if DELETE_SOURCE:
             # Groups the provenance gate predicted as REFUSED are excluded: the
             # real run removes them from the plan and deletes nothing for them,
@@ -4971,13 +5186,42 @@ Examples:
                     f"would DELETE NO source JXL(s) — all "
                     f"{sum(len(t['entries']) for t in tasks)} would be KEPT.")
             else:
-                _n = sum(len(t["entries"]) for t in tasks
+                _live = [t for t in tasks
                          if str(t["main_jxl"]) not in _refused_names
-                         and os.path.normcase(str(t["final_tiff"])) not in _master_refused)
+                         and os.path.normcase(str(t["final_tiff"])) not in _master_refused]
+                # The degraded decodes the gate keeps (D2), previewed: --depth 8
+                # is decided by the depth marker, known now; --basic only after
+                # djxl has run, so the files whose real profile lives in XMP
+                # are announced as "may be kept".
+                _depth8, _basic = [], []
+                if DJXL_OUTPUT_DEPTH == 8:
+                    _depth8 = [t for t in _live
+                               if any(e[6] is None or e[6] > 8 for e in t["entries"])]
+                if FORCE_BASIC_MODE and not FORCE_NONE_MODE:
+                    _d8 = {id(t) for t in _depth8}
+                    _rest = [t for t in _live if id(t) not in _d8]
+                    _xmp_icc = _xmp_icc_jxls_batch(
+                        [e[0] for t in _rest for e in t["entries"]])
+                    _basic = [t for t in _rest
+                              if any(os.path.normcase(str(e[0])) in _xmp_icc
+                                     for e in t["entries"])]
+                _n_kept8 = sum(len(t["entries"]) for t in _depth8)
+                _n_basic = sum(len(t["entries"]) for t in _basic)
+                _n = sum(len(t["entries"]) for t in _live) - _n_kept8
                 logger.warning(
                     f"Dry run: --delete-source is ARMED. Up to {_n} source JXL(s) would be "
                     f"DELETED, each only after its TIFF is written and passes the "
                     f"integrity check.")
+                if _n_kept8:
+                    logger.warning(
+                        f"Dry run: {_n_kept8} source JXL(s) would be KEPT: --depth 8 "
+                        f"from a deeper (or unrecorded) source is a degraded copy, "
+                        f"not the master.")
+                if _n_basic:
+                    logger.warning(
+                        f"Dry run: up to {_n_basic} of them may be KEPT instead: their "
+                        f"real colour profile is recorded in XMP, and --basic keeps "
+                        f"the JXL whenever djxl's profile differs from it.")
 
         # Preview --delete-skipped: a dry run returns before process_group, so
         # without this the one destructive option acting on files this run does
@@ -4999,8 +5243,11 @@ Examples:
                     # vanish from the count.
                     if os.path.normcase(str(task["final_tiff"])) in _master_refused:
                         _would_keep.append((task["main_jxl"],
-                                            "existing TIFF looks like an original "
-                                            "master (would be REFUSED)", _n_src))
+                                            ("existing TIFF was edited after the "
+                                             "decode (would be REFUSED)"
+                                             if task["final_tiff"] in _would_refuse_edited
+                                             else "existing TIFF looks like an original "
+                                                  "master (would be REFUSED)"), _n_src))
                     continue
                 if str(task["main_jxl"]) in _refused_names:
                     _would_keep.append((task["main_jxl"],
@@ -5044,7 +5291,14 @@ Examples:
                 for t in _would_delete:
                     _info = _marks.get(str(t["final_tiff"])) or {"src": None, "srcsum": None}
                     if _provenance_ok(_info, [e[0] for e in t["entries"]], PROVENANCE_CHECK):
-                        _proven.append(t)
+                        _edited = _decoded_tiff_edited(t["final_tiff"])
+                        if _edited:
+                            # The gate's D5 check, previewed.
+                            _would_keep.append((t["main_jxl"],
+                                                f"existing TIFF {_edited}",
+                                                len(t["entries"])))
+                        else:
+                            _proven.append(t)
                     else:
                         _would_keep.append(
                             (t["main_jxl"],
@@ -5187,17 +5441,18 @@ Examples:
 
     if refused:
         logger.warning(f"Refused: {len(refused)} existing TIFF(s) are not decodes of "
-                       f"these JXLs — ORIGINAL masters (no jxlphoto-src marker) or the "
-                       f"decode of a DIFFERENT same-named JXL — and were NOT "
+                       f"these JXLs — ORIGINAL masters (no jxlphoto-src marker), the "
+                       f"decode of a DIFFERENT same-named JXL, or a decode EDITED "
+                       f"since — and were NOT "
                        f"overwritten; their JXLs were not decoded and not deleted:")
         for _p in refused[:10]:
             logger.warning(f"  -> {_p}")
         if len(refused) > 10:
             logger.warning(f"  -> ... and {len(refused) - 10} more")
         logger.warning("  Decode them into another folder (e.g. --mode 1). For an "
-                       "original master, --overwrite replaces it if that is really "
-                       "intended; another JXL's decode is never overwritten (see "
-                       "each KEEP line above).")
+                       "original master or an edited decode, --overwrite replaces "
+                       "it if that is really intended; another JXL's decode is "
+                       "never overwritten (see each KEEP line above).")
 
     # Loudest line in the block: on a batch that ran for hours the reason it
     # stopped must not be buried above the per-file scrollback.

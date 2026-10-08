@@ -302,7 +302,10 @@ explicit mode ≠ 7.
   1/3/8, mode 0 in place, 6/7 whose marker sits below the Source) with
   non-overlapping Sources. Modes 2/4/5 always scan; mode 0 with a real
   Destination scans; 6/7 rows sharing a marker dir scan; nested per-row
-  markers scan.
+  markers scan. For TIFF → JXL the scan also knows the split pages: with the
+  run's multi-page mode `foto.tif`'s second page writes `foto_page1.jxl`, so a
+  `foto_page1.tif` in another row landing in the same folder is a collision
+  (only those page-shaped names get their TIFF header read, v2.8.1).
 - **Output vs Source** — an entry whose Source *is* another entry's (future)
   output folder would process files the other entry just wrote: refused/warned
   like the other guards.

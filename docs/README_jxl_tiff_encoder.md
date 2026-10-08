@@ -1093,6 +1093,8 @@ When splitting, each page is encoded with its own effective ICC profile (read fr
 
 Single-channel pages are encoded as grayscale and flagged with `jxlphoto-grayscale` in `dc:Relation`. The original `SubfileType` value (e.g. `2` for PAGE, `4` for MASK) is also recorded so the decoder can restore the page's role. Inherited RGB ICC is not applied to grayscale pages, which prevents libpng iCCP errors on scanner IR/mask pages.
 
+A page with a 2nd or 4th **channel** (grey + extra, RGB + extra — e.g. VueScan's RGBI layout) reaches cjxl as alpha. Its TIFF `ExtraSamples` value is recorded as `jxlphoto-extrasamples:<v>` (`0` unspecified, e.g. IR; `1` associated alpha; `2` unassociated alpha) so the decoder gives the channel back its role (v2.8.1); lossy encodes keep the colour under it with cjxl's `keep_invisible` option (v2.8.0).
+
 > **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
 
 ### Examples

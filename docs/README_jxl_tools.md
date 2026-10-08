@@ -667,6 +667,11 @@ Basic parameters always shown:
   A run with resize and/or sharpening plus a delete option is refused up front
   (a derivative never deletes its source), and the Step 7 summary shows a
   `Resize:` and a `Sharpening:` line
+- **With `[D]` (delete originals) chosen in Step 4**, Step 6 does not ask the
+  derivative questions at all — output colour space, "Convert to sRGB?",
+  resize, sharpening — and says why: a derivative never deletes its source,
+  so the run could only be refused later (v2.8.1). Answers from an earlier
+  pass through the step are dropped
 - **Staging directory** — SSD staging for HDD collections
 - **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
 - **TIFF compression** — zip / lzw / none

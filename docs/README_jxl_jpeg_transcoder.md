@@ -348,7 +348,9 @@ Options:
                      "adobe", "adobergb1998") - an Adobe RGB (1998)-compatible
                      profile, byte-identical to the recompressor's (0 difference
                      from Adobe's own in 8 bits). A path that does not exist is
-                     refused up front (exit 2).
+                     refused up front (exit 2), and so is an input/scanner
+                     profile with A2B tables but no B2A (e.g. SilverFast's
+                     SFprofT): nothing converts INTO it faithfully (v2.8.1).
                      GRAYSCALE images are left alone: a single-channel file has
                      no gamut to map, and an RGB profile on one is invalid (PNG
                      rejects a mismatched iCCP, and a 1-component JPEG carrying
