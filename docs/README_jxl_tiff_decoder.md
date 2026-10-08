@@ -360,8 +360,18 @@ an existing TIFF **without** that marker is treated as an original and is
 ```
 WARNING | [1/1] KEEP (refusing to overwrite photo.tif: this TIFF carries no jxlphoto-src marker ...) | photo.jxl
 ...
-WARNING | Refused: 1 existing TIFF(s) look like ORIGINAL masters (no jxlphoto-src marker) and were NOT overwritten
+WARNING | Refused: 1 existing TIFF(s) are not decodes of these JXLs — ORIGINAL masters (no jxlphoto-src marker) or the decode of a DIFFERENT same-named JXL — and were NOT overwritten
 ```
+
+The marker must also name **these** JXLs, not merely exist: a TIFF decoded from
+a *different* `photo.jxl` (another folder in mode 2, say) is not "up to date"
+for this one and is never overwritten by it. When an earlier run deleted that
+other JXL, its TIFF is the only copy of the photo. In the smart sync's "TIFF up
+to date" direction such a TIFF is refused (as above); when the run would
+**overwrite** it (the JXL is newer, or `--overwrite`) the refusal is an
+**error** (exit 1, listed in the failures) and is previewed by `--dry-run`.
+`--overwrite` does not override it — rename one of the files or decode into
+another folder (or, if the JXLs were MOVED, use `--provenance content`).
 
 - A refused file is **not** a skip: its JXL is not decoded, and it is never
   deleted — not even with `--delete-source --delete-skipped` (the TIFF on disk
@@ -376,6 +386,19 @@ WARNING | Refused: 1 existing TIFF(s) look like ORIGINAL masters (no jxlphoto-sr
 - TIFFs written in **None** mode (`--none`) carry no XMP, hence no marker:
   re-decoding over them also needs `--overwrite` (the failure is in the safe
   direction). The same holds for TIFFs decoded by versions before v2.0.0.
+
+### A lossy ICC blob of a scanner profile is decoded, but never deleted
+
+A lossy JXL that stores its profile as an ICC blob decodes as linear sRGB and
+is CONVERTED back into the original profile (float decode, ImageMagick). For
+an input/scanner profile with A2B tables and no B2A (a film scanner's
+`SFprofT`, say) that way back is not the inverse of the way in, so the TIFF is
+only an approximation (27 dB on a real scan). The decode is still written,
+with a warning, but `--delete-source` keeps the JXL:
+`KEPT ... store(s) a scanner profile (no B2A table) as a lossy ICC blob`. The
+encoder never writes such files by default (its cautious strategy encodes
+them tagged sRGB with the profile in XMP), and the recompressor no longer
+does either.
 
 ---
 
@@ -483,9 +506,14 @@ Options:
                   staging dir, so it works with TEMP2_DIR set in the script and
                   no --staging flag. Never runs under --dry-run
   --delete-source    Delete source JXLs after successful decode. Works in EVERY
-                     mode, not just 8. IRREVERSIBLE
+                     mode, not just 8. IRREVERSIBLE. A DEGRADED decode never
+                     deletes: --none + --delete-source exits 2, and a page
+                     decoded at --depth 8 from a deeper source, or by --basic
+                     with a profile other than the one recorded in XMP, keeps
+                     its JXL ("the TIFF is a degraded copy"), like --matrix.
+                     A JXL changed on disk since this run read it is kept too
   --provenance path|content
-                     [with --delete-source] How an EXISTING output is matched to
+                     How an EXISTING output is matched to
                      the source it would replace OR certify, in EVERY mode: the
                      folder-collapsing modes (2/4/5/6/7) drop folder structure, so
                      two JXLs with the same name in different folders land on the
@@ -500,6 +528,11 @@ Options:
                      moved folders -- slower, it reads and hashes every source.
                      A mismatch always fails closed: not decoded, nothing
                      overwritten or deleted.
+                     EVERY run (any mode, with or without --delete-source) also
+                     refuses to OVERWRITE a TIFF whose marker names DIFFERENT
+                     JXLs: the overwrite itself is the loss when an earlier run
+                     already deleted those JXLs. That refusal is an error (exit 1);
+                     a markerless TIFF keeps the master rule above.
                      There is NO `adopt` here (the encoder has one): a TIFF written
                      before these markers existed, or written with --none, carries no
                      record and this script cannot verify one after the fact. Such

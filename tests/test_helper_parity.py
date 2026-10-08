@@ -105,6 +105,16 @@ SHARED_HELPERS = [
     # copy-then-delete MD5 proof off the second.
     "has_jbrd_box",
     "md5_of_file",
+    # Which ICC profiles cannot be a conversion TARGET (A2B tables, no B2A —
+    # scanner profiles). The recompressor refuses such derivatives, the
+    # decoder keeps the source of such a decode, the transcoder refuses the
+    # "keep" conversion: a copy drifting would let one backend do it anyway.
+    "_icc_a2b_only",
+    # Source identity between the read and the unlink (X2 of the 2026-10-08
+    # audit): a copy drifting would let one backend delete a source that was
+    # re-exported mid-run while the others keep it.
+    "_record_source_identity",
+    "_source_changed_since_read",
     # The distance dead-zone warning: the user must hear the SAME sentence from
     # every script that takes --distance.
     "_warn_distance_clamp",

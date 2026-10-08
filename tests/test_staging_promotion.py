@@ -20,11 +20,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import jxl_jpeg_transcoder as tr
+import jxl_recompressor as rec
 import jxl_tiff_decoder as dec
 import jxl_tiff_encoder as enc
 
-MODULES = [enc, dec, tr]
-IDS = ["encoder", "decoder", "transcoder"]
+MODULES = [enc, dec, tr, rec]
+IDS = ["encoder", "decoder", "transcoder", "recompressor"]
 
 
 @pytest.fixture(autouse=True)
@@ -70,10 +71,13 @@ def test_a_partial_destination_is_removed(mod, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("mod", MODULES, ids=IDS)
-def test_an_overwritten_output_is_not_left_corrupt(mod, tmp_path, monkeypatch):
-    """Worse case: the destination already held a good file, and the failed
-    copy overwrote part of it. Leaving it keeps a corrupt file with a fresh
-    mtime; removing it lets a later run rebuild from the source."""
+def test_an_existing_output_is_never_touched_by_a_failed_move(mod, tmp_path, monkeypatch):
+    """E6/X3 of the 2026-10-08 audit. The destination already held a good
+    file and the copy failed half way: the copy used to go STRAIGHT onto it
+    (shutil.move = copy2 + unlink over an existing file), so the old archive
+    was truncated and then deleted by the cleanup. The copy now goes to a
+    temp in the destination folder and only an atomic os.replace touches the
+    final name — the old output survives, byte for byte, and no temp is left."""
     src = _staged(tmp_path)
     dst = tmp_path / "final" / "out.bin"
     dst.parent.mkdir(parents=True)
@@ -85,7 +89,9 @@ def test_an_overwritten_output_is_not_left_corrupt(mod, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod.shutil, "move", _fake_move)
     assert mod._promote_from_staging(src, dst) is False
-    assert not dst.exists()
+    assert dst.read_bytes() == b"older complete output"
+    assert src.exists(), "the complete copy must stay in staging"
+    assert [p.name for p in dst.parent.iterdir()] == ["out.bin"], "a temp was left"
 
 
 @pytest.mark.parametrize("mod", MODULES, ids=IDS)
@@ -183,20 +189,36 @@ def test_a_complete_copy_with_failed_unlink_survives(mod, tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("mod", MODULES, ids=IDS)
-def test_a_genuinely_partial_overwrite_is_still_removed(mod, tmp_path, monkeypatch):
-    """The one case where deletion is right: the destination's identity
-    changed mid-move (a pre-existing file was truncated by the failed copy)
-    and what landed is incomplete."""
+def test_a_partial_copy_never_reaches_the_final_name(mod, tmp_path, monkeypatch):
+    """Before E6/X3 a truncated copy over an existing output was the one case
+    where the cleanup deleted the destination. With the temp + os.replace it
+    cannot happen: the partial temp is removed, the final name never saw it."""
     src = _staged(tmp_path)
     dst = tmp_path / "final" / "out.bin"
     dst.parent.mkdir(parents=True)
-    dst.write_bytes(b"older complete output, now corrupt")
+    dst.write_bytes(b"older complete output")
+    seen = []
 
     def _fake_move(a, b):
+        seen.append(Path(b))
         Path(b).write_bytes(b"PAR")  # truncated mid-copy
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(mod.shutil, "move", _fake_move)
     assert mod._promote_from_staging(src, dst) is False
-    assert not dst.exists(), "the truncated file was left at the destination"
+    assert seen and seen[0] != dst and seen[0].parent == dst.parent, \
+        "the copy must go to a temp in the destination folder, not onto the output"
+    assert dst.read_bytes() == b"older complete output"
+    assert not seen[0].exists(), "the partial temp was left behind"
     assert src.exists(), "the complete copy must stay in staging"
+
+
+@pytest.mark.parametrize("mod", MODULES, ids=IDS)
+def test_a_real_promotion_replaces_an_existing_output(mod, tmp_path):
+    src = _staged(tmp_path)
+    dst = tmp_path / "final" / "out.bin"
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes(b"older complete output")
+    assert mod._promote_from_staging(src, dst) is True
+    assert dst.read_bytes() == b"x" * 4096 and not src.exists()
+    assert [p.name for p in dst.parent.iterdir()] == ["out.bin"]

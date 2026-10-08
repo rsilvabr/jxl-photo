@@ -543,16 +543,19 @@ What backs that up depends on the direction, and `[D]` says which one you are in
 | Direction | What backs a delete of an already-converted original |
 |---|---|
 | JPEG ↔ JXL lossless | **Provenance PROVEN** — `checksums.md5` holds the source's hash; it must match |
-| TIFF → JXL | Structural check, plus the round-trip pixel comparison below if you enable it |
-| JXL → TIFF | Structural check only |
-| Any lossy direction | ⚠️ Structural check only, **and nothing better is possible** |
+| TIFF → JXL | Provenance marker naming THIS source + structural check, plus the round-trip pixel comparison below if you enable it |
+| JXL → TIFF | Provenance marker naming THIS source + structural check |
+| Any lossy direction | ⚠️ Provenance marker naming THIS source + structural check — no checksum, no pixel comparison |
 
 > ### ⚠️ Lossy directions
 >
 > A lossy conversion stores no checksum and its output cannot reproduce the
-> source, so nothing can tie the existing file to the original you are about to
-> delete — an unrelated file with the same name would pass. `[D]` charges a
-> **separate confirmation** (default **No**) before arming it there.
+> source. What ties the existing file to the original you are about to delete
+> is the provenance marker every toolkit output carries (an unrelated
+> same-named file has none, or another one, and keeps the original — the
+> transcoder requires it since the 2026-10-08 audit). The marker names the
+> source FILE, though, not its pixels, so `[D]` still charges a **separate
+> confirmation** (default **No**) before arming it there.
 
 **Matching an existing output to its source** (asked inside `[D]` for modes
 2/4/5/6/7): those modes drop folder structure, so two files with the same name in

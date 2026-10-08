@@ -145,6 +145,13 @@ def _compare_psnr(a: Path, b: Path) -> float:
     return float(m.group(1))
 
 
+def _creator_tool_icc(jxl: Path):
+    """The ICC:<base64> profile recorded in the file's XMP CreatorTool."""
+    ct = subprocess.run(["exiftool", "-s3", "-XMP-xmp:CreatorTool", str(jxl)],
+                        capture_output=True, text=True, timeout=300).stdout
+    return rec._xmp_icc_from_creator_tool(ct)
+
+
 def _make_master(tmp_path: Path, name: str, icc: bytes, strategy: str):
     """(source TIFF, master JXL) encoded at d=1 with the given strategy."""
     src_dir = tmp_path / f"src_{name}"
@@ -282,12 +289,13 @@ def test_recompressor_keep_resize_stays_in_the_master_space(tmp_path):
     derivs = sorted(out_dir.rglob("*.jxl"))
     assert len(derivs) == 1
 
-    # The derivative's own profile is still the ROMM one (ProPhoto primaries).
-    orig_icc = tmp_path / "deriv_orig.icc"
-    subprocess.run(["djxl", str(derivs[0]), str(tmp_path / "deriv.png"),
-                    f"--orig_icc_out={orig_icc}"],
-                   check=True, capture_output=True, timeout=300)
-    assert b"ROMM toe" in orig_icc.read_bytes(), (
+    # The derivative's profile is still the ROMM one (ProPhoto primaries) —
+    # carried in XMP: a profile with no native JXL form is encoded tagged sRGB
+    # ("skip"), never as a lossy ICC blob that decodes through linear sRGB
+    # (R1 of the 2026-10-08 audit; it used to be written as a blob).
+    assert _blob_state(derivs[0], tmp_path / "dprobe") is True, (
+        "the keep-derivative was written as a lossy ICC blob")
+    assert b"ROMM toe" in (_creator_tool_icc(derivs[0]) or b""), (
         "the keep-derivative lost the master's profile")
 
     # Colours: decode the derivative with the fixed decoder and compare page 0
@@ -344,7 +352,9 @@ def test_non_blob_derivatives_are_byte_identical_to_before(tmp_path, monkeypatch
             monkeypatch.setattr(mod, "SHARPEN", "none")
             monkeypatch.setattr(mod, "CJXL_DISTANCE", 1.0)
             monkeypatch.setattr(mod, "CJXL_EFFORT", 1)
-            converted, _size = mod._derive_pixels(jxl, out)
+            # (converted, size) before the 2026-10-08 audit, (converted,
+            # size, skip_icc) after: only `converted` matters here.
+            converted = mod._derive_pixels(jxl, out)[0]
             assert converted is True
             digests.append(hashlib.md5(out.read_bytes()).hexdigest())
         assert digests[0] == digests[1], (
@@ -417,11 +427,10 @@ def test_recompressor_grey_blob_derivative_keeps_its_tones(tmp_path, recipe):
          "--on-downgrade", "convert", *recipe)
     derivs = sorted(out_dir.rglob("*.jxl"))
     assert len(derivs) == 1
-    orig_icc = tmp_path / "deriv_orig.icc"
-    subprocess.run(["djxl", str(derivs[0]), str(tmp_path / "deriv.png"),
-                    f"--orig_icc_out={orig_icc}"],
-                   check=True, capture_output=True, timeout=300)
-    assert b"Grey ROMM toe" in orig_icc.read_bytes(), (
+    # Carried in XMP, the pixels tagged sRGB grey (see the RGB keep test).
+    assert _blob_state(derivs[0], tmp_path / "dprobe") is True, (
+        "the grey derivative was written as a lossy ICC blob")
+    assert b"Grey ROMM toe" in (_creator_tool_icc(derivs[0]) or b""), (
         "the grey derivative lost the master's grey profile")
 
     out_tif = _decode(derivs[0].parent, tmp_path / "decoded")

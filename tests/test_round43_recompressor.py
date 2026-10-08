@@ -2,7 +2,9 @@
 """Round 43 regression tests for jxl_recompressor.py (261001 audit).
 
   R-1  overwriting a pre-existing output whose provenance markers name a
-       DIFFERENT origin must log a loud warning (warn only, never block).
+       DIFFERENT origin. Round 43 made it a loud warning; the 2026-10-08 audit
+       (X1/R2) made it a REFUSAL in every mode: the existing output may be the
+       only copy of a photo whose TIFF an earlier run deleted.
   R-2  run-scoped, CLI-mutated globals reset unconditionally at main() entry,
        so a second in-process run cannot inherit armed state.
   R-3  `_counter["done"]` is zeroed at main() entry.
@@ -120,14 +122,12 @@ def _patch_main_plumbing(monkeypatch, captured):
 # R-1 — warn when overwriting an output whose provenance names another origin
 # ===========================================================================
 
-def test_r1_warns_on_a_foreign_output(tmp_path, monkeypatch):
+def test_r1_refuses_a_foreign_output(tmp_path, monkeypatch):
     src = tmp_path / "a.jxl"
     _jxl_stub(src, b"this photo")
     final = tmp_path / "out" / "a.jxl"
     _jxl_stub(final, b"someone else's archive")
 
-    fake = _FakeLogger()
-    monkeypatch.setattr(rec, "logger", fake)
     monkeypatch.setattr(rec, "_would_skip", lambda s, f: False)
     monkeypatch.setattr(rec, "PROVENANCE_CHECK", "path")
     monkeypatch.setattr(rec, "_read_source_markers_batch",
@@ -136,49 +136,45 @@ def test_r1_warns_on_a_foreign_output(tmp_path, monkeypatch):
                             str(src): {"src": "this-photo", "srcsum": "s"},
                         })
 
-    rec._warn_foreign_overwrite([{"src": src, "final": final,
-                                  "action": "convert", "in_place": False}])
-    assert any("different origin" in w for w in fake.warnings), fake.warnings
+    it = {"src": src, "final": final, "action": "convert", "in_place": False}
+    refused = rec._foreign_overwrite_refusals([it])
+    assert [r[0] for r in refused] == [it]
+    assert "different origin" in refused[0][1]
 
 
-def test_r1_no_warning_when_markers_match(tmp_path, monkeypatch):
+def test_r1_no_refusal_when_markers_match(tmp_path, monkeypatch):
     src = tmp_path / "a.jxl"
     _jxl_stub(src)
     final = tmp_path / "out" / "a.jxl"
     _jxl_stub(final)
 
-    fake = _FakeLogger()
-    monkeypatch.setattr(rec, "logger", fake)
     monkeypatch.setattr(rec, "_would_skip", lambda s, f: False)
     monkeypatch.setattr(rec, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": "same", "srcsum": "same"}
                                        for p in paths})
 
-    rec._warn_foreign_overwrite([{"src": src, "final": final,
-                                  "action": "convert", "in_place": False}])
-    assert not fake.warnings, fake.warnings
+    assert rec._foreign_overwrite_refusals(
+        [{"src": src, "final": final, "action": "convert", "in_place": False}]) == []
 
 
-def test_r1_no_warning_when_output_is_markerless(tmp_path, monkeypatch):
+def test_r1_no_refusal_when_output_is_markerless(tmp_path, monkeypatch):
     src = tmp_path / "a.jxl"
     _jxl_stub(src)
     final = tmp_path / "out" / "a.jxl"
     _jxl_stub(final)
 
-    fake = _FakeLogger()
-    monkeypatch.setattr(rec, "logger", fake)
     monkeypatch.setattr(rec, "_would_skip", lambda s, f: False)
     monkeypatch.setattr(rec, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": None, "srcsum": None}
                                        for p in paths})
 
-    rec._warn_foreign_overwrite([{"src": src, "final": final,
-                                  "action": "convert", "in_place": False}])
-    assert not fake.warnings, fake.warnings
+    assert rec._foreign_overwrite_refusals(
+        [{"src": src, "final": final, "action": "convert", "in_place": False}]) == []
 
 
-def test_r1_main_warns_and_still_proceeds(tmp_path, monkeypatch):
-    """End to end: the warning is logged and the run reaches its summary."""
+def test_r1_main_refuses_and_exits_1(tmp_path, monkeypatch):
+    """End to end: the foreign output is refused (not handed to the pool) and
+    the run reports it as a failure."""
     src_dir = tmp_path / "in"
     src_dir.mkdir()
     src = _jxl_stub(src_dir / "a.jxl", b"this photo")
@@ -200,9 +196,9 @@ def test_r1_main_warns_and_still_proceeds(tmp_path, monkeypatch):
                          "--on-unknown", "convert", "--no-preflight"])
     with pytest.raises(SystemExit) as ei:
         rec.main()
-    assert ei.value.code == 0, ei.value.code
-    assert any("different origin" in w for w in fake.warnings), fake.warnings
-    assert captured["items"], "the run did not reach its work plan"
+    assert ei.value.code == 1, ei.value.code
+    assert any("different origin" in e for e in fake.errors), fake.errors
+    assert not captured.get("items"), "the foreign output was handed to the pool"
 
 
 # ===========================================================================

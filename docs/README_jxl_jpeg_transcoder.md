@@ -393,11 +393,12 @@ Options:
   --no-md5           Skip MD5 storage (encode only)
   --no-verify        Skip MD5 verification (decode only)
   --delete-source    Delete source after a verified encode, in any mode
-                     (requires confirmation)
+                     (requires confirmation). On the lossy paths a source
+                     changed on disk since this run read it is KEPT
   --provenance path|content
-                     [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
-                     structure, so two sources with the same name in different
-                     folders land on the same output. Before overwriting an output
+                     [strict check: with --delete-source, modes 2/4/5/6/7] Those
+                     modes DROP folder structure, so two sources with the same name
+                     in different folders land on the same output. Before overwriting an output
                      that already exists -- and deleting the file that made it -- the
                      run checks it really came from this source, using the markers a
                      conversion writes (jxlphoto-src = location, jxlphoto-srcsum =
@@ -410,6 +411,17 @@ Options:
                      output must stay byte-identical and cannot carry a marker.
                      A mismatch always fails closed: not converted, nothing
                      overwritten or deleted.
+                     EVERY --sync/--overwrite run (any mode, with or without
+                     --delete-source) also refuses to OVERWRITE an output that is
+                     provably another source's: a marker naming a different file,
+                     a lossless JPEG archive (jbrd) whose recorded checksum is not
+                     this JPEG's, or -- on the JXL->JPEG recovery -- an existing
+                     JPEG that is not the one this JXL recorded. The overwrite is
+                     the loss when an earlier run already deleted that other
+                     source. The refusal is an error (exit 1); an output with no
+                     record either way is overwritten as before. A JPEG edited in
+                     place since it was archived reads as "another source": delete
+                     the old .jxl first to re-archive it.
                      There is NO `adopt` here (the encoder has one): an output
                      written before these markers existed carries no record, and the
                      lossy directions have no way to prove after the fact which
@@ -492,16 +504,20 @@ entirely on the direction, and the difference is large**:
 |---|---|---|
 | JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected |
 | JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN, bound to the JXL's content.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it — **and** the JXL itself must be the file that was archived: its own MD5 is stored beside the original's (a `<name>.jxl-md5` line), and databases written before that fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12). A same-named JXL that was never archived fails both, and when no proof can run the source is KEPT |
-| JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Structural check only** |
-| JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Structural check only** |
+| JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Provenance marker** naming this source + structural check |
+| JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Provenance marker** naming this source + structural check |
 
-> ### ⚠️ The lossy directions cannot prove anything
+> ### ⚠️ The lossy directions prove the FILE, not the pixels
 >
 > Nothing is stored for a lossy (`d>0`) conversion, and a lossy output cannot
-> reproduce its source, so there is **no way to tell** that the existing file came from the
-> source you are about to delete. The only check is that the output is a
-> structurally valid file of the right type — **an unrelated file with the same
-> name would pass**.
+> reproduce its source. What ties the existing output to the source you are
+> about to delete is the `jxlphoto-src`/`jxlphoto-srcsum` provenance marker
+> every lossy output of this script carries: it must name THIS source
+> (`--provenance content` also accepts the same source bytes), so an
+> unrelated file with the same name — the camera's own JPEG next to an
+> archived master, say — keeps the source (until the 2026-10-08 audit it was
+> enough to delete it). Outputs written before the markers, or by another
+> tool, keep their source too.
 >
 > The one exception: a JPEG archived with `--force-convert --distance 0` produces
 > a `jbrd` container (XMP provenance markers must never go there), and that encode

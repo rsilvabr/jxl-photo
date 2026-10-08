@@ -386,7 +386,9 @@ Options:
   --ram           Keep PNG intermediate in RAM (faster, more memory)
   --no-ram        Write PNG intermediate to disk (slower, less memory)
   --delete-source Delete source TIFFs after their JXL is written to the mode's
-                  destination and verified. Works in EVERY mode. IRREVERSIBLE
+                  destination and verified. Works in EVERY mode. IRREVERSIBLE.
+                  A TIFF changed on disk since this run read it (re-exported
+                  during a long batch) is KEPT: its new version was never archived
   --provenance path|content|adopt
                   [with --delete-source, modes 2/4/5/6/7] Those modes DROP folder
                   structure, so two files with the same name in different folders
@@ -397,6 +399,14 @@ Options:
                   same proof also backs --delete-skipped in EVERY mode: a skipped
                   source is only deleted when its pre-existing output carries the
                   markers this source proves.
+                  EVERY run (any mode, with or without --delete-source) also refuses
+                  to OVERWRITE an existing output whose marker names a DIFFERENT
+                  source, or that is a lossless JPEG archive (jbrd) written by the
+                  transcoder: the overwrite itself is the loss when an earlier run
+                  already deleted that other photo's source (foto.tif and foto.tiff
+                  both write foto.jxl, even in mode 8). A refusal is an error (exit
+                  1, listed in the failures); a markerless output is overwritten as
+                  before.
                   path (default): compares the LOCATION. Free. Handles re-exporting a
                   file in place, but a MOVED folder reads as a different file.
                   content: also accepts a matching IMAGE, so it survives moved
@@ -441,7 +451,10 @@ Options:
   --export-subfolder NAME
                    [Mode 7] Only process TIFFs inside this subfolder of the
                    export marker (default: script setting, empty = all)
-  --staging DIR   Staging directory for output JXLs (reduces HDD seek contention)
+  --staging DIR   Staging directory for output JXLs (reduces HDD seek contention).
+                  Each finished file is moved to a temp in the destination folder
+                  and then renamed over the final name (os.replace): an existing
+                  output is never half-overwritten by an interrupted move
   --encode-tag      Where to record encoding params: xmp (default), software, off
                     ('off' also strips any gen=/cjxl record the source TIFF
                     carries — the only way to deliberately discard the lineage)
@@ -1011,6 +1024,20 @@ Multi-page TIFFs are handled explicitly instead of silently discarding extra pag
 - `--multipage-mode split_all` — encode every page, **always including thumbnails**.
   Equivalent to `--multipage-mode split --thumbnail-mode include`; `--thumbnail-mode`
   is ignored in this mode.
+
+**Images in SubIFDs are not encoded — and their source is never deleted.** Only
+the main IFD chain is read. A TIFF/EP- or DNG-style file that keeps a small
+preview in IFD0 and the full image in a SubIFD would otherwise have its preview
+archived and the real image deleted with `--delete-source`; such a file is
+logged (`SubIFD image(s) NOT encoded`) and kept by every delete gate.
+
+**Lossy encodes keep the colour under a 4th channel.** A 2nd/4th channel (alpha,
+or the IR channel of an RGB+IR scan saved as 4 channels) reaches cjxl as alpha,
+and lossy cjxl would otherwise rewrite the colour wherever that channel is 0.
+The encoder turns on cjxl's `keep_invisible` option for such pages (density
+cost only). The
+channel's ExtraSamples type is still written back by the decoder as unassociated
+alpha.
 
 Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`). The suffix must be a plain filename suffix — an empty value, a path separator, or `..` is rejected at startup (a thumbnail name must never point outside the destination).
 

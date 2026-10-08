@@ -450,7 +450,7 @@ def test_decoder_dry_run_counts_sync_skips(tmp_path, monkeypatch):
                         lambda *a, **k: captured.update(k))
     monkeypatch.setattr(dec, "collect_multipage_groups",
                         lambda jxls: {src: [(src, 0, False, False, 0, False, None)]})
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     monkeypatch.setattr(dec, "FORCE_NONE_MODE", False)
     monkeypatch.setattr(dec, "_group_conflicts", [])

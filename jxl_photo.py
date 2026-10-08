@@ -1282,8 +1282,20 @@ class DependencyChecker:
 # Folder names the mode-6 preview (Auto Mode / manifest generator) skips below
 # an export folder in EVERY direction: the decoder's TIFF output folders (the
 # encoder's mode-6 finder skips them; in the other directions they hold no
-# source files anyway).
+# source files anyway). Shipped defaults — used ONLY when the encoder cannot
+# be imported; otherwise the encoder's own set is asked (_decoder_output_names),
+# which follows the decoder's configured names (W1/E7, 2026-10-08 audit).
 _DECODER_OUTPUT_NAMES = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
+
+
+def _decoder_output_names() -> frozenset:
+    """The decoder output folder names the ENCODER's finders skip — asked from
+    the encoder itself, so the preview matches the child even when the
+    decoder's folder settings were edited."""
+    try:
+        return frozenset(importlib.import_module('jxl_tiff_encoder')._DECODER_OUTPUT_FOLDERS)
+    except Exception:
+        return _DECODER_OUTPUT_NAMES
 # Shipped defaults of jxl_recompressor._RECOMPRESSOR_OUTPUT_FOLDERS + its
 # EXPORT_JXL_FOLDER — used ONLY if the child cannot be imported.
 _RECOMPRESSOR_OUTPUT_FALLBACK = frozenset(
@@ -1303,7 +1315,8 @@ def _mode6_preview_skips(origin: str, dest: str, below_lower: List[str]) -> bool
     its configured EXPORT_JXL_FOLDER and the _JXL_small suffix rule, so a
     folder name edited at the top of that script is honored here too.
     """
-    if any(p in _DECODER_OUTPUT_NAMES for p in below_lower):
+    _dec_names = _decoder_output_names()
+    if any(p in _dec_names for p in below_lower):
         return True
     if (origin, dest) != ('jxl', 'jxl'):
         return False
@@ -1455,7 +1468,14 @@ class FolderAnalyzer:
             # (and the preview would lie) — fall back to mode 6.
             origin_sub_names = set()
             origin_exts = self._get_extensions(self.origin)
-            for export_path in export_paths[:3]:
+            # Every export folder, not the first three (W10 of the 2026-10-08
+            # audit): mode 7 takes ONE subfolder name for the whole run, so a
+            # 4th export folder using another name would silently lose its
+            # files to the recommendation. Stops at the second name — the
+            # answer is mode 6 from there on.
+            for export_path in export_paths:
+                if len(origin_sub_names) > 1:
+                    break
                 export_dir = Path(export_path)
                 try:
                     subdirs = sorted((d for d in export_dir.iterdir() if d.is_dir()),
@@ -1895,21 +1915,38 @@ class FolderAnalyzer:
 def _dest_folder_names(origin: str, dest: str) -> tuple:
     """Real output subfolder names created by the backend scripts, by direction.
 
-    Returns (mode1_subfolder, mode3_subfolder). Keep in sync with
-    CONVERTED_*_FOLDER / *_FOLDER_NAME constants in the scripts.
+    Returns (mode1_subfolder, mode3_subfolder), READ from the child that
+    creates them (CONVERTED_*_FOLDER / *_FOLDER_NAME at the top of that
+    script) — W1 of the 2026-10-08 audit: literal copies of the defaults made
+    the "About to delete originals" panel and the previews name the shipped
+    folder even after the user edited the script. The literals below are only
+    the fallbacks for a child that cannot be imported.
     """
     if origin == 'jxl' and dest == 'jxl':
         # jxl_recompressor: CONVERTED_JXL_FOLDER / JXL_FOLDER_NAME — NOT the
         # transcoder's converted_jxl. Wrong names here made the previews and
         # the "About to delete originals" panel point at folders the run
         # never created.
-        return ('recompressed_jxl', 'JXL_recompressed')
+        return (_child_setting('jxl_recompressor', 'CONVERTED_JXL_FOLDER',
+                               'recompressed_jxl'),
+                _child_setting('jxl_recompressor', 'JXL_FOLDER_NAME',
+                               'JXL_recompressed'))
     if dest == 'tiff':
-        return ('converted_tiff', 'TIFF_16bits')
+        return (_child_setting('jxl_tiff_decoder', 'CONVERTED_TIFF_FOLDER',
+                               'converted_tiff'),
+                _child_setting('jxl_tiff_decoder', 'TIFF_FOLDER_NAME', 'TIFF_16bits'))
     if dest == 'jxl':
-        return ('converted_jxl', 'JXL_16bits' if origin == 'tiff' else 'converted_jxl')
+        if origin == 'tiff':
+            return (_child_setting('jxl_tiff_encoder', 'CONVERTED_JXL_FOLDER',
+                                   'converted_jxl'),
+                    _child_setting('jxl_tiff_encoder', 'JXL_FOLDER_NAME', 'JXL_16bits'))
+        _tj = _child_setting('jxl_jpeg_transcoder', 'CONVERTED_JXL_FOLDER',
+                             'converted_jxl')
+        return (_tj, _tj)
     # jpeg / png outputs come from the transcoder's decode path
-    return ('recovered_jpeg', 'recovered_jpeg')
+    _rj = _child_setting('jxl_jpeg_transcoder', 'RECOVERED_JPEG_FOLDER',
+                         'recovered_jpeg')
+    return (_rj, _rj)
 
 
 def _row_effective_options(workflow: Dict, advanced: Dict, row_opts: Optional[Dict],
@@ -2199,6 +2236,26 @@ def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) 
             return _child_setting('jxl_recompressor', 'EXPORT_JXL_FOLDER', '16B_JXL_small')
         return _child_setting('jxl_jpeg_transcoder', 'EXPORT_JXL_FOLDER', 'JXL_jpeg')
     return _child_setting('jxl_jpeg_transcoder', 'EXPORT_JPEG_FOLDER', 'JPEG_recovered')
+
+
+def _kill_process_tree(process) -> None:
+    """Kill a child script AND what it started (W3 of the 2026-10-08 audit).
+
+    On Windows Popen.kill() is TerminateProcess on the Python child alone: the
+    cjxl/djxl/exiftool it launched kept running and left their
+    <uuid>_name.tmp files beside the finals, where no sweep looks. taskkill /T
+    takes the whole tree. Only a real Popen gets it: a pid of a stand-in
+    object could name an unrelated process."""
+    if os.name == "nt" and isinstance(process, subprocess.Popen):
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+    try:
+        process.kill()
+    except Exception:
+        pass
 
 
 def _child_setting(module: str, name: str, fallback):
@@ -3803,9 +3860,14 @@ class InteractiveMenu:
         if workflow.get('_lossy_skip_confirmed') or workflow.get('dry_run'):
             return
 
+        # W2 (2026-10-08 audit): the transcoder's lossy gate requires the
+        # output's provenance marker now (T1); "nothing ties it to the
+        # original" was no longer true. What remains true is that the marker
+        # names the source FILE and nothing compares the pixels.
         msg = ("This direction is LOSSY and stores no checksum. For originals that were "
-               "already converted, the ONLY check is that the existing output is a "
-               "structurally valid file — nothing ties it to the original being deleted.")
+               "already converted, what ties the existing output to the original being "
+               "deleted is its provenance marker (it names the source FILE) and a "
+               "structural check — nothing compares the pixels.")
         if RICH_AVAILABLE and console:
             console.print()
             console.print(Panel(f"[bold red]{msg}[/bold red]", border_style="red"))
@@ -4003,6 +4065,10 @@ class InteractiveMenu:
             8: "the same folder as each source file (recursive)",
         }.get(mode, "the mode's destination")
         n = self._count_origin_files(workflow, mode)
+        # Kept for Step 7 (W5 of the 2026-10-08 audit): this count is taken
+        # BEFORE Step 5 sets the marker / mode-7 subfolder / output folder,
+        # so the summary recounts and flags a difference.
+        self._delete_panel_count = n
         count_str = (f"{n} {origin.upper()} file(s)" if n >= 0
                      else f"an unknown number of {origin.upper()} file(s) (folder unreadable)")
         lines = [
@@ -4110,8 +4176,10 @@ class InteractiveMenu:
         # Only these two can PROVE provenance: the transcoder stores the
         # source's md5 keyed by the output's name, so the hash must match.
         _provable = conv in ('transcode_lossless', 'jxl_to_jpeg_lossless')
-        # No provenance possible at all, and the output cannot reproduce the
-        # source either. This is the combination that gets its own confirmation.
+        # The output cannot reproduce the source: only the provenance marker
+        # ties it to this file (since the 2026-10-08 audit the transcoder's
+        # lossy gate requires it too). Still the combination that gets its own
+        # confirmation — a marker names a FILE, not its pixels.
         _lossy = conv in ('convert_lossy', 'jxl_to_jpeg_force', 'jxl_to_png',
                           'jxl_to_jpeg_auto')
 
@@ -4119,15 +4187,17 @@ class InteractiveMenu:
             _guarantee = ("the stored checksum must match, which PROVES that output "
                           "came from this exact file.")
         elif verify:
-            _guarantee = "it must also decode back to the source pixels."
+            _guarantee = ("it must carry the provenance marker naming THIS source, and "
+                          "also decode back to the source pixels.")
         elif _lossy:
-            _guarantee = ("and that is ALL — this direction stores no checksum and the "
-                          "output cannot reproduce the source, so nothing can prove that "
-                          "file came from this one. An unrelated file with the same name "
-                          "would pass.")
+            _guarantee = ("and it must carry the provenance marker naming THIS source — a "
+                          "same-named file from anywhere else keeps the original. That is "
+                          "ALL: this direction stores no checksum and a lossy output cannot "
+                          "be compared with its source.")
         else:
-            _guarantee = ("and that is all — nothing compares the contents, so a file "
-                          "that came from a different source with the same name would pass.")
+            _guarantee = ("and it must carry the provenance marker naming THIS source — a "
+                          "same-named file from anywhere else keeps the original. Nothing "
+                          "compares the image contents.")
 
         ds_default = bool(self.config.config.last_delete_skipped)
         ds_explain = (
@@ -4238,9 +4308,10 @@ class InteractiveMenu:
                     else:
                         print(_w)
         if del_skipped and not verify and not _provable:
-            _w = ("Deleting already-converted originals with no content check: the only "
-                  "thing standing between a stale or unrelated output and your original "
-                  "is that the file is structurally valid.")
+            _w = ("Deleting already-converted originals with no content check: what "
+                  "stands between a stale output and your original is the provenance "
+                  "marker (it names the source FILE, not its pixels) and a structural "
+                  "check.")
             if RICH_AVAILABLE and console:
                 console.print(f"[yellow]{_w}[/yellow]")
             else:
@@ -5467,7 +5538,25 @@ class InteractiveMenu:
         if any(k not in _default_keys and v not in (None, False, "") for k, v in _adv.items()):
             extra_info.append("Advanced: Yes")
         if _adv.get('delete_source'):
-            extra_info.append("DELETE SOURCE: ON (!)")
+            # W5 (2026-10-08 audit): the [D] panel counts the originals in
+            # Step 4, before Step 5 sets the export marker, the mode-7 subfolder
+            # and the output folder — a DIFFERENT set of files than the run
+            # touches (reproduced: panel 3, run 2). Recount here, where the
+            # mode settings are final, and say when the two disagree.
+            if workflow.get('mode') == 99:
+                # A manifest: every entry has its own source; its recap lists them.
+                extra_info.append("DELETE SOURCE: ON (!)")
+            else:
+                _n_now = self._count_origin_files(workflow, workflow.get('mode'))
+                _o = (workflow.get('origin_format') or '').upper()
+                _cnt = (f"{_n_now} {_o} file(s) in scope" if _n_now >= 0
+                        else f"an unknown number of {_o} file(s) in scope")
+                _prev = getattr(self, '_delete_panel_count', None)
+                if (_prev is not None and _prev >= 0 and _n_now >= 0
+                        and _prev != _n_now):
+                    _cnt += (f" (the [D] panel counted {_prev} before the mode "
+                             f"settings were known)")
+                extra_info.append(f"DELETE SOURCE: ON (!) — {_cnt}")
             # Say which gate stands in front of the unlink, because "verified"
             # means two very different things with and without this.
             extra_info.append("Verify round-trip: ON"
@@ -6267,6 +6356,7 @@ class InteractiveMenu:
                 entry_reports.append({
                     "index": i, "mode": detected_mode, "source": source,
                     "state": "cancelled", "summary": self._last_child_summary,
+                    "deletes": "--delete-source" in [str(c) for c in cmd],
                 })
                 for j, (src_rest, _dst_rest, m_rest) in enumerate(
                         resolved_entries[i:], i + 1):
@@ -6347,6 +6437,7 @@ class InteractiveMenu:
             entry_reports.append({
                 "index": i, "mode": detected_mode, "source": source,
                 "state": state, "summary": self._last_child_summary,
+                "deletes": "--delete-source" in [str(c) for c in cmd],
             })
 
             if aborted:
@@ -6539,7 +6630,13 @@ class InteractiveMenu:
         _del_arch = extras_total.pop("Sources deleted (already archived)", 0)
         _kept = extras_total.pop("Sources KEPT by a delete gate", 0)
         _refused = extras_total.pop("Refused (output belongs to another source)", 0)
-        if _del or _kept or _refused:
+        # W8 (2026-10-08 audit): the totals come from the ##JXLSUM## lines, and
+        # a child killed (idle timeout), crashed or interrupted emits none — so
+        # whatever its delete gate had already removed was missing from
+        # "SOURCES DELETED" with nothing saying the count was incomplete.
+        _uncounted = [r for r in entry_reports
+                      if r.get("deletes") and not r.get("summary")]
+        if _del or _kept or _refused or _uncounted:
             lines.append((rule, "dim"))
             _txt = f"  SOURCES DELETED: {_del}"
             if _del_arch:
@@ -6551,6 +6648,13 @@ class InteractiveMenu:
             if _refused:
                 lines.append((f"  Refused, output belongs to another source: {_refused}",
                               "yellow"))
+            if _uncounted:
+                _n = len(_uncounted)
+                lines.append((f"  NOT COUNTED: {_n} entr{'y' if _n == 1 else 'ies'} with "
+                              f"--delete-source ended without a summary "
+                              f"({', '.join(sorted({str(r.get('state')) for r in _uncounted}))})"
+                              f" — whatever {'it' if _n == 1 else 'they'} deleted is not in "
+                              f"the number above; see the child log(s)", "bold red"))
 
         if extras_total:
             lines.append((rule, "dim"))
@@ -7651,7 +7755,22 @@ class InteractiveMenu:
                 cmd.append('--overwrite')
             if advanced.get('sync'):
                 cmd.append('--sync')
-            if advanced.get('delete_source') and not _has_derivative_options(advanced):
+            if (advanced.get('delete_source') and workflow.get('icc_profile')
+                    and not _has_derivative_options(advanced)):
+                # W6 (2026-10-08 audit): "Convert to sRGB?" makes a colour-
+                # converted DERIVATIVE, exactly like the manifest's OutputICC
+                # column, which already never received --delete-source. The
+                # direct route used to send it, and the transcoder deleted the
+                # 16-bit master after writing an 8-bit sRGB JPEG. The child
+                # refuses the pair now, so it is dropped here, said out loud.
+                _note = ("Colour conversion (--icc-profile) writes a DERIVATIVE: the "
+                         "originals are NOT deleted on this run.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_note}[/yellow]")
+                else:
+                    print(_note)
+            if (advanced.get('delete_source') and not _has_derivative_options(advanced)
+                    and not workflow.get('icc_profile')):
                 # A derivative row (a manifest option column: colour
                 # conversion, resize, sharpening) never deletes its source —
                 # the flag is suppressed for THIS row; the plain rows of the
@@ -7818,7 +7937,7 @@ class InteractiveMenu:
             while True:
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    process.kill()
+                    _kill_process_tree(process)
                     self._print_error(
                         f"No output for {idle_timeout // 60} min: process killed "
                         f"(hidden prompt, hang, or a single file slower than that "
@@ -7847,16 +7966,13 @@ class InteractiveMenu:
                 self._print_child_line(line)
         except KeyboardInterrupt:
             # Ctrl+C must also take the child down, not leave it running.
-            try:
-                process.kill()
-            except Exception:
-                pass
+            _kill_process_tree(process)
             raise
 
         try:
             process.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            process.kill()
+            _kill_process_tree(process)
             return -1
         return process.returncode
 
@@ -7956,6 +8072,39 @@ class InteractiveMenu:
             # --delete-source with the resize/sharpening flags.
             self._print_error("Resize/sharpening write a derivative that never deletes "
                               "its source — drop the delete option.")
+            return False
+        if origin == 'jxl' and dest == 'tiff' and _delete_pre:
+            # W4 (2026-10-08 audit): a degraded decode is not a copy of the
+            # master. The decoder refuses --none + --delete-source (exit 2)
+            # and keeps the JXLs of an 8-bit decode of a deeper source or of a
+            # --basic decode that drops the XMP profile; say it here, before
+            # the HHMM token, instead of letting the child refuse or keep.
+            if _adv_pre.get('none'):
+                self._print_error("Decode mode 'none' writes no colour profile and no "
+                                  "XMP/IPTC — the TIFF is not a copy of the master, so "
+                                  "it cannot delete the JXLs. Drop the delete option "
+                                  "(or pick another decode mode).")
+                return False
+            if str(workflow.get('bit_depth', 16)) == '8' or _adv_pre.get('basic'):
+                _note = ("Bit depth 8 / decode mode 'basic' makes a degraded copy: the "
+                         "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
+                         "whose real profile lives in XMP.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_note}[/yellow]")
+                else:
+                    print(_note)
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
+                                  'jxl_to_png')
+                and workflow.get('icc_profile') and _delete_pre):
+            # W6 (2026-10-08 audit): a colour conversion is a derivative too —
+            # the manifest's OutputICC rows never deleted, while this direct
+            # route deleted the 16-bit master after an 8-bit sRGB JPEG. The
+            # child refuses --icc-profile + --delete-source now; refused here
+            # first, before the HHMM token.
+            self._print_error("Colour conversion (Convert to sRGB) writes a derivative "
+                              "that never deletes its source — drop the delete option "
+                              "(or the conversion).")
             return False
 
         # --rename-from on the lossless JXL->JPEG recovery is impossible for

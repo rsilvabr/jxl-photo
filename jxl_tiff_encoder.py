@@ -162,6 +162,46 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 
 
+# (size, mtime_ns) of every source as this run was about to READ it, keyed by
+# normcased absolute path. The delete gate runs only after the WHOLE pool has
+# drained — hours, on a big batch — and a source re-exported in that window
+# (an editor exporting into the tree, a scheduled run with Capture One open)
+# was deleted without its new version ever being read: the 2026-10-08 audit
+# reproduced it. Recorded when the work is handed to the pool; a source
+# changed between that and the read is kept too, which only errs on the safe
+# side. Cleared at the start of every run.
+_source_identity = {}
+
+
+def _record_source_identity(path) -> None:
+    """Remember a source's (size, mtime_ns) before this run reads it. The
+    first record wins: a multi-page file is read page by page."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    if key in _source_identity:
+        return
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _source_changed_since_read(path) -> bool:
+    """Is the file at `path` no longer the one this run recorded before
+    reading it (rewritten, re-exported or replaced since)? A vanished file
+    counts as changed. A source this run never recorded (an already-archived
+    one admitted by --delete-skipped, which was never read) returns False:
+    its own proof lives elsewhere in the gate."""
+    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
+    if rec is None:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    return (st.st_size, st.st_mtime_ns) != rec
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -227,73 +267,58 @@ def _abort_if_disk_full(write_dir, needed):
 def _promote_from_staging(write_path, final_path) -> bool:
     """Move one finished output out of staging. True when it landed.
 
-    A cross-volume move is copy-then-unlink, so an ENOSPC part way through
-    leaves a TRUNCATED file at the destination — with a fresh mtime. That is
-    the worst possible outcome: smart-sync compares timestamps, sees something
-    newer than the source, and skips the reconversion forever. The good copy is
-    still in staging, so removing whatever landed loses nothing and puts the
-    destination back to a state a later run will fix.
+    The move goes to a temp file IN THE DESTINATION FOLDER first and only then
+    over the final name with an atomic os.replace (E6/X3 of the 2026-10-08
+    audit). A plain shutil.move onto an existing output is copy2 + unlink on
+    Windows — even on one volume, since os.rename refuses an existing target —
+    and copy2 TRUNCATES the destination first: a kill or power cut mid-copy
+    left the old archive destroyed and a partial file with a fresh mtime that
+    smart sync then treats as up to date forever. Now the final name holds
+    either the old file or the complete new one, never a mix.
 
-    But "the move raised" does not mean "the destination is partial". The move
-    can fail BEFORE touching the destination (a read-only or locked
-    pre-existing file — that file is a perfectly good archive), and the copy
-    can SUCCEED with only the staging unlink failing (the destination then
-    holds the COMPLETE new output). Deleting either one destroys good data, so
-    the cleanup compares against an identity snapshot taken before the move
-    and removes the destination only when the move provably wrote to it AND
-    what it wrote is incomplete. When in doubt, the file is kept.
-
-    A destination volume that is simply FULL also has to stop the run rather
-    than produce one MOVE FAILED line per remaining file, which is what the
-    disk-full abort exists for.
+    When the move raises, what reached the temp decides: a COMPLETE copy (the
+    copy finished, only the staging unlink or the final rename failed) is put
+    in place — after a successful copy+unlink it may be the only copy left —
+    and a partial one is removed (the good copy is still in staging; the
+    destination was never touched). A destination volume that is simply FULL
+    also has to stop the run rather than produce one MOVE FAILED line per
+    remaining file, which is what the disk-full abort exists for.
     """
-    pre_identity = None
-    try:
-        _st = final_path.stat()
-        pre_identity = (_st.st_mtime_ns, _st.st_size)
-    except OSError:
-        pass
     try:
         size = write_path.stat().st_size
     except OSError:
         size = 0
+    tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(final_path))
+        shutil.move(str(write_path), str(tmp))
+        os.replace(str(tmp), str(final_path))
         return True
     except OSError as e:
         logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
                      f"{final_path} | {e}")
-        # Only when the staging copy survived: if it is gone the move actually
-        # completed and something else raised.
-        if write_path.exists() and final_path.exists():
-            try:
-                _st = final_path.stat()
-                written = (pre_identity is None
-                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
-                complete = size > 0 and _st.st_size == size
-            except OSError:
-                written, complete = False, False  # cannot tell → keep the file
-            if written and not complete:
+        try:
+            landed = tmp.stat().st_size if tmp.exists() else None
+        except OSError:
+            landed = None
+        if landed is not None:
+            if size > 0 and landed == size:
                 try:
-                    final_path.unlink()
-                    logger.error(
-                        f"    Removed the partial file left at the destination"
-                        + (" (it had OVERWRITTEN an existing output, which was already "
-                           "corrupt by then)" if pre_identity is not None else "")
-                        + " — the complete copy is still in staging.")
+                    os.replace(str(tmp), str(final_path))
+                    logger.error("    The copy itself finished — the destination now "
+                                 "holds the COMPLETE output.")
                 except OSError as e2:
-                    logger.error(f"    Could NOT remove the partial destination file "
-                                 f"({e2}). Delete {final_path} by hand before re-running: "
-                                 f"a later sync run would treat it as up to date.")
-            elif written:
-                logger.error(
-                    "    The destination holds a COMPLETE copy (the copy itself "
-                    "finished; only the staging cleanup failed) — keeping it.")
+                    logger.error(f"    The COMPLETE output is at {tmp}: rename it to "
+                                 f"{final_path.name} once the problem is fixed ({e2}).")
             else:
-                logger.error(
-                    "    The destination was never touched by the move "
-                    "(pre-existing file) — keeping it.")
+                try:
+                    tmp.unlink()
+                    logger.error("    Removed the partial copy; the destination was "
+                                 "never touched and the complete copy is still in "
+                                 "staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial copy {tmp} ({e2}); "
+                                 f"the destination itself was never touched.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -1142,6 +1167,12 @@ THUMB_XMP_FLAG = "jxlphoto-thumb"
 
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+DERIVED_XMP_PREFIX = "jxlphoto-derived:"
+# The recipe marker the recompressor/transcoder write on a DERIVATIVE (colour
+# conversion, resize, sharpening). Must match theirs. Never copied onward:
+# a file decoded from a derivative and encoded again is a NEW master, and a
+# master carrying it reads as a derivative to their "only overwrite our own
+# derivatives" guard (E8/D4 of the 2026-10-08 audit).
 # WHICH source this output was made from. Both are always written (when metadata
 # is not stripped): the path id is free, and the content id is hashed from the
 # pixel array that is already in memory, so recording both costs almost nothing
@@ -1162,11 +1193,18 @@ ADOPT_SCAN = True
 # have put a different photo under that name.
 
 PROVENANCE_CHECK = "path"
-# How an EXISTING output is matched against the source about to overwrite it,
-# when --delete-source is on and the mode collapses folders. Only then: without
-# deletion an overwrite is recoverable (the source is still there), and outside
-# the collapsing modes the output path is derived from the source path, so there
-# is nothing to confuse.
+# How an EXISTING output is matched against the source about to overwrite it.
+# Two levels:
+#   * --delete-source in a mode that collapses folders: EVERY existing output
+#     must prove it came from this source (a markerless one included — that is
+#     what "adopt" heals);
+#   * every other run: an output that is about to be OVERWRITTEN and whose
+#     marker names a DIFFERENT source is refused (a markerless one is
+#     overwritten as before). "Without deletion an overwrite is recoverable"
+#     only holds for the NEW source: the old archive's own source may have been
+#     deleted by an earlier run, and then the overwrite is the loss (#268's
+#     missing half). Every mode collapses names, too: foto.tif and foto.tiff
+#     both write foto.jxl.
 #
 # "path"    -> (default) the archive must record THIS source path. Cheap: no
 #              file is read. Survives re-editing and re-exporting a file in
@@ -1180,8 +1218,6 @@ PROVENANCE_CHECK = "path"
 #
 # Either way a mismatch is fail-CLOSED: the file is not converted, the existing
 # output is not touched, and no source is deleted.
-# Marker appended to dc:Relation on thumbnail pages of a split (instead of
-# relying on the _thumbnail filename suffix).
 
 
 # ─────────────────────────────────────────────
@@ -2508,6 +2544,7 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-icc:inherited",
     "jxlphoto-grayscale",
     "jxlphoto-thumb",
+    DERIVED_XMP_PREFIX,
 )
 
 
@@ -3012,6 +3049,31 @@ _PAGE_PIXELS = {}
 _PAGE_PIXELS_LOCK = threading.Lock()
 
 
+def _note_subifd_images(tif, tiff_path) -> None:
+    """E5 of the 2026-10-08 audit: image data in SubIFDs is never encoded.
+
+    tifffile's `pages` is the main IFD chain only. A TIFF/EP- or DNG-style
+    file keeps a small preview in IFD0 and the FULL image in a SubIFD: the
+    planner saw only the preview, `--multipage-mode skip/ignore/split_all`
+    archived it, and --delete-source deleted the file holding the real image
+    (reproduced). The SubIFDs are still not encoded — but the source is
+    recorded as having discarded real pages, so no delete gate removes it,
+    and the run says so."""
+    try:
+        has = any(getattr(p, "subifds", None) for p in tif.pages)
+    except Exception:
+        has = False
+    if not has:
+        return
+    with _multipage_ignored_lock:      # _capped_discard_warning needs it held
+        _discarded_real_page_sources.add(os.path.normcase(str(tiff_path)))
+        _capped_discard_warning(
+            f"SubIFD image(s) NOT encoded | {Path(tiff_path).name} | this TIFF keeps "
+            f"image data in SubIFDs (TIFF/EP or DNG layout — the full-size image may "
+            f"live there); only the main IFD chain is encoded, so the source will "
+            f"NOT be deleted")
+
+
 def _analyze_tiff_pages(tiff_path: Path):
     """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
 
@@ -3022,6 +3084,7 @@ def _analyze_tiff_pages(tiff_path: Path):
     with tifffile.TiffFile(str(tiff_path)) as tif:
         real_pages = []
         thumb_pages = []
+        _note_subifd_images(tif, tiff_path)
         for i, page in enumerate(tif.pages):
             page_info[i] = {
                 'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
@@ -3496,6 +3559,80 @@ def _provenance_marker_args(src_paths):
     return lines
 
 
+def has_jbrd_box(jxl_path: Path) -> bool:
+    """Check if JXL has jbrd (JPEG Bitstream Reconstruction Data) box.
+    Returns True if this JXL can be losslessly transcoded back to JPEG.
+    Parses ISOBMFF boxes sequentially until jbrd is found or EOF, so files
+    with large metadata headers before jbrd are detected correctly.
+    """
+    try:
+        with open(jxl_path, 'rb') as f:
+            header = f.read(12)
+
+            if header[:2] == b'\xff\x0a':  # Bare codestream
+                return False
+            if header[:12] != b'\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a':
+                return False
+
+            while True:
+                box_header = f.read(8)
+                if len(box_header) < 8:
+                    return False
+
+                size = int.from_bytes(box_header[:4], 'big')
+                box_type = box_header[4:8]
+
+                if box_type == b'jbrd':
+                    return True
+
+                if size == 0:  # Box extends to end of file
+                    return False
+                elif size == 1:  # Extended 64-bit size
+                    ext_size = f.read(8)
+                    if len(ext_size) < 8:
+                        return False
+                    size = int.from_bytes(ext_size, 'big')
+                    if size < 16:
+                        return False
+                    payload = size - 16
+                else:
+                    if size < 8:
+                        return False
+                    payload = size - 8
+
+                if payload > 0:
+                    f.seek(payload, 1)
+        return False
+    except Exception:
+        return False
+
+
+def _foreign_overwrite_reason(info: dict, src_paths, out_path) -> Optional[str]:
+    """Why an EXISTING output this run is about to OVERWRITE must be refused,
+    or None when the overwrite may go ahead.
+
+    The #268 guard used to run only when THIS run deleted its sources in a
+    collapsing mode. The loss it prevents happens on the OVERWRITE, though: an
+    earlier run already deleted the other photo's TIFF, so a later plain sync
+    (every scheduled preset is one) destroyed that photo's only file. And every
+    mode collapses names — foto.tif and foto.tiff both write foto.jxl.
+
+    Refused: a provenance marker that names ANOTHER source (with --provenance
+    content, a matching source-bytes id still accepts it), and a jbrd JXL —
+    the transcoder's lossless JPEG archive, which this encoder never writes.
+    A markerless output keeps the old behaviour: there is no proof either way,
+    and refusing would block every archive written before the markers existed.
+    """
+    if info.get("src") or info.get("srcsum"):
+        if _provenance_ok(info, src_paths, PROVENANCE_CHECK):
+            return None
+        return "it was made from a different source (its provenance marker names another file)"
+    if has_jbrd_box(out_path):
+        return ("it is a lossless JPEG archive (jbrd) written by the JPEG "
+                "transcoder — the only copy of that JPEG")
+    return None
+
+
 def _skipped_archive_proof(pairs: list) -> dict:
     """E-1 proof for --delete-skipped: does each pre-existing output carry the
     provenance markers of the VERY source behind it?
@@ -3897,10 +4034,19 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if not embed and icc_bytes:
                     logger.info(f"  >Skipping ICC in PNG iCCP for {tiff_path.name} (page {page_idx}); profile will be preserved via XMP")
 
+            # E4 (2026-10-08 audit): a 2nd/4th channel goes to cjxl as ALPHA,
+            # and lossy cjxl defaults to --keep_invisible=0 — it rewrites the
+            # colour wherever that channel is 0. For an RGB+IR scan stored as
+            # 4 channels that is real image under the dust (measured: error
+            # 1601 vs 19 elsewhere, ~80x what was asked). Keep it.
+            _channels = img.shape[2] if getattr(img, "ndim", 0) == 3 else 1
+            invisible_flag = (["--keep_invisible=1"]
+                              if lossy and _channels in (2, 4) else [])
+
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT, input=png_input)
                 del png_input
@@ -3910,7 +4056,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
 
@@ -4266,6 +4412,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                     # falling through with samples=3 and dying in convert_one on
                     # "Page index 0 out of range" — a per-file ERROR, exit 1.
                     raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
+                _note_subifd_images(tif, tiff_path)
                 samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
                 # Same reason as samples: ignore encodes page 0 as a real page,
                 # so page 0's own SubfileType must travel with it or the decoder
@@ -4747,6 +4894,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 for t in tasks),
             CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
             modular=bool(CJXL_MODULAR))
+    for _t in tasks:
+        _record_source_identity(_t[0])      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {ex.submit(convert_one, t, w, f, p, th, sft, spl, g, gt):
                    (t, w, f, p, th, sft, spl, g, gt)
@@ -4961,6 +5110,10 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     continue
 
             src_tiff = Path(tiff_key)
+            if _source_changed_since_read(src_tiff):
+                _delete_stats["kept"] += 1
+                logger.warning(f"  KEEP source (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_tiff.name}")
+                continue
             try:
                 src_tiff.unlink()
                 deleted += 1
@@ -5055,7 +5208,41 @@ def find_tiffs_recursive(input_path: Path):
 # original exports (duplicate output -> abort) or silently re-encode decoded
 # TIFFs (generational loss at d>0). Only the decoder's names are skipped:
 # TIFFs in 16bit/ or any user folder are still found normally.
-_DECODER_OUTPUT_FOLDERS = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
+#
+# The names are the decoder's SETTINGS (EXPORT_TIFF_FOLDER, TIFF_FOLDER_NAME,
+# CONVERTED_TIFF_FOLDER): read from the jxl_tiff_decoder.py that sits next to
+# this script (E7 of the 2026-10-08 audit — a literal copy of the defaults
+# silently stopped protecting a user who renamed them). The shipped defaults
+# stay in the set as well: skipping a folder only means its TIFFs are not
+# picked up here, while re-encoding a decode is a generational loss.
+_DECODER_DEFAULT_OUTPUT_FOLDERS = frozenset({"16b_tiff", "tiff_16bits", "converted_tiff"})
+_DECODER_FOLDER_SETTINGS = ("EXPORT_TIFF_FOLDER", "TIFF_FOLDER_NAME",
+                            "CONVERTED_TIFF_FOLDER")
+
+
+def _decoder_output_folders() -> frozenset:
+    """The decoder's configured output folder names (lowercased), read from
+    its source with `ast` — nothing is imported or executed — plus the
+    shipped defaults. A missing or unreadable decoder leaves the defaults."""
+    names = set(_DECODER_DEFAULT_OUTPUT_FOLDERS)
+    try:
+        import ast
+        src = (Path(__file__).resolve().parent / "jxl_tiff_decoder.py").read_text(
+            encoding="utf-8")
+        for node in ast.parse(src).body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in _DECODER_FOLDER_SETTINGS
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                    and node.value.value.strip()):
+                names.add(node.value.value.strip().lower())
+    except Exception:
+        pass
+    return frozenset(names)
+
+
+_DECODER_OUTPUT_FOLDERS = _decoder_output_folders()
 
 
 def _skip_decoder_output(parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
@@ -5159,8 +5346,11 @@ def main():
                              "(0-8), not just 8. IRREVERSIBLE.")
     parser.add_argument("--provenance", type=str, default=None,
                         choices=["path", "content", "adopt"],
-                        help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
-                             "output is matched to the source about to overwrite it. "
+                        help="How an EXISTING output is matched to the source about to "
+                             "overwrite it. Every run refuses to overwrite an output "
+                             "whose marker names a DIFFERENT source; with "
+                             "--delete-source in modes 2/4/5/6/7 every existing output "
+                             "must also prove it came from this source. "
                              "path (default) compares the recorded source LOCATION: "
                              "free, and survives re-exporting a file in place. content "
                              "also accepts matching source bytes, so it survives MOVED "
@@ -5183,9 +5373,10 @@ def main():
                              "interrupted between the encode and the unlink can be "
                              "finished without re-encoding everything. NEVER on the "
                              "timestamp alone: the output must still exist and pass the "
-                             "integrity check, and --verify-roundtrip is strongly "
-                             "recommended here — a SKIP carries no proof that the JXL "
-                             "came from that photo.")
+                             "integrity check AND carry this source's provenance "
+                             "marker; --verify-roundtrip is still recommended — the "
+                             "marker names the source file, it does not compare the "
+                             "pixels.")
     parser.add_argument("--verify-roundtrip", action="store_true",
                         help="Before deleting a source, decode its JXL and compare it "
                              "against the source page: pixel-identical for --distance 0, "
@@ -5555,12 +5746,16 @@ def main():
         # Not fatal — the structural check still stands between a skip and the
         # unlink — but this is the one combination where the toolkit deletes a
         # master on the strength of a file it did not write.
+        # (X5 of the 2026-10-08 audit: the text used to say "a JXL from a
+        # different photo with the same name would pass" — untrue since E-1:
+        # the gate requires the output's provenance marker to name THIS TIFF.)
         logger.warning(
             "--delete-skipped without --verify-roundtrip: sources whose output already "
-            "exists will be deleted after a STRUCTURAL check only (valid, complete JXL "
-            "container). Nothing compares the pixels, so a JXL that came from a "
-            "different photo with the same name would pass. Add --verify-roundtrip "
-            "unless you know the archive's provenance.")
+            "exists will be deleted once that output carries THIS source's provenance "
+            "marker and passes the structural check. The marker names the source FILE: "
+            "nothing compares the pixels, so a stale archive of a file re-exported in "
+            "place since would pass. Add --verify-roundtrip unless you know the "
+            "archive is current.")
 
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
@@ -5788,123 +5983,159 @@ def main():
     _abort_on_duplicate_outputs([(item[0], item[1]) for item in all_items])
 
     # Cross-RUN output collision. The guard above only sees collisions inside
-    # THIS run; in the collapsing modes an output written by an earlier run can
-    # belong to a different source entirely, and overwriting it while deleting
-    # the new source destroys the earlier photo for good (its own source was
-    # already deleted then). Only checked where it can actually bite: deletion
-    # armed, a collapsing mode, and an output that already exists.
+    # THIS run; an output written by an earlier run can belong to a different
+    # source entirely, and overwriting it destroys the earlier photo for good
+    # when an earlier run already deleted that photo's own source.
+    #
+    # Two levels. Deletion armed in a collapsing mode (the strict guard): EVERY
+    # existing output must prove it came from this source — a markerless one
+    # too (adopt heals those). Everywhere else (no deletion, or a mode that
+    # keeps folders): every output this run is about to OVERWRITE is checked,
+    # and one whose marker names ANOTHER source is refused. That second level
+    # is the half of #268 that was missing: the overwrite is the destructive
+    # step, not this run's deletion — a plain sync (every scheduled preset is
+    # one) destroyed the archive of a photo deleted by an earlier run, and
+    # foto.tif / foto.tiff collide in mode 8 as well.
     provenance_blocked = []
     provenance_failures = []
     # Outputs adopt has decided to stamp. Filled here, WRITTEN much later — see
     # the stamping block after the delete confirmation.
     provenance_to_stamp = []
     _src_root = args.input.parent if args.input.is_file() else args.input
-    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
+    _strict_guard = DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root)
+    if _strict_guard:
         _existing = sorted({item[1] for item in all_items if item[1].exists()})
-        if _existing:
-            logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
-                        f"(--provenance {PROVENANCE_CHECK})...")
-            _marks = _read_source_markers_batch(_existing)
-            _bad_sources = {}
-            _adopted, _adopted_blind, _would_adopt = [], [], []
-            for t, j, page_idx, *_rest in all_items:
-                if not j.exists():
+    else:
+        # Only what will really be overwritten: an up-to-date output is a
+        # SKIP and writes nothing, so it has nothing to refuse.
+        _existing = sorted({item[1] for item in all_items
+                            if item[1].exists() and not _would_skip(item[0], item[1])})
+    if _existing:
+        _existing_set = set(_existing)
+        logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
+                    f"(--provenance {PROVENANCE_CHECK})...")
+        _marks = _read_source_markers_batch(_existing)
+        _bad_sources = {}
+        _adopted, _adopted_blind, _would_adopt = [], [], []
+        for t, j, page_idx, *_rest in all_items:
+            if j not in _existing_set:
+                continue
+            info = _marks.get(str(j)) or {"src": None, "srcsum": None}
+            if not _strict_guard:
+                _why_x = _foreign_overwrite_reason(info, t, j)
+                if _why_x:
+                    _bad_sources.setdefault(str(t), (j, _why_x))
+                continue
+            if _provenance_ok(info, t, PROVENANCE_CHECK):
+                continue
+            _unmarked = not (info.get("src") or info.get("srcsum"))
+            # An archive built before these markers existed carries none.
+            # That is a gap in what we KNOW, not evidence of a conflict, so
+            # `adopt` resolves it by PROVING the pairing rather than
+            # assuming it — and only for that case. A marker that MISMATCHES
+            # is still refused: adopt relaxes "I cannot tell", never "I can
+            # tell it is wrong".
+            if PROVENANCE_CHECK == "adopt" and _unmarked:
+                # A dry run neither scans nor stamps. The scan decodes every
+                # unmarked output (hours on a real library) and the stamp
+                # WRITES to the file — both are things a simulation must not
+                # do, and reporting the count is what the user came for.
+                if args.dry_run:
+                    _would_adopt.append((t, j))
                     continue
-                info = _marks.get(str(j)) or {"src": None, "srcsum": None}
-                if _provenance_ok(info, t, PROVENANCE_CHECK):
+                if not ADOPT_SCAN:
+                    _adopted_blind.append((t, j))
                     continue
-                _unmarked = not (info.get("src") or info.get("srcsum"))
-                # An archive built before these markers existed carries none.
-                # That is a gap in what we KNOW, not evidence of a conflict, so
-                # `adopt` resolves it by PROVING the pairing rather than
-                # assuming it — and only for that case. A marker that MISMATCHES
-                # is still refused: adopt relaxes "I cannot tell", never "I can
-                # tell it is wrong".
-                if PROVENANCE_CHECK == "adopt" and _unmarked:
-                    # A dry run neither scans nor stamps. The scan decodes every
-                    # unmarked output (hours on a real library) and the stamp
-                    # WRITES to the file — both are things a simulation must not
-                    # do, and reporting the count is what the user came for.
-                    if args.dry_run:
-                        _would_adopt.append((t, j))
-                        continue
-                    if not ADOPT_SCAN:
-                        _adopted_blind.append((t, j))
-                        continue
-                    _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, CJXL_DISTANCE)
-                    if _ok_v:
-                        _adopted.append((t, j))
-                        continue
-                    # The scan verifies against the CURRENT --distance, so the
-                    # likeliest mass refusal is not a foreign archive at all:
-                    # an archive written at d=0.1 can never survive THIS run's
-                    # d=0 pixel comparison. Name that cause and its remedies —
-                    # mirror of the delete-gate hint in _delete_sources.
-                    _bad_sources.setdefault(
-                        str(t), (j, f"the adopt scan says this output is not this "
-                                    f"source ({_detail}) — if the archive was written "
-                                    f"at a different --distance than this run "
-                                    f"(d={CJXL_DISTANCE}), re-run with the archive's "
-                                    f"distance, or pass --no-adopt-scan to adopt "
-                                    f"without the scan"))
+                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, CJXL_DISTANCE)
+                if _ok_v:
+                    _adopted.append((t, j))
                     continue
-                _why = ("no provenance marker — this archive predates them; re-run with "
-                        "--provenance adopt to verify and stamp it"
-                        if _unmarked else "it was made from a different source")
-                _bad_sources.setdefault(str(t), (j, _why))
-            for _t, _j in _adopted_blind:
-                logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
-            if _would_adopt:
-                logger.info(
-                    f"Dry run: {len(_would_adopt)} existing output(s) carry no provenance "
-                    f"record. A real run would decode and compare each one against its "
-                    f"source before adopting and stamping it"
-                    + ("" if ADOPT_SCAN else " — except that --no-adopt-scan is set, so "
-                                              "they would be adopted WITHOUT that proof")
-                    + ". Any that failed the check would be REFUSED, so this count is an "
-                      "upper bound, and nothing has been written or verified yet.")
-            if _adopted or _adopted_blind:
-                # WHAT to stamp is decided here; the stamping itself happens
-                # after the delete confirmation (see provenance_to_stamp). It
-                # rewrites the user's existing archive, so it must not run on a
-                # dry run, and it must not run when the user then answers "no"
-                # to the deletion this whole check exists to gate.
-                provenance_to_stamp = list(_adopted) + list(_adopted_blind)
-                logger.info(
-                    f"Provenance: adopting {len(provenance_to_stamp)} existing output(s)"
-                    + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
-                    + " — they will be stamped once the run is confirmed.")
+                # The scan verifies against the CURRENT --distance, so the
+                # likeliest mass refusal is not a foreign archive at all:
+                # an archive written at d=0.1 can never survive THIS run's
+                # d=0 pixel comparison. Name that cause and its remedies —
+                # mirror of the delete-gate hint in _delete_sources.
+                _bad_sources.setdefault(
+                    str(t), (j, f"the adopt scan says this output is not this "
+                                f"source ({_detail}) — if the archive was written "
+                                f"at a different --distance than this run "
+                                f"(d={CJXL_DISTANCE}), re-run with the archive's "
+                                f"distance, or pass --no-adopt-scan to adopt "
+                                f"without the scan"))
+                continue
+            _why = ("no provenance marker — this archive predates them; re-run with "
+                    "--provenance adopt to verify and stamp it"
+                    if _unmarked else "it was made from a different source")
+            _bad_sources.setdefault(str(t), (j, _why))
+        for _t, _j in _adopted_blind:
+            logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
+        if _would_adopt:
+            logger.info(
+                f"Dry run: {len(_would_adopt)} existing output(s) carry no provenance "
+                f"record. A real run would decode and compare each one against its "
+                f"source before adopting and stamping it"
+                + ("" if ADOPT_SCAN else " — except that --no-adopt-scan is set, so "
+                                          "they would be adopted WITHOUT that proof")
+                + ". Any that failed the check would be REFUSED, so this count is an "
+                  "upper bound, and nothing has been written or verified yet.")
+        if _adopted or _adopted_blind:
+            # WHAT to stamp is decided here; the stamping itself happens
+            # after the delete confirmation (see provenance_to_stamp). It
+            # rewrites the user's existing archive, so it must not run on a
+            # dry run, and it must not run when the user then answers "no"
+            # to the deletion this whole check exists to gate.
+            provenance_to_stamp = list(_adopted) + list(_adopted_blind)
+            logger.info(
+                f"Provenance: adopting {len(provenance_to_stamp)} existing output(s)"
+                + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
+                + " — they will be stamped once the run is confirmed.")
 
-            if _bad_sources:
-                provenance_blocked = sorted(_bad_sources)
+        if _bad_sources:
+            provenance_blocked = sorted(_bad_sources)
+            if _strict_guard:
                 logger.error(
                     f"REFUSING {len(provenance_blocked)} file(s): their output already "
                     f"exists and did not come from them. Converting would overwrite "
                     f"someone else's archive, and --delete-source would then destroy "
                     f"the photo that archive held.")
-                for _sp in provenance_blocked[:10]:
-                    _out, _why = _bad_sources[_sp]
-                    logger.error(f"    {_sp}")
-                    logger.error(f"      -> {_out} ({_why})")
-                if len(provenance_blocked) > 10:
-                    logger.error(f"    ... and {len(provenance_blocked) - 10} more")
+            else:
+                logger.error(
+                    f"REFUSING {len(provenance_blocked)} file(s): their output already "
+                    f"exists and belongs to a DIFFERENT file. Converting would "
+                    f"overwrite that archive — and if an earlier run deleted its "
+                    f"source, the photo it holds exists nowhere else.")
+            for _sp in provenance_blocked[:10]:
+                _out, _why = _bad_sources[_sp]
+                logger.error(f"    {_sp}")
+                logger.error(f"      -> {_out} ({_why})")
+            if len(provenance_blocked) > 10:
+                logger.error(f"    ... and {len(provenance_blocked) - 10} more")
+            if _strict_guard:
                 logger.error(
                     "  These files were NOT converted and NOTHING was deleted. Rename "
                     "them, pick a mode that keeps folder structure (0/1/3/8), or drop "
                     "--delete-source." +
                     ("" if PROVENANCE_CHECK == "content" else
                      " If you MOVED the sources, re-run with --provenance content."))
-                _blocked = set(provenance_blocked)
-                all_items = [it for it in all_items if str(it[0]) not in _blocked]
-                # A refusal is a FAILURE, not a quiet skip: the file was not
-                # converted and needs a human. Counted into err (exit 1) and
-                # listed in the summary's failures so a scheduled run and the
-                # wrapper's manifest recap both surface it.
-                for _sp in provenance_blocked:
-                    _o, _w = _bad_sources[_sp]
-                    provenance_failures.append(
-                        (_sp, f"refused: output {_o} already exists and {_w}"))
-                failed_files.extend(provenance_failures)
+            else:
+                logger.error(
+                    "  These files were NOT converted and NOTHING was deleted. Rename "
+                    "the source (or the existing output, if it is really a different "
+                    "photo you want to keep apart); delete the existing output only "
+                    "if you are sure it is obsolete." +
+                    ("" if PROVENANCE_CHECK == "content" else
+                     " If you MOVED the sources, re-run with --provenance content."))
+            _blocked = set(provenance_blocked)
+            all_items = [it for it in all_items if str(it[0]) not in _blocked]
+            # A refusal is a FAILURE, not a quiet skip: the file was not
+            # converted and needs a human. Counted into err (exit 1) and
+            # listed in the summary's failures so a scheduled run and the
+            # wrapper's manifest recap both surface it.
+            for _sp in provenance_blocked:
+                _o, _w = _bad_sources[_sp]
+                provenance_failures.append(
+                    (_sp, f"refused: output {_o} already exists and {_w}"))
+            failed_files.extend(provenance_failures)
 
     _counter["total"] = len(all_items)
 
@@ -6085,6 +6316,7 @@ def main():
     ok = skipped = overwritten = synced = aborted = 0
     err = analyze_errors + len(provenance_failures)  # count TIFFs that couldn't be analyzed at planning time
     _reset_abort()  # a fresh run must not inherit a previous one's latch
+    _source_identity.clear()
 
     # ONE pool for the whole run. Feeding it folder by folder meant a folder with
     # fewer files than --workers could never fill the pool, and every folder

@@ -252,10 +252,12 @@ class TestMarkersMatch:
         b = {"src": "loc1", "srcsum": "different"}
         assert rec._markers_match(a, b) is True
 
-    def test_content_mode_requires_srcsum(self):
+    def test_content_mode_is_a_superset_of_path(self):
+        # R3 (2026-10-08 audit): content used to compare the srcsum ONLY, so
+        # a same-path match was refused with content and accepted with path.
         a = {"src": "loc1", "srcsum": None}
         b = {"src": "loc1", "srcsum": "different"}
-        assert rec._markers_match(a, b, "content") is False
+        assert rec._markers_match(a, b, "content") is True
 
     def test_mismatch_fails_closed(self):
         a = {"src": "loc1", "srcsum": "sum1"}
@@ -322,6 +324,14 @@ def _mock_exiftool_ok(monkeypatch):
 
 
 class TestConvertOne:
+    @pytest.fixture(autouse=True)
+    def _native_colour(self, monkeypatch):
+        # These fakes are not real JXLs: tell convert_one their colour space is
+        # native, so it takes the plain `cjxl src.jxl` route under test (the
+        # ICC-blob routes have their own real-codec tests in
+        # tests/test_audit_261008_r1.py).
+        monkeypatch.setattr(rec, "_jxlinfo_colour", lambda p: ("enum", True))
+
     def test_convert_writes_output_and_restamps(self, tmp_path, monkeypatch):
         src = _fake_jxl(tmp_path / "photo.jxl", size=5000)
         final = tmp_path / "out" / "photo.jxl"

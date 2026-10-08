@@ -94,6 +94,46 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 
 
+# (size, mtime_ns) of every source as this run was about to READ it, keyed by
+# normcased absolute path. The delete gate runs only after the WHOLE pool has
+# drained — hours, on a big batch — and a source re-exported in that window
+# (an editor exporting into the tree, a scheduled run with Capture One open)
+# was deleted without its new version ever being read: the 2026-10-08 audit
+# reproduced it. Recorded when the work is handed to the pool; a source
+# changed between that and the read is kept too, which only errs on the safe
+# side. Cleared at the start of every run.
+_source_identity = {}
+
+
+def _record_source_identity(path) -> None:
+    """Remember a source's (size, mtime_ns) before this run reads it. The
+    first record wins: a multi-page file is read page by page."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    if key in _source_identity:
+        return
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _source_changed_since_read(path) -> bool:
+    """Is the file at `path` no longer the one this run recorded before
+    reading it (rewritten, re-exported or replaced since)? A vanished file
+    counts as changed. A source this run never recorded (an already-archived
+    one admitted by --delete-skipped, which was never read) returns False:
+    its own proof lives elsewhere in the gate."""
+    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
+    if rec is None:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    return (st.st_size, st.st_mtime_ns) != rec
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -159,73 +199,58 @@ def _abort_if_disk_full(write_dir, needed):
 def _promote_from_staging(write_path, final_path) -> bool:
     """Move one finished output out of staging. True when it landed.
 
-    A cross-volume move is copy-then-unlink, so an ENOSPC part way through
-    leaves a TRUNCATED file at the destination — with a fresh mtime. That is
-    the worst possible outcome: smart-sync compares timestamps, sees something
-    newer than the source, and skips the reconversion forever. The good copy is
-    still in staging, so removing whatever landed loses nothing and puts the
-    destination back to a state a later run will fix.
+    The move goes to a temp file IN THE DESTINATION FOLDER first and only then
+    over the final name with an atomic os.replace (E6/X3 of the 2026-10-08
+    audit). A plain shutil.move onto an existing output is copy2 + unlink on
+    Windows — even on one volume, since os.rename refuses an existing target —
+    and copy2 TRUNCATES the destination first: a kill or power cut mid-copy
+    left the old archive destroyed and a partial file with a fresh mtime that
+    smart sync then treats as up to date forever. Now the final name holds
+    either the old file or the complete new one, never a mix.
 
-    But "the move raised" does not mean "the destination is partial". The move
-    can fail BEFORE touching the destination (a read-only or locked
-    pre-existing file — that file is a perfectly good archive), and the copy
-    can SUCCEED with only the staging unlink failing (the destination then
-    holds the COMPLETE new output). Deleting either one destroys good data, so
-    the cleanup compares against an identity snapshot taken before the move
-    and removes the destination only when the move provably wrote to it AND
-    what it wrote is incomplete. When in doubt, the file is kept.
-
-    A destination volume that is simply FULL also has to stop the run rather
-    than produce one MOVE FAILED line per remaining file, which is what the
-    disk-full abort exists for.
+    When the move raises, what reached the temp decides: a COMPLETE copy (the
+    copy finished, only the staging unlink or the final rename failed) is put
+    in place — after a successful copy+unlink it may be the only copy left —
+    and a partial one is removed (the good copy is still in staging; the
+    destination was never touched). A destination volume that is simply FULL
+    also has to stop the run rather than produce one MOVE FAILED line per
+    remaining file, which is what the disk-full abort exists for.
     """
-    pre_identity = None
-    try:
-        _st = final_path.stat()
-        pre_identity = (_st.st_mtime_ns, _st.st_size)
-    except OSError:
-        pass
     try:
         size = write_path.stat().st_size
     except OSError:
         size = 0
+    tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(final_path))
+        shutil.move(str(write_path), str(tmp))
+        os.replace(str(tmp), str(final_path))
         return True
     except OSError as e:
         logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
                      f"{final_path} | {e}")
-        # Only when the staging copy survived: if it is gone the move actually
-        # completed and something else raised.
-        if write_path.exists() and final_path.exists():
-            try:
-                _st = final_path.stat()
-                written = (pre_identity is None
-                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
-                complete = size > 0 and _st.st_size == size
-            except OSError:
-                written, complete = False, False  # cannot tell → keep the file
-            if written and not complete:
+        try:
+            landed = tmp.stat().st_size if tmp.exists() else None
+        except OSError:
+            landed = None
+        if landed is not None:
+            if size > 0 and landed == size:
                 try:
-                    final_path.unlink()
-                    logger.error(
-                        f"    Removed the partial file left at the destination"
-                        + (" (it had OVERWRITTEN an existing output, which was already "
-                           "corrupt by then)" if pre_identity is not None else "")
-                        + " — the complete copy is still in staging.")
+                    os.replace(str(tmp), str(final_path))
+                    logger.error("    The copy itself finished — the destination now "
+                                 "holds the COMPLETE output.")
                 except OSError as e2:
-                    logger.error(f"    Could NOT remove the partial destination file "
-                                 f"({e2}). Delete {final_path} by hand before re-running: "
-                                 f"a later sync run would treat it as up to date.")
-            elif written:
-                logger.error(
-                    "    The destination holds a COMPLETE copy (the copy itself "
-                    "finished; only the staging cleanup failed) — keeping it.")
+                    logger.error(f"    The COMPLETE output is at {tmp}: rename it to "
+                                 f"{final_path.name} once the problem is fixed ({e2}).")
             else:
-                logger.error(
-                    "    The destination was never touched by the move "
-                    "(pre-existing file) — keeping it.")
+                try:
+                    tmp.unlink()
+                    logger.error("    Removed the partial copy; the destination was "
+                                 "never touched and the complete copy is still in "
+                                 "staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial copy {tmp} ({e2}); "
+                                 f"the destination itself was never touched.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -919,6 +944,12 @@ PAGES_PREFIX = "jxlphoto-pages:"
 
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+DERIVED_XMP_PREFIX = "jxlphoto-derived:"
+# The recipe marker the recompressor/transcoder write on a DERIVATIVE (colour
+# conversion, resize, sharpening). Must match theirs. Never copied onward:
+# a file decoded from a derivative and encoded again is a NEW master, and a
+# master carrying it reads as a derivative to their "only overwrite our own
+# derivatives" guard (E8/D4 of the 2026-10-08 audit).
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX. They record WHICH
 # source made a JXL, so a later encode can refuse to overwrite one archive with
 # a different photo that happens to share its name. Nothing here uses them —
@@ -958,10 +989,14 @@ OVERWRITE = "smart"
 # "smart" → only reconvert if JXL is newer than TIFF
 
 PROVENANCE_CHECK = "path"
-# [with DELETE_SOURCE, modes 2/4/5/6/7] How an EXISTING output is matched to
-# the source about to replace it. Those modes drop folder structure, so two
-# sources in different folders resolve to the same output; without this a
-# second run overwrote the first archive and deleted both originals.
+# How an EXISTING output is matched to the source about to replace it.
+# With DELETE_SOURCE in modes 2/4/5/6/7 (which drop folder structure, so two
+# sources in different folders resolve to the same output) EVERY existing
+# output must prove it came from these JXLs; without this a second run
+# overwrote the first archive and deleted both originals. Every other run
+# still refuses to OVERWRITE a TIFF whose marker names DIFFERENT JXLs, and
+# the smart sync never treats one as up to date: the overwrite is the loss
+# when an earlier run already deleted that other photo's JXL (#268).
 # "path"    -> the recorded LOCATION must match. Free. Survives re-decoding
 #              in place, not a moved folder.
 # "content" -> also accepts matching source BYTES, so it survives moved
@@ -1457,6 +1492,30 @@ def _djxl_icc_args(tmp_dir: Path) -> tuple:
         except OSError:
             pass
     return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+
+
+def _icc_a2b_only(icc) -> bool:
+    """Can this ICC profile NOT be a faithful conversion TARGET?
+
+    True for a profile with A2B tables and no B2A — an input (scanner)
+    profile such as the film scanner's SFprofT. It is a fine SOURCE (A2B0
+    takes its pixels to the PCS), but converting INTO it makes LittleCMS fall
+    back to the matrix/TRC, which is not the inverse of A2B0: a real scan came
+    back at 27 dB instead of ~49. A profile with B2A tables, or a plain
+    matrix/TRC one, is invertible. Unparsable -> False (no claim made).
+    """
+    try:
+        if not icc or len(icc) < 132:
+            return False
+        n = struct.unpack(">I", bytes(icc[128:132]))[0]
+        if n > 1000 or len(icc) < 132 + 12 * n:
+            return False
+        sigs = {bytes(icc[132 + 12 * i:136 + 12 * i]) for i in range(n)}
+    except Exception:
+        return False
+    has_a2b = bool(sigs & {b"A2B0", b"A2B1", b"A2B2"})
+    has_b2a = bool(sigs & {b"B2A0", b"B2A1", b"B2A2"})
+    return has_a2b and not has_b2a
 
 
 def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
@@ -2098,6 +2157,10 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             # ride along into the reconstructed TIFF.
                             or t.startswith(SRC_PREFIX)
                             or t.startswith(SRCSUM_PREFIX)
+                            # A derivative's recipe marker describes THAT
+                            # file; the TIFF (and any master encoded from it)
+                            # is not a derivative (E8/D4, 2026-10-08 audit).
+                            or t.startswith(DERIVED_XMP_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -2597,6 +2660,18 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
             else:
                 target_path = orig_icc
                 final_icc = orig_icc.read_bytes()
+            if _icc_a2b_only(final_icc):
+                # An input (scanner) profile with A2B tables and no B2A: the
+                # way back from linear sRGB falls to its matrix/TRC, which is
+                # not the inverse of A2B0 (27 dB on a real scan). The decode
+                # is still the best available, but it is NOT a faithful copy
+                # of the master — the delete gate keeps the JXL.
+                _unfaithful_decodes.add(os.path.normcase(str(jxl_path)))
+                logger.warning(
+                    f" >ICC blob in a lossy file whose profile has no B2A table "
+                    f"(an input/scanner profile): the colours of this decode are "
+                    f"an approximation, and the JXL will NOT be deleted | "
+                    f"{jxl_path.name}")
             conv_png = tmp_dir / "converted.png"
             r = _run_captured(["magick", str(pfm_path),
                                "-profile", str(float_icc),
@@ -2696,22 +2771,75 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
             logger.debug(" >ICC extracted from djxl output")
         else:
             logger.debug(" >No ICC in djxl output")
+        if original_icc and djxl_icc != original_icc:
+            # --basic ignores the profile the encoder recorded in XMP: on a
+            # "skip" file (pixels tagged sRGB, real profile in XMP) or a lossy
+            # ICC blob the TIFF ends up in another colour space than the
+            # master's — not a copy of it.
+            _mark_degraded(jxl_path, "--basic replaced the colour profile "
+                                     "recorded in XMP with djxl's")
 
         return pixels, djxl_icc, reason, mode
 
 
-def _decode_output_is_ours(tiff_path: Path) -> bool:
+def _decode_output_is_ours(tiff_path: Path, src_paths=None) -> bool:
     """Does this TIFF carry the jxlphoto-src/srcsum marker this decoder writes
-    into every output it produces?
+    into every output it produces — and, given `src_paths` (the group's JXLs
+    in page order), does that marker name THESE JXLs?
 
     The marker is the difference between "a TIFF we decoded earlier, safe to
     re-decode over" and "the original master (scanner/camera/lightroom
-    export), which must never be overwritten by a lossy decode". A read
-    failure comes back with no markers and fails CLOSED (not ours).
+    export), which must never be overwritten by a lossy decode". Its mere
+    presence is not enough for the smart sync, though: a TIFF decoded from a
+    DIFFERENT same-named JXL carries one too, and when an earlier run deleted
+    that JXL the TIFF is the only copy of its photo (#268's missing half). So
+    the sync passes `src_paths` and requires `_provenance_ok`, the predicate
+    the --delete-skipped gate already uses. A read failure comes back with no
+    markers and fails CLOSED (not ours).
     """
     info = (_read_source_markers_batch([tiff_path]).get(str(tiff_path))
             or {"src": None, "srcsum": None})
-    return bool(info.get("src") or info.get("srcsum"))
+    if src_paths is None:
+        return bool(info.get("src") or info.get("srcsum"))
+    return _provenance_ok(info, list(src_paths), PROVENANCE_CHECK)
+
+
+def _would_overwrite_group(page_entries, final_path: Path) -> bool:
+    """Would this run write OVER an existing TIFF for this group — the
+    --overwrite case, or the smart sync's "JXL newer" direction? Timestamps
+    only; the marker checks happen in main() (batched) and at conversion. An
+    unreadable stat means the run would attempt it, so it counts (fail closed
+    for the provenance check that consumes this)."""
+    try:
+        if not final_path.exists():
+            return False
+    except (OSError, ValueError):
+        return False
+    if OVERWRITE is True:
+        return True
+    if OVERWRITE == "smart":
+        try:
+            newest = max(j.stat().st_mtime for j, *_rest in page_entries)
+            return newest > final_path.stat().st_mtime
+        except (OSError, ValueError):
+            return True
+    return False
+
+
+def _not_ours_why(tiff_path: Path) -> str:
+    """The second half of a "this TIFF ..." refusal: a different JXL's decode
+    (it carries a marker, just not of these sources) or an original master
+    (no marker at all). Only called on a refusal, so the extra read is rare."""
+    if _decode_output_is_ours(tiff_path):
+        return ("carries the jxlphoto-src marker of a DIFFERENT JXL — it is "
+                "another photo's decode, and the only copy of that photo if its "
+                "JXL was deleted. Rename one of them or decode into another "
+                "folder" + ("" if PROVENANCE_CHECK == "content" else
+                            "; if these JXLs MOVED, re-run with --provenance "
+                            "content"))
+    return ("carries no jxlphoto-src marker, so it is not a file this tool "
+            "decoded — it looks like the original master. Re-run with "
+            "--overwrite to replace it anyway.")
 
 
 def _would_skip_group(page_entries, final_path: Path) -> bool:
@@ -2736,8 +2864,11 @@ def _would_skip_group(page_entries, final_path: Path) -> bool:
                 # skip ONLY on the marker: a marker-less TIFF is an original
                 # master, reported "refused" (never "skipped"), and a refusal
                 # must never let --delete-skipped delete the JXL on the
-                # strength of a file this decoder never produced.
-                return _decode_output_is_ours(final_path)
+                # strength of a file this decoder never produced. The marker
+                # must name THESE JXLs (another same-named JXL's decode is
+                # refused too).
+                return _decode_output_is_ours(
+                    final_path, [e[0] for e in page_entries])
             # JXL newer → the real run reconverts, or — when the existing TIFF
             # is an original master (no jxlphoto-src marker) — REFUSES. A
             # refusal is NOT a skip: the TIFF on disk is not this JXL's decode
@@ -2766,6 +2897,9 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
         return str(main_jxl), "aborted", _why
 
     already_exists = final_path.exists()
+    # The JXLs whose decode an existing TIFF must record to count as "ours"
+    # (see _decode_output_is_ours): page order, as the marker was written.
+    _group_srcs = [e[0] for e in page_entries]
 
     if already_exists:
         if OVERWRITE is False:
@@ -2796,24 +2930,24 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # the marker, never the timestamp, is what a skip is admitted
                 # on. An explicit --overwrite is the way to say "I know what
                 # I am doing".
-                if not _decode_output_is_ours(final_path):
+                if not _decode_output_is_ours(final_path, _group_srcs):
                     n, total = next_count()
                     logger.warning(f"[{n}/{total}] KEEP (refusing to treat "
                                    f"{final_path.name} as up to date: this TIFF "
-                                   f"carries no jxlphoto-src marker, so it is not "
-                                   f"a file this tool decoded — it looks like the "
-                                   f"original master. Re-run with --overwrite to "
-                                   f"replace it anyway.) | {main_jxl.name}")
+                                   f"{_not_ours_why(final_path)}) | {main_jxl.name}")
                     return str(main_jxl), "refused", str(final_path)
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: TIFF up to date) | {main_jxl.name}")
                 return str(main_jxl), "skipped", str(final_path)
-            if not _decode_output_is_ours(final_path):
+            if not _decode_output_is_ours(final_path, _group_srcs):
                 # The JXL is newer, but the TIFF on disk is an ORIGINAL MASTER
-                # (no jxlphoto-src marker — never through this decoder).
-                # Overwriting it with a decode would destroy the only copy of
-                # the master. Refuse; an explicit --overwrite is the way to
-                # say "I know what I am doing".
+                # (no jxlphoto-src marker — never through this decoder), or the
+                # decode of a DIFFERENT same-named JXL (its marker names other
+                # sources; main() normally refuses those before the pool, this
+                # is the last line). Overwriting it would destroy the only copy
+                # of the master — or of that other photo, once an earlier run
+                # deleted its JXL. Refuse; for a marker-less master an explicit
+                # --overwrite is the way to say "I know what I am doing".
                 #
                 # Status "refused", NOT "skipped": a skip admits the source to
                 # --delete-skipped, and this TIFF is not the JXL's decode — the
@@ -2821,11 +2955,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # older) file, with a KEEP line right above the DELETED one.
                 n, total = next_count()
                 logger.warning(f"[{n}/{total}] KEEP (refusing to overwrite "
-                               f"{final_path.name}: this TIFF carries no "
-                               f"jxlphoto-src marker, so it is not a file this "
-                               f"tool decoded — it looks like the original "
-                               f"master. Re-run with --overwrite to replace "
-                               f"it anyway.) | {main_jxl.name}")
+                               f"{final_path.name}: this TIFF "
+                               f"{_not_ours_why(final_path)}) | {main_jxl.name}")
                 return str(main_jxl), "refused", str(final_path)
             logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
 
@@ -2881,6 +3012,13 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 else:  # preserve_thumbnails (default)
                     target_depth = 8 if (is_thumb and original_depth == 8) else 16
 
+                if target_depth == 8 and (original_depth is None or original_depth > 8):
+                    # None: a JXL without the depth marker — cannot prove it
+                    # was 8-bit, so it counts as deeper (fail closed).
+                    _mark_degraded(jxl_path, (
+                        f"--depth 8 from a {original_depth}-bit source"
+                        if original_depth else
+                        "--depth 8 from a source of unrecorded bit depth"))
                 pixels, icc_data, page_reason, page_strategy = decode_jxl_to_numpy(
                     jxl_path, tmp_dir, target_icc_path, target_depth=target_depth
                 )
@@ -3193,6 +3331,9 @@ def process_group(group_tasks, workers, target_icc=None):
 
     results = []
     status_map = {}
+    for _task in tasks:
+        for _e in _task["entries"]:
+            _record_source_identity(_e[0])      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {}
         for task in tasks:
@@ -3376,6 +3517,33 @@ def process_group(group_tasks, workers, target_icc=None):
                     f"--matrix decodes through PPM and cannot prove alpha was not "
                     f"dropped; use roundtrip/basic mode to delete them")
                 continue
+            # D2 (2026-10-08 audit): a decode the user degraded on purpose
+            # (--depth 8 from 16 bits, --basic dropping the XMP profile) is a
+            # derivative, and a derivative never deletes its master.
+            _degr = [(e[0], _degraded_decodes[os.path.normcase(str(e[0]))])
+                     for e in task["entries"]
+                     if os.path.normcase(str(e[0])) in _degraded_decodes]
+            if _degr:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"the TIFF is a degraded copy ({_degr[0][1]}), not the master — "
+                    f"decode without that option to delete the JXL")
+                continue
+            # R1 (2026-10-08 audit): a page decoded by CONVERTING into an
+            # A2B-only profile is an approximation, not a copy of the master.
+            _approx = [e[0] for e in task["entries"]
+                       if os.path.normcase(str(e[0])) in _unfaithful_decodes]
+            if _approx:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"{', '.join(p.name for p in _approx)} store(s) a scanner "
+                    f"profile (no B2A table) as a lossy ICC blob: the TIFF's colours "
+                    f"are an approximation, so the JXL stays the archive")
+                continue
             _orphan_thumbs = list(task.get("ignored_thumbs", []))
             if _orphan_thumbs:
                 _delete_stats["kept"] += len(_orphan_thumbs)
@@ -3384,6 +3552,15 @@ def process_group(group_tasks, workers, target_icc=None):
                     f"{task['main_jxl'].name} | their pixels are NOT in the TIFF "
                     f"(--thumbnail-handling ignore); delete them yourself if you "
                     f"do not want them")
+            _changed = [e[0] for e in task["entries"]
+                        if _source_changed_since_read(e[0])]
+            if _changed:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"{', '.join(p.name for p in _changed)}: source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived")
+                continue
             _tag = " (already archived)" if was_skipped else ""
             for jxl_path, _, _, _, _, _, _ in task["entries"]:
                 try:
@@ -3743,6 +3920,22 @@ _incomplete_groups = {}
 # every run.
 _mpg_marker_failures: set = set()
 
+# JXLs (normcased) whose decode this run had to CONVERT from linear sRGB into
+# an A2B-only profile (a lossy ICC blob of a scanner profile): the TIFF is an
+# approximation, so the delete gate keeps them. Cleared with the sets above.
+_unfaithful_decodes: set = set()
+
+# JXL (normcased) -> why its decode this run is a DEGRADED copy of the master
+# (D2 of the 2026-10-08 audit): --depth 8 from a source deeper than 8 bits,
+# or --basic replacing the profile recorded in XMP with djxl's. The TIFF is
+# what the user asked for, but it is not the master any more, so the delete
+# gate keeps the JXL (the toolkit's rule: a derivative never deletes).
+_degraded_decodes: dict = {}
+
+
+def _mark_degraded(jxl_path, why: str) -> None:
+    _degraded_decodes.setdefault(os.path.normcase(str(jxl_path)), why)
+
 # Groups this run REFUSED to merge: they carry MORE members than the split
 # recorded and nothing could tell which ones belong (see _split_group_by_srcsum).
 # Every member is decoded standalone instead, and main() counts these as errors —
@@ -3888,6 +4081,8 @@ def collect_multipage_groups(jxls: list) -> dict:
     _incomplete_groups.clear()
     _group_conflicts.clear()
     _mpg_marker_failures.clear()
+    _unfaithful_decodes.clear()
+    _degraded_decodes.clear()
     _pending_incomplete: list = []
 
     # Read markers first; they are needed even when reconstruction is disabled
@@ -4237,8 +4432,12 @@ Examples:
                              "mode, not just 8. IRREVERSIBLE")
     parser.add_argument("--provenance", type=str, default=None,
                         choices=["path", "content"],
-                        help="[with --delete-source] How an EXISTING output is matched "
-                             "to the source it would replace or certify (every mode): "
+                        help="How an EXISTING output is matched to the source it "
+                             "would replace or certify. Every run refuses to overwrite "
+                             "a TIFF whose marker names DIFFERENT JXLs (and the smart "
+                             "sync never treats one as up to date); with "
+                             "--delete-source in modes 2/4/5/6/7 every existing output "
+                             "must also prove it came from these JXLs. "
                              "path (default, free) compares the recorded LOCATION; "
                              "content also accepts matching source bytes, so it "
                              "survives MOVED folders at the cost of reading each "
@@ -4389,6 +4588,14 @@ Examples:
     if USE_MATRIX_MODE and not ImageCms:
         print("WARNING: Matrix mode requested but ImageCms unavailable. Install with: pip install Pillow --upgrade")
 
+    if FORCE_NONE_MODE and DELETE_SOURCE:
+        # D2 (2026-10-08 audit): --none writes no colour profile and no
+        # XMP/IPTC — a degraded copy, never a replacement for the master. The
+        # transcoder refuses a derivative + --delete-source the same way.
+        parser.error("--none writes no colour profile and no XMP/IPTC, so the TIFF "
+                     "is not a copy of the master: it cannot be combined with "
+                     "--delete-source")
+
     if args.depth:
         DJXL_OUTPUT_DEPTH = args.depth
     if args.compression:
@@ -4463,10 +4670,13 @@ Examples:
         # This script has no pixel-level verify (see the DELETE_SKIPPED note),
         # so the structural check is the whole gate. Say so rather than let the
         # flag read as strong as the encoder's.
+        # (X5 of the 2026-10-08 audit: "a TIFF that came from different JXLs
+        # with the same name would pass" was untrue since D-2 — the gate
+        # requires the TIFF's provenance marker to name THESE JXLs.)
         logger.warning(
-            "--delete-skipped: sources whose TIFF already exists will be deleted after a "
-            "STRUCTURAL check only (valid, readable TIFF). Nothing compares the pixels, so "
-            "a TIFF that came from different JXLs with the same name would pass.")
+            "--delete-skipped: sources whose TIFF already exists will be deleted once "
+            "that TIFF carries the provenance marker of THESE JXLs and passes the "
+            "structural check. Nothing compares the pixels.")
 
     _check_external_tools(dry_run=args.dry_run)
     _warn_if_libjxl_too_old("djxl")
@@ -4621,64 +4831,89 @@ Examples:
 
     provenance_failures = []
     _src_root = args.input.parent if args.input.is_file() else args.input
-    if DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root):
+    # Two levels (same design as the encoder). Deletion armed in a collapsing
+    # mode: EVERY existing output must prove it came from these JXLs. Every
+    # other run: a TIFF this run is about to OVERWRITE (--overwrite, or the
+    # smart sync's "JXL newer" direction) is refused when its marker names
+    # DIFFERENT JXLs. That is #268's missing half: a plain sync with no
+    # deletion overwrote the decode of a same-named JXL that an earlier run
+    # had already deleted — the TIFF was that photo's only copy. A marker-less
+    # TIFF keeps its old handling (the smart sync refuses it as an original
+    # master; an explicit --overwrite replaces it).
+    _strict_guard = DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root)
+    if _strict_guard:
         _existing = sorted({t["final_tiff"] for t in tasks if t["final_tiff"].exists()})
-        if _existing:
-            logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
-                        f"(--provenance {PROVENANCE_CHECK})...")
-            _marks = _read_source_markers_batch(_existing)
-            _blocked = []
-            for _t in list(tasks):
-                _out = _t["final_tiff"]
-                if not _out.exists():
-                    continue
-                _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
-                _srcs = [e[0] for e in _t["entries"]]
-                if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
-                    continue
-                _why = ("no provenance marker (written by an older version)"
-                        if not (_info.get("src") or _info.get("srcsum"))
-                        else "it was made from a different source")
-                _blocked.append((_t, _why))
-            if _blocked:
-                if args.dry_run:
-                    # Simulation: report the refusals, touch nothing.
-                    logger.warning(
-                        f"Dry run: {len(_blocked)} group(s) would be REFUSED: their output "
-                        f"already exists and did not come from them.")
-                    for _t, _why in _blocked[:10]:
-                        logger.warning(f"  would REFUSE | {_t['main_jxl']}")
-                        logger.warning(f"    -> {_t['final_tiff']} ({_why})")
-                    if len(_blocked) > 10:
-                        logger.warning(f"  ... and {len(_blocked) - 10} more")
-                else:
+    else:
+        _existing = sorted({t["final_tiff"] for t in tasks
+                            if _would_overwrite_group(t["entries"], t["final_tiff"])})
+    if _existing:
+        _existing_set = set(_existing)
+        logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
+                    f"(--provenance {PROVENANCE_CHECK})...")
+        _marks = _read_source_markers_batch(_existing)
+        _blocked = []
+        for _t in list(tasks):
+            _out = _t["final_tiff"]
+            if _out not in _existing_set:
+                continue
+            _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
+            _srcs = [e[0] for e in _t["entries"]]
+            if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
+                continue
+            _unmarked = not (_info.get("src") or _info.get("srcsum"))
+            if _unmarked and not _strict_guard:
+                continue    # no proof either way: the old handling applies
+            _why = ("no provenance marker (written by an older version)"
+                    if _unmarked
+                    else "it was made from a different source")
+            _blocked.append((_t, _why))
+        if _blocked:
+            if args.dry_run:
+                # Simulation: report the refusals, touch nothing.
+                logger.warning(
+                    f"Dry run: {len(_blocked)} group(s) would be REFUSED: their output "
+                    f"already exists and did not come from them.")
+                for _t, _why in _blocked[:10]:
+                    logger.warning(f"  would REFUSE | {_t['main_jxl']}")
+                    logger.warning(f"    -> {_t['final_tiff']} ({_why})")
+                if len(_blocked) > 10:
+                    logger.warning(f"  ... and {len(_blocked) - 10} more")
+            else:
+                if _strict_guard:
                     logger.error(
                         f"REFUSING {len(_blocked)} group(s): their output already exists and "
                         f"did not come from them. Converting would overwrite someone else's "
                         f"output, and --delete-source would then destroy what it held.")
-                    for _t, _why in _blocked[:10]:
-                        logger.error(f"    {_t['main_jxl']}")
-                        logger.error(f"      -> {_t['final_tiff']} ({_why})")
-                    if len(_blocked) > 10:
-                        logger.error(f"    ... and {len(_blocked) - 10} more")
+                else:
                     logger.error(
-                        "  These were NOT converted and NOTHING was deleted. Rename them, "
-                        "pick a mode that keeps folder structure (0/1/3/8), or drop "
-                        "--delete-source." +
-                        ("" if PROVENANCE_CHECK == "content" else
-                         " If you MOVED the sources, re-run with --provenance content."))
-                    _bad = {id(_t) for _t, _ in _blocked}
-                    tasks = [t for t in tasks if id(t) not in _bad]
-                    # total is re-initialised for the reduced task list; done must
-                    # restart with it (same in-process re-run rule as above).
-                    _counter["done"] = 0
-                    _counter["total"] = len(tasks)
-                # A refusal is a FAILURE, not a quiet skip (see the encoder) —
-                # in a dry run it is a PREDICTED failure, reported as such.
-                provenance_failures = [
-                    (str(_t["main_jxl"]),
-                     f"refused: output {_t['final_tiff']} already exists and {_w}")
-                    for _t, _w in _blocked]
+                        f"REFUSING {len(_blocked)} group(s): their output already exists and "
+                        f"is the decode of DIFFERENT JXLs. Converting would overwrite it — "
+                        f"and if an earlier run deleted those JXLs, that TIFF is the only "
+                        f"copy of the photo.")
+                for _t, _why in _blocked[:10]:
+                    logger.error(f"    {_t['main_jxl']}")
+                    logger.error(f"      -> {_t['final_tiff']} ({_why})")
+                if len(_blocked) > 10:
+                    logger.error(f"    ... and {len(_blocked) - 10} more")
+                logger.error(
+                    "  These were NOT converted and NOTHING was deleted. Rename them, "
+                    + ("pick a mode that keeps folder structure (0/1/3/8), or drop "
+                       "--delete-source." if _strict_guard else
+                       "or decode them into another folder.") +
+                    ("" if PROVENANCE_CHECK == "content" else
+                     " If you MOVED the sources, re-run with --provenance content."))
+                _bad = {id(_t) for _t, _ in _blocked}
+                tasks = [t for t in tasks if id(t) not in _bad]
+                # total is re-initialised for the reduced task list; done must
+                # restart with it (same in-process re-run rule as above).
+                _counter["done"] = 0
+                _counter["total"] = len(tasks)
+            # A refusal is a FAILURE, not a quiet skip (see the encoder) —
+            # in a dry run it is a PREDICTED failure, reported as such.
+            provenance_failures = [
+                (str(_t["main_jxl"]),
+                 f"refused: output {_t['final_tiff']} already exists and {_w}")
+                for _t, _w in _blocked]
 
     # Dry run
     if args.dry_run:
@@ -4694,6 +4929,7 @@ Examples:
         # admits only ok/overwrite, and a refusal is neither).
         _would_refuse = []
         if OVERWRITE == "smart":
+            _prov_refused = {_p for _p, _ in provenance_failures}
             for task in tasks:
                 _ft = task["final_tiff"]
                 try:
@@ -4701,17 +4937,21 @@ Examples:
                         continue
                 except (OSError, ValueError):
                     continue
+                if str(task["main_jxl"]) in _prov_refused:
+                    continue    # already previewed by the provenance check
                 # Both mtime directions refuse a marker-less TIFF: up to date
                 # or not, an original master is never overwritten and never
                 # reported as a skip. The old `continue` before this check
                 # (TIFF newer = up to date) hid the up-to-date masters from
-                # this preview while the real run refused them.
-                if not _decode_output_is_ours(_ft):
+                # this preview while the real run refused them. The marker
+                # must name THESE JXLs, like the real run requires.
+                if not _decode_output_is_ours(_ft, [e[0] for e in task["entries"]]):
                     _would_refuse.append(_ft)
             if _would_refuse:
-                logger.warning(f"Dry run: {len(_would_refuse)} existing TIFF(s) look like "
-                               f"ORIGINAL masters (no jxlphoto-src marker) and would be "
-                               f"REFUSED, not overwritten:")
+                logger.warning(f"Dry run: {len(_would_refuse)} existing TIFF(s) are not "
+                               f"decodes of these JXLs (ORIGINAL masters with no "
+                               f"jxlphoto-src marker, or another JXL's decode) and would "
+                               f"be REFUSED, not overwritten:")
                 for _ft in _would_refuse[:10]:
                     logger.warning(f"  would REFUSE | {_ft}")
         if DELETE_SOURCE:
@@ -4901,6 +5141,7 @@ Examples:
     refused = []
     err = len(provenance_failures) + len(group_conflicts)
     _reset_abort()  # a fresh run must not inherit a previous one's latch
+    _source_identity.clear()
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     # Counts alone don't answer "did something break in the middle?" — the user
     # walks away from a multi-hour manifest and needs the paths on return.
@@ -4945,15 +5186,18 @@ Examples:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
 
     if refused:
-        logger.warning(f"Refused: {len(refused)} existing TIFF(s) look like ORIGINAL "
-                       f"masters (no jxlphoto-src marker) and were NOT overwritten; "
-                       f"their JXLs were not decoded and not deleted:")
+        logger.warning(f"Refused: {len(refused)} existing TIFF(s) are not decodes of "
+                       f"these JXLs — ORIGINAL masters (no jxlphoto-src marker) or the "
+                       f"decode of a DIFFERENT same-named JXL — and were NOT "
+                       f"overwritten; their JXLs were not decoded and not deleted:")
         for _p in refused[:10]:
             logger.warning(f"  -> {_p}")
         if len(refused) > 10:
             logger.warning(f"  -> ... and {len(refused) - 10} more")
-        logger.warning("  Decode them into another folder (e.g. --mode 1), or pass "
-                       "--overwrite if replacing those TIFFs is really intended.")
+        logger.warning("  Decode them into another folder (e.g. --mode 1). For an "
+                       "original master, --overwrite replaces it if that is really "
+                       "intended; another JXL's decode is never overwritten (see "
+                       "each KEEP line above).")
 
     # Loudest line in the block: on a batch that ran for hours the reason it
     # stopped must not be buried above the per-file scrollback.

@@ -101,7 +101,7 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     monkeypatch.setattr(dec, "TEMP2_DIR", staging)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: integrity)
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: ours)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: ours)
     # Round 43 (D-2): the skipped path's delete gate certifies the existing TIFF
     # by its provenance marker MATCHING these sources, not by mere marker
     # presence. `ours` now stands for a matching jxlphoto-src marker.
@@ -160,18 +160,18 @@ def test_decoder_would_skip_matches_the_real_decision(tmp_path, monkeypatch):
     # our own decode skips (round 39), a marker-less original master is
     # refused, and a refusal is never a skip (the dry-run mirror used to say
     # True on the mtime alone).
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     assert dec._would_skip_group(entries, final) is True
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     assert dec._would_skip_group(entries, final) is False
     _make_newer(src, final)
     # JXL newer: reconverts when the existing TIFF is one of ours (carries
     # the jxlphoto-src marker); an original master is REFUSED an overwrite.
     # Neither is a skip — a refusal must never let --delete-skipped delete
     # the JXL on the strength of a TIFF that is not its decode (round 36).
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     assert dec._would_skip_group(entries, final) is False
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     assert dec._would_skip_group(entries, final) is False
     final.unlink()
     assert dec._would_skip_group(entries, final) is False
@@ -251,10 +251,13 @@ def test_transcoder_still_needs_integrity(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Transcoder — lossy, where nothing can prove anything
+# Transcoder — lossy: no checksum, but the output's provenance marker must
+# name this source (T1 of the 2026-10-08 audit; before it the structural check
+# was the whole gate and any same-named JPEG deleted the master)
 # ---------------------------------------------------------------------------
 
-def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True):
+def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
+              marker="this"):
     src = tmp_path / "photo.jxl"
     _jxl_stub(src)
     final = tmp_path / "photo.jpg"
@@ -273,6 +276,11 @@ def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True):
     monkeypatch.setattr(tr, "process_group_convert",
                         lambda pairs, *a, **k: ([(str(s), "skipped", str(o), None)
                                                  for s, o in pairs], set()))
+    _ids = {"this": tr._source_path_id(src), "other": "0123456789abcdef",
+            None: None}
+    monkeypatch.setattr(tr, "_read_source_markers_batch",
+                        lambda paths: {str(p): {"src": _ids[marker], "srcsum": None}
+                                       for p in paths})
     args = tr.build_parser().parse_args(
         [str(tmp_path), "--force-convert", "--decode", "--mode", "3"])
     tr.cmd_convert(args, from_jxl=True)
@@ -283,12 +291,21 @@ def test_transcoder_lossy_keeps_by_default(tmp_path, monkeypatch):
     assert _tr_lossy(tmp_path, monkeypatch, delete_skipped=False).exists()
 
 
-def test_transcoder_lossy_delete_skipped_is_structural_only(tmp_path, monkeypatch):
+def test_transcoder_lossy_delete_skipped_with_this_sources_marker(tmp_path, monkeypatch):
     assert not _tr_lossy(tmp_path, monkeypatch, delete_skipped=True).exists()
 
 
+@pytest.mark.parametrize("marker", ["other", None])
+def test_transcoder_lossy_delete_skipped_needs_a_matching_marker(tmp_path, monkeypatch,
+                                                                 marker):
+    """A same-named output from another source, or one with no marker at all,
+    proves nothing about this source: it is kept."""
+    assert _tr_lossy(tmp_path, monkeypatch, delete_skipped=True,
+                     marker=marker).exists()
+
+
 def test_transcoder_lossy_honours_the_integrity_check(tmp_path, monkeypatch):
-    """The structural check is the ONLY gate here, so it had better hold."""
+    """A matching marker is not enough on its own: the structure must hold."""
     assert _tr_lossy(tmp_path, monkeypatch, delete_skipped=True,
                      integrity=False).exists()
 
@@ -338,7 +355,7 @@ def test_lossy_gate_fires_on_a_repeat(menu, monkeypatch, capsys):
     menu._confirm_lossy_delete_skipped(wf)
     assert wf["advanced_options"]["delete_skipped"] is False, (
         "declining must turn the option off, not cancel the run")
-    assert "nothing ties it to the original" in _out(capsys)
+    assert "nothing compares the pixels" in _out(capsys)
 
 
 def test_lossy_gate_accepts(menu, monkeypatch):
@@ -406,7 +423,7 @@ def test_D_lossy_direction_asks_an_extra_confirmation(menu, monkeypatch, capsys)
                        "jxl", "jpeg", "jxl_to_jpeg_force")
     assert wf["delete_source"] is True
     assert wf["delete_skipped"] is False
-    assert "nothing ties it to the original" in _out(capsys)
+    assert "nothing compares the pixels" in _out(capsys)
 
 
 def test_D_lossy_direction_can_still_be_confirmed(menu, monkeypatch):
@@ -423,14 +440,20 @@ def test_D_lossless_direction_has_no_extra_gate(menu, monkeypatch, capsys):
     assert wf["delete_skipped"] is True
     out = _out(capsys)
     assert "PROVES" in out
-    assert "nothing ties it to the original" not in out
+    assert "This direction is LOSSY" not in out
 
 
-def test_D_decoder_direction_says_it_is_structural_only(menu, monkeypatch, capsys):
+def test_D_decoder_direction_says_what_backs_the_delete(menu, monkeypatch, capsys):
+    # W2 of the 2026-10-08 audit: the text used to say "a file from a
+    # different source with the same name would pass" — false since the
+    # decoder's gate requires the matching provenance marker (D-2).
     _ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "y"],
                        "jxl", "tiff", "jxl_tiff_decoder")
     assert wf["delete_skipped"] is True
-    assert "nothing compares the contents" in _out(capsys)
+    out = _out(capsys)
+    assert "provenance marker naming THIS source" in out
+    assert "Nothing compares the image contents" in out
+    assert "would pass" not in out
 
 
 # ---------------------------------------------------------------------------

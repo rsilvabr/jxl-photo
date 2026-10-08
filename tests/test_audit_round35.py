@@ -271,7 +271,7 @@ def test_decoder_refuses_to_overwrite_a_master_tiff(tmp_path, monkeypatch):
     monkeypatch.setattr(dec, "_aborted", lambda: None)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
     # The TIFF on disk is NOT one of ours (no jxlphoto-src marker):
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     # JXL newer than the TIFF:
     _old = final.stat().st_mtime
     import os as _os
@@ -294,7 +294,7 @@ def test_decoder_redecodes_its_own_output(tmp_path, monkeypatch):
     dec.setup_logger()
     monkeypatch.setattr(dec, "_aborted", lambda: None)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     import os as _os
     _old = final.stat().st_mtime
     _os.utime(final, (_old - 100, _old - 100))
@@ -454,6 +454,8 @@ def test_convert_one_reorders_boxes_after_restamp(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "_run_exiftool_argfile", _fake_exif)
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
     monkeypatch.setattr(rec, "_counter", {"done": 0, "total": 1})
+    # A stub, not a real JXL: take the plain cjxl route (native colour).
+    monkeypatch.setattr(rec, "_jxlinfo_colour", lambda p: ("enum", True))
 
     def _reorder(p):
         calls.append("reorder")

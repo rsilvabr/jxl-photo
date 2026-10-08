@@ -236,8 +236,13 @@ def decoder_checks(A1, pool_jxl):
     touch(f / "converted_tiff" / "p.tif", 0)
     rc, out = run("dec_foreign", [DEC, f, "--mode", "1", "--sync", "--delete-source",
                                   "--delete-skipped", "--delete-confirm-off"])
+    # Since the 2026-10-08 audit (X1/D1) the smart sync itself refuses to call
+    # another JXL's decode "up to date" ("... marker of a DIFFERENT JXL"), so
+    # the skip never reaches the --delete-skipped gate (whose KEEP says
+    # "MATCHING"); either refusal keeps the JXL.
     check("--delete-skipped: a decoded TIFF copied next to a DIFFERENT p.jxl keeps it",
-          (f / "p.jxl").exists() and "MATCHING" in out, f"rc={rc}")
+          (f / "p.jxl").exists() and ("DIFFERENT JXL" in out or "MATCHING" in out),
+          f"rc={rc}")
     rc, _ = run("dec_allskip", [DEC, a, "--mode", "1", "--sync", "--delete-source"])
     check("all-skip plan + --delete-source, no TTY: exit 0, nothing deleted",
           rc == 0 and (a / "p.jxl").exists(), f"rc={rc}")
@@ -289,6 +294,36 @@ def multipage_and_recompressor_checks(A1, pool_jxl, scan):
     lin = exif(["-s3", "-XMP-dc:Description", r / "single.jxl"])
     check("in place: lineage records the second generation", "gen=2" in lin, lin[:120])
 
+    # R1 (2026-10-08 audit): the COLOURS, not only markers and lineage. The
+    # scan's profile (a film scanner's: A2B tables, no B2A) has no native JXL
+    # form, and before the fix this very in-place d=2 re-encode came back at
+    # ~27 dB through the decoder (18 dB one generation later) while every
+    # check above passed.
+    rd = B / "r_inplace_dec"
+    for p in pages:
+        cp(r / p.name, rd / p.name)
+    rc, _ = run("rec_inplace_decode", [DEC, rd, "--mode", "1", "--workers", "4"])
+    rt = list((rd / "converted_tiff").glob("*.tif"))
+    ok, detail = False, f"rc={rc} tiffs={len(rt)}"
+    if rc == 0 and len(rt) == 1:
+        with tifffile.TiffFile(scan) as t0, tifffile.TiffFile(rt[0]) as t1:
+            a = [pg for pg in t0.pages if pg.shape[0] > 2000]
+            b = [pg for pg in t1.pages if pg.shape[0] > 2000]
+            if a and b and a[0].shape == b[0].shape:
+                x, y = a[0].asarray(), b[0].asarray()
+                sse = 0.0
+                for i in range(0, x.shape[0], 256):      # row blocks: low memory
+                    d = x[i:i + 256].astype(np.float64) - y[i:i + 256].astype(np.float64)
+                    sse += float((d * d).sum())
+                mse = sse / x.size
+                psnr = float("inf") if mse == 0 else 10 * np.log10(65535.0 ** 2 / mse)
+                ok = psnr >= 40.0
+                detail = f"RGB page vs the original scan: {psnr:.1f} dB (d=2)"
+            else:
+                detail = "page shapes differ"
+    check("in place: the re-encoded scan keeps its colours (decoder vs original)",
+          ok, detail)
+
     r = B / "r_veto"
     for p in pages:
         cp(p, r / p.name)
@@ -311,14 +346,19 @@ def recompressor_foreign_check(A1, A3, pool_jxl):
     run("rec_first", [REC, r, "--mode", "1"] + common)
     outs = [p for p in r.rglob("*.jxl") if p.parent != r]
     if not outs:
-        check("overwriting an output of ANOTHER origin is warned", False, "no output")
+        check("overwriting an output of ANOTHER origin is refused", False, "no output")
         return
     cp(pool_jxl / A3.with_suffix(".jxl").name, outs[0])
     touch(outs[0], -7200)
     touch(r / "p.jxl", 0)
+    _before = md5(outs[0])
     rc, out = run("rec_foreign", [REC, r, "--mode", "1", "--sync"] + common)
-    check("overwriting an output of ANOTHER origin is warned (and proceeds)",
-          rc == 0 and "different origin" in out, f"rc={rc}")
+    # 2026-10-08 audit (X1/R2): a warning used to be all this got, and the
+    # archive of another photo was overwritten anyway. It is a refusal now:
+    # exit 1, the existing output untouched.
+    check("overwriting an output of ANOTHER origin is refused (archive untouched)",
+          rc == 1 and "different origin" in out and md5(outs[0]) == _before,
+          f"rc={rc}")
 
 
 def memory_cap_checks(A1, pool_jxl):

@@ -113,7 +113,7 @@ def test_sync_skip_refuses_a_master_tiff(tmp_path, monkeypatch):
     dec.setup_logger()
     monkeypatch.setattr(dec, "_aborted", lambda: None)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
 
     result = dec.convert_multipage_jxl_group(
         src, [(src, 0, False, False, 0, False, None)], final, final)
@@ -134,7 +134,7 @@ def test_sync_skip_still_skips_its_own_decode(tmp_path, monkeypatch):
     dec.setup_logger()
     monkeypatch.setattr(dec, "_aborted", lambda: None)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
 
     result = dec.convert_multipage_jxl_group(
         src, [(src, 0, False, False, 0, False, None)], final, final)
@@ -158,7 +158,7 @@ def test_delete_gate_keeps_a_skipped_source_without_marker(tmp_path, monkeypatch
     monkeypatch.setattr(dec, "DELETE_SKIPPED", True)
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     # Round 43 (D-2): a marker-less TIFF reads as both markers None → the gate's
     # `_provenance_ok` refuses. Stub the batch so the test never spawns exiftool.
     monkeypatch.setattr(dec, "_read_source_markers_batch",
@@ -190,7 +190,7 @@ def test_delete_gate_still_deletes_a_proven_skip(tmp_path, monkeypatch):
     monkeypatch.setattr(dec, "DELETE_SKIPPED", True)
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     # Round 43 (D-2): the delete gate now proves the skip by a marker MATCH
     # (`_read_source_markers_batch` + `_provenance_ok`), not by the presence
     # check `_decode_output_is_ours` above (which only drives the skip itself).
@@ -423,7 +423,7 @@ def test_metadata_failure_never_touches_the_preexisting_final(monkeypatch, tmp_p
 
     dec.setup_logger()
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     monkeypatch.setattr(dec, "ADD_JPEG_PREVIEW", False)
     monkeypatch.setattr(dec, "decode_jxl_to_numpy",
                         lambda *a, **k: (np.zeros((8, 8, 3), dtype=np.uint16),
@@ -550,7 +550,7 @@ def test_incomplete_group_kept_count_counts_the_jxls(tmp_path, monkeypatch):
     monkeypatch.setattr(dec, "DELETE_SKIPPED", True)
     monkeypatch.setattr(dec, "TEMP2_DIR", None)
     monkeypatch.setattr(dec, "_verify_tiff_integrity", lambda p: True)
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda m, e, w, f, *a: (str(m), "skipped", str(f)))
     monkeypatch.setattr(dec, "_incomplete_groups",
@@ -582,8 +582,8 @@ def test_would_skip_group_is_false_for_an_up_to_date_master(tmp_path, monkeypatc
     final.write_bytes(b"master")
     _make_newer(final, src)          # TIFF newer -> the skip direction
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     assert dec._would_skip_group([(src, 0, False, False, 0, False, None)], final) is False
     # And an up-to-date decode of ours is still a skip, exactly as before.
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: True)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: True)
     assert dec._would_skip_group([(src, 0, False, False, 0, False, None)], final) is True

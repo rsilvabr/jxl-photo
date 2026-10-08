@@ -124,6 +124,33 @@ Recompressing destroys both, so these files default to **copy** verbatim,
 whatever distance you asked for. `--jbrd-policy convert` overrides this —
 logged per file, because the JPEG recovery is gone for good.
 
+### Profiles with no native JPEG XL form (scanner profiles, table curves)
+
+JPEG XL describes most working spaces natively (sRGB, AdobeRGB, ProPhoto,
+gamma curves). A profile it cannot describe — tone curves stored as tables,
+scanner LUT profiles such as a film scanner's `SFprofT` — survives only as
+an embedded "ICC blob", and a **lossy** file carrying one decodes as LINEAR
+sRGB. Converting back into the profile is only approximate, and for an input
+profile with A2B tables but no B2A (scanner profiles) it is plainly wrong:
+on a real scan the first recompression of a lossless master came back at
+27 dB through the decoder, the second at 18 dB (the 2026-10-08 audit). So,
+like the encoder's default:
+
+- a source whose profile has no native form is decoded in its own space and
+  re-encoded **tagged sRGB with the real profile in XMP** (`CreatorTool`
+  `ICC:`, the encoder's "skip") — the toolkit's decoder assigns it back; other
+  viewers show the numbers as sRGB, exactly as for an encoder "skip" file.
+  The same applies to the final encode of a derivative. Whether a profile has
+  a native form is probed once per run on a 16x16 image;
+- a source that already IS a lossy ICC blob is **never re-encoded**: it is
+  copied verbatim (`COPY (lossy ICC blob)`; in place it is left as it is);
+- a profile with A2B tables and no B2A is never a conversion **target**: a
+  "keep" derivative (resize/sharpen without `--output-icc`) of a lossy-blob
+  file with such a profile is refused, and so is `--output-icc` naming one.
+
+`jxlinfo` (shipped with libjxl) is used to skip the extra decode for files
+whose colour space is native; without it every file takes the careful route.
+
 ### Keep-smaller safety net
 
 After every re-encode the sizes are compared. If the new file is **not
@@ -201,18 +228,24 @@ for a true in-place run. Mode 0 accepts its own folder as output: it is flat,
 so that simply IS the in-place run. Modes 1/3/4/5/6/7 compute their own
 folders and ignore the output positional.
 
-**Overwriting a foreign output is loudly warned, never blocked.** In the
-folder-preserving modes (1 and 3) a sync/`--overwrite` run re-encodes over an
-existing output with no provenance gate — the source is authoritative on
-that path, and re-running is what regenerates it. If that output carries
-`jxlphoto-src:`/`jxlphoto-srcsum:` markers naming a DIFFERENT origin, the
-run logs a loud warning before replacing it. A markerless or unreadable
-output — the common case — says nothing: there is no cheap proof to
-arbitrate an arbitrary pair, so the check is advisory by design.
+**Overwriting a foreign output is refused, in every mode.** A sync/`--overwrite`
+run that would re-encode over an existing output whose
+`jxlphoto-src:`/`jxlphoto-srcsum:` markers name a DIFFERENT origin refuses it
+(`REFUSED | ... different origin`, exit 1, listed in the failures; previewed
+by `--dry-run`), with or without `--delete-source`. Until the 2026-10-08 audit
+this was only a warning, and only in modes 1/3 — but that output may be the
+only copy of another photo whose TIFF an earlier encoder run deleted, and a
+plain scheduled sync overwrote it (in the collapsing modes, with no warning
+at all). A markerless or unreadable output keeps the old behaviour (it is
+overwritten): there is nothing to compare. `--overwrite` does not override the
+refusal — rename one of the files or write into another folder (moved
+sources: `--provenance content`).
 
 ## Deleting the originals
 
-`--delete-source` removes each source JXL after its output is:
+`--delete-source` removes each source JXL — unless the JXL changed on disk
+since this run read it (it is then KEPT: its current version was never
+recompressed) — after its output is:
 
 1. written and verified at its **final** path (container box-chain walk), and
 2. for verbatim copies, **MD5-matched** against the source, and

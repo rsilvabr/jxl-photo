@@ -168,6 +168,46 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 
 
+# (size, mtime_ns) of every source as this run was about to READ it, keyed by
+# normcased absolute path. The delete gate runs only after the WHOLE pool has
+# drained — hours, on a big batch — and a source re-exported in that window
+# (an editor exporting into the tree, a scheduled run with Capture One open)
+# was deleted without its new version ever being read: the 2026-10-08 audit
+# reproduced it. Recorded when the work is handed to the pool; a source
+# changed between that and the read is kept too, which only errs on the safe
+# side. Cleared at the start of every run.
+_source_identity = {}
+
+
+def _record_source_identity(path) -> None:
+    """Remember a source's (size, mtime_ns) before this run reads it. The
+    first record wins: a multi-page file is read page by page."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    if key in _source_identity:
+        return
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _source_changed_since_read(path) -> bool:
+    """Is the file at `path` no longer the one this run recorded before
+    reading it (rewritten, re-exported or replaced since)? A vanished file
+    counts as changed. A source this run never recorded (an already-archived
+    one admitted by --delete-skipped, which was never read) returns False:
+    its own proof lives elsewhere in the gate."""
+    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
+    if rec is None:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    return (st.st_size, st.st_mtime_ns) != rec
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -233,73 +273,58 @@ def _abort_if_disk_full(write_dir, needed):
 def _promote_from_staging(write_path, final_path) -> bool:
     """Move one finished output out of staging. True when it landed.
 
-    A cross-volume move is copy-then-unlink, so an ENOSPC part way through
-    leaves a TRUNCATED file at the destination — with a fresh mtime. That is
-    the worst possible outcome: smart-sync compares timestamps, sees something
-    newer than the source, and skips the reconversion forever. The good copy is
-    still in staging, so removing whatever landed loses nothing and puts the
-    destination back to a state a later run will fix.
+    The move goes to a temp file IN THE DESTINATION FOLDER first and only then
+    over the final name with an atomic os.replace (E6/X3 of the 2026-10-08
+    audit). A plain shutil.move onto an existing output is copy2 + unlink on
+    Windows — even on one volume, since os.rename refuses an existing target —
+    and copy2 TRUNCATES the destination first: a kill or power cut mid-copy
+    left the old archive destroyed and a partial file with a fresh mtime that
+    smart sync then treats as up to date forever. Now the final name holds
+    either the old file or the complete new one, never a mix.
 
-    But "the move raised" does not mean "the destination is partial". The move
-    can fail BEFORE touching the destination (a read-only or locked
-    pre-existing file — that file is a perfectly good archive), and the copy
-    can SUCCEED with only the staging unlink failing (the destination then
-    holds the COMPLETE new output). Deleting either one destroys good data, so
-    the cleanup compares against an identity snapshot taken before the move
-    and removes the destination only when the move provably wrote to it AND
-    what it wrote is incomplete. When in doubt, the file is kept.
-
-    A destination volume that is simply FULL also has to stop the run rather
-    than produce one MOVE FAILED line per remaining file, which is what the
-    disk-full abort exists for.
+    When the move raises, what reached the temp decides: a COMPLETE copy (the
+    copy finished, only the staging unlink or the final rename failed) is put
+    in place — after a successful copy+unlink it may be the only copy left —
+    and a partial one is removed (the good copy is still in staging; the
+    destination was never touched). A destination volume that is simply FULL
+    also has to stop the run rather than produce one MOVE FAILED line per
+    remaining file, which is what the disk-full abort exists for.
     """
-    pre_identity = None
-    try:
-        _st = final_path.stat()
-        pre_identity = (_st.st_mtime_ns, _st.st_size)
-    except OSError:
-        pass
     try:
         size = write_path.stat().st_size
     except OSError:
         size = 0
+    tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(final_path))
+        shutil.move(str(write_path), str(tmp))
+        os.replace(str(tmp), str(final_path))
         return True
     except OSError as e:
         logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
                      f"{final_path} | {e}")
-        # Only when the staging copy survived: if it is gone the move actually
-        # completed and something else raised.
-        if write_path.exists() and final_path.exists():
-            try:
-                _st = final_path.stat()
-                written = (pre_identity is None
-                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
-                complete = size > 0 and _st.st_size == size
-            except OSError:
-                written, complete = False, False  # cannot tell → keep the file
-            if written and not complete:
+        try:
+            landed = tmp.stat().st_size if tmp.exists() else None
+        except OSError:
+            landed = None
+        if landed is not None:
+            if size > 0 and landed == size:
                 try:
-                    final_path.unlink()
-                    logger.error(
-                        f"    Removed the partial file left at the destination"
-                        + (" (it had OVERWRITTEN an existing output, which was already "
-                           "corrupt by then)" if pre_identity is not None else "")
-                        + " — the complete copy is still in staging.")
+                    os.replace(str(tmp), str(final_path))
+                    logger.error("    The copy itself finished — the destination now "
+                                 "holds the COMPLETE output.")
                 except OSError as e2:
-                    logger.error(f"    Could NOT remove the partial destination file "
-                                 f"({e2}). Delete {final_path} by hand before re-running: "
-                                 f"a later sync run would treat it as up to date.")
-            elif written:
-                logger.error(
-                    "    The destination holds a COMPLETE copy (the copy itself "
-                    "finished; only the staging cleanup failed) — keeping it.")
+                    logger.error(f"    The COMPLETE output is at {tmp}: rename it to "
+                                 f"{final_path.name} once the problem is fixed ({e2}).")
             else:
-                logger.error(
-                    "    The destination was never touched by the move "
-                    "(pre-existing file) — keeping it.")
+                try:
+                    tmp.unlink()
+                    logger.error("    Removed the partial copy; the destination was "
+                                 "never touched and the complete copy is still in "
+                                 "staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial copy {tmp} ({e2}); "
+                                 f"the destination itself was never touched.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -781,6 +806,9 @@ PROVENANCE_CHECK = "path"
 # "path"    -> an existing output is matched to the source replacing it by the
 #              recorded jxlphoto-src location id (free)
 # "content" -> also accepts a matching jxlphoto-srcsum (survives moved folders)
+# Every run refuses to OVERWRITE an existing output whose markers name a
+# different origin (a markerless one is overwritten as before); with
+# --delete-source in a collapsing mode every existing output must match.
 # There is no "adopt" here: recompressor outputs keep the source JXL's own
 # markers verbatim, so an archive made by jxl_tiff_encoder.py is provable as-is.
 
@@ -1651,15 +1679,22 @@ def _markers_match(out_info: dict, src_info: dict, mode_check: str = "path") -> 
 
     mode_check mirrors the other scripts' --provenance: "path" requires the
     recorded LOCATION (jxlphoto-src) to agree — the strict, documented default —
-    while "content" accepts a matching source-BYTES id (jxlphoto-srcsum), which
-    survives a moved folder. The flag used to be assigned and never read, so
-    path runs quietly accepted content-only matches.
+    while "content" ALSO accepts a matching source-BYTES id (jxlphoto-srcsum),
+    which survives a moved folder. The flag used to be assigned and never read,
+    so path runs quietly accepted content-only matches.
+
+    "content" is a SUPERSET of "path", exactly like _provenance_ok in the other
+    scripts and like the help says ("also accepts"): it used to compare the
+    srcsum ONLY, so a master re-exported in place (same path, new bytes) was
+    refused with content and accepted with path.
     """
+    if (out_info.get("src") and src_info.get("src")
+            and out_info["src"] == src_info["src"]):
+        return True
     if mode_check == "content":
         return bool(out_info.get("srcsum") and src_info.get("srcsum")
                     and out_info["srcsum"] == src_info["srcsum"])
-    return bool(out_info.get("src") and src_info.get("src")
-                and out_info["src"] == src_info["src"])
+    return False
 
 
 def _argfile_safe(value) -> str:
@@ -2862,6 +2897,258 @@ def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
     return a == b
 
 
+def _icc_a2b_only(icc) -> bool:
+    """Can this ICC profile NOT be a faithful conversion TARGET?
+
+    True for a profile with A2B tables and no B2A — an input (scanner)
+    profile such as the film scanner's SFprofT. It is a fine SOURCE (A2B0
+    takes its pixels to the PCS), but converting INTO it makes LittleCMS fall
+    back to the matrix/TRC, which is not the inverse of A2B0: a real scan came
+    back at 27 dB instead of ~49. A profile with B2A tables, or a plain
+    matrix/TRC one, is invertible. Unparsable -> False (no claim made).
+    """
+    try:
+        if not icc or len(icc) < 132:
+            return False
+        n = struct.unpack(">I", bytes(icc[128:132]))[0]
+        if n > 1000 or len(icc) < 132 + 12 * n:
+            return False
+        sigs = {bytes(icc[132 + 12 * i:136 + 12 * i]) for i in range(n)}
+    except Exception:
+        return False
+    has_a2b = bool(sigs & {b"A2B0", b"A2B1", b"A2B2"})
+    has_b2a = bool(sigs & {b"B2A0", b"B2A1", b"B2A2"})
+    return has_a2b and not has_b2a
+
+
+def _jxlinfo_colour(jxl_path: Path):
+    """('enum' | 'icc' | None, lossy True/False/None) from jxlinfo — a HEADER
+    read, no decode. 'enum' = the file's colour space has a native JXL form,
+    so cjxl straight from the JXL keeps it; 'icc' = the codestream carries an
+    ICC blob, which needs the careful route (_recompress_encode). None when
+    jxlinfo is missing or says something unexpected: the careful route then
+    decides from a real decode."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        return None, None
+    try:
+        r = _run_captured([exe, str(jxl_path)], CJXL_TIMEOUT, text=True)
+    except Exception:
+        return None, None
+    out = r.stdout or ""
+    if r.returncode != 0:
+        return None, None
+    kind = None
+    if re.search(r"^\d+-byte ICC profile", out, re.M):
+        kind = "icc"
+    elif re.search(r"^Color space:", out, re.M):
+        kind = "enum"
+    m = re.search(r"^JPEG XL image, [^,]*, (lossy|\(possibly\) lossless)", out, re.M)
+    lossy = None if not m else (m.group(1) == "lossy")
+    return kind, lossy
+
+
+# {(sha256 of the profile, grey): bool} — one tiny probe per profile per run.
+_native_icc_cache = {}
+
+
+def _tiny_png_with_icc(icc: bytes, grey: bool) -> bytes:
+    """A 16x16 16-bit PNG carrying `icc` in an iCCP chunk (a gradient, so the
+    encoder has something to encode)."""
+    import zlib
+    w = h = 16
+    ch = 1 if grey else 3
+    rows = []
+    for y in range(h):
+        row = bytearray(b"\x00")
+        for x in range(w):
+            for c in range(ch):
+                row += struct.pack(">H", (x * 4000 + y * 300 + c * 9000) % 65536)
+        rows.append(bytes(row))
+
+    def chunk(t, data):
+        return (struct.pack(">I", len(data)) + t + data
+                + struct.pack(">I", zlib.crc32(t + data) & 0xFFFFFFFF))
+    ihdr = struct.pack(">IIBBBBB", w, h, 16, 0 if grey else 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"iCCP", b"icc\x00\x00" + zlib.compress(icc))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows)))
+            + chunk(b"IEND", b""))
+
+
+def _icc_has_native_form(icc: bytes, grey: bool) -> bool:
+    """Does a LOSSY encode keep pixels carrying this profile in the profile's
+    own space? Probed on a 16x16 image (cjxl -d 1, then djxl's
+    --icc_out/--orig_icc_out) and cached per profile. False means cjxl would
+    store it as an ICC blob, which djxl (and cjxl reading it back) returns as
+    LINEAR sRGB. Any failure reads False: the caller then encodes the pixels
+    tagged sRGB with the profile in XMP (the encoder's "skip"), which the
+    toolkit always decodes correctly."""
+    key = (hashlib.sha256(icc).hexdigest(), bool(grey))
+    hit = _native_icc_cache.get(key)
+    if hit is not None:
+        return hit
+    native = False
+    try:
+        with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+            tmp = Path(tmp)
+            png, jxl, dec = tmp / "probe.png", tmp / "probe.jxl", tmp / "probe_dec.png"
+            png.write_bytes(_tiny_png_with_icc(icc, grey))
+            r = _run_captured([_get_cjxl_cmd() or "cjxl", str(png), str(jxl),
+                               "-d", "1", "--effort", "1"], CJXL_TIMEOUT)
+            if r.returncode == 0 and jxl.exists():
+                icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
+                r = _run_captured(["djxl", str(jxl), str(dec)] + icc_args, CJXL_TIMEOUT)
+                if r.returncode == 0:
+                    native = _decoded_in_original_space(out_icc, orig_icc) is True
+    except Exception:
+        native = False
+    _native_icc_cache[key] = native
+    return native
+
+
+def _png_iccp(png_path: Path):
+    """The ICC profile in a PNG's iCCP chunk (decompressed), or None. Reads
+    chunk headers only up to the first IDAT."""
+    import zlib
+    try:
+        with open(png_path, "rb") as f:
+            if f.read(8) != b"\x89PNG\r\n\x1a\n":
+                return None
+            while True:
+                head = f.read(8)
+                if len(head) < 8:
+                    return None
+                n = struct.unpack(">I", head[:4])[0]
+                t = head[4:8]
+                if t == b"IDAT":
+                    return None
+                if t == b"iCCP":
+                    data = f.read(n)
+                    sep = data.index(b"\x00")
+                    return zlib.decompress(data[sep + 2:])
+                f.seek(n + 4, 1)
+    except Exception:
+        return None
+
+
+def _png_without_colour_chunks(src: Path, dst: Path) -> None:
+    """Copy a PNG dropping iCCP/sRGB/gAMA/cHRM/cICP: cjxl then reads the
+    pixels as sRGB and keeps their numbers — the encoder's "skip" layout,
+    with the real profile carried in XMP CreatorTool."""
+    drop = {b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP"}
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        sig = fi.read(8)
+        if sig != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError(f"not a PNG: {src}")
+        fo.write(sig)
+        while True:
+            head = fi.read(8)
+            if len(head) < 8:
+                break
+            n = struct.unpack(">I", head[:4])[0]
+            t = head[4:8]
+            if t in drop:
+                fi.seek(n + 4, 1)
+                continue
+            fo.write(head)
+            remaining = n + 4
+            while remaining:
+                block = fi.read(min(remaining, 1 << 20))
+                if not block:
+                    raise RuntimeError(f"truncated PNG: {src}")
+                fo.write(block)
+                remaining -= len(block)
+            if t == b"IEND":
+                break
+
+
+def _skip_icc_creator_line(jxl_path: Path, skip_icc: bytes) -> list:
+    """[] when the source's CreatorTool already records an ICC (the toolkit
+    decoder assigns THAT one, so it keeps describing the pixels exactly as it
+    did for the source), else the line that records `skip_icc` there — the
+    output's pixels are tagged sRGB and would otherwise lose their profile."""
+    creator, _tokens = _read_creator_and_relation(jxl_path)
+    if _xmp_icc_from_creator_tool(creator):
+        return []
+    b64 = base64.b64encode(skip_icc).decode("ascii")
+    base = creator.strip()
+    return ["-XMP-xmp:CreatorTool=" + _argfile_safe(f"{base} | ICC:{b64}" if base
+                                                    else f"ICC:{b64}")]
+
+
+def _keep_invisible_flag() -> list:
+    """--keep_invisible=1 for every LOSSY encode (E4 of the 2026-10-08 audit).
+    A 2nd/4th channel reaches cjxl as alpha, and lossy cjxl otherwise rewrites
+    the colour wherever it is 0 — for an RGB+IR scan kept as 4 channels, real
+    image under the dust. A no-op for files without such a channel, and the
+    channel count of a JXL is not known here without a decode."""
+    return ["--keep_invisible=1"] if CJXL_DISTANCE > 0 else []
+
+
+def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
+    """The plain (non-derivative) recompression, colour-safe.
+
+    `cjxl src.jxl out.jxl` is right whenever the source's colour space has a
+    native JXL form. It is NOT for a profile without one (table curves,
+    scanner LUTs — the real film scans' SFprofT, A2B-only):
+      * a LOSSLESS source re-encoded lossy became a "lossy ICC blob", which
+        the toolkit decodes through linear sRGB — 27 dB on a real scan;
+      * a source that already IS a lossy ICC blob is read by cjxl as LINEAR
+        sRGB and written as native linear sRGB with the old ICC still in XMP
+        — 18 dB on the real scan, 14 dB synthetic.
+    So (mirroring the encoder): a lossy-blob source is never converted (the
+    caller copies it verbatim); a source whose profile has no native form is
+    decoded in its own space and encoded WITHOUT the profile (pixels tagged
+    sRGB, profile in XMP — the encoder's "skip"); everything else goes
+    straight through cjxl as before.
+
+    Returns (route, skip_icc): route "encoded" (write_path written) or "blob"
+    (nothing written); skip_icc = the profile the pixels are in when they were
+    encoded tagged sRGB, else None.
+    """
+    def _cjxl(inp):
+        cmd = ([_get_cjxl_cmd() or "cjxl", str(inp), str(write_path),
+                "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
+                # --container=1 UNCONDITIONALLY: a bare-codestream output is
+                # refused by the exiftool restamp ("Will wrap JXL codestream").
+                "--container=1"] + _keep_invisible_flag() + _cjxl_buffering_flag())
+        r = _run_captured(cmd, CJXL_TIMEOUT)
+        if r.returncode != 0:
+            raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
+
+    kind, _lossy = _jxlinfo_colour(jxl_path)
+    if kind == "enum":
+        _cjxl(jxl_path)
+        return "encoded", None
+    with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
+        tmp = Path(tmp)
+        dec = tmp / "dec.png"
+        icc_args, out_icc, orig_icc = _djxl_icc_args(tmp)
+        r = _run_captured(["djxl", str(jxl_path), str(dec)] + icc_args, CJXL_TIMEOUT)
+        if r.returncode != 0 or not dec.exists():
+            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+        same = _decoded_in_original_space(out_icc, orig_icc)
+        if same is False:
+            return "blob", None
+        if same is None:
+            raise RuntimeError("djxl did not report the decoded and original colour "
+                               "spaces (--icc_out/--orig_icc_out), so nothing proves "
+                               "a re-encode keeps the colours — refusing")
+        icc = orig_icc.read_bytes()
+        grey = bytes(icc[16:20]) == b"GRAY"
+        if CJXL_DISTANCE == 0 or _icc_has_native_form(icc, grey):
+            _cjxl(jxl_path)
+            return "encoded", None
+        skip_png = tmp / "skip.png"
+        _png_without_colour_chunks(dec, skip_png)
+        _cjxl(skip_png)
+        logger.info(f"  >Profile with no native JXL form: re-encoded tagged sRGB "
+                    f"with the profile kept in XMP (the encoder's 'skip') | "
+                    f"{jxl_path.name}")
+        return "encoded", icc
+
+
 def _png_is_grayscale(png_path: Path) -> bool:
     """True when the PNG djxl just wrote is single-channel (colour type 0 or 4).
 
@@ -3120,9 +3407,17 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     float PFM decode with djxl's profile assigned, converted to the target —
     and a grey one back to its own grey profile.
 
-    Returns (converted, size): converted True only for a colour conversion
-    (CreatorTool then carries the TARGET profile); size is the resized (w, h)
-    or None. _derivative_metadata_args takes both instead of guessing again
+    A profile with no native JXL form (table curves, scanner LUTs) would be
+    written as a lossy ICC blob, which the toolkit decodes through linear
+    sRGB: the encoded image is then the pixels tagged sRGB with the profile in
+    XMP (the encoder's "skip"), and skip_icc names that profile. A conversion
+    INTO an A2B-only profile (input/scanner profile, no B2A) is refused: it
+    cannot be done faithfully.
+
+    Returns (converted, size, skip_icc): converted True only for a colour
+    conversion (CreatorTool then carries the TARGET profile); size is the
+    resized (w, h) or None; skip_icc the profile bytes when the pixels were
+    encoded tagged sRGB, else None. _derivative_metadata_args takes both instead of guessing again
     from the jxlphoto-grayscale marker: a grey JXL that does not carry the
     marker (not written by this toolkit) was left unconverted here but got the
     RGB target profile stamped into its CreatorTool.
@@ -3181,6 +3476,8 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # the file's own grey profile (djxl's --orig_icc_out: always
                 # single-channel, unlike an XMP ICC that could be RGB). The
                 # copied CreatorTool keeps describing these pixels.
+                if _icc_a2b_only(orig_icc.read_bytes()):
+                    raise RuntimeError(_A2B_ONLY_TARGET_MSG)
                 args += ["-intent", "Relative", "-black-point-compensation",
                          "-profile", str(orig_icc)]
                 out_profile = orig_icc
@@ -3204,6 +3501,8 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                             orig_path.write_bytes(src_icc)
                         else:
                             orig_path = orig_icc
+                        if _icc_a2b_only(orig_path.read_bytes()):
+                            raise RuntimeError(_A2B_ONLY_TARGET_MSG)
                         args += ["-intent", "Relative", "-black-point-compensation",
                                  "-profile", str(orig_path)]
                         out_profile = orig_path
@@ -3263,14 +3562,37 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 raise RuntimeError("ImageMagick wrote the converted image without its ICC "
                                    "profile — refusing to encode it as the wrong colour space")
             enc_in = conv_png
+        skip_icc = None
+        if CJXL_DISTANCE > 0:
+            _icc_in = _png_iccp(enc_in)
+            if _icc_in and not _icc_has_native_form(
+                    _icc_in, bytes(_icc_in[16:20]) == b"GRAY"):
+                # R1 (2026-10-08 audit): with the profile in iCCP cjxl would
+                # write a lossy ICC blob — read back through linear sRGB (27 dB
+                # on a real scan with its A2B-only profile). Encode the pixels
+                # tagged sRGB instead; the profile rides in XMP CreatorTool.
+                skip_png = tmp / "skip.png"
+                _png_without_colour_chunks(enc_in, skip_png)
+                enc_in = skip_png
+                skip_icc = _icc_in
+                logger.info(f"  >Profile with no native JXL form: derivative encoded "
+                            f"tagged sRGB with the profile kept in XMP | {jxl_path.name}")
         cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(enc_in), str(write_path),
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
-                    + _cjxl_buffering_flag())
+                    + _keep_invisible_flag() + _cjxl_buffering_flag())
         r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
-    return converted, size
+    return converted, size, skip_icc
+
+
+_A2B_ONLY_TARGET_MSG = (
+    "this lossy file stores an ICC blob whose profile has A2B tables but no B2A "
+    "(an input/scanner profile): its pixels decode as linear sRGB and nothing can "
+    "convert them back INTO that profile faithfully (the way back falls to the "
+    "matrix/TRC — 27 dB on a real scan). Derive from the lossless master, or "
+    "with --output-icc to a working space such as sRGB")
 
 
 def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
@@ -3367,23 +3689,39 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # action == "convert"
         write_path.parent.mkdir(parents=True, exist_ok=True)
         output_dirty = True
+        skip_icc = None
         if DERIVATIVE:
             # djxl -> magick (recipe) -> cjxl; returns (converted, size|None)
-            converted, size = _derive_pixels(jxl_path, write_path)
+            converted, size, skip_icc = _derive_pixels(jxl_path, write_path)
         else:
             converted, size = True, None
-            # --container=1 UNCONDITIONALLY: at d=0 the gate used to omit it, so a
-            # bare-codestream source (any third-party JXL) produced a bare output
-            # that the exiftool restamp below refuses to edit ("Will wrap JXL
-            # codestream in ISO BMFF container for writing") — a guaranteed ERROR
-            # per file. Wrapping an already-container input costs nothing.
-            container_flag = ["--container=1"]
-            cjxl_cmd = ([_get_cjxl_cmd() or "cjxl", str(jxl_path), str(write_path),
-                         "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)]
-                        + container_flag + _cjxl_buffering_flag())
-            r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
-            if r.returncode != 0:
-                raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
+            # --container=1 UNCONDITIONALLY (inside _recompress_encode): at d=0
+            # the gate used to omit it, so a bare-codestream source (any
+            # third-party JXL) produced a bare output that the exiftool restamp
+            # below refuses to edit — a guaranteed ERROR per file.
+            route, skip_icc = _recompress_encode(jxl_path, write_path)
+            if route == "blob":
+                # A lossy file carrying an ICC blob: any re-encode reads it as
+                # LINEAR sRGB and the colours are lost (R1 of the 2026-10-08
+                # audit). Never convert it — keep the bytes, exactly like the
+                # downgrade/jbrd "copy" policy.
+                logger.warning(f"  >Lossy file with an ICC blob: a re-encode would "
+                               f"go through linear sRGB and lose the colours — "
+                               f"copied verbatim instead | {jxl_path.name}")
+                if in_place:
+                    try:
+                        write_path.unlink()
+                    except OSError:
+                        pass
+                    logger.info(f"[{n}/{total}] SKIP (lossy ICC blob: kept as it is) "
+                                f"| {jxl_path.name}")
+                    return (str(jxl_path), "skipped", str(final_path))
+                shutil.copy2(str(jxl_path), str(write_path))
+                if not _verify_jxl_integrity(write_path):
+                    raise RuntimeError("copied file failed the JXL integrity check")
+                logger.info(f"[{n}/{total}] COPY (lossy ICC blob) | {jxl_path.name} "
+                            f"-> {final_path.name}")
+                return (str(jxl_path), "copied", str(final_path))
 
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
         # in CreatorTool, jxlphoto-* provenance and multi-page group markers)
@@ -3396,6 +3734,11 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # with the boxes reordered — the encoder's outputs use plain boxes.
         _extra = (_derivative_metadata_args(jxl_path, converted, size)
                   if DERIVATIVE else [])
+        if skip_icc is not None and not (DERIVATIVE and converted):
+            # The pixels are tagged sRGB; their real profile must reach the
+            # XMP the decoder reads (already there for every encoder output;
+            # a colour-converted derivative gets the TARGET profile above).
+            _extra = _extra + _skip_icc_creator_line(jxl_path, skip_icc)
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
              "-tagsfromfile", str(jxl_path),
@@ -3487,6 +3830,7 @@ def process_group(items, workers: int):
     staging_used = TEMP2_DIR is not None
 
     def _submit(ex, it):
+        _record_source_identity(it["src"])      # X2: before anything reads it
         return ex.submit(convert_one, it["src"], it["write"], it["final"],
                          it["action"], it["in_place"], it["desc"],
                          it["software"], it["src_d"])
@@ -3773,17 +4117,19 @@ def _read_mpg_markers(paths: list):
     return mpg, complete
 
 
-def _warn_foreign_overwrite(items):
-    """WARN when the run is about to overwrite an existing output whose
-    provenance markers name a DIFFERENT origin.
+def _foreign_overwrite_refusals(items):
+    """[(item, reason)] for every item this run is about to OVERWRITE onto an
+    existing output whose provenance markers name a DIFFERENT origin.
 
-    In the folder-preserving modes (1/3) an existing output is re-encoded over
-    on smart sync (source newer) or with --overwrite; that path carries no
-    provenance gate, so an output left there by another origin used to be
-    replaced in silence. There is no cheap proof to arbitrate — the source is
-    authoritative on the overwrite path (re-running regenerates by contract) —
-    so this is a loud note, never a block. A markerless or unreadable output is
-    the common case and says nothing.
+    This used to be a warning, and only in the folder-preserving modes: "the
+    source is authoritative on the overwrite path". That holds for the NEW
+    source only. The existing output may be the archive of a photo whose TIFF
+    an earlier encoder run deleted — then a plain sync with no deletion (every
+    scheduled preset is one) overwrote that photo's only file, with no
+    warning at all in the collapsing modes where same-named sources meet
+    (#268's missing half). So it is a refusal now, in every mode. A markerless
+    or unreadable output keeps the old behaviour: nothing to compare, and
+    refusing would block every archive written before the markers existed.
     """
     targets = [it for it in items
                if not it["in_place"]
@@ -3791,18 +4137,25 @@ def _warn_foreign_overwrite(items):
                and it["final"].exists()
                and not _would_skip(it["src"], it["final"])]
     if not targets:
-        return
+        return []
     marks = _read_source_markers_batch(
         [it["final"] for it in targets] + [it["src"] for it in targets])
+    refused = []
     for it in targets:
         out_info = marks.get(str(it["final"])) or {"src": None, "srcsum": None}
         src_info = marks.get(str(it["src"])) or {"src": None, "srcsum": None}
         if out_info.get("src") is None and out_info.get("srcsum") is None:
             continue    # markerless (or unreadable): nothing to compare
         if not _markers_match(out_info, src_info, PROVENANCE_CHECK):
-            logger.warning(
-                f"Overwriting {it['final']} — its provenance markers name a "
-                f"different origin ({out_info.get('src') or out_info.get('srcsum')})")
+            refused.append((it, (
+                f"the existing output's provenance markers name a different origin "
+                f"({out_info.get('src') or out_info.get('srcsum')}) — it is another "
+                f"photo's archive, and overwriting it would destroy that photo if "
+                f"its TIFF was already deleted; rename one of them or write into "
+                f"another folder"
+                + ("" if PROVENANCE_CHECK == "content" else
+                   " (if the sources MOVED, re-run with --provenance content)"))))
+    return refused
 
 
 def _hold_incomplete_in_place_groups(items):
@@ -3934,7 +4287,9 @@ def _delete_gate(items, results, promoted):
                               "not converted in this run", False))
             continue
         ok, reason = True, ""
-        if not final_path.exists():
+        if _source_changed_since_read(src):
+            ok, reason = False, "source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived"
+        elif not final_path.exists():
             ok, reason = False, "output missing"
         elif not _verify_jxl_integrity(final_path):
             ok, reason = False, "output failed integrity check"
@@ -4264,7 +4619,11 @@ def main():
                              "charges its own and passes this)")
     parser.add_argument("--provenance", default=None, choices=["path", "content"],
                         help="How an existing output is matched to the source replacing "
-                             "it when --delete-source runs in a collapsing mode")
+                             "it. Every run refuses to overwrite an output whose markers "
+                             "name a DIFFERENT origin; with --delete-source in a "
+                             "collapsing mode every existing output must also match. "
+                             "path (default) compares the recorded location; content "
+                             "also accepts matching source bytes (moved folders)")
     parser.add_argument("--staging", type=str, default=None,
                         help="Staging directory (fast SSD); overrides the TEMP2_DIR setting")
     parser.add_argument("--clean-staging", action="store_true",
@@ -4363,20 +4722,24 @@ def main():
         print("WARNING: --delete-skipped has no effect without --delete-source: it only "
               "widens which sources the deletion covers. Nothing will be deleted.")
         DELETE_SKIPPED = False
-    if args.provenance is not None and not DELETE_SOURCE:
-        # Same spirit as the --delete-skipped warning above: --provenance is
-        # only READ by the cross-run provenance gate, which runs solely under
-        # --delete-source in a folder-collapsing mode. Armed alone it used to
-        # sit silently inert while the user believed their archive was guarded.
-        print("WARNING: --provenance has no effect without --delete-source: it only "
-              "checks an existing output's provenance before that source is "
-              "deleted. Nothing will be checked.")
+    # (No "--provenance has no effect without --delete-source" warning any
+    # more: since the 2026-10-08 audit every run that overwrites an existing
+    # output checks its provenance first — _foreign_overwrite_refusals — and
+    # this script's default is the smart sync, which does overwrite.)
 
     if OUTPUT_ICC:
         try:
             _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES = _resolve_output_icc(OUTPUT_ICC)
         except ValueError as e:
             parser.error(str(e))
+        if _icc_a2b_only(_OUTPUT_ICC_BYTES):
+            # An input (scanner/camera) profile with A2B tables and no B2A:
+            # converting INTO it falls back to its matrix/TRC, which is not the
+            # inverse of A2B0 — the derivative's colours would be wrong.
+            parser.error(f"--output-icc {OUTPUT_ICC}: this profile has A2B tables "
+                         f"but no B2A (an input/scanner profile), so nothing can be "
+                         f"converted INTO it faithfully — pick an output/working "
+                         f"space profile (sRGB, AdobeRGB, ProPhoto, ...)")
 
     # --resize-*/--sharpen: resolve to module globals (mutual exclusion is
     # charged by argparse itself; the positivity checks exit 2 like the other
@@ -4461,6 +4824,7 @@ def main():
 
     log_file = setup_logger()
     _reset_abort()
+    _source_identity.clear()
     # Same placement as the encoder (#431): the progress counter is per-run
     # state and _reset_abort is kept as the delete-stats-only helper, so the
     # zeroing lives here. Without it a second in-process run showed [N+1/total].
@@ -4891,19 +5255,32 @@ def main():
                 if not args.dry_run:
                     items = [it for it in items if id(it) not in refused_ids]
                     provenance_refused = refused
+    else:
+        # Every other run: an output about to be OVERWRITTEN whose markers
+        # name a DIFFERENT origin is refused (see _foreign_overwrite_refusals).
+        # Same bookkeeping as above, so a refused page still vetoes the
+        # deletion of its multi-page siblings.
+        _foreign = _foreign_overwrite_refusals(items)
+        if _foreign:
+            refused = []
+            for it, reason in _foreign:
+                refused.append(it)
+                failures.append((str(it["src"]), reason))
+                if args.dry_run:
+                    logger.info(f" DRY | would REFUSE | {it['src'].name} | {reason}")
+                else:
+                    logger.error(f"REFUSED | {it['src'].name} | {reason}")
+                    _log_rejected_file(str(it["src"]), f"provenance: {reason}")
+            refused_ids = {id(it) for it in refused}
+            if not args.dry_run:
+                items = [it for it in items if id(it) not in refused_ids]
+                provenance_refused = refused
 
     # In-place multi-page documents are replaced all-or-nothing: a page that
     # cannot take part must hold the whole group (process_group also vetoes a
     # page that fails at CONVERSION time). Runs in a dry run too, so the preview
     # matches the real run.
     _hold_incomplete_in_place_groups(items)
-
-    # R-1: the folder-preserving modes re-encode over an existing output with no
-    # provenance gate; if that output's markers name a different origin, say so
-    # loudly. Warn only — the source is authoritative on the overwrite path.
-    if not args.dry_run and not _run_collapses_structure(
-            args.mode, args.output, args.input):
-        _warn_foreign_overwrite(items)
 
     _t_outputs = time.monotonic() - _t_out0
     logger.info(f"Planned in {_fmt_secs(_t_records + _t_jbrd + _t_outputs)} "

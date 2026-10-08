@@ -76,7 +76,7 @@ def test_would_skip_group_is_false_for_a_refused_master(tmp_path, monkeypatch):
     final.write_bytes(b"master")
     os.utime(final, (final.stat().st_mtime - 100,) * 2)
     monkeypatch.setattr(dec, "OVERWRITE", "smart")
-    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p: False)
+    monkeypatch.setattr(dec, "_decode_output_is_ours", lambda p, *_a, **_k: False)
     assert dec._would_skip_group([(src, 0, False, False, 0, False, None)], final) is False
 
 

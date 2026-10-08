@@ -42,6 +42,77 @@ import time
 from typing import Optional
 
 
+def _jpeg_main_eoi(file_path: Path) -> bool:
+    """Does this JPEG reach the EOI of its MAIN image?
+
+    Walks the marker chain from the SOI: segments with a length (APPn — where
+    an EXIF thumbnail with its own SOI/EOI lives —, DQT, DHT, SOFn, COM, ...)
+    are skipped by that length; after each SOS the entropy-coded data is
+    scanned for the next real marker (FF00 stuffing, RSTn and fill bytes are
+    part of the data). True only on reaching EOI; a file that ends first, or
+    whose structure breaks, is truncated or broken. Bytes after the EOI
+    (Motion Photo payloads, appended data) are fine: they are never read.
+    """
+    import mmap
+    try:
+        if file_path.stat().st_size < 4:
+            return False
+        with open(file_path, "rb") as f, \
+                mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            n = len(m)
+            if m[0:2] != b"\xff\xd8":
+                return False
+            i = 2
+            while True:
+                if i >= n:
+                    return False
+                if m[i] != 0xFF:
+                    # Extraneous bytes between segments: decoders skip them
+                    # to the next 0xFF ("Corrupt JPEG data: N extraneous
+                    # bytes before marker"), and a bit-exact reconstruction
+                    # carries them over — resync instead of refusing.
+                    i = m.find(b"\xff", i)
+                    if i < 0:
+                        return False
+                while i < n and m[i] == 0xFF:      # fill bytes before a marker
+                    i += 1
+                if i >= n:
+                    return False
+                marker = m[i]
+                i += 1
+                if marker == 0x00:                 # not a marker: keep resyncing
+                    continue
+                if marker == 0xD9:                 # EOI of the main image
+                    return True
+                if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                    continue                       # TEM / RSTn: no length
+                if i + 2 > n:
+                    return False
+                seglen = (m[i] << 8) | m[i + 1]
+                if seglen < 2:
+                    return False
+                i += seglen
+                if i > n:
+                    return False
+                if marker != 0xDA:                 # not SOS: next segment
+                    continue
+                while True:                        # entropy-coded data
+                    j = m.find(b"\xff", i)
+                    if j < 0 or j + 1 >= n:
+                        return False
+                    nxt = m[j + 1]
+                    if nxt == 0x00 or 0xD0 <= nxt <= 0xD7:
+                        i = j + 2                  # stuffing / restart marker
+                        continue
+                    if nxt == 0xFF:
+                        i = j + 1                  # fill byte: look again
+                        continue
+                    i = j                          # a real marker ends the scan
+                    break
+    except (OSError, ValueError):
+        return False
+
+
 def _verify_file_integrity(file_path: Path) -> bool:
     """Verify output file integrity before deleting source.
 
@@ -51,7 +122,9 @@ def _verify_file_integrity(file_path: Path) -> bool:
     extension for the rest (a bare ".tmp" of unknown kind refuses — no
     false pass for garbage):
     - JXL: Valid JXL signature + well-formed box chain ending at EOF
-    - JPEG: Valid SOI + an EOI at the logical end (trailer-after-EOI is OK)
+    - JPEG: Valid SOI + the EOI that closes the MAIN image, found by walking
+      the segment chain (an EXIF thumbnail's EOI does not count;
+      trailer-after-EOI is OK)
     - PNG: Valid PNG signature + IEND in the tail
     - TIFF: Valid TIFF header + readable last pixel
     """
@@ -137,21 +210,17 @@ def _verify_file_integrity(file_path: Path) -> bool:
             # perfect, yet this check refused both the JPEG and the recovered
             # copy of it (2026-09-21 audit, item 2). Trailer-after-EOI is
             # legitimate; no EOI anywhere is not.
+            #
+            # "An EOI anywhere" was not enough, though (T2 of the 2026-10-08
+            # audit): the EXIF thumbnail inside APP1 is a whole JPEG with its
+            # own EOI near the START of the file, so a real camera JPEG cut in
+            # half still passed. The EOI must be the one that closes the MAIN
+            # image: _jpeg_main_eoi walks the segment chain from the SOI
+            # (APPn and friends skipped by their length, entropy-coded data
+            # scanned for its terminating marker).
             if header[0:2] != b'\xff\xd8':
                 return False
-            with open(file_path, 'rb') as f:
-                _CHUNK = 1 << 20
-                pos = stat.st_size
-                carry = b""     # bytes already covered by the previous (later) chunk
-                while pos > 2:
-                    step = min(_CHUNK, pos - 2)
-                    pos -= step
-                    f.seek(pos)
-                    buf = f.read(step)
-                    if b'\xff\xd9' in buf + carry:
-                        return True
-                    carry = buf[:1]  # an EOI can straddle the chunk boundary
-                return False
+            return _jpeg_main_eoi(file_path)
 
         elif _is_png:
             # PNG signature AND the IEND chunk closing the stream (search the
@@ -234,6 +303,46 @@ _abort_lock = threading.Lock()
 _abort_reason = None
 
 
+# (size, mtime_ns) of every source as this run was about to READ it, keyed by
+# normcased absolute path. The delete gate runs only after the WHOLE pool has
+# drained — hours, on a big batch — and a source re-exported in that window
+# (an editor exporting into the tree, a scheduled run with Capture One open)
+# was deleted without its new version ever being read: the 2026-10-08 audit
+# reproduced it. Recorded when the work is handed to the pool; a source
+# changed between that and the read is kept too, which only errs on the safe
+# side. Cleared at the start of every run.
+_source_identity = {}
+
+
+def _record_source_identity(path) -> None:
+    """Remember a source's (size, mtime_ns) before this run reads it. The
+    first record wins: a multi-page file is read page by page."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    if key in _source_identity:
+        return
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _source_changed_since_read(path) -> bool:
+    """Is the file at `path` no longer the one this run recorded before
+    reading it (rewritten, re-exported or replaced since)? A vanished file
+    counts as changed. A source this run never recorded (an already-archived
+    one admitted by --delete-skipped, which was never read) returns False:
+    its own proof lives elsewhere in the gate."""
+    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
+    if rec is None:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    return (st.st_size, st.st_mtime_ns) != rec
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -299,73 +408,58 @@ def _abort_if_disk_full(write_dir, needed):
 def _promote_from_staging(write_path, final_path) -> bool:
     """Move one finished output out of staging. True when it landed.
 
-    A cross-volume move is copy-then-unlink, so an ENOSPC part way through
-    leaves a TRUNCATED file at the destination — with a fresh mtime. That is
-    the worst possible outcome: smart-sync compares timestamps, sees something
-    newer than the source, and skips the reconversion forever. The good copy is
-    still in staging, so removing whatever landed loses nothing and puts the
-    destination back to a state a later run will fix.
+    The move goes to a temp file IN THE DESTINATION FOLDER first and only then
+    over the final name with an atomic os.replace (E6/X3 of the 2026-10-08
+    audit). A plain shutil.move onto an existing output is copy2 + unlink on
+    Windows — even on one volume, since os.rename refuses an existing target —
+    and copy2 TRUNCATES the destination first: a kill or power cut mid-copy
+    left the old archive destroyed and a partial file with a fresh mtime that
+    smart sync then treats as up to date forever. Now the final name holds
+    either the old file or the complete new one, never a mix.
 
-    But "the move raised" does not mean "the destination is partial". The move
-    can fail BEFORE touching the destination (a read-only or locked
-    pre-existing file — that file is a perfectly good archive), and the copy
-    can SUCCEED with only the staging unlink failing (the destination then
-    holds the COMPLETE new output). Deleting either one destroys good data, so
-    the cleanup compares against an identity snapshot taken before the move
-    and removes the destination only when the move provably wrote to it AND
-    what it wrote is incomplete. When in doubt, the file is kept.
-
-    A destination volume that is simply FULL also has to stop the run rather
-    than produce one MOVE FAILED line per remaining file, which is what the
-    disk-full abort exists for.
+    When the move raises, what reached the temp decides: a COMPLETE copy (the
+    copy finished, only the staging unlink or the final rename failed) is put
+    in place — after a successful copy+unlink it may be the only copy left —
+    and a partial one is removed (the good copy is still in staging; the
+    destination was never touched). A destination volume that is simply FULL
+    also has to stop the run rather than produce one MOVE FAILED line per
+    remaining file, which is what the disk-full abort exists for.
     """
-    pre_identity = None
-    try:
-        _st = final_path.stat()
-        pre_identity = (_st.st_mtime_ns, _st.st_size)
-    except OSError:
-        pass
     try:
         size = write_path.stat().st_size
     except OSError:
         size = 0
+    tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
     try:
         final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(final_path))
+        shutil.move(str(write_path), str(tmp))
+        os.replace(str(tmp), str(final_path))
         return True
     except OSError as e:
         logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
                      f"{final_path} | {e}")
-        # Only when the staging copy survived: if it is gone the move actually
-        # completed and something else raised.
-        if write_path.exists() and final_path.exists():
-            try:
-                _st = final_path.stat()
-                written = (pre_identity is None
-                           or (_st.st_mtime_ns, _st.st_size) != pre_identity)
-                complete = size > 0 and _st.st_size == size
-            except OSError:
-                written, complete = False, False  # cannot tell → keep the file
-            if written and not complete:
+        try:
+            landed = tmp.stat().st_size if tmp.exists() else None
+        except OSError:
+            landed = None
+        if landed is not None:
+            if size > 0 and landed == size:
                 try:
-                    final_path.unlink()
-                    logger.error(
-                        f"    Removed the partial file left at the destination"
-                        + (" (it had OVERWRITTEN an existing output, which was already "
-                           "corrupt by then)" if pre_identity is not None else "")
-                        + " — the complete copy is still in staging.")
+                    os.replace(str(tmp), str(final_path))
+                    logger.error("    The copy itself finished — the destination now "
+                                 "holds the COMPLETE output.")
                 except OSError as e2:
-                    logger.error(f"    Could NOT remove the partial destination file "
-                                 f"({e2}). Delete {final_path} by hand before re-running: "
-                                 f"a later sync run would treat it as up to date.")
-            elif written:
-                logger.error(
-                    "    The destination holds a COMPLETE copy (the copy itself "
-                    "finished; only the staging cleanup failed) — keeping it.")
+                    logger.error(f"    The COMPLETE output is at {tmp}: rename it to "
+                                 f"{final_path.name} once the problem is fixed ({e2}).")
             else:
-                logger.error(
-                    "    The destination was never touched by the move "
-                    "(pre-existing file) — keeping it.")
+                try:
+                    tmp.unlink()
+                    logger.error("    Removed the partial copy; the destination was "
+                                 "never touched and the complete copy is still in "
+                                 "staging.")
+                except OSError as e2:
+                    logger.error(f"    Could NOT remove the partial copy {tmp} ({e2}); "
+                                 f"the destination itself was never touched.")
         _abort_if_disk_full(final_path.parent, size)
         return False
 
@@ -636,10 +730,14 @@ STORE_MD5 = True
 # Store MD5 checksums during transcode encode (for verify during decode)
 
 PROVENANCE_CHECK = "path"
-# [with DELETE_SOURCE, modes 2/4/5/6/7] How an EXISTING output is matched to
-# the source about to replace it. Those modes drop folder structure, so two
-# sources in different folders resolve to the same output; without this a
-# second run overwrote the first archive and deleted both originals.
+# How an EXISTING output is matched to the source about to replace it.
+# With DELETE_SOURCE in modes 2/4/5/6/7 (which drop folder structure, so two
+# sources in different folders resolve to the same output) EVERY existing
+# output must prove it came from this source; without this a second run
+# overwrote the first archive and deleted both originals. Every other
+# --sync/--overwrite run still refuses to overwrite an output that is
+# provably another source's (see _foreign_overwrite_filter): the overwrite is
+# the loss when an earlier run already deleted that other source (#268).
 # "path" (default) compares the recorded LOCATION; "content" also accepts
 # matching source bytes, so it survives MOVED folders. See _provenance_ok.
 #
@@ -670,10 +768,13 @@ DELETE_SKIPPED = False
 #     keyed by the OUTPUT's name, so provenance can be PROVEN: hash the source
 #     and compare. That is stronger than any pixel comparison and cheaper (no
 #     decode). Applied whenever a checksum exists.
-#   * LOSSY convert (JXL -> JPEG/PNG, or PNG/JPEG -> JXL lossy) — nothing is
-#     stored and nothing can be re-derived, so the gate is the STRUCTURAL check
-#     alone. There is no way to prove that output came from that source. The run
-#     warns, and the wrapper asks for an extra confirmation.
+#   * LOSSY convert (JXL -> JPEG/PNG, or PNG/JPEG -> JXL lossy) — nothing can
+#     be re-derived, but every lossy output this script writes carries the
+#     jxlphoto-src/srcsum provenance marker of its source. The gate requires
+#     that marker to MATCH (the encoder's E-1 rule), plus the structural check:
+#     a same-named file from anywhere else (a camera JPEG next to its archived
+#     master, say) never certifies a deletion. Markerless outputs (written
+#     before the markers, or by another tool) keep their source.
 
 DELETE_SOURCE = False
 # Delete source after successful encode/decode, in ANY mode.
@@ -2867,6 +2968,8 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     results = []
     status_map = {}
+    for _s, _w, _f in tasks:
+        _record_source_identity(_s)      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:
         if decode:
             futures = {ex.submit(decode_one_transcode, s, w, f, verify, reconvert_val, smart): (s, w, f)
@@ -3098,6 +3201,10 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                 continue
+            if _source_changed_since_read(src_path):
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
+                continue
             try:
                 src_path.unlink()
                 deleted += 1
@@ -3125,13 +3232,101 @@ def _prov_src_root(args):
     return args.input.parent if args.input.is_file() else args.input
 
 
+def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
+    """The half of _provenance_filter that runs when this run does NOT delete
+    in a collapsing mode: drop every pair this run is about to OVERWRITE onto
+    an existing output that is provably ANOTHER source's.
+
+    "Without deletion an overwrite is recoverable" holds for the NEW source
+    only: the existing output may be the archive of a photo an earlier run
+    already deleted, and then a plain --sync/--overwrite run destroyed its only
+    copy (#268's missing half; T3 of the 2026-10-08 audit, reproduced with a
+    lossless JPEG archive). Provably another source's:
+      * a provenance marker naming a different file (lossy outputs carry one);
+      * a lossless JPEG archive (jbrd, no XMP by design) whose recorded
+        checksum is not this JPEG's — another photo, or this one edited since;
+      * on the JXL -> JPEG recovery, an existing JPEG whose bytes are not the
+        checksum this JXL recorded.
+    No record either way (markerless, no checksums.md5 entry) keeps the old
+    behaviour. A hash that cannot be computed is a refusal (fail closed).
+
+    would_write(src, out) -> bool is the run's own should_process; without it
+    nothing is checked (direct callers that predate this keep their behaviour).
+    """
+    if would_write is None:
+        return pairs, []
+    targets = []
+    for src, out in pairs:
+        try:
+            if out.exists() and would_write(src, out):
+                targets.append((src, out))
+        except OSError:
+            continue
+    if not targets:
+        return pairs, []
+    marks = _read_source_markers_batch(sorted({out for _s, out in targets}))
+    refused = []
+    for src, out in targets:
+        why = None
+        info = marks.get(str(out)) or {"src": None, "srcsum": None}
+        if info.get("src") or info.get("srcsum"):
+            if not _provenance_ok(info, src, PROVENANCE_CHECK):
+                why = ("it was made from a different source (its provenance "
+                       "marker names another file)")
+        elif decode_lossless:
+            stored = read_md5_db(src)
+            if stored is not None:
+                try:
+                    if md5_of_file(out) != stored:
+                        why = ("the existing JPEG is not the one this JXL holds "
+                               "(checksum mismatch) — another photo, or a copy "
+                               "edited since")
+                except OSError as e:
+                    why = f"could not hash the existing output ({e})"
+        elif out.suffix.lower() == ".jxl" and has_jbrd_box(out):
+            stored = read_md5_db(out)
+            if stored is not None:
+                try:
+                    if md5_of_file(src) != stored:
+                        why = ("it is the lossless archive of a DIFFERENT JPEG (its "
+                               "recorded checksum does not match this source) — if "
+                               "this is the same photo edited since, delete the old "
+                               ".jxl first")
+                except OSError as e:
+                    why = f"could not hash the source ({e})"
+        if why:
+            refused.append((src, out, why))
+    if not refused:
+        return pairs, []
+    _bad = {(os.path.normcase(str(s)), os.path.normcase(str(o))) for s, o, _w in refused}
+    kept = [(s, o) for s, o in pairs
+            if (os.path.normcase(str(s)), os.path.normcase(str(o))) not in _bad]
+    logger.error(
+        f"REFUSING {len(refused)} file(s): their output already exists and belongs "
+        f"to a DIFFERENT source. Converting would overwrite it — and if an earlier "
+        f"run deleted that source, the output is the only copy of the photo.")
+    for _s, _o, _w in refused[:10]:
+        logger.error(f"    {_s}")
+        logger.error(f"      -> {_o} ({_w})")
+    if len(refused) > 10:
+        logger.error(f"    ... and {len(refused) - 10} more")
+    logger.error(
+        "  These were NOT converted and NOTHING was deleted. Rename them or write "
+        "into another folder." +
+        ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
+         " If you MOVED the sources, re-run with --provenance content."))
+    return kept, refused
+
+
 def _provenance_filter(pairs, mode, decode_lossless=False,
-                       output_arg=None, source_root=None):
+                       output_arg=None, source_root=None, would_write=None):
     """Drop pairs whose output already exists and came from a DIFFERENT source.
 
-    Only meaningful in the folder-collapsing modes with DELETE_SOURCE armed:
-    elsewhere the output path is derived from the source's own folder, and
-    without deletion an overwrite is recoverable.
+    The STRICT check (every existing output must prove it came from this
+    source) runs in the folder-collapsing modes with DELETE_SOURCE armed.
+    Every other run gets _foreign_overwrite_filter: only the outputs it is
+    about to overwrite (would_write), refused only on positive evidence that
+    they are another source's.
 
     decode_lossless: the JXL -> JPEG recovery path, whose output must stay
     byte-identical and therefore carries no marker. checksums.md5 holds the
@@ -3141,7 +3336,7 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
     Returns (kept_pairs, refused) — refused is [(src, out, why)].
     """
     if not (DELETE_SOURCE and _run_collapses_structure(mode, output_arg, source_root)):
-        return pairs, []
+        return _foreign_overwrite_filter(pairs, decode_lossless, would_write)
     existing = sorted({out for _s, out in pairs if out.exists()})
     if not existing:
         return pairs, []
@@ -3226,6 +3421,40 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
             ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
              " If you MOVED the sources, re-run with --provenance content."))
     return kept, refused
+
+
+def _lossy_skip_marks(results, src_map) -> dict:
+    """Markers of every pre-existing output a lossy --delete-skipped could
+    delete a source for, in one batch (T1 of the 2026-10-08 audit)."""
+    if not DELETE_SKIPPED:
+        return {}
+    finals = []
+    for result in results:
+        if result[1] == "skipped":
+            _sm = src_map.get(result[0])
+            if _sm is not None and _sm[1] is not None:
+                finals.append(_sm[1])
+    return _read_source_markers_batch(finals) if finals else {}
+
+
+def _lossy_skip_unproven(src_path, final_file, marks) -> bool:
+    """True when an already-existing LOSSY output cannot prove it was made
+    from `src_path`: its provenance marker is absent, unreadable or names
+    another file. A jbrd JPEG archive is proven by the reconstruction test
+    instead, so it is never judged here. Before this, a same-named JPEG from
+    anywhere (the camera's own, next to the archived master) deleted the
+    master JXL — reproduced in the 2026-10-08 audit."""
+    if (final_file.suffix.lower() == '.jxl'
+            and src_path.suffix.lower() in JPEG_EXTS
+            and has_jbrd_box(final_file)):
+        return False
+    info = marks.get(str(final_file)) or {"src": None, "srcsum": None}
+    return not _provenance_ok(info, src_path, PROVENANCE_CHECK)
+
+
+_LOSSY_SKIP_KEEP = ("KEEP (the existing output carries no provenance marker "
+                    "MATCHING this source, so it cannot prove it is this file's "
+                    "conversion)")
 
 
 def _plan_would_delete_source(pairs, smart_mode, reconvert_explicit) -> bool:
@@ -3394,7 +3623,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     _abort_on_duplicate_outputs(pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode, decode_lossless=decode,
-        output_arg=args.output, source_root=_prov_src_root(args))
+        output_arg=args.output, source_root=_prov_src_root(args),
+        would_write=lambda s, o: should_process(s, o, smart_mode, reconvert_explicit))
     if _refused:
         _counter["total"] = len(pairs)
 
@@ -3465,6 +3695,7 @@ def cmd_transcode(args, auto_decode: bool = False):
     # A refusal is a FAILURE, not a quiet skip: the file was not converted and
     # needs a human, so it must reach the exit code and the wrapper's recap.
     err = len(_refused)
+    _source_identity.clear()
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = [(str(_s), f"refused: output {_o} already exists and {_w}")
@@ -3822,6 +4053,30 @@ def _png_has_alpha(png_path: Path) -> bool:
     if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
         return False
     return head[25] in (4, 6)          # 4 = grey + alpha, 6 = RGBA
+
+
+def _icc_a2b_only(icc) -> bool:
+    """Can this ICC profile NOT be a faithful conversion TARGET?
+
+    True for a profile with A2B tables and no B2A — an input (scanner)
+    profile such as the film scanner's SFprofT. It is a fine SOURCE (A2B0
+    takes its pixels to the PCS), but converting INTO it makes LittleCMS fall
+    back to the matrix/TRC, which is not the inverse of A2B0: a real scan came
+    back at 27 dB instead of ~49. A profile with B2A tables, or a plain
+    matrix/TRC one, is invertible. Unparsable -> False (no claim made).
+    """
+    try:
+        if not icc or len(icc) < 132:
+            return False
+        n = struct.unpack(">I", bytes(icc[128:132]))[0]
+        if n > 1000 or len(icc) < 132 + 12 * n:
+            return False
+        sigs = {bytes(icc[132 + 12 * i:136 + 12 * i]) for i in range(n)}
+    except Exception:
+        return False
+    has_a2b = bool(sigs & {b"A2B0", b"A2B1", b"A2B2"})
+    has_b2a = bool(sigs & {b"B2A0", b"B2A1", b"B2A2"})
+    return has_a2b and not has_b2a
 
 
 def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
@@ -4480,6 +4735,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                         orig_target.write_bytes(_xmp_icc)
                     else:
                         orig_target = orig_icc
+                    if not output_icc and _icc_a2b_only(orig_target.read_bytes()):
+                        # A "keep" result must go back INTO the master's
+                        # profile; one with A2B tables and no B2A (a scanner
+                        # profile) cannot be a faithful target (R1, 27 dB).
+                        raise RuntimeError(
+                            "this lossy file stores an ICC blob whose profile has "
+                            "A2B tables but no B2A (an input/scanner profile): "
+                            "nothing can convert its pixels back INTO that "
+                            "profile faithfully — convert to a working space "
+                            "instead (--to-srgb / --icc-profile)")
                     float_src = (pfm_path, float_icc, orig_target)
                     magick_in = pfm_path
                     logger.info(f"  >ICC blob in a lossy file: converting from "
@@ -4628,6 +4893,8 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
 
     results = []
     status_map = {}
+    for _s, _w, _f in tasks:
+        _record_source_identity(_s)      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:
         if direction == "to_jxl":
             futures = {ex.submit(encode_to_jxl, s, w, f, effort, distance, reconvert_val, smart): (s, w, f)
@@ -4879,7 +5146,9 @@ def cmd_convert(args, from_jxl: bool = True):
     _abort_on_duplicate_outputs(pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
-        output_arg=args.output, source_root=_prov_src_root(args))
+        output_arg=args.output, source_root=_prov_src_root(args),
+        would_write=lambda s, o: (os.path.normcase(str(o)) in _FORCE_REDERIVE
+                                  or should_process(s, o, smart_mode, reconvert_explicit)))
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -4967,6 +5236,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
     ok = skipped = overwritten = aborted = 0
     err = len(_refused)
+    _source_identity.clear()
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     # Which files actually failed, for the wrapper's end-of-run FAILURES list.
     failed_files = [(str(_s), f"refused: output {_o} already exists and {_w}")
@@ -4985,10 +5255,11 @@ def cmd_convert(args, from_jxl: bool = True):
     if DELETE_SOURCE:
         deleted = 0
         src_map = {str(s): (s, out) for s, out in pairs}
+        _skip_marks = _lossy_skip_marks(results, src_map)
         for result in results:
             status = result[1]
-            # LOSSY direction: see the note in _process_file_group — the
-            # structural check is the whole gate for an already-archived source.
+            # LOSSY direction: see the note in _process_file_group — an
+            # already-archived source needs its output's provenance marker.
             was_skipped = status == "skipped"
             if (status not in ("ok", "reconvert")
                     and not (DELETE_SKIPPED and was_skipped)):
@@ -5032,6 +5303,14 @@ def cmd_convert(args, from_jxl: bool = True):
             if final_file is None or not _verify_file_integrity(final_file):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                continue
+            if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
+                _delete_stats["kept"] += 1
+                logger.warning(f" {_LOSSY_SKIP_KEEP} | {src_path.name}")
+                continue
+            if _source_changed_since_read(src_path):
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
                 continue
             try:
                 src_path.unlink()
@@ -5305,6 +5584,7 @@ def cmd_auto(args):
     # have its JXL source overwritten before decoding (extra belt on top of
     # the collision guard above).
     totals = {"ok": 0, "err": 0, "skipped": 0, "aborted": 0, "overwritten": 0}
+    _source_identity.clear()
     _reset_abort()  # once per RUN, not per group: the four _process_file_group
                     # calls below must share one latch, so an abort in the first
                     # stops the rest instead of being forgotten between them.
@@ -5430,7 +5710,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         pairs, args.mode,
         decode_lossless=(use_transcode and all(
             s.suffix.lower() == '.jxl' for s, _o in pairs)),
-        output_arg=args.output, source_root=_prov_src_root(args))
+        output_arg=args.output, source_root=_prov_src_root(args),
+        would_write=lambda s, o: should_process(s, o, args.sync, args.overwrite))
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -5567,13 +5848,13 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         if DELETE_SOURCE:
             deleted = 0
             src_map = {str(s): (s, out) for s, out in pairs}
+            _skip_marks = _lossy_skip_marks(results, src_map)
             for result in results:
                 status = result[1]
-                # LOSSY direction: nothing is stored and nothing can be
-                # re-derived, so an already-archived source is judged by the
-                # STRUCTURAL check alone. There is no way to prove that output
-                # came from that source — main() warns and the wrapper asks
-                # for its own confirmation.
+                # LOSSY direction: nothing can be re-derived, but every lossy
+                # output this script writes carries its source's provenance
+                # marker — an already-archived source is deleted only when
+                # that marker MATCHES (plus the structural check).
                 was_skipped = status == "skipped"
                 if (status not in ("ok", "reconvert")
                         and not (DELETE_SKIPPED and was_skipped)):
@@ -5612,6 +5893,14 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 if final_file is None or not _verify_file_integrity(final_file):
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                    continue
+                if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" {_LOSSY_SKIP_KEEP} | {src_path.name}")
+                    continue
+                if _source_changed_since_read(src_path):
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
                     continue
                 try:
                     src_path.unlink()
@@ -5726,8 +6015,12 @@ Examples:
                              "IRREVERSIBLE")
     parser.add_argument("--provenance", type=str, default=None,
                         choices=["path", "content"],
-                        help="[with --delete-source, modes 2/4/5/6/7] How an EXISTING "
-                             "output is matched to the source about to overwrite it: "
+                        help="How an EXISTING output is matched to the source about "
+                             "to overwrite it. Every --sync/--overwrite run refuses to "
+                             "overwrite an output that is provably another source's "
+                             "(marker, or checksums.md5 for lossless JPEG archives); "
+                             "with --delete-source in modes 2/4/5/6/7 every existing "
+                             "output must also prove it came from this source. "
                              "path (default, free) compares the recorded LOCATION; "
                              "content also accepts matching source bytes, so it "
                              "survives MOVED folders. The lossless JXL->JPEG path "
@@ -5738,8 +6031,10 @@ Examples:
                              "ALREADY EXISTS (reported as SKIP), so an archive interrupted "
                              "between the conversion and the unlink can be finished. "
                              "Lossless JPEG<->JXL: provenance is PROVEN against "
-                             "checksums.md5. LOSSY directions: structural check only — "
-                             "nothing can prove that output came from that source")
+                             "checksums.md5. LOSSY directions: the existing output must "
+                             "carry the provenance marker of THIS source (every lossy "
+                             "output this script writes has one) and pass the "
+                             "structural check")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user.")
@@ -5963,20 +6258,22 @@ def main():
         print("NOTE: --delete-skipped will delete sources whose output already exists.")
         print("      Lossless JPEG<->JXL: provenance is PROVEN against checksums.md5 "
               "(the stored hash must match).")
-        print("      LOSSY directions (JXL -> JPEG/PNG, lossy encodes): STRUCTURAL CHECK "
-              "ONLY. Nothing can prove")
-        print("      that the existing output came from that source -- an unrelated file "
-              "with the same name would pass.")
+        print("      LOSSY directions (JXL -> JPEG/PNG, lossy encodes): the existing "
+              "output must carry")
+        print("      THIS source's provenance marker (an unrelated file with the same "
+              "name keeps the source).")
 
-    if args.provenance is not None and not DELETE_SOURCE:
-        # The --provenance flag is only READ by the provenance gate, which runs
-        # solely under --delete-source in a folder-collapsing mode (_provenance_filter
-        # short-circuits out of it). Armed alone it used to sit silently inert while
-        # the user believed their archive was guarded — same warning the recompressor
-        # has printed since round-39 #413.
-        print("WARNING: --provenance has no effect without --delete-source: it only "
-              "checks an existing output's provenance before that source is "
-              "deleted. Nothing will be checked.")
+    if (args.provenance is not None and not DELETE_SOURCE
+            and not (args.sync or args.overwrite)):
+        # The --provenance flag is only READ when an existing output is about
+        # to be overwritten (--sync/--overwrite, _foreign_overwrite_filter) or
+        # a source deleted (--delete-source). This script's default skips every
+        # existing output, so armed alone it would sit silently inert while the
+        # user believed their archive was guarded — say so (round-39 #413).
+        print("WARNING: --provenance has no effect without --delete-source, --sync "
+              "or --overwrite: it only checks an existing output's provenance "
+              "before that output is overwritten or its source deleted. Nothing "
+              "will be checked.")
 
     # Handle --to-srgb shortcut
     if args.to_srgb:
@@ -6091,6 +6388,17 @@ def main():
     if _is_derivative() and (DELETE_SOURCE or args.delete_skipped):
         parser.error("--resize-*/--sharpen write a DERIVATIVE: it never replaces "
                      "or deletes its source — drop --delete-source/--delete-skipped")
+    # A colour conversion is a derivative too (W6/T4 of the 2026-10-08 audit):
+    # an sRGB JPEG of a 16-bit wide-gamut master is not a replacement for it.
+    # The recompressor's --output-icc never deletes, and the wrapper's
+    # manifest already suppressed --delete-source for an OutputICC row — while
+    # this direct route converted the gamut and deleted the master. Only the
+    # transcode route ignores the profile (the original bytes come back).
+    if (args.icc_profile and cmd != "transcode"
+            and (DELETE_SOURCE or args.delete_skipped)):
+        parser.error("--icc-profile/--to-srgb writes a colour-converted DERIVATIVE: "
+                     "it never deletes its source — drop --delete-source/"
+                     "--delete-skipped (or the conversion)")
     if _is_derivative() and (cmd == "transcode" or (cmd == "auto" and args.decode)):
         parser.error("a bit-exact JPEG reconstruction cannot be resized/sharpened — "
                      "drop --force-transcode/--decode (or the resize/sharpening flags)")

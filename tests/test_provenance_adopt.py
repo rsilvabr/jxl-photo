@@ -213,9 +213,19 @@ def test_none_mode_warns_that_it_leaves_no_provenance(tmp_path):
     (tmp_path / "root" / "A").mkdir(parents=True)
     (tmp_path / "a.jxl").replace(tmp_path / "root" / "A" / "a.jxl")
 
+    # Without --delete-source: since the 2026-10-08 audit (D2) --none can no
+    # longer be combined with it at all (the TIFF is not a copy of the master,
+    # so it exits 2 before anything runs). The warning is still due in a
+    # collapsing mode, for the later deleting run.
+    r = subprocess.run(
+        [sys.executable, str(REPO / "jxl_tiff_decoder.py"), "root", "--mode", "5",
+         "--none"],
+        capture_output=True, text=True, timeout=600, cwd=str(tmp_path),
+        stdin=subprocess.DEVNULL)
+    assert "--none writes NO provenance marker" in r.stdout
     r = subprocess.run(
         [sys.executable, str(REPO / "jxl_tiff_decoder.py"), "root", "--mode", "5",
          "--none", "--delete-source", "--delete-confirm-off"],
         capture_output=True, text=True, timeout=600, cwd=str(tmp_path),
         stdin=subprocess.DEVNULL)
-    assert "--none writes NO provenance marker" in r.stdout
+    assert r.returncode == 2 and (tmp_path / "root" / "A" / "a.jxl").exists()
