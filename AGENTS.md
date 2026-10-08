@@ -258,7 +258,14 @@ trusting the report; write the review with
 must-fix / should-fix items and a commit verdict.
 
 ## Docs map
-- `README.md` — current release, install, quick start
+- `README.md` — short by design: features, install, quick start, a
+  one-line-per-item "Good to know", and a SHORT "What's new" for the current
+  release (calm, a few bullets, links). Long explanations go to the docs
+  below, not here
+- `docs/upgrading.md` — what to check when upgrading, newest first (one
+  section per release that changed an existing command line's behaviour)
+- `docs/behavior_and_limitations.md` — defaults, limits and viewer quirks
+  (the README's "Good to know" links into it)
 - `docs/README_jxl_tiff_encoder.md`, `docs/README_jxl_tiff_decoder.md`,
   `docs/README_jxl_jpeg_transcoder.md`, `docs/README_jxl_recompressor.md` —
   per-script CLI, settings and modes (every `--flag` must appear in its doc:
@@ -274,13 +281,22 @@ must-fix / should-fix items and a commit verdict.
   round's table, and the round's row in the index table is updated;
   `tests/test_bug_tracker_numbers.py` fails on a reused number, a stale next
   number, an out-of-order round or a stale index row
-- `docs/version_history.md` — detailed notes for all superseded releases
-  (the README keeps only the current version's changelog in full, plus the
-  summary table)
+- `docs/version_history.md` — detailed notes for EVERY release, the current
+  one included, plus the full release table (the README keeps the last few
+  rows)
 - `docs/RELEASE_v*.md` — gitignored; local drafts to paste into GitHub Releases
 
 ## Releases
 - Stable tags: `vX.Y.Z` (e.g. `v1.7.1`); betas: `vX.Y.Z_betaN`.
+- **Tone of release notes and the README's "What's new": calm and short.**
+  Most fixes close rare edge cases (an unusual combination, an interrupted
+  run, a scanner profile): say that — "closes edge cases", "hardening" — and
+  never headline a fix with "lost files" / "destroyed the archive" when it
+  took an unusual setup to happen. Lead with what the user will notice and
+  whether they need to do anything; the mechanism, reproductions and numbers
+  belong in `docs/version_history.md` and the bug tracker. An action the
+  user really must take goes in `docs/upgrading.md` and gets one clear line
+  in the notes.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
   `Claude-Session` trailers** (AI assistance is credited in the README's
   Acknowledgments instead, and more than one assistant is used).

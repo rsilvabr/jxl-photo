@@ -1,13 +1,127 @@
 # Version history
 
-Detailed notes for superseded releases, newest first. The current release is
-documented in the [main README](../README.md) — which also carries a one-line
-summary table of every release — and per-release notes are published as
-[GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
+Detailed notes for every release, newest first — the current one included.
+The [main README](../README.md) keeps a short summary of the current release;
+per-release notes are also published as
+[GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases), and what to
+check when you upgrade is in [upgrading.md](upgrading.md).
 
 For the complete list of individual fixes see
 [bug_tracking_since_v1.0.md](bug_tracking_since_v1.0.md) and
 [new_features_since_v1.0.md](new_features_since_v1.0.md).
+
+## Release history
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **[v2.8.1](#v281)** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening; shorter README (round 50, 7 fixes) |
+| [v2.8.0](#v280) | 2026-10-08 | Overwrites check whose output they replace (all four scripts, every mode); scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too; round-49 audit (25 fixes) |
+| [v2.7.0](#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
+| [v2.6.2](#v262) | 2026-10-05 | The recompressor announces and times its planning phase instead of minutes of silence |
+| [v2.6.1](#v261) | 2026-10-05 | Every codec call without reader threads (encoder, decoder, transcoder); error messages keep the failing line; `--multipage-mode ignore` sized for the memory cap; `JXLPHOTO_LOG_DIR` |
+| [v2.6.0](#v260) | 2026-10-05 | `--workers` capped by memory (encoder, recompressor); no subprocess hang when memory runs out; scheduled runs keep their window open |
+| [v2.5.0](#v250) | 2026-10-02 | `--exclude-folders`; `--delete-skipped` proves the pairing in every mode; round-43 audit (31 fixes) |
+| [v2.4.0](#v240) | 2026-09-27 | Per-row export columns in manifests (`ExportMarker`/`ExportSubfolder`/`ExportJxlFolder`), generator writes them for mode-6/7 rows, per-row (nesting-aware) collision scan |
+| [v2.3.0](#v230) | 2026-09-26 | Resize + output sharpening for derivatives, per-row manifest options, transcoder AdobeRGB; table-curve ICC profiles decode with correct colours |
+| [v2.2.0](#v220) | 2026-09-24 | Colour-converted 16-bit derivatives (`--output-icc`), `--export-jxl-folder`, distance floor per cjxl version; audits 37–40 (88 fixes) |
+| [v2.1.1_beta1](#v211_beta1) | 2026-09-20 | Pre-release, superseded by v2.2.0 |
+| [v2.1.0](#v210) | 2026-09-20 | New `jxl_recompressor.py`: shrink a JXL archive, refusing counterproductive re-encodes |
+| [v2.0.3](#v203) | 2026-08-23 | JXL → JPEG delete gates bound to content, not names; 32 fixes |
+| [v2.0.2](#v202) | 2026-08-19 | Re-archiving a multi-page scan no longer repeats a page |
+| [v2.0.1](#v201) | 2026-08-13 | Delete machinery audited against real scans; 6 fixes |
+| [v2.0.0](#v200) | 2026-08-09 | Archive and replace: `--delete-source` in every mode, provenance markers |
+| [v1.9.1](#v191) | 2026-08-02 | Mode 6/7 manifests start immediately (collision scan skipped where it cannot find anything) |
+| [v1.9.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.9.0) | 2026-08-01 | Disk-space preflight, full-disk abort, scan progress, staging cleanup |
+| [v1.8.4](#v184) | 2026-07-28 | `--run-preset NAME` runs a saved preset unattended |
+| [v1.8.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.3) | 2026-07-28 | Named presets, repeatable manifests, configurable default distance, run summary |
+| [v1.8.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.2) | 2026-07-27 | Audit + real-batch fixes; multi-page default is now `split` |
+| [v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) | 2026-07-26 | Audit release: data-safety hardening, multi-page reconstruction v2 |
+| [v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) | 2026-07-18 | libjxl v0.12 support, output integrity verification |
+| [v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) | 2026-07-18 | Wrapper delete confirmation unstuck; Exif/XMP before the codestream |
+| [v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) | 2026-07-13 | Cautious ICC strategy (round-trip test + cache), `.jfif`/`.jpe` support |
+| [v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0) | 2026-07-12 | Multi-page TIFF support |
+| [v1.6.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.6.0) | 2026-07-05 | Audit-driven fixes: staging concurrency, wrapper routing, CMYK rejection |
+| [v1.5.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.5.3) | 2026-04-15 | Full Auto Mode, PNG bit depth, 8-bit TIFF black-image fix |
+| [v1.4](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.4) | 2026-04-11 | JXL → JPEG workflow |
+| [v1.3](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.3) | 2026-04-11 | Auto Mode (beta), manifests, embedded JPEG thumbnail |
+| [v1.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.2) | 2026-04-05 | Basic/None decode modes, ICC mode selector |
+| [v1.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.1) | 2026-04-05 | D50 patch modes, metadata strip |
+| [v1.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.0) | 2026-04-02 | First stable release — TIFF and JPEG → JXL with ICC preservation |
+
+GitHub release notes before v1.8.2:
+[v1.8.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.1) ·
+[v1.8.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0) ·
+[v1.7.2](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.2) ·
+[v1.7.1](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.1) ·
+[v1.7.0](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.7.0).
+Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
+
+---
+
+## v2.8.1
+
+**Released 2026-10-08.** Supersedes v2.8.0. The low-severity findings v2.8.0 left open from the same audit (round 50, 7 fixes). None of them lost a photo; most are edge cases a normal library never meets. Plus a shorter README.
+
+### A scan's 4th channel keeps its role (#521)
+
+JPEG XL stores a TIFF's 2nd/4th channel as alpha and keeps no TIFF role for it, so the decoder wrote every such channel back as unassociated alpha: the IR channel of an RGB+IR scan (VueScan's RGBI layout, `ExtraSamples=0`) came back as a transparency mask. The pixels were always intact. The encoder now records the page's `ExtraSamples` (`jxlphoto-extrasamples:`) and the decoder restores it. JXLs encoded before v2.8.1 decode as before.
+
+### An edited decode is left alone (#522)
+
+Photoshop keeps a file's XMP when it saves, so a decode you retouched still carried the marker naming its JXL: when the JXL later became newer, a sync decoded over the edit, and `--delete-skipped` could delete the JXL on the strength of the edited TIFF. Each decode now records its pixels (`jxlphoto-pixsum:`); before overwriting one of its own TIFFs, or letting one vouch for a deletion, the decoder compares. An edited TIFF is refused like an original master — `--overwrite` still replaces it. See [An edited decode is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over-v281).
+
+### Smaller items
+
+- **Integrity check (#523):** a codestream split into `jxlp` boxes now has to end with the box marked "last"; a file cut exactly between two boxes no longer passes (encoder, recompressor, transcoder). Hardening — cjxl and exiftool write a single `jxlc` box.
+- **Decoder dry run (#524):** `--dry-run --delete-source` previews the JXLs a `--depth 8` or `--basic` decode keeps, instead of counting them as deleted.
+- **Transcoder (#525):** `--icc-profile` refuses an input/scanner profile (A2B tables, no B2A) up front, like the recompressor's `--output-icc`.
+- **Wizard (#526):** with `[D]` (delete originals) chosen, Step 6 no longer offers a colour conversion, resize or sharpening — a derivative never deletes, so the run would only have been refused after the Step 7 YES.
+- **Manifest collision scan (#527):** for TIFF → JXL it now sees split pages: `foto.tif`'s second page writes `foto_page1.jxl`, the same file another row's `foto_page1.tif` writes.
+
+### Docs
+
+The README is shorter: what to check when upgrading moved to [upgrading.md](upgrading.md), the behaviour and limitations notes to [behavior_and_limitations.md](behavior_and_limitations.md), and the full changelog of every release — the current one included — lives here.
+
+Every fix has a regression test that fails against v2.8.0, using the real codecs where the fix touches what they write. The real-photo battery gained two checks on a real 16-bit decode (an edited TIFF is refused, an untouched one is refreshed). **2261 tests**; battery 41/41.
+
+---
+
+## v2.8.0
+
+**Released 2026-10-08, superseded by v2.8.1.** Supersedes v2.7.0. The 2026-10-08 audit — round 49, 25 fixes — and two features finished after v2.7.0. Nearly all of these need an unusual combination to matter (two photos with the same name in one output folder, a run killed in the middle of a move, a film scan with a scanner profile); every one that could cost a file was first reproduced with copies of real photos.
+
+### Fixed: a plain sync overwrote the archive of a photo an earlier run had deleted (#496–#500)
+
+v2.0.0's fix for colliding names (#268) armed the provenance check only when the CURRENT run had `--delete-source` in a mode that collapses folders. The loss happens on the overwrite, though: run 1 archives `A/foto.tif` and deletes it; run 2 — a sync with no delete flag, which is what every scheduled preset is — writes `B/foto.tif` over `out/foto.jxl`, and photo A exists nowhere. Reproduced with real photos in all four scripts, and in mode 8 too (`foto.tif` and `foto.tiff` both write `foto.jxl`).
+
+Every run now reads, in one batch, the markers of each output it is about to overwrite and **refuses** one whose `jxlphoto-src` names another source (`--provenance content` still accepts the same bytes): exit 1, listed in the failures, previewed by `--dry-run`, `--overwrite` included. A markerless output is overwritten as before. Also refused: a lossless JPEG archive (jbrd) at the encoder's output path, and in the transcoder a jbrd archive whose `checksums.md5` names another JPEG. The decoder's smart sync no longer treats another JXL's decode as "up to date", and the recompressor's warning about a foreign output became a refusal, in every mode.
+
+### Fixed: recompressing a master with a scanner profile changed its colours (#501–#503)
+
+`cjxl src.jxl out.jxl` turned a lossless master whose profile has no native JPEG XL form into a "lossy ICC blob", which the toolkit decodes through linear sRGB — and an input profile with A2B tables but no B2A cannot be converted back faithfully (27 dB on a real scan); a second recompression read that file as linear sRGB and kept the old profile in XMP (18 dB). The real-photo battery ran exactly this chain on the real scan and passed, because it checked markers, not colours. Now: a lossy-blob source is copied verbatim, never re-encoded; a profile with no native form (probed once per run on a 16x16 image) is encoded tagged sRGB with the profile in XMP, as the encoder does; a derivative never converts INTO an A2B-only profile; the decoder still decodes such a blob but keeps the JXL. A new battery check decodes the in-place scan and compares it with the original (47.6 dB).
+
+### Fixed: delete gates (#504–#507, #511–#514)
+
+- A source **re-exported during the run** was deleted unread: each source's size and mtime are recorded before it is read and checked before the unlink (all four scripts).
+- The decoder deleted the master after a **degraded decode**: `--none` + `--delete-source` now exits 2, and a page decoded at `--depth 8` from a deeper source, or by `--basic` with a profile other than the XMP one, keeps its JXL.
+- Lossy **`--delete-skipped`** in the transcoder deleted the master for any same-named JPEG/PNG; it now requires the output's provenance marker.
+- A **JPEG cut in half** passed the integrity check on its EXIF thumbnail's end marker; the check now walks to the end of the main image.
+- An image kept in a **SubIFD** (TIFF/EP, DNG layout) was deleted after only its preview was archived; such a source is never deleted.
+- Moving an output out of **staging** over an existing one was a truncating copy; it now goes through a temp file in the destination folder and an atomic rename (all four scripts).
+- Lossy encodes rewrote the colour wherever a **4th channel** is 0 (an RGB+IR scan's dust); cjxl's `keep_invisible` is now on for such pages.
+- A master encoded from a decoded **derivative** was marked as a derivative.
+
+### Fixed: the wrapper (#509, #510, #516–#520)
+
+The `[D]` panel counted the originals before the export marker and subfolder were known (it said 3, the run deleted 2): Step 7 recounts. "Convert to sRGB?" with `[D]` deleted the 16-bit master after an 8-bit sRGB JPEG: a colour conversion is a derivative and never deletes, in the wizard and in the transcoder. Decode mode `none` with `[D]` is refused before the HHMM token. The output folder names follow the scripts' settings; the idle-timeout kill takes the codecs down with the child; the manifest recap says when a killed entry's deletions are missing from the total; Auto Mode looks at every export folder before recommending mode 7. The `--delete-skipped` texts say what really backs the delete (#508).
+
+### New since v2.7.0
+
+- **`--workers` capped by the smaller of commit and physical RAM** (encoder, recompressor): `WORKER_MEMORY_LIMIT` = `both` (default), `commit` or `physical`; the `Memory:` line says which one decided.
+- **A lower effort no longer re-derives the derivatives** (recompressor): at the same distance only a better-ranked encode re-derives (`REDERIVE_ON_LOWER_EFFORT`, `--rederive-on-lower-effort`), and a streamed encode is marked `s` in the recipe (`sRGB/d3e9s`).
+- The measured cost of `--buffering 1` (#480): at effort 8–9 a streamed encode is effort 7's file.
+
+Every fix has a regression test proven to fail against the pre-fix code, most of them running the real codecs on real files. The real-photo battery (39 checks) passes. Full list: [bug tracking](bug_tracking_since_v1.0.md) (rounds 48–49, #480, #496–#520) and [new features](new_features_since_v1.0.md). **2155 tests.**
 
 ---
 
@@ -142,7 +256,7 @@ Every fix has a regression test proven to fail against the pre-fix code, includi
 
 ### Fixed: `--delete-skipped` could delete a master on the strength of another photo's archive (#439)
 
-The skipped path of the delete gate now requires the existing output's provenance marker to **match** the source — the encoder never read one there, the decoder only checked that one existed. The dry-run preview runs the same check. See the [notice](../README.md#notices-for-upgraders) for archives without markers.
+The skipped path of the delete gate now requires the existing output's provenance marker to **match** the source — the encoder never read one there, the decoder only checked that one existed. The dry-run preview runs the same check. See [upgrading.md](upgrading.md#v250---delete-skipped-needs-a-matching-provenance-marker-in-every-mode) for archives without markers.
 
 ### Changed
 
