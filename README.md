@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.8.1** (2026-10-08) · [What's new](#whats-new-in-v281) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.8.2** (2026-10-09) · [What's new](#whats-new-in-v282) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.8.1](#whats-new-in-v281)
+- [What's new in v2.8.2](#whats-new-in-v282)
 - [More about this project](#more-about-this-project)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -381,25 +381,23 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.8.1
+## What's new in v2.8.2
 
-Released 2026-10-08. It finishes the 2026-10-08 audit: v2.8.0 fixed the findings that mattered most, and this release closes the remaining edge cases. None of them lost a photo. Nothing to do when upgrading.
+Released 2026-10-09. A small fix in the interactive wizard. Nothing to do when upgrading.
 
-- **A film scan's 4th channel keeps its role.** An IR channel stored next to RGB (VueScan's RGBI layout) used to come back from the round trip tagged as transparency.
-- **A decode you edited is left alone.** The decoder no longer decodes over a TIFF you retouched since, and never deletes its JXL on the strength of it.
-- **Smaller hardening:** a stricter JXL integrity check, a more accurate decoder `--dry-run`, scanner profiles refused as a conversion target in the transcoder, and two wizard checks moved earlier.
+- **The wizard follows the settings at the top of each script.** If you edited one (the multi-page mode, the TIFF compression, the recompressor's distance...), the wizard now offers your value instead of the shipped one. An answer the wizard remembers from an earlier run still comes first.
 
-Full notes: [version history](docs/version_history.md#v281) · [bug tracker](docs/bug_tracking_since_v1.0.md) (#521–#527). **2261 tests**, and the real-photo battery passes (41 checks).
+Full notes: [version history](docs/version_history.md#v282) · [bug tracker](docs/bug_tracking_since_v1.0.md) (#528). **2278 tests**, and the real-photo battery passes (41 checks).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.8.1** | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; smaller hardening |
+| **v2.8.2** | 2026-10-09 | The wizard's defaults follow the settings at the top of each script |
+| [v2.8.1](docs/version_history.md#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; smaller hardening |
 | [v2.8.0](docs/version_history.md#v280) | 2026-10-08 | Overwrites check whose output they replace; scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too |
 | [v2.7.0](docs/version_history.md#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout |
 | [v2.6.2](docs/version_history.md#v262) | 2026-10-05 | The recompressor announces and times its planning phase |
-| [v2.6.1](docs/version_history.md#v261) | 2026-10-05 | Every codec call without reader threads; `JXLPHOTO_LOG_DIR` |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 

@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | unreleased | #528 (1) |
+| [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | v2.8.2 | #528 (1) |
 | [Round-50 — what the 261008 audit left open](#round-50--what-the-261008-audit-left-open-2026-10-08) | 2026-10-08 | v2.8.1 | #521–#527 (7) |
 | [Round-49 — the 261008 audit](#round-49--the-261008-audit-2026-10-08) | 2026-10-08 | v2.8.0 | #496–#520 (25) |
 | [Round-48 — what `--buffering 1` really costs](#round-48--what---buffering-1-really-costs-2026-10-06) | 2026-10-06 | v2.8.0 | #480 (1) |
