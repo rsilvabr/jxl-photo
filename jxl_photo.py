@@ -1332,7 +1332,8 @@ def _mode6_preview_skips(origin: str, dest: str, below_lower: List[str]) -> bool
 class FolderAnalyzer:
     """Analyzes folder structure to recommend best mode."""
 
-    def __init__(self, root_path: Path, origin: str, dest: str, export_marker: str = "_EXPORT"):
+    def __init__(self, root_path: Path, origin: str, dest: str,
+                 export_marker: str = ToolConfig.export_marker):
         self.root = root_path
         self.origin = origin
         self.dest = dest
@@ -2299,6 +2300,69 @@ def _child_bool_setting(module: str, name: str, fallback: bool) -> bool:
     return fallback if value is None else bool(value)
 
 
+# Wizard option -> the setting at the top of the child script that is its
+# default, with the shipped value as the fallback for a child that cannot be
+# imported. The wizard puts these options on the child's command line, so a
+# literal default in the wizard would override an edit of that setting.
+_CHILD_OPTION_DEFAULTS = {
+    'jxl_tiff_encoder': {
+        'multipage_mode': ('MULTIPAGE_TIFF_MODE', 'split'),
+        'thumbnail_mode': ('THUMBNAIL_MODE', 'exclude'),
+        'thumbnail_suffix': ('THUMBNAIL_SUFFIX', '_thumbnail'),
+        'd50_patch': ('D50_PATCH_MODE', 'auto'),
+        'encode_tag': ('ENCODE_TAG_MODE', 'xmp'),
+        'use_ram': ('USE_RAM_FOR_PNG', True),
+        'embed_thumbnail': ('EMBED_JPEG_THUMBNAIL', False),
+        'provenance': ('PROVENANCE_CHECK', 'path'),
+    },
+    'jxl_tiff_decoder': {
+        'thumbnail_handling': ('THUMBNAIL_HANDLING', 'include'),
+        'thumbnail_suffix': ('THUMBNAIL_SUFFIX', '_thumbnail'),
+        'depth_policy': ('DEPTH_POLICY', 'preserve_thumbnails'),
+        'compression': ('TIFF_COMPRESSION', 'zip'),
+        'bit_depth': ('DJXL_OUTPUT_DEPTH', 16),
+        'add_preview': ('ADD_JPEG_PREVIEW', True),
+        'reconstruct_multipage': ('RECONSTRUCT_MULTIPAGE', True),
+        'provenance': ('PROVENANCE_CHECK', 'path'),
+    },
+    'jxl_jpeg_transcoder': {
+        'bit_depth': ('PNG_DEFAULT_BIT_DEPTH', 16),
+        'provenance': ('PROVENANCE_CHECK', 'path'),
+    },
+    'jxl_recompressor': {
+        'distance': ('CJXL_DISTANCE', 1.0),
+        'provenance': ('PROVENANCE_CHECK', 'path'),
+    },
+}
+
+
+def _child_default(module: str, option: str):
+    """The child's own default for a wizard option (see _CHILD_OPTION_DEFAULTS).
+    A remembered `last_*` answer still comes first at every call site."""
+    name, fallback = _CHILD_OPTION_DEFAULTS[module][option]
+    if isinstance(fallback, bool):
+        return _child_bool_setting(module, name, fallback)
+    return _child_setting(module, name, fallback)
+
+
+def _child_module(origin: str, dest: str) -> str:
+    """The child script (module name) that runs this direction."""
+    if origin == 'tiff' and dest == 'jxl':
+        return 'jxl_tiff_encoder'
+    if origin == 'jxl' and dest == 'tiff':
+        return 'jxl_tiff_decoder'
+    if origin == 'jxl' and dest == 'jxl':
+        return 'jxl_recompressor'
+    return 'jxl_jpeg_transcoder'
+
+
+def _bit_depth_or_default(workflow: Dict, dest: str) -> int:
+    """The run's bit depth: the user's answer, else the child's own default —
+    the decoder's for TIFF, the transcoder's for PNG (one key, two children)."""
+    module = 'jxl_tiff_decoder' if dest == 'tiff' else 'jxl_jpeg_transcoder'
+    return workflow.get('bit_depth') or _child_default(module, 'bit_depth')
+
+
 class InteractiveMenu:
     def __init__(self, config_manager: ConfigManager,
                  dependency_checker: DependencyChecker):
@@ -2533,7 +2597,7 @@ class InteractiveMenu:
         elif new_staging:
             self.config.config.staging_dir = new_staging
 
-        self.config.config.export_marker = new_marker or "_EXPORT"
+        self.config.config.export_marker = new_marker or ToolConfig.export_marker
         self.config.config.default_workers = max(1, min(new_workers, 32))
         self.config.config.default_quality = max(1, min(new_quality, 100))
         self.config.config.default_effort = max(1, min(new_effort, 10))
@@ -2589,10 +2653,18 @@ class InteractiveMenu:
             'effort': self.config.config.last_effort or self.config.config.default_effort,
             'staging': last_staging,
             'icc_profile': None,
-            'use_ram': self.config.config.last_use_ram if self.config.config.last_use_ram is not None else True,
-            'compression': self.config.config.last_compression or 'zip',
-            'bit_depth': self.config.config.last_bit_depth or 16,
-            'add_preview': self.config.config.last_add_preview if self.config.config.last_add_preview is not None else True,
+            'use_ram': (self.config.config.last_use_ram
+                        if self.config.config.last_use_ram is not None
+                        else _child_default('jxl_tiff_encoder', 'use_ram')),
+            'compression': (self.config.config.last_compression
+                            or _child_default('jxl_tiff_decoder', 'compression')),
+            # None = the child's own default; TIFF and PNG have different
+            # children, and the direction is not chosen yet
+            # (_bit_depth_or_default).
+            'bit_depth': self.config.config.last_bit_depth,
+            'add_preview': (self.config.config.last_add_preview
+                            if self.config.config.last_add_preview is not None
+                            else _child_default('jxl_tiff_decoder', 'add_preview')),
             'dry_run': False,
             'advanced_options': {},
             'expert_flags': '',
@@ -4257,9 +4329,13 @@ class InteractiveMenu:
             # script rejects at argparse.
             _adopt_ok = _supports_provenance_adopt(origin, dest)
             _pv_choices = ["path", "content"] + (["adopt"] if _adopt_ok else [])
-            pv_default = self.config.config.last_provenance or 'path'
+            pv_child = _child_default(_child_module(origin, dest), 'provenance')
+            pv_default = self.config.config.last_provenance or pv_child
             if pv_default not in _pv_choices:
-                pv_default = 'path'
+                # e.g. a remembered `adopt` on a direction without it: the
+                # child's own setting, or the strict check if that is not
+                # offered either.
+                pv_default = pv_child if pv_child in _pv_choices else 'path'
             pv_explain = (
                 f"{scope_label}, so two files with the same name in "
                 f"different folders land on the same output. Before overwriting an output "
@@ -4731,10 +4807,10 @@ class InteractiveMenu:
             elif conv_type == 'jxl_recompress':
                 # JXL -> JXL: distance-driven like the TIFF encoder
                 try:
-                    distance = float(Prompt.ask("Target distance (0=lossless, 1=visually lossless, 2=smaller)", default=str(workflow.get('distance', 1.0))))
+                    distance = float(Prompt.ask("Target distance (0=lossless, 1=visually lossless, 2=smaller)", default=str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))))
                     workflow['distance'] = max(0.0, min(distance, 15.0))
                 except ValueError:
-                    workflow['distance'] = workflow.get('distance', 1.0)
+                    workflow['distance'] = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
                     console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
                 effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
                 workflow['effort'] = max(1, min(effort, 10))
@@ -4851,16 +4927,21 @@ class InteractiveMenu:
                             workflow.setdefault('advanced_options', {}))
 
             if dest == 'png':
-                depth = IntPrompt.ask("PNG bit depth", choices=["8", "16"], default=str(workflow['bit_depth']))
-                workflow['bit_depth'] = int(depth) if depth else workflow['bit_depth']
+                bd_default = _bit_depth_or_default(workflow, dest)
+                depth = IntPrompt.ask("PNG bit depth", choices=["8", "16"], default=str(bd_default))
+                workflow['bit_depth'] = int(depth) if depth else bd_default
 
             if dest == 'tiff':
                 compression = Prompt.ask("TIFF compression", choices=["zip", "lzw", "none"], default=workflow['compression'])
                 workflow['compression'] = compression
-                depth = IntPrompt.ask("Bit depth", choices=["8", "16"], default=workflow['bit_depth'])
-                workflow['bit_depth'] = int(depth) if depth else workflow['bit_depth']
+                bd_default = _bit_depth_or_default(workflow, dest)
+                depth = IntPrompt.ask("Bit depth", choices=["8", "16"], default=bd_default)
+                workflow['bit_depth'] = int(depth) if depth else bd_default
                 # Preview option for JXL→TIFF
-                add_preview = Confirm.ask("Add JPEG preview? (for faster viewing)", default=True)
+                add_preview = Confirm.ask(
+                    "Add JPEG preview? (for faster viewing)",
+                    default=bool(workflow.get('add_preview',
+                                              _child_default('jxl_tiff_decoder', 'add_preview'))))
                 workflow['add_preview'] = add_preview
 
                 # Matrix/Basic mode and target ICC for JXL→TIFF
@@ -4895,15 +4976,20 @@ class InteractiveMenu:
             workflow['overwrite_mode'] = ow
 
             if origin == 'tiff' and dest == 'jxl':
-                d50 = Prompt.ask("D50 patch", choices=["auto", "on", "off"], default="auto")
+                d50 = Prompt.ask("D50 patch", choices=["auto", "on", "off"],
+                                 default=_child_default('jxl_tiff_encoder', 'd50_patch'))
                 workflow['d50_patch'] = d50
 
         else:
             print("\n--- Step 6: Basic Parameters ---")
 
             if origin == 'tiff':
-                ram_input = input(f"Use RAM for intermediate PNG? [Y/n]: ").strip().lower()
-                workflow['use_ram'] = not ram_input.startswith('n')
+                ram_default = workflow.get('use_ram', _child_default('jxl_tiff_encoder', 'use_ram'))
+                ram_input = input(f"Use RAM for intermediate PNG? [{'Y/n' if ram_default else 'y/N'}]: ").strip().lower()
+                # Enter keeps the default; any other answer flips it only when
+                # it says so (n for a Y default, y for an N default).
+                workflow['use_ram'] = (not ram_input.startswith('n') if ram_default
+                                       else ram_input.startswith('y'))
 
             workers = input(f"Workers [{workflow['workers']}]: ").strip()
             workflow['workers'] = max(1, min(int(workers), 32)) if workers.isdigit() else workflow['workers']
@@ -4915,11 +5001,12 @@ class InteractiveMenu:
                 # No effort parameter for JXL decoding - djxl doesn't use it
                 pass
             elif conv_type == 'jxl_recompress':
-                distance = input(f"Target distance (0=lossless, 1=visually lossless) [{workflow.get('distance', 1.0)}]: ").strip()
+                rec_default = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
+                distance = input(f"Target distance (0=lossless, 1=visually lossless) [{rec_default}]: ").strip()
                 try:
-                    workflow['distance'] = max(0.0, min(float(distance) if distance else workflow.get('distance', 1.0), 15.0))
+                    workflow['distance'] = max(0.0, min(float(distance) if distance else rec_default, 15.0))
                 except ValueError:
-                    workflow['distance'] = workflow.get('distance', 1.0)
+                    workflow['distance'] = rec_default
                 effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
                 workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
                 # The child cannot prompt through the wrapper's pipe, so the
@@ -4975,8 +5062,9 @@ class InteractiveMenu:
                 workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
 
             if origin == 'tiff' and dest == 'jxl':
-                d50_input = input("D50 patch (auto/on/off) [auto]: ").strip().lower() or "auto"
-                workflow['d50_patch'] = d50_input if d50_input in ["auto", "on", "off"] else "auto"
+                d50_default = _child_default('jxl_tiff_encoder', 'd50_patch')
+                d50_input = input(f"D50 patch (auto/on/off) [{d50_default}]: ").strip().lower() or d50_default
+                workflow['d50_patch'] = d50_input if d50_input in ["auto", "on", "off"] else d50_default
 
             staging_input = input(f"Staging [{staging_display}] (empty=keep, 'none'=system default): ").strip()
             if staging_input.lower() in ('system default', 'none'):
@@ -5016,20 +5104,23 @@ class InteractiveMenu:
                             workflow.setdefault('advanced_options', {}))
 
             if dest == 'png':
-                depth_input = input(f"PNG bit depth (8/16) [{workflow['bit_depth']}]: ").strip()
-                if depth_input in ['8', '16']:
-                    workflow['bit_depth'] = int(depth_input)
+                bd_default = _bit_depth_or_default(workflow, dest)
+                depth_input = input(f"PNG bit depth (8/16) [{bd_default}]: ").strip()
+                workflow['bit_depth'] = int(depth_input) if depth_input in ['8', '16'] else bd_default
 
             if dest == 'tiff':
                 comp_input = input(f"TIFF compression (zip/lzw/none) [{workflow['compression']}]: ").strip()
                 if comp_input in ['zip', 'lzw', 'none']:
                     workflow['compression'] = comp_input
-                depth_input = input(f"Bit depth (8/16) [{workflow['bit_depth']}]: ").strip()
-                if depth_input in ['8', '16']:
-                    workflow['bit_depth'] = int(depth_input)
+                bd_default = _bit_depth_or_default(workflow, dest)
+                depth_input = input(f"Bit depth (8/16) [{bd_default}]: ").strip()
+                workflow['bit_depth'] = int(depth_input) if depth_input in ['8', '16'] else bd_default
                 # Preview option for JXL→TIFF
-                preview_input = input("Add JPEG preview? (Y/n) [Y]: ").strip().lower()
-                workflow['add_preview'] = not preview_input.startswith('n')
+                pv_default = workflow.get('add_preview',
+                                          _child_default('jxl_tiff_decoder', 'add_preview'))
+                preview_input = input(f"Add JPEG preview? [{'Y/n' if pv_default else 'y/N'}]: ").strip().lower()
+                workflow['add_preview'] = (not preview_input.startswith('n') if pv_default
+                                           else preview_input.startswith('y'))
 
                 # Matrix/Basic mode and target ICC for JXL→TIFF
                 if origin == 'jxl' and dest == 'tiff':
@@ -5102,16 +5193,27 @@ class InteractiveMenu:
                 advanced_options['overwrite'] = False
                 advanced_options['sync'] = True
             if origin == 'tiff' and dest == 'jxl':
-                advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
-                advanced_options['encode_tag'] = workflow.get('encode_tag', 'xmp')
-                advanced_options['multipage_mode'] = self.config.config.last_multipage_mode or 'split'
-                advanced_options['thumbnail_mode'] = self.config.config.last_thumbnail_mode or 'exclude'
-                advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
+                advanced_options['d50_patch'] = (workflow.get('d50_patch')
+                                                 or _child_default('jxl_tiff_encoder', 'd50_patch'))
+                advanced_options['encode_tag'] = (workflow.get('encode_tag')
+                                                  or _child_default('jxl_tiff_encoder', 'encode_tag'))
+                advanced_options['multipage_mode'] = (self.config.config.last_multipage_mode
+                                                      or _child_default('jxl_tiff_encoder', 'multipage_mode'))
+                advanced_options['thumbnail_mode'] = (self.config.config.last_thumbnail_mode
+                                                      or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
+                advanced_options['thumbnail_suffix'] = (self.config.config.last_thumbnail_suffix
+                                                        or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
             elif origin == 'jxl' and dest == 'tiff':
-                advanced_options['thumbnail_handling'] = self.config.config.last_thumbnail_handling or 'include'
-                advanced_options['thumbnail_suffix'] = self.config.config.last_thumbnail_suffix or '_thumbnail'
-                advanced_options['no_reconstruct_multipage'] = bool(self.config.config.last_no_reconstruct_multipage)
-                advanced_options['depth_policy'] = self.config.config.last_depth_policy or 'preserve_thumbnails'
+                advanced_options['thumbnail_handling'] = (self.config.config.last_thumbnail_handling
+                                                          or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
+                advanced_options['thumbnail_suffix'] = (self.config.config.last_thumbnail_suffix
+                                                        or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
+                _no_recon = self.config.config.last_no_reconstruct_multipage
+                advanced_options['no_reconstruct_multipage'] = (
+                    bool(_no_recon) if _no_recon is not None
+                    else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
+                advanced_options['depth_policy'] = (self.config.config.last_depth_policy
+                                                    or _child_default('jxl_tiff_decoder', 'depth_policy'))
             # Preserve decode-mode/target-icc chosen earlier when not showing advanced
             existing = workflow.get('advanced_options', {})
             for key in ('matrix', 'basic', 'none', 'target_icc'):
@@ -5135,17 +5237,21 @@ class InteractiveMenu:
         if origin == 'tiff' and dest == 'jxl':
             if RICH_AVAILABLE and console:
                 strip_meta = Confirm.ask("Strip metadata?", default=False)
-                encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"], default="xmp")
+                encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"],
+                                        default=_child_default('jxl_tiff_encoder', 'encode_tag'))
                 # Measured on real photos: equal quality, bigger files, 20-100x
                 # slower — only sensible for screenshots/graphics batches.
                 force_modular = Confirm.ask(
                     "Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only)",
                     default=False)
                 # Thumbnail option
-                thumb_default = self.config.config.last_jpeg_thumbnail if self.config.config.last_jpeg_thumbnail is not None else False
+                thumb_default = (self.config.config.last_jpeg_thumbnail
+                                 if self.config.config.last_jpeg_thumbnail is not None
+                                 else _child_default('jxl_tiff_encoder', 'embed_thumbnail'))
                 embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
                 # Multi-page TIFF options
-                mp_default = self.config.config.last_multipage_mode or "split"
+                mp_default = (self.config.config.last_multipage_mode
+                              or _child_default('jxl_tiff_encoder', 'multipage_mode'))
                 # The default has been `split` since v1.8.2 (mp_default above
                 # says so too); advertising `ignore` as the default pointed the
                 # user at the one choice that silently discards image data.
@@ -5159,36 +5265,45 @@ class InteractiveMenu:
                     choices=["ignore", "skip", "split", "split_all"],
                     default=mp_default
                 )
-                thumbnail_mode = "exclude"
-                thumbnail_suffix = "_thumbnail"
+                # Not asked below for every choice: keep the remembered (or the
+                # encoder's own) values rather than overwrite them with literals.
+                tm_default = (self.config.config.last_thumbnail_mode
+                              or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
+                ts_default = (self.config.config.last_thumbnail_suffix
+                              or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
+                thumbnail_mode = tm_default
+                thumbnail_suffix = ts_default
                 # Only "split" consults the thumbnail question — split_all always
                 # includes thumbnails, so asking there implied a choice that the
                 # encoder ignores.
                 if multipage_mode == "split":
-                    tm_default = self.config.config.last_thumbnail_mode or "exclude"
                     thumbnail_mode = Prompt.ask(
                         "Embedded thumbnail/preview pages",
                         choices=["exclude", "include"],
                         default=tm_default
                     )
                 if multipage_mode == "split_all" or thumbnail_mode == "include":
-                    ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
             else:
                 strip_input = input("Strip metadata? [y/N]: ").strip().lower()
                 strip_meta = strip_input.startswith('y')
-                encode_tag_input = input("Encode tag (xmp/software/off) [xmp]: ").strip().lower() or "xmp"
-                encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else "xmp"
+                et_default = _child_default('jxl_tiff_encoder', 'encode_tag')
+                encode_tag_input = input(f"Encode tag (xmp/software/off) [{et_default}]: ").strip().lower() or et_default
+                encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else et_default
                 modular_input = input("Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only) [y/N]: ").strip().lower()
                 force_modular = modular_input.startswith('y')
                 # Thumbnail option
-                thumb_default = "y" if self.config.config.last_jpeg_thumbnail else "n"
+                _thumb_on = (self.config.config.last_jpeg_thumbnail
+                             if self.config.config.last_jpeg_thumbnail is not None
+                             else _child_default('jxl_tiff_encoder', 'embed_thumbnail'))
+                thumb_default = "y" if _thumb_on else "n"
                 thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
                 embed_thumb = thumb_input.startswith('y')
                 # Multi-page TIFF options
-                mp_default = self.config.config.last_multipage_mode or "split"
+                mp_default = (self.config.config.last_multipage_mode
+                              or _child_default('jxl_tiff_encoder', 'multipage_mode'))
                 print("  split     = one JXL per real page; thumbnails per the next question (default)")
                 print("  split_all = one JXL per page, thumbnails always included")
                 print("  ignore    = encode page 0 only, DROP the rest")
@@ -5199,17 +5314,21 @@ class InteractiveMenu:
                 # mask page of every film scan. The rich branch cannot reach
                 # this (it uses choices=).
                 multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else mp_default
-                thumbnail_mode = "exclude"
-                thumbnail_suffix = "_thumbnail"
+                # Not asked below for every choice: keep the remembered (or the
+                # encoder's own) values rather than overwrite them with literals.
+                tm_default = (self.config.config.last_thumbnail_mode
+                              or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
+                ts_default = (self.config.config.last_thumbnail_suffix
+                              or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
+                thumbnail_mode = tm_default
+                thumbnail_suffix = ts_default
                 # split_all always includes thumbnails; only "split" has a choice.
                 if multipage_mode == "split":
-                    tm_default = self.config.config.last_thumbnail_mode or "exclude"
                     tm_input = input(f"Embedded thumbnail/preview pages (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
                     # Fall back to the DEFAULT on a typo, not to a fixed value
                     # (same rule as multipage_mode above).
                     thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else tm_default
                 if multipage_mode == "split_all" or thumbnail_mode == "include":
-                    ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                     thumbnail_suffix = ts_input if ts_input else ts_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
@@ -5226,7 +5345,8 @@ class InteractiveMenu:
             advanced_options['encode_tag'] = encode_tag
             if force_modular:
                 advanced_options['modular'] = 'on'
-            advanced_options['d50_patch'] = workflow.get('d50_patch', 'auto')
+            advanced_options['d50_patch'] = (workflow.get('d50_patch')
+                                             or _child_default('jxl_tiff_encoder', 'd50_patch'))
             advanced_options['overwrite'] = overwrite
             advanced_options['sync'] = sync
             advanced_options['delete_source'] = delete_src
@@ -5277,8 +5397,8 @@ class InteractiveMenu:
                         target_icc = ""
                 no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
                 # Thumbnail reconstruction handling
-                th_default = self.config.config.last_thumbnail_handling if hasattr(self.config.config, 'last_thumbnail_handling') else "include"
-                th_default = th_default or "include"
+                th_default = (self.config.config.last_thumbnail_handling
+                              or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
                 thumbnail_handling = Prompt.ask(
                     "Thumbnail handling for multi-page TIFFs",
                     choices=["ignore", "include", "generate"],
@@ -5287,11 +5407,15 @@ class InteractiveMenu:
                 if thumbnail_handling == "generate":
                     console.print("[yellow]generate is not yet implemented; using include[/yellow]")
                     thumbnail_handling = "include"
-                ts_default = self.config.config.last_thumbnail_suffix or "_thumbnail"
+                ts_default = (self.config.config.last_thumbnail_suffix
+                              or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
                 thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
-                no_recon_default = self.config.config.last_no_reconstruct_multipage if self.config.config.last_no_reconstruct_multipage is not None else False
+                no_recon_default = (self.config.config.last_no_reconstruct_multipage
+                                    if self.config.config.last_no_reconstruct_multipage is not None
+                                    else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
                 no_reconstruct_multipage = Confirm.ask("Decode every JXL to its own TIFF (no multi-page reconstruction)?", default=no_recon_default)
-                dp_default = self.config.config.last_depth_policy or "preserve_thumbnails"
+                dp_default = (self.config.config.last_depth_policy
+                              or _child_default('jxl_tiff_decoder', 'depth_policy'))
                 depth_policy = Prompt.ask(
                     "Bit depth policy",
                     choices=["force16", "preserve_thumbnails", "preserve_original"],
@@ -5339,21 +5463,27 @@ class InteractiveMenu:
                 cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
                 no_cleanup = cleanup_input.startswith('y')
                 # Thumbnail reconstruction handling
-                th_default = getattr(self.config.config, 'last_thumbnail_handling', None) or "include"
+                th_default = (getattr(self.config.config, 'last_thumbnail_handling', None)
+                              or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
                 th_input = input(f"Thumbnail handling for multi-page TIFFs (ignore/include/generate) [{th_default}]: ").strip().lower() or th_default
-                thumbnail_handling = th_input if th_input in ["ignore", "include", "generate"] else "include"
+                thumbnail_handling = th_input if th_input in ["ignore", "include", "generate"] else th_default
                 if thumbnail_handling == "generate":
                     print("generate is not yet implemented; using include")
                     thumbnail_handling = "include"
-                ts_default = getattr(self.config.config, 'last_thumbnail_suffix', None) or "_thumbnail"
+                ts_default = (getattr(self.config.config, 'last_thumbnail_suffix', None)
+                              or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
                 ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                 thumbnail_suffix = ts_input if ts_input else ts_default
-                no_recon_default = "y" if self.config.config.last_no_reconstruct_multipage else "n"
+                _no_recon_on = (self.config.config.last_no_reconstruct_multipage
+                                if self.config.config.last_no_reconstruct_multipage is not None
+                                else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
+                no_recon_default = "y" if _no_recon_on else "n"
                 no_recon_input = input(f"Decode every JXL to its own TIFF (no multi-page reconstruction)? [{no_recon_default}/n]: ").strip().lower() or no_recon_default
                 no_reconstruct_multipage = no_recon_input.startswith('y')
-                dp_default = getattr(self.config.config, 'last_depth_policy', None) or "preserve_thumbnails"
+                dp_default = (getattr(self.config.config, 'last_depth_policy', None)
+                              or _child_default('jxl_tiff_decoder', 'depth_policy'))
                 dp_input = input(f"Bit depth policy (force16/preserve_thumbnails/preserve_original) [{dp_default}]: ").strip().lower() or dp_default
-                depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else "preserve_thumbnails"
+                depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else dp_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
 
@@ -5535,7 +5665,7 @@ class InteractiveMenu:
         page-dropping choices are flagged as warnings.
         """
         adv = workflow.get('advanced_options', {})
-        mp = adv.get('multipage_mode') or 'split'
+        mp = adv.get('multipage_mode') or _child_default('jxl_tiff_encoder', 'multipage_mode')
         if mp == 'ignore':
             return "ignore — extra pages are DISCARDED (choose split to keep them)", True
         if mp == 'skip':
@@ -5544,7 +5674,7 @@ class InteractiveMenu:
             # split_all never consults thumbnail_mode; saying otherwise implied
             # a choice the encoder ignores.
             return "split_all — one JXL per page, thumbnail pages included", False
-        tm = adv.get('thumbnail_mode') or 'exclude'
+        tm = adv.get('thumbnail_mode') or _child_default('jxl_tiff_encoder', 'thumbnail_mode')
         tm_note = "thumbnail pages included" if tm == 'include' else "thumbnail pages excluded"
         return f"split — one JXL per page ({tm_note})", False
 
@@ -5715,12 +5845,13 @@ class InteractiveMenu:
                     table.add_row("Quality:", str(workflow.get('quality', 95)))
             elif origin == 'jxl' and dest == 'tiff':
                 # JXL->TIFF: show preview option
-                preview_status = "Yes" if workflow.get('add_preview', True) else "No"
+                preview_status = "Yes" if workflow.get(
+                    'add_preview', _child_default('jxl_tiff_decoder', 'add_preview')) else "No"
                 table.add_row("JPEG Preview:", preview_status)
             elif workflow.get('conversion_type') == 'jxl_recompress':
                 # JXL->JXL: the target distance and the downgrade policy are
                 # what the user must see before typing YES
-                table.add_row("Distance:", str(workflow.get('distance', 1.0)))
+                table.add_row("Distance:", str(workflow.get('distance', _child_default('jxl_recompressor', 'distance'))))
                 _dg = workflow.get('advanced_options', {}).get('on_downgrade')
                 table.add_row("If no gain possible:", _dg or "copy (child default: ask)")
                 _rg = workflow.get('advanced_options', {}).get('on_regeneration')
@@ -5798,12 +5929,13 @@ class InteractiveMenu:
                     print(f"Quality: {workflow.get('quality', 95)}")
             elif origin == 'jxl' and dest == 'tiff':
                 # JXL->TIFF: show preview option
-                preview_status = "Yes" if workflow.get('add_preview', True) else "No"
+                preview_status = "Yes" if workflow.get(
+                    'add_preview', _child_default('jxl_tiff_decoder', 'add_preview')) else "No"
                 print(f"JPEG Preview: {preview_status}")
             elif workflow.get('conversion_type') == 'jxl_recompress':
                 # JXL->JXL: the target distance and the downgrade policy are
                 # what the user must see before typing YES
-                print(f"Distance: {workflow.get('distance', 1.0)}")
+                print(f"Distance: {workflow.get('distance', _child_default('jxl_recompressor', 'distance'))}")
                 _dg = workflow.get('advanced_options', {}).get('on_downgrade')
                 print(f"If no gain possible: {_dg or 'copy (child default: ask)'}")
                 _rg = workflow.get('advanced_options', {}).get('on_regeneration')
@@ -6780,7 +6912,7 @@ class InteractiveMenu:
         which anchor on a FILE path) there is no filename to exclude here.
         """
         parts = Path(source).parts
-        marker_lower = (export_marker or "_EXPORT").lower()
+        marker_lower = (export_marker or ToolConfig.export_marker).lower()
         idx = next((i for i, p in enumerate(parts)
                     if _marker_matches(p.lower(), marker_lower)), None)
         if idx is None:
@@ -7684,8 +7816,9 @@ class InteractiveMenu:
                 cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
 
         elif origin == 'jxl' and dest == 'tiff':
-            cmd.extend(['--compression', workflow.get('compression', 'zip')])
-            cmd.extend(['--depth', str(workflow.get('bit_depth', 16))])
+            cmd.extend(['--compression', workflow.get('compression')
+                        or _child_default('jxl_tiff_decoder', 'compression')])
+            cmd.extend(['--depth', str(_bit_depth_or_default(workflow, 'tiff'))])
 
             if advanced.get('matrix'):
                 cmd.append('--matrix')
@@ -7712,7 +7845,7 @@ class InteractiveMenu:
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
                 self._append_provenance_flags(cmd, advanced, origin, dest)
-            if not workflow.get('add_preview', True):
+            if workflow.get('add_preview') is False:
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
                 cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
@@ -7725,7 +7858,7 @@ class InteractiveMenu:
 
         elif origin == 'jxl' and dest == 'jxl':
             # JXL -> JXL recompressor
-            cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            cmd.extend(['--distance', str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))])
             cmd.extend(['--effort', str(workflow.get('effort', 7))])
 
             if _recompress_entry_in_place(source, dest_path, mode):
@@ -8177,7 +8310,7 @@ class InteractiveMenu:
                                   "it cannot delete the JXLs. Drop the delete option "
                                   "(or pick another decode mode).")
                 return False
-            if str(workflow.get('bit_depth', 16)) == '8' or _adv_pre.get('basic'):
+            if str(_bit_depth_or_default(workflow, 'tiff')) == '8' or _adv_pre.get('basic'):
                 _note = ("Bit depth 8 / decode mode 'basic' makes a degraded copy: the "
                          "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
                          "whose real profile lives in XMP.")
@@ -8385,11 +8518,12 @@ class InteractiveMenu:
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
                     cmd.insert(3, output_dir)
 
-            cmd.extend(['--compression', workflow['compression']])
-            cmd.extend(['--depth', str(workflow['bit_depth'])])
+            cmd.extend(['--compression', workflow.get('compression')
+                        or _child_default('jxl_tiff_decoder', 'compression')])
+            cmd.extend(['--depth', str(_bit_depth_or_default(workflow, 'tiff'))])
             
             # Preview option
-            if not workflow.get('add_preview', True):
+            if workflow.get('add_preview') is False:
                 cmd.append('--no-preview')
 
             if advanced.get('matrix'):
@@ -8465,7 +8599,7 @@ class InteractiveMenu:
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
                     cmd.insert(3, output_dir)
 
-            cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+            cmd.extend(['--distance', str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))])
             cmd.extend(['--effort', str(workflow.get('effort', 7))])
 
             if advanced.get('on_downgrade'):
@@ -8876,8 +9010,10 @@ class InteractiveMenu:
         last_origin = session.get('last_origin_format') or "tiff"
         last_dest = session.get('last_dest_format') or ("jxl" if last_origin != "jxl" else "jpeg")
         last_conv_type = session.get('last_conversion_type') or ""
-        last_d50_patch = session.get('last_d50_patch') or "auto"
-        last_encode_tag = session.get('last_encode_tag') or "xmp"
+        last_d50_patch = (session.get('last_d50_patch')
+                          or _child_default('jxl_tiff_encoder', 'd50_patch'))
+        last_encode_tag = (session.get('last_encode_tag')
+                           or _child_default('jxl_tiff_encoder', 'encode_tag'))
 
         # A manifest repeat re-reads the CSV instead of replaying a stored
         # copy of its rows, so edits made in Excel between runs take effect
@@ -9147,24 +9283,39 @@ class InteractiveMenu:
             session.get('last_exclude_folders')
             if (origin, last_dest) in (('tiff', 'jxl'), ('jxl', 'tiff'))
             else None)
-        workflow['use_ram'] = session.get('last_use_ram') if session.get('last_use_ram') is not None else True
+        workflow['use_ram'] = (session.get('last_use_ram')
+                               if session.get('last_use_ram') is not None
+                               else _child_default('jxl_tiff_encoder', 'use_ram'))
         workflow['icc_profile'] = session.get('last_icc_profile')
-        workflow['compression'] = session.get('last_compression') or 'zip'
-        workflow['bit_depth'] = session.get('last_bit_depth') or 16
+        workflow['compression'] = (session.get('last_compression')
+                                   or _child_default('jxl_tiff_decoder', 'compression'))
+        # None = the child's own default (_bit_depth_or_default)
+        workflow['bit_depth'] = session.get('last_bit_depth')
         workflow['dry_run'] = dry_choice
-        workflow['add_preview'] = session.get('last_add_preview') if session.get('last_add_preview') is not None else True
+        workflow['add_preview'] = (session.get('last_add_preview')
+                                   if session.get('last_add_preview') is not None
+                                   else _child_default('jxl_tiff_decoder', 'add_preview'))
         fallback_advanced = {
             'overwrite': overwrite,
             'sync': sync,
             'd50_patch': last_d50_patch if origin == 'tiff' else None,
             'encode_tag': last_encode_tag if origin == 'tiff' else None,
             'embed_thumbnail': session.get('last_jpeg_thumbnail') if origin == 'tiff' else None,
-            'multipage_mode': session.get('last_multipage_mode') or 'split',
-            'thumbnail_mode': session.get('last_thumbnail_mode') or 'exclude',
-            'thumbnail_suffix': session.get('last_thumbnail_suffix') or '_thumbnail',
-            'thumbnail_handling': session.get('last_thumbnail_handling') or 'include',
-            'no_reconstruct_multipage': bool(session.get('last_no_reconstruct_multipage')),
-            'depth_policy': session.get('last_depth_policy') or 'preserve_thumbnails',
+            'multipage_mode': (session.get('last_multipage_mode')
+                               or _child_default('jxl_tiff_encoder', 'multipage_mode')),
+            'thumbnail_mode': (session.get('last_thumbnail_mode')
+                               or _child_default('jxl_tiff_encoder', 'thumbnail_mode')),
+            'thumbnail_suffix': (session.get('last_thumbnail_suffix')
+                                 or _child_default('jxl_tiff_decoder' if origin == 'jxl'
+                                                   else 'jxl_tiff_encoder', 'thumbnail_suffix')),
+            'thumbnail_handling': (session.get('last_thumbnail_handling')
+                                   or _child_default('jxl_tiff_decoder', 'thumbnail_handling')),
+            'no_reconstruct_multipage': (
+                bool(session.get('last_no_reconstruct_multipage'))
+                if session.get('last_no_reconstruct_multipage') is not None
+                else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage')),
+            'depth_policy': (session.get('last_depth_policy')
+                             or _child_default('jxl_tiff_decoder', 'depth_policy')),
             'matrix': False,
             'basic': False,
             'none': False,
@@ -9330,7 +9481,8 @@ def _main():
                     saved_distance = workflow.get('distance')
                 elif workflow['conversion_type'] == 'jxl_recompress':
                     # JXL -> JXL is distance-driven; no quality knob involved.
-                    saved_distance = workflow.get('distance') if workflow.get('distance') is not None else 1.0
+                    saved_distance = (workflow.get('distance') if workflow.get('distance') is not None
+                                      else _child_default('jxl_recompressor', 'distance'))
                     saved_quality = None
                 elif workflow['conversion_type'] == 'jxl_tiff_decoder':
                     # The decoder is never passed --quality, so storing one only

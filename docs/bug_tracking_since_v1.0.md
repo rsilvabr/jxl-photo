@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #528.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #529.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | unreleased | #528 (1) |
 | [Round-50 — what the 261008 audit left open](#round-50--what-the-261008-audit-left-open-2026-10-08) | 2026-10-08 | v2.8.1 | #521–#527 (7) |
 | [Round-49 — the 261008 audit](#round-49--the-261008-audit-2026-10-08) | 2026-10-08 | v2.8.0 | #496–#520 (25) |
 | [Round-48 — what `--buffering 1` really costs](#round-48--what---buffering-1-really-costs-2026-10-06) | 2026-10-06 | v2.8.0 | #480 (1) |
@@ -57,6 +58,20 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-51 — the wizard's defaults are the scripts' settings (2026-10-09)
+
+Found while closing round 50 (`AI_tools/261008_Claude_report_audit-leftovers.md`).
+Harmless with the shipped settings, which the literals matched. Regression
+tests: `tests/test_wrapper_child_defaults.py` (every scenario fails against the
+v2.8.1 wrapper via `JXLPHOTO_SCRIPTS_UNDER_TEST`). Nothing a codec or exiftool
+writes is involved, so there is no real-codec test.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 528 | **The wizard's defaults were literal copies of the scripts' settings.** For the options it puts on a child's command line — multi-page and thumbnail mode, thumbnail suffix, D50 patch, encode tag, RAM for the PNG intermediate, TIFF compression, bit depth, JPEG preview, depth policy, multi-page reconstruction, provenance check, the recompressor's distance — the wizard fell back to the shipped value (`last_multipage_mode or 'split'`) whenever it had no remembered answer. An edit at the top of a script (`MULTIPAGE_TIFF_MODE = "split_all"`) was overridden by a fresh wizard run, by Step 6A answered "no", and by every preset that stored no answer. Three `"_EXPORT"` literals repeated the wrapper's own marker setting. | wrapper | ✅ FIXED (`_child_default` reads each option's setting from its script through one table, `_CHILD_OPTION_DEFAULTS`, whose fallbacks a test pins to the shipped settings; a remembered `last_*` answer still comes first, and a typo falls back to the setting; the marker literals read `ToolConfig.export_marker`. Unchanged on purpose: the wrapper's own settings (workers, quality, effort, the TIFF → JXL distance, set in menu option 4) and the transcoder's lossy distance, which has no setting at the top of its script) |
 
 ---
 

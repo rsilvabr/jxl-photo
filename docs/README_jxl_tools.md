@@ -790,6 +790,16 @@ Some options are available directly in the wizard, others must be edited in the 
 
 These are hardcoded global variables at the top of each script. To change them, open the script file and edit the variable at the top.
 
+The wizard reads them too: its default for every option it passes to a script
+(multi-page and thumbnail mode, thumbnail suffix, D50 patch, encode tag, RAM
+for the PNG intermediate, TIFF compression, bit depth, JPEG preview, depth
+policy, multi-page reconstruction, provenance check, the recompressor's
+distance) is that script's setting, so an edit here shows up as the wizard's
+default. An answer the wizard remembers from an earlier run, or a preset's
+stored value, still comes first. The wrapper's own settings above (workers,
+quality, effort, the TIFF → JXL distance, the export marker) are the
+exception: they are set in menu option 4.
+
 #### jxl_tiff_encoder.py
 | Variable | Default | What it does |
 |----------|---------|--------------|
