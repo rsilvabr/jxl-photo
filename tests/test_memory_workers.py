@@ -553,15 +553,12 @@ def test_constants_agree():
                  "_UNKNOWN_IMAGE_PIXELS"):
         assert getattr(enc, name) == getattr(rec, name), name
 
-    # WORKER_MEMORY_FRACTION is zeroed in memory by the conftest fixture, so
-    # compare the SOURCE line of each script.
-    pat = re.compile(r"^WORKER_MEMORY_FRACTION = (.+)$", re.M)
+    # WORKER_MEMORY_FRACTION is NOT compared: since v2.9.0 the recompressor
+    # budgets the steps around cjxl separately (cjxl slots, tests/
+    # test_cjxl_slots.py) and ships 1.0, while the encoder keeps 0.8. The
+    # budget reading (WORKER_MEMORY_LIMIT) stays the same in both; compare the
+    # SOURCE line, which the conftest fixtures never touch.
     src_enc = (REPO / "jxl_tiff_encoder.py").read_text(encoding="utf-8")
     src_rec = (REPO / "jxl_recompressor.py").read_text(encoding="utf-8")
-    val_enc = pat.search(src_enc).group(1)
-    val_rec = pat.search(src_rec).group(1)
-    # Equal, but NOT pinned to a value: it is a user setting, and editing it at
-    # the top of both scripts must not break the suite.
-    assert val_enc == val_rec
     pat = re.compile(r"^WORKER_MEMORY_LIMIT = (.+)$", re.M)
     assert pat.search(src_enc).group(1) == pat.search(src_rec).group(1)

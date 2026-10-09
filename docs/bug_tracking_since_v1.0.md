@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #529.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #530.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-52 — the recompressor's `--output-icc` is reset between runs](#round-52--the-recompressors---output-icc-is-reset-between-runs-2026-10-10) | 2026-10-10 | v2.9.0 | #529 (1) |
 | [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | v2.8.2 | #528 (1) |
 | [Round-50 — what the 261008 audit left open](#round-50--what-the-261008-audit-left-open-2026-10-08) | 2026-10-08 | v2.8.1 | #521–#527 (7) |
 | [Round-49 — the 261008 audit](#round-49--the-261008-audit-2026-10-08) | 2026-10-08 | v2.8.0 | #496–#520 (25) |
@@ -58,6 +59,21 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-52 — the recompressor's `--output-icc` is reset between runs (2026-10-10)
+
+Found while reviewing the cjxl-slots change of v2.9.0
+(`AI_tools/261010_Claude_review_cjxl-slots.md`). Only a caller that runs the
+recompressor's `main()` twice in one process could meet it — the test suite;
+the wrapper runs each script as a subprocess. Regression test:
+`tests/test_round52_output_icc_reset.py` (fails against v2.8.2). Nothing a
+codec or exiftool writes is involved, so there is no real-codec test.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 529 | **A second in-process run inherited `--output-icc`.** `main()` assigned `OUTPUT_ICC` only when the flag was given, and the setting was missing from `_RUN_DEFAULTS`, so a later `main()` in the same process without the flag kept the first run's target and planned a colour-converted derivative. Same class as the encoder's #431. | recompressor | ✅ FIXED (`OUTPUT_ICC` joins `_RUN_DEFAULTS`: every run starts from the setting at the top of the script) |
 
 ---
 

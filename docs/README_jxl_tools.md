@@ -866,7 +866,7 @@ exception: they are set in menu option 4.
 | `REDERIVE_ON_ENCODE_CHANGE` | `True` | Derivatives: re-derive when the recorded distance/effort differ (also `--rederive-on-encode-change` / `--no-rederive-on-encode-change`) |
 | `REDERIVE_ON_LOWER_EFFORT` | `False` | Derivatives: at the same distance only a higher effort re-derives; `True` also re-derives on a lower one (also `--rederive-on-lower-effort` / `--no-rederive-on-lower-effort`; the wizard asks right after the question above) |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
-| `WORKER_MEMORY_FRACTION` | `0.8` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
+| `WORKER_MEMORY_FRACTION` | `1.0` | Caps how many cjxl run at once (and `--workers`) so the run fits in this share of the memory budget; extra workers prepare the next files with what is left; `0` = no cap |
 | `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
 

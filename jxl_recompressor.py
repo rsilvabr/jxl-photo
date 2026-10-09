@@ -683,15 +683,19 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
 # reported as a codec timeout). The planning-time batch reads keep their own
 # per-batch timeout.
 
-WORKER_MEMORY_FRACTION = 0.8
-# Caps --workers so the parallel cjxl processes fit in memory. The peak of
-# each worker is estimated from the largest image in the batch and the encode
-# settings: cjxl encodes the whole image at once (2.5-8x the memory of its
-# usual streaming encode) at effort 7 with distance >= 3, effort 8-9 with
-# distance > 0.5, effort 10+, or --buffering 0. The run then uses at most this
-# fraction of the memory WORKER_MEMORY_LIMIT picks (by default the smaller of
-# what the system can still commit and the physical RAM still available).
-# 0 disables the cap.
+WORKER_MEMORY_FRACTION = 1.0
+# Caps the memory the parallel encodes may take. The peak of one cjxl is
+# estimated from the largest image in the batch and the encode settings: cjxl
+# encodes the whole image at once (2.5-8x the memory of its usual streaming
+# encode) at effort 7 with distance >= 3, effort 8-9 with distance > 0.5,
+# effort 10+, or --buffering 0. At most as many cjxl as fit run at once, and
+# the memory left over pays for extra workers that decode and convert the
+# next files meanwhile. The whole run stays within this fraction of the memory
+# WORKER_MEMORY_LIMIT picks (by default the smaller of what the system can
+# still commit and the physical RAM still available). 0 disables the cap.
+# 1.0 by default (the TIFF encoder keeps 0.8): the per-cjxl estimate already
+# sits ~10% above the measured peak, and every other step of a file is
+# budgeted on its own.
 
 WORKER_MEMORY_LIMIT = "both"
 # What the --workers cap budgets from (WORKER_MEMORY_FRACTION of it):
@@ -946,6 +950,10 @@ _RUN_DEFAULTS = {
     "PROVENANCE_CHECK": PROVENANCE_CHECK,
     "TEMP2_DIR": TEMP2_DIR,
     "REDERIVE_ON_LOWER_EFFORT": REDERIVE_ON_LOWER_EFFORT,
+    # --output-icc only assigns it when the flag is given: without the reset a
+    # second in-process run without the flag inherited the first one's target
+    # and wrote a colour-converted DERIVATIVE (#529).
+    "OUTPUT_ICC": OUTPUT_ICC,
 }
 
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
@@ -1056,6 +1064,40 @@ _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
 _MODULAR_LOSSY_BYTES_PER_PIXEL = 110
 _UNKNOWN_IMAGE_PIXELS = 60_000_000
+
+# Peak private memory, in bytes per pixel, of the steps a recompressor worker
+# runs on a file besides the full-size cjxl: djxl to a 16-bit PNG (19 measured)
+# and the magick recipe (36 with Lab + unsharp + resize), plan
+# 261004_Claude_plan_memoria-workers.md, +~10% margin. One budget covers any
+# of them: a worker runs one at a time.
+_SIDE_STEP_BYTES_PER_PIXEL = 40
+
+# How many full-size cjxl encodes may run at once (_run_cjxl_full); None = no
+# limit. Set by main() from _memory_capped_pipeline for the length of the
+# pool, then cleared.
+_CJXL_SLOTS_N = None
+_CJXL_SEMAPHORE = None
+
+
+def _set_cjxl_slots(n):
+    """Limit the full-size cjxl encodes to `n` at a time (None/0 = no limit)."""
+    global _CJXL_SLOTS_N, _CJXL_SEMAPHORE
+    _CJXL_SLOTS_N = n or None
+    _CJXL_SEMAPHORE = threading.BoundedSemaphore(n) if n else None
+
+
+def _run_cjxl_full(cmd):
+    """_run_captured for a full-size cjxl encode, holding one of the cjxl slots
+    while it runs (see _memory_capped_pipeline). The wait happens before the
+    process starts, so CJXL_TIMEOUT never counts it."""
+    sem = _CJXL_SEMAPHORE
+    if sem is None:
+        return _run_captured(cmd, CJXL_TIMEOUT)
+    sem.acquire()
+    try:
+        return _run_captured(cmd, CJXL_TIMEOUT)
+    finally:
+        sem.release()
 
 
 def _cjxl_whole_image(distance, effort, buffering=None):
@@ -1206,6 +1248,72 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
                        f"{WORKER_MEMORY_FRACTION}, WORKER_MEMORY_LIMIT="
                        f"{WORKER_MEMORY_LIMIT}).{hint}")
     return workers
+
+
+def _memory_capped_pipeline(requested, max_pixels, distance, effort,
+                            buffering=None):
+    """(workers, cjxl_slots) for the recompressor's pool.
+
+    The peak that matters is cjxl's; the other steps of a file (djxl, the
+    magick recipe, exiftool, the checks) need a fraction of it. So at most
+    `cjxl_slots` full-size encodes run at once (_run_cjxl_full) and the memory
+    left over goes to extra workers that decode and convert the next files
+    meanwhile — a slot no longer sits idle while its worker is busy with the
+    other steps. Worst case = every slot at its cjxl peak plus every extra
+    worker at its side-step peak, within WORKER_MEMORY_FRACTION of the budget
+    (_available_memory_bytes). cjxl_slots is None when nothing is capped
+    (fraction 0, memory unknown).
+    """
+    if WORKER_MEMORY_FRACTION <= 0:
+        return requested, None
+    if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
+        logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
+                       f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
+    pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
+    per_cjxl = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering)
+    per_side = pixels * _SIDE_STEP_BYTES_PER_PIXEL
+    avail, budget = _available_memory_bytes()
+    if avail is None:
+        logger.info("Memory: could not read the available memory — "
+                    "--workers not capped")
+        return requested, None
+    total = avail * WORKER_MEMORY_FRACTION
+    slots = max(1, int(total // max(per_cjxl, per_side)))
+    extra = 0
+    if per_cjxl > per_side and not VERIFY_ROUNDTRIP:
+        # --verify-roundtrip decodes both images inside Python (not measured):
+        # no extra workers then, exactly the pre-pipeline cap.
+        extra = max(0, min(slots, int((total - slots * per_cjxl) // per_side)))
+    workers = min(requested, slots + extra)
+    slots = min(slots, workers)
+    if _cjxl_whole_image(distance, effort, buffering):
+        kind = "whole-image"
+    else:
+        kind = "streaming"
+    logger.info(f"Memory: ~{per_cjxl / 2**30:.1f} GB per cjxl ({kind} encode, "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}), "
+                f"~{per_side / 2**30:.1f} GB per file being prepared | "
+                f"{avail / 2**30:.1f} GB available ({budget}) | "
+                f"workers {workers}, cjxl at a time {slots}")
+    if workers < requested:
+        hint = ""
+        if kind == "whole-image" and effort >= 8:
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once. --buffering 1 would stream it, but a streamed effort "
+                    "8+ encode is effort 7's file (~8% larger): for a light run "
+                    "use effort 7 instead.")
+        elif kind == "whole-image":
+            hint = (" This distance/effort makes cjxl encode the whole image at "
+                    "once; --buffering 1 keeps it streaming (~3x less memory, "
+                    "files ~1.5% larger, same quality).")
+        more = (f"; {workers - slots} more worker(s) decode and convert the next "
+                f"files meanwhile" if workers > slots else "")
+        logger.warning(f"--workers {requested} reduced to {workers}: {slots} cjxl "
+                       f"process(es) at ~{per_cjxl / 2**30:.1f} GB each fit in the "
+                       f"{avail / 2**30:.1f} GB {_MEMORY_BUDGET_TEXT[budget]} "
+                       f"(WORKER_MEMORY_FRACTION={WORKER_MEMORY_FRACTION}, "
+                       f"WORKER_MEMORY_LIMIT={WORKER_MEMORY_LIMIT}){more}.{hint}")
+    return workers, slots
 
 
 def _abort_on_duplicate_outputs(pairs):
@@ -3140,7 +3248,7 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
                 # --container=1 UNCONDITIONALLY: a bare-codestream output is
                 # refused by the exiftool restamp ("Will wrap JXL codestream").
                 "--container=1"] + _keep_invisible_flag() + _cjxl_buffering_flag())
-        r = _run_captured(cmd, CJXL_TIMEOUT)
+        r = _run_cjxl_full(cmd)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
 
@@ -3608,7 +3716,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                      "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                      "--container=1", "-x", "strip=exif", "-x", "strip=xmp"]
                     + _keep_invisible_flag() + _cjxl_buffering_flag())
-        r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
+        r = _run_cjxl_full(cjxl_cmd)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
     return converted, size, skip_icc
@@ -5485,16 +5593,22 @@ def main():
     try:
         if work_items:
             workers = args.workers
+            _slots = None
             _to_encode = [it for it in work_items if it["action"] == "convert"]
             if _to_encode:
-                workers = _memory_capped_workers(
+                workers, _slots = _memory_capped_pipeline(
                     args.workers, max(it.get("pixels", 0) for it in _to_encode),
                     CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING)
+            # The semaphore only matters when some workers must wait for a slot.
+            _set_cjxl_slots(_slots if _slots is not None and _slots < workers
+                            else None)
             results, promoted = process_group(work_items, workers)
     except KeyboardInterrupt:
         interrupted = True
         logger.error("Interrupted (Ctrl+C) — finishing the summary with what is done.")
         # Fall through to the summary with partial results; exit 130 below.
+    finally:
+        _set_cjxl_slots(None)
 
     # EVERY planned item, not just the ones that ran: policy-skipped and
     # refused pages must still veto the deletion of their multi-page siblings.

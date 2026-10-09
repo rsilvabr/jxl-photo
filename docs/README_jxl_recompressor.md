@@ -513,14 +513,24 @@ it ran on: 314 of 681
 files failed with `JxlEncoderProcessOutput failed` / `WinError 1455`, and one
 worker hung forever when the MemoryError landed in a subprocess reader thread.
 
-**The run caps `--workers` for you.** Before the pool starts it takes the
-**largest** file in the batch, estimates the per-worker peak from the distance,
-effort and buffering, and lowers the count so the jobs fit in the memory budget
-times `WORKER_MEMORY_FRACTION` (0.8).
-It logs `Memory: ~N GB per worker (...) | M GB available (commit|physical) |
-workers K` and warns `--workers N reduced to K` with the `--buffering 1` remedy
-on the whole-image path. The worker count the pool really uses is the capped
-one; the startup `Mode: ... | workers:` line still shows what you asked for.
+**The run caps the encodes for you.** Before the pool starts it takes the
+**largest** file in the batch and estimates the peak of one cjxl from the
+distance, effort and buffering. At most as many cjxl as fit in the memory
+budget times `WORKER_MEMORY_FRACTION` (1.0; the estimate already sits ~10 %
+above the measured peak) run at once. The other steps of
+a file — the djxl decode, the colour/resize/sharpen recipe, exiftool, the
+checks — need far less (~1.8 GB at 45 MP), so the memory left over pays for
+**extra workers that prepare the next files** while the encodes run: a cjxl
+slot no longer sits idle while its worker decodes. The whole run (every
+slot at its cjxl peak plus every extra worker at its side-step peak) stays
+within the budget.
+It logs `Memory: ~N GB per cjxl (...), ~M GB per file being prepared | B GB
+available (commit|physical) | workers W, cjxl at a time S` and warns
+`--workers N reduced to W` with the `--buffering 1` remedy on the
+whole-image path. When nothing is left over after the slots there are no
+extra workers (W = S), exactly as before; `--verify-roundtrip` never adds
+them. The startup `Mode: ... | workers:` line still shows what you asked
+for.
 
 The budget (`WORKER_MEMORY_LIMIT`, default `"both"`) is the **smaller** of two
 readings taken when the run starts:
@@ -538,9 +548,18 @@ readings taken when the run starts:
 machine (2026-10-07, cjxl 0.12, 45 MP at d=3 e=9: **11.8 GiB of commit per
 cjxl**, estimated 13.4): with the automatic 13.7 GB pagefile and a desktop
 open, ~32 GB could still be committed while ~39 GB of RAM was free — 2
-workers. A fixed 32 GB pagefile raises the commit budget to ~51 GB, so RAM
+workers at the fraction of the time (0.8). A fixed 32 GB pagefile raises the commit budget to ~51 GB, so RAM
 decides and the same run gets 3. Closing other programs — or `--buffering 1` —
 also gives workers back.
+
+Measured during a real MOBILE run (2026-10-09, 45 MP at d=3 e=9, 3
+workers before this change): each cjxl peaked at **12.1 GiB** but averaged
+8.6 GiB, and used about **one CPU core**. Because every worker also spent
+about a third of its time decoding and converting, only ~2.2 of the 3
+encodes were running on average and ~30–40 GB of RAM stayed free. With the
+extra workers the slots stay busy: at the default 1.0 the same run gets 3
+encodes + 3 workers preparing (at 1.1, 4 + 2 — tighter: it counts on the
+estimate's margin).
 
 **If files still fail for lack of memory**, the summary says so:
 `N error(s) look like the system ran out of memory — lower --workers or
@@ -707,8 +726,9 @@ CJXL_EFFORT = 7              # Effort: size/encode-time, NOT quality
 CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl. None = cjxl
                              # chooses (streaming, EXCEPT the whole-image cases
                              # in "Memory and --workers"); 1-3 = always stream
-WORKER_MEMORY_FRACTION = 0.8 # Cap --workers so parallel cjxl processes fit in
-                             # memory; 0 disables the cap
+WORKER_MEMORY_FRACTION = 1.0 # Share of the memory budget the run may take:
+                             # caps how many cjxl run at once (and --workers);
+                             # 0 disables the cap
 WORKER_MEMORY_LIMIT = "both" # Budget of the cap: "both" (smaller of commit and
                              # physical RAM), "commit" or "physical"
 OVERWRITE = "smart"          # False | "smart" (source newer) | True

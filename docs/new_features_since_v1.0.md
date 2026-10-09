@@ -1,5 +1,17 @@
 # New Features Since v1.0
 
+## v2.9.0 (2026-10-10)
+
+### cjxl slots apart from the workers (recompressor)
+
+The memory cap now limits the full-size cjxl encodes, not the workers: at most
+as many encodes as fit run at once, and the memory left over pays for extra
+workers that decode and convert the next files meanwhile. On a whole-image
+setting (45 MP at d=3 e=9, ~53 GB free) a run goes from 3 workers to 3 encodes
++ 3 workers preparing. `WORKER_MEMORY_FRACTION` in the recompressor is now 1.0
+(the encoder keeps 0.8). The `Memory:` line reads `workers W, cjxl at a time
+S`. See [Memory and --workers](README_jxl_recompressor.md#memory-and---workers).
+
 ## v2.8.0 (2026-10-08)
 
 ### Every overwrite checks provenance (all four scripts)

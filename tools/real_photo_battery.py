@@ -414,10 +414,14 @@ def memory_cap_checks(A1, pool_jxl):
           rc == 0 and "--workers 512 reduced to" in out and len(outs) == 1
           and subprocess.run(["djxl", str(outs[0]), str(B / "mem_rec.png")],
                              capture_output=True).returncode == 0, f"rc={rc}")
-    _m = re.search(r"Memory: ~[\d.]+ GB per worker \([a-z-]+ encode, (\d+) MP", out)
+    _m = re.search(r"Memory: ~[\d.]+ GB per cjxl \([a-z-]+ encode, (\d+) MP", out)
     check(f"recompressor: the cap read the real image size ({_mp_expected} MP)",
           bool(_m) and _m.group(1) == _mp_expected,
           f"log={_m.group(1) if _m else 'none'} expected={_mp_expected}")
+    _s = re.search(r"workers (\d+), cjxl at a time (\d+)", out)
+    check("recompressor: cjxl slots logged, never more than the workers",
+          bool(_s) and 1 <= int(_s.group(2)) <= int(_s.group(1)) <= 512,
+          f"log={_s.group(0) if _s else 'none'}")
 
 
 def derivative_rederive_checks(A1, pool_jxl):

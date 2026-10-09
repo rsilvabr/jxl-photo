@@ -113,6 +113,13 @@
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the
   planning-time `*_batch` reads keep their per-batch limit.
   `tests/test_exiftool_timeouts.py` scans every call.
+- **Worker memory cap**: the encoder caps `--workers`
+  (`_memory_capped_workers`, parity-pinned with the recompressor's unused
+  copy). The recompressor caps the full-size cjxl instead
+  (`_memory_capped_pipeline` + `_run_cjxl_full`, a semaphore) and spends the
+  leftover memory on extra workers that run djxl/magick/exiftool for the next
+  files. Its `WORKER_MEMORY_FRACTION` is 1.0, the encoder's 0.8 — on purpose
+  (v2.9.0); `test_constants_agree` no longer compares them.
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
@@ -152,7 +159,9 @@
 
 ## Verification
 - After editing any script, run `python -m py_compile` on the changed files.
-- Tests: `pytest tests/`
+- Tests: `python -m pytest tests/`. On the owner's machine `py` resolves to a
+  Python 3.13 without pytest/numpy/tifffile; `python` (3.12) has them — use
+  `python` for the suite, the pre-fix proofs and the battery.
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
