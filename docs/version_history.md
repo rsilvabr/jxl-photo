@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.8.2](#v282)** | 2026-10-09 | The wizard's defaults follow the settings at the top of each script (round 51, 1 fix) |
+| **[v2.9.0](#v290)** | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
+| [v2.8.2](#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script (round 51, 1 fix) |
 | [v2.8.1](#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening (round 50, 7 fixes) |
 | [v2.8.0](#v280) | 2026-10-08 | Overwrites check whose output they replace (all four scripts, every mode); scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too; round-49 audit (25 fixes) |
 | [v2.7.0](#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout (all four scripts); the planning phase counts its progress |
@@ -59,9 +60,56 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.9.0
+
+**Released 2026-10-10.** Supersedes v2.8.2. Faster recompressor runs on the
+big-memory settings, and one small fix (round 52).
+
+### cjxl slots apart from the workers (recompressor)
+
+At effort 7 with distance ≥ 3, effort 8–9 with distance > 0.5 and effort 10,
+cjxl encodes the whole image at once, and the memory cap of v2.6.0 lowered
+`--workers` so every worker could hold one such encode. But a worker spends
+about a third of each file outside cjxl — the djxl decode, the colour/resize/
+sharpen recipe, exiftool, the checks — and its cjxl share sat idle meanwhile.
+Measured on a real scheduled run (45 MP, `--output-icc sRGB` at d=3 e=9, 3
+workers): each cjxl peaked at 12.1 GiB and averaged 8.6 GiB, used about one
+CPU core, and only ~2.2 of the 3 encodes ran on average, with 30–40 GB of RAM
+free.
+
+The recompressor now caps the encodes, not the workers: at most as many
+full-size cjxl as fit run at once (a semaphore around the encode), and the
+memory left over pays for extra workers that decode and convert the next
+files, so a slot is fed the moment it frees up. The worst case — every slot at
+its cjxl peak plus every extra worker at its side-step peak (40 B/px, measured
+21.7–25.0) — stays within the budget. The log line becomes `Memory: ~N GB per
+cjxl (...), ~M GB per file being prepared | ... | workers W, cjxl at a time S`.
+Streaming encodes are unchanged (the side steps cost as much as the encode, so
+there is no difference to exploit), and `--verify-roundtrip` never adds extra
+workers. The TIFF encoder keeps its cap as it was. See
+[Memory and --workers](README_jxl_recompressor.md#memory-and---workers).
+
+`WORKER_MEMORY_FRACTION` in `jxl_recompressor.py` goes from 0.8 to **1.0**:
+the per-cjxl estimate (320 B/px at effort 8+) already sits ~10 % above the
+measured peak (286–293 B/px), and the steps around cjxl are now budgeted on
+their own. On the 64 GB machine with ~53 GB free, the MOBILE run above goes
+from 3 workers to 3 encodes + 3 workers preparing. The encoder keeps 0.8.
+
+### The recompressor's `--output-icc` is reset between runs (#529)
+
+A second `main()` in the same process without `--output-icc` inherited the
+first run's target and planned a derivative; only the test suite runs the
+script that way (the wrapper uses a subprocess). `OUTPUT_ICC` now starts from
+the script's setting on every run, like the other run-scoped settings.
+
+Regression tests: `tests/test_cjxl_slots.py` (the arithmetic, the semaphore,
+and two real-codec runs that prove a side step overlaps a held cjxl slot —
+they fail against v2.8.2, where the same budget gave a single worker) and
+`tests/test_round52_output_icc_reset.py`. **2311 tests**; battery 42/42.
+
 ## v2.8.2
 
-**Released 2026-10-09.** Supersedes v2.8.1. One wizard fix (round 51).
+**Released 2026-10-09, superseded by v2.9.0.** Supersedes v2.8.1. One wizard fix (round 51).
 
 ### The wizard's defaults are the scripts' settings (#528)
 

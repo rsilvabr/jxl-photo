@@ -11,6 +11,17 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.9.0: the recompressor may run more workers than encodes
+
+Nothing to check; the outputs are the same. On the big-memory settings
+(effort 8–9 above distance 0.5, effort 7 from distance 3, effort 10) a
+recompressor run may now use **more workers than before** while still running
+at most as many cjxl at once as fit in memory — the log says
+`workers W, cjxl at a time S`. `WORKER_MEMORY_FRACTION` at the top of
+`jxl_recompressor.py` went from 0.8 to 1.0 (at 0.8 a typical run has no
+memory left over for the extra workers). If you had edited it, re-apply your
+value in the new script. The TIFF encoder's setting is unchanged.
+
 ## v2.8.1: an edited decode is left alone
 
 Nothing to check. Two refusals you may notice:
