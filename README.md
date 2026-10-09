@@ -431,7 +431,7 @@ If this toolkit's setup is more than you want to deal with, [tiff-workflow](http
 | Uncompressed TIFF | ~260 MB | ~130 MB |
 | **ZIP/Deflate (PowerShell)** | ~220 MB (~15% smaller) | ~65 MB (~50% smaller) |
 | JXL lossless (this toolkit) | ~173 MB (~35% smaller) | ~43 MB (~67% smaller) |
-| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~34 MB (same as 16-bit for jxl) |
+| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~34 MB (~74% smaller) — no smaller than 16-bit: [lossy JXL gains nothing from 8 bits](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) |
 
 **Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
 
