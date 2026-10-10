@@ -1,5 +1,25 @@
 # New Features Since v1.0
 
+## v2.11.0 (2026-10-11)
+
+### The regeneration guard counts the loss before the toolkit (recompressor)
+
+The `gen=` count only covers the encodes this toolkit recorded. A first master
+made from a JPEG (`jxlphoto-origin:jpeg`) or from a lossy JXL of another
+program (`jxl-lossy`, or plain `jxl` from v2.10.0, treated as lossy) now counts
+one hidden generation for `--on-regeneration`: such a file at `gen=1` meets the
+guard, so a third lossy generation is asked about (skipped on an unattended
+run) instead of happening silently. The stored `gen=` never changes. See the
+`--on-regeneration` section of the
+[recompressor README](README_jxl_recompressor.md).
+
+### `jxl-lossy` / `jxl-lossless` origins (recompressor)
+
+A JXL no toolkit script wrote now gets `jxlphoto-origin:jxl-lossy` or
+`jxl-lossless`, as `jxlinfo` reads its header (XYB means certain loss; no XYB
+means the last encode was lossless). Plain `jxl` remains for when `jxlinfo`
+cannot tell.
+
 ## v2.10.0 (2026-10-10)
 
 ### Where the first master came from (`jxlphoto-origin`)

@@ -1204,11 +1204,13 @@ SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 ORIGIN_PREFIX = "jxlphoto-origin:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
-# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
-# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
-# toolkit script wrote). Written once by the script that first touches a clean
-# input, then carried forward unchanged — absent means unknown, never guessed.
-# Informational only: no gate or policy reads it.
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
+# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
+# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
+# its header; plain `jxl` when jxlinfo could not tell, and in files written by
+# v2.10.0). Written once by the script that first touches a clean input, then
+# carried forward unchanged — absent means unknown, never guessed. The only
+# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 _TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).

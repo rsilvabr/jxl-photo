@@ -832,7 +832,9 @@ PNG bit depth cannot be read) in `XMP-dc:Relation`; the lossless `jbrd`
 direction never writes it — XMP in a `jbrd` container would break
 `--reconstruct_jpeg`. The JXL → JPEG/PNG direction copies the marker it finds,
 so a JPEG decoded from a master and later re-encoded as JXL keeps the master's
-origin.
+origin. Every output carries exactly ONE `jxlphoto-src`/`jxlphoto-srcsum`
+pair — its own: the source's pair, copied along with the metadata, is removed
+in the same exiftool write that adds this output's pair.
 
 * * *
 

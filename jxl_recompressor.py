@@ -962,11 +962,13 @@ SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 ORIGIN_PREFIX = "jxlphoto-origin:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
-# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
-# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
-# toolkit script wrote). Written once by the script that first touches a clean
-# input, then carried forward unchanged — absent means unknown, never guessed.
-# Informational only: no gate or policy reads it.
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
+# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
+# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
+# its header; plain `jxl` when jxlinfo could not tell, and in files written by
+# v2.10.0). Written once by the script that first touches a clean input, then
+# carried forward unchanged — absent means unknown, never guessed. The only
+# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 _TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
@@ -2095,7 +2097,7 @@ _ENCODE_RECORD_BATCH = 100
 
 def _read_encode_params_batch(paths: list) -> dict:
     """{path str: {'desc': str, 'software': str, 'params': (d,e)|None,
-    'gen': int, 'pixels': int}} with one exiftool call per
+    'gen': int, 'pixels': int, 'origin': str|None}} with one exiftool call per
     _ENCODE_RECORD_BATCH files — per-file spawns were minutes on a library.
     A slow read reports its progress (paced like the directory scan).
 
@@ -2106,12 +2108,13 @@ def _read_encode_params_batch(paths: list) -> dict:
     'pixels' is width*height (0 = unknown), read in the same exiftool call for the worker memory cap.
     """
     info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0,
-                     "pixels": 0}
+                     "pixels": 0, "origin": None}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return info
     batch_lines = ["-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
+                   "-XMP-dc:Relation",
                    "-ImageWidth", "-ImageHeight",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = _ENCODE_RECORD_BATCH
@@ -2176,9 +2179,20 @@ def _read_encode_params_batch(paths: list) -> dict:
                         entry.get("ImageHeight") or 0)
                 except (TypeError, ValueError):
                     pixels = 0
+                # jxlphoto-origin (ORIGIN_PREFIX): what the first master came
+                # from, for the --on-regeneration guard (_hidden_generations).
+                rel = entry.get("Relation")
+                rel_values = [] if rel is None else (
+                    rel if isinstance(rel, list) else [rel])
+                origin = None
+                for t in rel_values:
+                    t = str(t).strip()
+                    if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
+                        origin = t[len(ORIGIN_PREFIX):]
+                        break
                 info[index[key]] = {"desc": desc, "software": software,
                                     "params": params, "gen": gen,
-                                    "pixels": pixels}
+                                    "pixels": pixels, "origin": origin}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -2287,7 +2301,23 @@ def _more_conservative(a: str, b: str) -> str:
     return a if _ACTION_RANK[a] >= _ACTION_RANK[b] else b
 
 
-def _regeneration_action(gen: int, new_d: float):
+# Origins whose first master already came out of a lossy step the gen= chain
+# never saw: a JPEG, a JXL from another program that jxlinfo read as lossy,
+# or one whose kind was not recorded (plain `jxl`, v2.10.0 — unknown is
+# treated as lossy, the side that only asks). Each counts as ONE hidden
+# generation for the --on-regeneration guard; the stored gen= never changes.
+_ORIGINS_WITH_HIDDEN_LOSS = ("jpeg", "jxl", "jxl-lossy")
+
+
+def _hidden_generations(origin) -> int:
+    """1 when `origin` (the jxlphoto-origin value, or None) names a lossy step
+    before the first encode this toolkit recorded, else 0. tiff8/tiff16 and
+    png8/png16/png are lossless sources; None or an unknown value adds
+    nothing (the guard then behaves exactly as before v2.11)."""
+    return 1 if origin in _ORIGINS_WITH_HIDDEN_LOSS else 0
+
+
+def _regeneration_action(gen: int, new_d: float, origin=None):
     """ON_REGENERATION when this request would add a REPEATED lossy generation
     to a file that has already been lossy-recompressed at least once; None
     when the guard does not apply.
@@ -2304,8 +2334,12 @@ def _regeneration_action(gen: int, new_d: float):
     A lossless request (new_d == 0) adds no generation — the d=0 entry is
     appended to the chain but costs no quality, so the guard stays quiet and
     --on-downgrade keeps covering the lossless-on-lossless cases.
+
+    `origin` is the source's jxlphoto-origin value: a JPEG or lossy third-party
+    origin is one generation the chain never recorded (_hidden_generations), so
+    a gen=1 file made from one already counts as two.
     """
-    if gen >= 2 and new_d > 0:
+    if gen + _hidden_generations(origin) >= 2 and new_d > 0:
         return ON_REGENERATION
     return None
 
@@ -3825,11 +3859,19 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
 def _origin_marker_lines(jxl_path: Path, has_record: bool) -> list:
     """The dc:Relation line giving a re-encoded output its jxlphoto-origin when
     the source has none and is clean: 'jpeg' for a jbrd source (the JPEG it
-    reconstructs is the first master), 'jxl' for a JXL no toolkit script wrote.
-    An inherited origin is already carried by -tagsfromfile -xmp:all (and kept
-    by _derivative_metadata_args), so nothing is added then."""
+    reconstructs is the first master), 'jxl-lossy'/'jxl-lossless' for a JXL no
+    toolkit script wrote (as jxlinfo reads its header; 'jxl' when it cannot
+    tell). An inherited origin is already carried by -tagsfromfile -xmp:all
+    (and kept by _derivative_metadata_args), so nothing is added then."""
     try:
-        fresh = "jpeg" if has_jbrd_box(jxl_path) else "jxl"
+        if has_jbrd_box(jxl_path):
+            fresh = "jpeg"
+        else:
+            # jxlinfo reads the header: XYB means lossy for certain; no XYB
+            # means the LAST encode was lossless (the history before it is
+            # unknown). No jxlinfo, or an answer it could not parse: plain jxl.
+            _kind, _lossy = _jxlinfo_colour(jxl_path)
+            fresh = {True: "jxl-lossy", False: "jxl-lossless"}.get(_lossy, "jxl")
     except Exception:
         return []
     tokens, record = _read_origin_inputs(jxl_path)
@@ -5300,6 +5342,7 @@ def main():
         it["src_d"] = info["params"][0] if info["params"] else None
         it["gen"] = info["gen"]
         it["pixels"] = info.get("pixels", 0)
+        it["origin"] = info.get("origin")
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
                                                  gen=it["gen"], floor=_floor)
@@ -5325,11 +5368,14 @@ def main():
         # top of the byte savings, measured at a fixed file size)
         # — the gen= count can. Independent of --on-downgrade: when both fire,
         # the more conservative action wins.
-        regen = _regeneration_action(it["gen"], CJXL_DISTANCE)
+        regen = _regeneration_action(it["gen"], CJXL_DISTANCE, it["origin"])
         if regen is not None:
-            it["reason"] += (f" | already at generation {it['gen']}: another "
-                             f"lossy re-encode adds ~0.2-0.6 dB of loss on top "
-                             f"of the byte savings (--on-regeneration)")
+            _hidden = _hidden_generations(it["origin"])
+            _before = (f" (+{_hidden} before this toolkit: the first master "
+                       f"came from '{it['origin']}')") if _hidden else ""
+            it["reason"] += (f" | already at generation {it['gen']}{_before}: "
+                             f"another lossy re-encode adds ~0.2-0.6 dB of loss "
+                             f"on top of the byte savings (--on-regeneration)")
             combined = _more_conservative(it["action"], regen)
             if combined == "ask" and regen == "ask":
                 it["category"] = "regeneration"   # prompt group of its own

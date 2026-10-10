@@ -463,6 +463,21 @@ def derivative_rederive_checks(A1, pool_jxl):
     check("recompressor: the derivative keeps the master's origin",
           origins == master_origins == ["jxlphoto-origin:tiff16"],
           f"master={master_origins} derivative={origins}")
+    # One provenance pair, not the master's plus its own (2026-10-11 plan): a
+    # decode used to keep the master's pair, naming the TIFF, next to its own.
+    tp = B / "t_pairs"
+    cp(r / "p.jxl", tp / "p.jxl")
+    master_src = [t for t in relation(r / "p.jxl") if t.startswith("jxlphoto-src:")]
+    rc, _ = run("tr_pairs", [TR, tp, "--mode", "1", "--force-convert",
+                             "--format", "jpeg"])
+    jpg = tp / "recovered_jpeg" / "p.jpg"
+    jrel = relation(jpg) if jpg.exists() else []
+    jsrc = [t for t in jrel if t.startswith("jxlphoto-src:")]
+    jsrcsum = [t for t in jrel if t.startswith("jxlphoto-srcsum:")]
+    check("transcoder decode of a master: one src/srcsum pair, its own",
+          rc == 0 and len(jsrc) == 1 and len(jsrcsum) == 1
+          and jsrc != master_src and origins_of(jpg) == ["jxlphoto-origin:tiff16"],
+          f"master={master_src} jpeg={jsrc}")
     if len(outs) != 1:
         check("recompressor: a new distance re-derives on sync", False,
               "no derivative from the first run")
@@ -543,6 +558,27 @@ def transcoder_checks(A1, A2):
     origins = origins_of(a / "out_lossy" / "b.jxl")
     check("16-bit PNG --force-convert -d 1: origin recorded as png16",
           origins == ["jxlphoto-origin:png16"], str(origins))
+
+    # The guard counts the lossy origin as one generation (2026-10-11 plan):
+    # the transcoder output has origin `jpeg` and no gen= record, so gen=1
+    # after the first recompression already meets --on-regeneration.
+    g1 = B / "g1"
+    cp(a / "out_lossy" / "a.jxl", g1 / "a.jxl")
+    run("regen_g1", [REC, g1, "--mode", "1", "--distance", "2", "--effort", "3",
+                     "--no-preflight", "--no-keep-smaller",
+                     "--on-unknown", "convert"])
+    g1e = g1 / "recompressed_jxl" / "a.jxl"
+    if not g1e.exists():
+        check("a JPEG-origin file at gen=1 meets the regeneration guard", False,
+              "no output from the first recompression")
+        return
+    cp(g1e, B / "g2" / "a.jxl")
+    rc, out = run("regen_g2", [REC, B / "g2", "--mode", "1", "--distance", "3",
+                               "--effort", "3", "--no-preflight",
+                               "--no-keep-smaller", "--on-regeneration", "skip"])
+    check("a JPEG-origin file at gen=1 meets the regeneration guard",
+          not (B / "g2" / "recompressed_jxl" / "a.jxl").exists()
+          and "before this toolkit" in out, f"rc={rc}")
 
 
 def main():

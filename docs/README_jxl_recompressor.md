@@ -79,6 +79,15 @@ step adds no loss, so there is no new generation to warn about. When
 regeneration and downgrade both apply, the more conservative action wins
 (skip > copy > ask > convert).
 
+The `gen=` count only covers the encodes this toolkit recorded; a first master
+that already came out of a lossy step counts as **one hidden generation**.
+Origin `jpeg` (a JPEG master), `jxl-lossy` (a third-party JXL `jxlinfo` read as
+lossy) or plain `jxl` (unknown — treated as lossy, the side that only asks)
+therefore meets the guard at `gen=1`: the file is treated as `gen=2`, and an
+unattended run resolves the `ask` as *skip*. The stored `gen=` never changes —
+the hidden generation exists only for this decision. `tiff8`/`tiff16`,
+`png8`/`png16`/`png` and `jxl-lossless` sources are unaffected.
+
 The policies are configurable (`--on-downgrade`, `--on-regeneration`,
 `--on-unknown`, and the matching settings in the script header). Each
 accepts:
@@ -176,9 +185,13 @@ leave them Brotli-compressed (`brob`) between the codestream parts, which
 IrfanView cannot read (see *Viewer quirks* in the main README).
 
 A re-encode or conversion of a source that carries **no** `jxlphoto-origin`
-records where its first master came from: `jxlphoto-origin:jxl` for a JXL no
-script of this toolkit wrote, `jxlphoto-origin:jpeg` when a `jbrd` container is
-converted (the reconstructed JPEG is the master). An origin the source does
+records where its first master came from: `jxlphoto-origin:jxl-lossy` or
+`jxlphoto-origin:jxl-lossless` for a JXL no script of this toolkit wrote —
+what `jxlinfo` reads in its header: `lossy` means XYB and certain loss, no
+XYB means the last encode was lossless (the history before it is unknown) —
+plain `jxl` when `jxlinfo` cannot tell, and in files written by v2.10.0.
+`jxlphoto-origin:jpeg` is recorded when a `jbrd` container is converted (the
+reconstructed JPEG is the master). An origin the source does
 carry is kept, derivatives included, while verbatim copies (policy copies,
 jbrd copies, the keep-smaller fallback) change no metadata and so gain none.
 A source that carries other `jxlphoto-*` markers but no origin stays unknown —

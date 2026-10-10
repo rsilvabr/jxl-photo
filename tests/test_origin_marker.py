@@ -250,17 +250,19 @@ def test_r3_decoder_carries_the_origin_forward(tmp_path):
 # ---------------------------------------------------------------------------
 
 @real
-def test_r4a_foreign_jxl_gets_the_jxl_origin(tmp_path):
+def test_r4a_foreign_jxl_gets_the_jxl_lossy_origin(tmp_path):
     in_dir = tmp_path / "in"
     in_dir.mkdir()
     png = tmp_path / "rand.png"
     _random_png(png, seed=6)
+    # -d 0.1 is XYB: jxlinfo reads the header as lossy, so since v2.11 the
+    # origin names that (the old `jxl` is only for "could not tell" now).
     subprocess.run(["cjxl", str(png), str(in_dir / "foreign.jxl"),
                     "-d", "0.1", "--container=1"], check=True, capture_output=True)
     _run("jxl_recompressor.py", in_dir, "--mode", "1", "--distance", "1.0",
          "--no-preflight")
     out = in_dir / "recompressed_jxl" / "foreign.jxl"
-    assert _origins(out) == ["jxlphoto-origin:jxl"]
+    assert _origins(out) == ["jxlphoto-origin:jxl-lossy"]
 
 
 @real

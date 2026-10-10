@@ -1090,16 +1090,18 @@ Since v2.0.0, every page also carries `jxlphoto-pages:<N>` — **how many JXLs t
 Every JXL this script writes also records what the **first master** of the photo
 was made from, in `XMP-dc:Relation` as `jxlphoto-origin:<value>` — `tiff8` or
 `tiff16` for the TIFF it read. The transcoder adds `jpeg`/`png8`/`png16` when
-it re-encodes JPEG/PNG pixels, and the recompressor adds `jxl` for a JXL no
-script of the toolkit wrote (`jpeg` when it converts a `jbrd` JXL). The rule is
+it re-encodes JPEG/PNG pixels, and the recompressor adds `jxl-lossy` or
+`jxl-lossless` for a JXL no script of the toolkit wrote — what `jxlinfo` reads
+in its header; `jxl` when it cannot tell, and in files written by v2.10.0 — or
+`jpeg` when it converts a `jbrd` JXL. The rule is
 **written once, then carried forward unchanged**: an input that already names
 an origin keeps that value (a decoded TIFF carries the JXL's origin, so a
 re-encode inherits it), a clean input gets the value above, and an input the
 toolkit touched before this marker existed — it carries any other `jxlphoto-*`
 token or a `cjxl d=` record — stays **unknown**: absent means unknown, never
-guessed. `--strip` drops it like the rest of the metadata, and nothing in the
-toolkit decides anything from it: it tells the story of the file, it gates
-nothing.
+guessed. `--strip` drops it like the rest of the metadata. The only thing that
+reads it is the recompressor's `--on-regeneration` guard (see the recompressor
+README); no delete gate does.
 
 ### Per-Page ICC Preservation (v1.7.0)
 

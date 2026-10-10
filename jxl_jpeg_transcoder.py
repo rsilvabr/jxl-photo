@@ -1056,11 +1056,13 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # archive with a different file that happens to share its name.
 ORIGIN_PREFIX = "jxlphoto-origin:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
-# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
-# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
-# toolkit script wrote). Written once by the script that first touches a clean
-# input, then carried forward unchanged — absent means unknown, never guessed.
-# Informational only: no gate or policy reads it.
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
+# re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
+# jxl-lossless (recompressor, a JXL no toolkit script wrote, as jxlinfo reads
+# its header; plain `jxl` when jxlinfo could not tell, and in files written by
+# v2.10.0). Written once by the script that first touches a clean input, then
+# carried forward unchanged — absent means unknown, never guessed. The only
+# reader is the recompressor's --on-regeneration guard (_hidden_generations).
 _TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
@@ -1326,6 +1328,27 @@ def _read_all_source_marker_values(jxl_path: Path):
         elif token.startswith(SRCSUM_PREFIX):
             srcsums.append(token[len(SRCSUM_PREFIX):])
     return srcs, srcsums
+
+
+def _inherited_marker_removal_lines(out_path: Path) -> list:
+    """'-XMP-dc:Relation-=' lines for every jxlphoto-src/srcsum value that
+    _copy_metadata carried over from the SOURCE into `out_path`.
+
+    Goes in the SAME exiftool call that writes this output's own pair
+    (_provenance_marker_args): exiftool applies -= and += on the bag together,
+    so the output ends with exactly one pair — its own — or, if the call fails,
+    exactly as before. A JPEG decoded from a master used to carry the master's
+    pair (naming the TIFF) next to its own (naming the JXL); every reader keeps
+    the LAST value, so no gate erred, but one that kept the first would have
+    let a decode prove the TIFF archived. A read failure returns [] (the old
+    two-pair behaviour, still correct for every reader)."""
+    srcs, srcsums = _read_all_source_marker_values(out_path)
+    lines = []
+    for value in dict.fromkeys(srcs):
+        lines.append("-XMP-dc:Relation-=" + SRC_PREFIX + _argfile_safe(value))
+    for value in dict.fromkeys(srcsums):
+        lines.append("-XMP-dc:Relation-=" + SRCSUM_PREFIX + _argfile_safe(value))
+    return lines
 
 
 def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
@@ -4026,7 +4049,8 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
             if not has_jbrd_box(write_path):
                 _copy_metadata(src_path, write_path)
                 _run_exiftool_argfile(
-                    ["-overwrite_original"] + _provenance_marker_args(src_path)
+                    ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
+                    + _provenance_marker_args(src_path)
                     + _origin_marker_lines(src_path)
                     + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
@@ -4902,7 +4926,8 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         else:
             try:
                 _run_exiftool_argfile(
-                    ["-overwrite_original"] + _provenance_marker_args(jxl_path)
+                    ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
+                    + _provenance_marker_args(jxl_path)
                     + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             except Exception as _e_prov:
                 logger.debug(f"Provenance marker skipped: {_e_prov}")

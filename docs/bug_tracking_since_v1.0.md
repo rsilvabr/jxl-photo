@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #530.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #531.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-53 — one provenance pair in the transcoder's outputs](#round-53--one-provenance-pair-in-the-transcoders-outputs-2026-10-11) | 2026-10-11 | v2.11.0 | #530 (1) |
 | [Round-52 — the recompressor's `--output-icc` is reset between runs](#round-52--the-recompressors---output-icc-is-reset-between-runs-2026-10-10) | 2026-10-10 | v2.9.0 | #529 (1) |
 | [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | v2.8.2 | #528 (1) |
 | [Round-50 — what the 261008 audit left open](#round-50--what-the-261008-audit-left-open-2026-10-08) | 2026-10-08 | v2.8.1 | #521–#527 (7) |
@@ -59,6 +60,22 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-53 — one provenance pair in the transcoder's outputs (2026-10-11)
+
+Seen while probing the `jxlphoto-origin` marker of v2.10.0
+(`AI_tools/261010_Claude_review_origin-marker.md`). Hardening: every reader
+keeps the LAST `jxlphoto-src` value, and the transcoder's own pair is always
+written last, so no gate ever erred. Regression tests:
+`tests/test_regen_origin.py` R4/R4b/R4c (real codecs; fail against v2.10.0
+with 2 and 3 pairs) and the battery check "transcoder decode of a master: one
+src/srcsum pair, its own".
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 530 | **A transcoder output carried its source's provenance pair next to its own.** `_copy_metadata` copies the whole bag, so a JPEG/PNG decoded from a master kept the master's `jxlphoto-src`/`srcsum` (naming the TIFF) before the transcoder's pair (naming the JXL), and a JXL re-encoded from that JPEG carried three pairs. Correct only because every reader keeps the last value; a reader keeping the first would have let a decode prove the TIFF archived. | transcoder | ✅ FIXED (`_inherited_marker_removal_lines`: the same exiftool call that adds the output's pair removes the copied ones — non-jbrd encode and non-derivative decode) |
 
 ---
 
