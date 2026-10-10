@@ -26,6 +26,7 @@ every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -83,6 +84,23 @@ def exif(args):
     return r.stdout.strip()
 
 
+def relation(path):
+    """XMP-dc:Relation values as a list. exiftool -j keeps list items separate,
+    while -s3 would join them with ', ' on one line."""
+    r = subprocess.run(["exiftool", "-j", "-XMP-dc:Relation", str(path)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        rel = json.loads(r.stdout)[0].get("Relation")
+    except Exception:
+        return []
+    return [] if rel is None else [str(v) for v in (rel if isinstance(rel, list) else [rel])]
+
+
+def origins_of(path):
+    """The jxlphoto-origin tokens of a file (a list, so a duplicate shows)."""
+    return [tok for tok in relation(path) if tok.startswith("jxlphoto-origin:")]
+
+
 def md5(p):
     h = hashlib.md5()
     with open(p, "rb") as f:
@@ -129,6 +147,10 @@ def pick_fixtures(fx: Path):
 def encoder_checks(A1, A2, A3, pool_jxl):
     section("Encoder (TIFF -> JXL)")
     FAST = ["--distance", "1", "--effort", "3", "--workers", "8", "--no-preflight"]
+
+    origins = origins_of(pool_jxl / A1.with_suffix(".jxl").name)
+    check("a clean 16-bit TIFF master records jxlphoto-origin:tiff16",
+          origins == ["jxlphoto-origin:tiff16"], str(origins))
 
     e = B / "e_caption"
     cp(A1, e / "cap.tif")
@@ -436,6 +458,11 @@ def derivative_rederive_checks(A1, pool_jxl):
     rel = exif(["-s3", "-XMP-dc:Relation", outs[0]]) if outs else ""
     check("recompressor: the derivative records its distance/effort",
           len(outs) == 1 and "jxlphoto-derived:sRGB/d2e3" in rel, rel[:160])
+    master_origins = origins_of(r / "p.jxl")
+    origins = origins_of(outs[0]) if outs else []
+    check("recompressor: the derivative keeps the master's origin",
+          origins == master_origins == ["jxlphoto-origin:tiff16"],
+          f"master={master_origins} derivative={origins}")
     if len(outs) != 1:
         check("recompressor: a new distance re-derives on sync", False,
               "no derivative from the first run")
@@ -482,6 +509,9 @@ def transcoder_checks(A1, A2):
     check("JPEG -> JXL --force-convert -d 0: run completes, checksums recorded",
           rc == 0 and (t / "out" / "j.jxl").exists() and jpg_md5 in dbtxt
           and "jxl-md5" in dbtxt, f"rc={rc}")
+    origins = origins_of(t / "out" / "j.jxl")
+    check("jbrd JXL (-d 0): no origin marker written (XMP would break recovery)",
+          origins == [], str(origins))
     rd = B / "t_rec"
     cp(t / "out" / "j.jxl", rd / "j.jxl")
     rc, _ = run("tr_reconstruct", [TR, rd, rd / "out", "--mode", "2", "--decode",
@@ -507,6 +537,12 @@ def transcoder_checks(A1, A2):
                                  "--distance", "1"])
     check("PNG/JPEG -> JXL --force-convert -d 1 completes",
           rc == 0 and (a / "out_lossy" / "b.jxl").exists(), f"rc={rc}")
+    origins = origins_of(a / "out_lossy" / "a.jxl")
+    check("JPEG --force-convert -d 1: origin recorded as jpeg",
+          origins == ["jxlphoto-origin:jpeg"], str(origins))
+    origins = origins_of(a / "out_lossy" / "b.jxl")
+    check("16-bit PNG --force-convert -d 1: origin recorded as png16",
+          origins == ["jxlphoto-origin:png16"], str(origins))
 
 
 def main():

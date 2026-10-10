@@ -1054,6 +1054,17 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX: they record
 # WHICH source made an output, so a later run can refuse to overwrite one
 # archive with a different file that happens to share its name.
+ORIGIN_PREFIX = "jxlphoto-origin:"
+# dc:Relation token naming what the FIRST master of this photo was made from:
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
+# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
+# toolkit script wrote). Written once by the script that first touches a clean
+# input, then carried forward unchanged — absent means unknown, never guessed.
+# Informational only: no gate or policy reads it.
+_TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
+# An encode record anywhere in Description/Software: the input came from this
+# toolkit (an older version, before the origin marker existed).
+_ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 
 # --- Provenance: which source made this output -----------------------------
 # Duplicated across the backend scripts on purpose (see AGENTS.md); enforced by
@@ -1345,6 +1356,45 @@ def _provenance_marker_args(src_paths):
     except OSError:
         pass        # never fail a conversion over a marker
     return lines
+
+
+def _read_origin_inputs(path):
+    """(dc:Relation tokens, has_record) of an INPUT file, for
+    _origin_for_output. tokens is None when exiftool could not read the file:
+    the caller then writes no origin (unknown is never guessed)."""
+    try:
+        r = _run_exiftool_argfile(
+            ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
+             str(path)], timeout=EXIFTOOL_TIMEOUT)
+        if r.returncode != 0 or not r.stdout:
+            return None, False
+        data = json.loads(r.stdout)
+        entry = data[0] if data else {}
+    except Exception:
+        return None, False
+    rel = entry.get("Relation")
+    values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
+    tokens = [str(v).strip() for v in values if str(v).strip()]
+    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}"
+    return tokens, bool(_ORIGIN_RECORD_RE.search(text))
+
+
+def _origin_for_output(tokens, has_record, fresh):
+    """(value, inherited) for the jxlphoto-origin token of a new output.
+
+    tokens: the INPUT's dc:Relation items, or None when unreadable.
+    has_record: the input carries a gen=/cjxl lineage record.
+    fresh: the origin this script assigns to a clean input.
+    An inherited origin wins; an input this toolkit already touched without
+    one (an older version) stays unknown; only a clean input gets `fresh`."""
+    if tokens is None:
+        return None, False
+    for t in tokens:
+        if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
+            return t[len(ORIGIN_PREFIX):], True
+    if has_record or any(t.startswith(_TOOLKIT_MARKER_NAMESPACE) for t in tokens):
+        return None, False
+    return fresh, False
 
 
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:
@@ -3977,6 +4027,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                 _copy_metadata(src_path, write_path)
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(src_path)
+                    + _origin_marker_lines(src_path)
                     + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
@@ -4369,6 +4420,37 @@ def _png_size(png_path: Path):
     if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
         raise RuntimeError(f"not a PNG: {png_path}")
     return struct.unpack(">II", head[16:24])
+
+
+def _png_bit_depth(png_path: Path):
+    """Bit depth from the IHDR (byte 24), or None. Only 25 bytes are read."""
+    try:
+        with open(png_path, "rb") as f:
+            head = f.read(25)
+    except OSError:
+        return None
+    if len(head) < 25 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return head[24]
+
+
+def _origin_marker_lines(src_path: Path) -> list:
+    """The dc:Relation line giving a JPEG/PNG -> JXL pixel re-encode its
+    jxlphoto-origin when the source has none and is clean (see ORIGIN_PREFIX).
+    An inherited origin is already copied by _copy_metadata."""
+    ext = src_path.suffix.lower()
+    if ext in JPEG_EXTS:
+        fresh = "jpeg"
+    elif ext in PNG_EXTS:
+        depth = _png_bit_depth(src_path)
+        fresh = f"png{depth}" if depth in (8, 16) else "png"
+    else:
+        return []
+    tokens, record = _read_origin_inputs(src_path)
+    value, inherited = _origin_for_output(tokens, record, fresh)
+    if value is None or inherited:
+        return []
+    return ["-XMP-dc:Relation+=" + ORIGIN_PREFIX + _argfile_safe(value)]
 
 
 def _resize_geometry(w: int, h: int, mode, value, allow_upscale: bool = False):

@@ -1,5 +1,19 @@
 # New Features Since v1.0
 
+## v2.10.0 (2026-10-10)
+
+### Where the first master came from (`jxlphoto-origin`)
+
+Every new JXL records in `XMP-dc:Relation` what the first master of the photo
+was made from: `tiff16`/`tiff8` (encoder), `jpeg`/`png16`/`png8` (transcoder,
+pixel re-encode), `jxl` for a JXL no toolkit script wrote and `jpeg` for a
+converted `jbrd` JXL (recompressor). It is written once and then carried
+forward — through the decoder's TIFF, derivatives and JPEG/PNG decodes — so a
+master re-encoded from its own decode keeps the original value. A file an
+older version wrote stays unknown (never guessed), and a `jbrd` container never
+gets it. Nothing decides from it yet. See
+[the encoder README](README_jxl_tiff_encoder.md#where-the-first-master-came-from-jxlphoto-origin).
+
 ## v2.9.0 (2026-10-10)
 
 ### cjxl slots apart from the workers (recompressor)

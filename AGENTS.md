@@ -100,6 +100,14 @@
   the master via the recompressor/transcoder and never carry that proof. Do
   not add such options to the encoder; see "Why the encoder never converts
   colour or resizes" in `docs/README_jxl_tiff_encoder.md`.
+- **`jxlphoto-origin:<v>` (v2.10.0) names what the FIRST master came from**
+  (`tiff8`/`tiff16`, `jpeg`/`png8`/`png16`/`png`, `jxl`). Written once on a
+  clean input, then only carried forward (decoder and derivatives keep it);
+  an input with any other `jxlphoto-*` token or a `cjxl d=` record but no
+  origin stays UNKNOWN — never guess. Never in a jbrd container. It is in the
+  encoder's `_INTERNAL_RELATION_PREFIXES` (else an inherited origin is written
+  twice) and must NOT join the decoder's `_is_internal_marker` list or any
+  derivative `drop` tuple. Informational: no gate or policy reads it yet.
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have

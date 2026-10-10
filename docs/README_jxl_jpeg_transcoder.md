@@ -824,6 +824,16 @@ The script walks the full ISOBMFF box chain of JXL files (to EOF) to detect the 
 - **False negatives**: only if the file is not a valid container-format JXL
 - **False positives**: impossible (exact byte signature matching)
 
+### Where the first master came from (`jxlphoto-origin`)
+
+A pixel re-encode (`--force-convert`) of a JPEG or PNG whose metadata carries
+no origin records `jxlphoto-origin:jpeg` / `png8` / `png16` (`png` when the
+PNG bit depth cannot be read) in `XMP-dc:Relation`; the lossless `jbrd`
+direction never writes it — XMP in a `jbrd` container would break
+`--reconstruct_jpeg`. The JXL → JPEG/PNG direction copies the marker it finds,
+so a JPEG decoded from a master and later re-encoded as JXL keeps the master's
+origin.
+
 * * *
 
 ## Round-trip workflow examples

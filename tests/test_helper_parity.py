@@ -46,6 +46,10 @@ SHARED_HELPERS = [
     # back; a copy that dropped `srcsum` would silently write an archive no
     # other backend could verify.
     "_provenance_marker_args",
+    # The jxlphoto-origin read/decision pair: a copy diverging would make one
+    # script inherit the origin while another guesses it (or drops it).
+    "_read_origin_inputs",
+    "_origin_for_output",
     # Derived (non-archive) marker reads and the partial-output cleanup that
     # guards a derivative write. Duplicated transcoder/recompressor; a drift
     # either mislabels a derivative or leaves a truncated output behind.

@@ -960,6 +960,17 @@ _RUN_DEFAULTS = {
 # a recompressed archive stays provable by the DECODER's delete gates.
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+ORIGIN_PREFIX = "jxlphoto-origin:"
+# dc:Relation token naming what the FIRST master of this photo was made from:
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
+# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
+# toolkit script wrote). Written once by the script that first touches a clean
+# input, then carried forward unchanged — absent means unknown, never guessed.
+# Informational only: no gate or policy reads it.
+_TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
+# An encode record anywhere in Description/Software: the input came from this
+# toolkit (an older version, before the origin marker existed).
+_ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 # Multi-page group id, written by the encoder into every page's dc:Relation.
 # Pages that share a document live or die together: the delete gate removes
 # the whole group or nothing (a half-deleted group is spread across two
@@ -3523,6 +3534,45 @@ def _read_creator_and_relation(jxl_path: Path):
     return str(entry.get("CreatorTool") or ""), tokens
 
 
+def _read_origin_inputs(path):
+    """(dc:Relation tokens, has_record) of an INPUT file, for
+    _origin_for_output. tokens is None when exiftool could not read the file:
+    the caller then writes no origin (unknown is never guessed)."""
+    try:
+        r = _run_exiftool_argfile(
+            ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
+             str(path)], timeout=EXIFTOOL_TIMEOUT)
+        if r.returncode != 0 or not r.stdout:
+            return None, False
+        data = json.loads(r.stdout)
+        entry = data[0] if data else {}
+    except Exception:
+        return None, False
+    rel = entry.get("Relation")
+    values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
+    tokens = [str(v).strip() for v in values if str(v).strip()]
+    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}"
+    return tokens, bool(_ORIGIN_RECORD_RE.search(text))
+
+
+def _origin_for_output(tokens, has_record, fresh):
+    """(value, inherited) for the jxlphoto-origin token of a new output.
+
+    tokens: the INPUT's dc:Relation items, or None when unreadable.
+    has_record: the input carries a gen=/cjxl lineage record.
+    fresh: the origin this script assigns to a clean input.
+    An inherited origin wins; an input this toolkit already touched without
+    one (an older version) stays unknown; only a clean input gets `fresh`."""
+    if tokens is None:
+        return None, False
+    for t in tokens:
+        if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
+            return t[len(ORIGIN_PREFIX):], True
+    if has_record or any(t.startswith(_TOOLKIT_MARKER_NAMESPACE) for t in tokens):
+        return None, False
+    return fresh, False
+
+
 def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     """Decode at 16 bits, apply the derivative recipe, re-encode.
 
@@ -3772,6 +3822,23 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
     return lines
 
 
+def _origin_marker_lines(jxl_path: Path, has_record: bool) -> list:
+    """The dc:Relation line giving a re-encoded output its jxlphoto-origin when
+    the source has none and is clean: 'jpeg' for a jbrd source (the JPEG it
+    reconstructs is the first master), 'jxl' for a JXL no toolkit script wrote.
+    An inherited origin is already carried by -tagsfromfile -xmp:all (and kept
+    by _derivative_metadata_args), so nothing is added then."""
+    try:
+        fresh = "jpeg" if has_jbrd_box(jxl_path) else "jxl"
+    except Exception:
+        return []
+    tokens, record = _read_origin_inputs(jxl_path)
+    value, inherited = _origin_for_output(tokens, has_record or record, fresh)
+    if value is None or inherited:
+        return []
+    return ["-XMP-dc:Relation+=" + ORIGIN_PREFIX + _argfile_safe(value)]
+
+
 def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 action: str, in_place: bool, desc: str, software: str,
                 src_distance):
@@ -3874,6 +3941,8 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             # XMP the decoder reads (already there for every encoder output;
             # a colour-converted derivative gets the TARGET profile above).
             _extra = _extra + _skip_icc_creator_line(jxl_path, skip_icc)
+        # jxlphoto-origin for a source that has none (ORIGIN_PREFIX).
+        _extra = _extra + _origin_marker_lines(jxl_path, src_distance is not None)
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
              "-tagsfromfile", str(jxl_path),

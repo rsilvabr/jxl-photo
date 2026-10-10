@@ -779,6 +779,10 @@ as a per-file error. The TIFF itself stays — its pixels are fine — but with
 `--delete-source` the source JXL is **kept**, since it may hold the only copy of
 that metadata. The delete gate fails closed here, like everywhere else.
 
+A `jxlphoto-origin` token in the JXL's `dc:Relation` (what the first master of
+the photo was made from) is copied into the TIFF like any other `dc:Relation`
+value, so a TIFF re-encoded later inherits it.
+
 ---
 
 ## Appendix: How to verify output

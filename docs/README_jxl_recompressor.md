@@ -175,6 +175,15 @@ codestream — the same layout the encoder produces. cjxl 0.12 would otherwise
 leave them Brotli-compressed (`brob`) between the codestream parts, which
 IrfanView cannot read (see *Viewer quirks* in the main README).
 
+A re-encode or conversion of a source that carries **no** `jxlphoto-origin`
+records where its first master came from: `jxlphoto-origin:jxl` for a JXL no
+script of this toolkit wrote, `jxlphoto-origin:jpeg` when a `jbrd` container is
+converted (the reconstructed JPEG is the master). An origin the source does
+carry is kept, derivatives included, while verbatim copies (policy copies,
+jbrd copies, the keep-smaller fallback) change no metadata and so gain none.
+A source that carries other `jxlphoto-*` markers but no origin stays unknown —
+never guessed.
+
 The `gen=` token at the head of the chain is **derived, never incremented**:
 every write recounts the lossy (`d>0`) entries and keeps
 `max(stored gen, count)`, so a hand-edited field self-corrects on the next

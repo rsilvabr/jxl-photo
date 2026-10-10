@@ -456,6 +456,9 @@ def test_convert_one_reorders_boxes_after_restamp(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "_counter", {"done": 0, "total": 1})
     # A stub, not a real JXL: take the plain cjxl route (native colour).
     monkeypatch.setattr(rec, "_jxlinfo_colour", lambda p: ("enum", True))
+    # The origin read is its own exiftool call (ORIGIN_PREFIX); this test
+    # counts exiftool invocations, so have it report "unknown" (plan §8).
+    monkeypatch.setattr(rec, "_read_origin_inputs", lambda p: (None, False))
 
     def _reorder(p):
         calls.append("reorder")

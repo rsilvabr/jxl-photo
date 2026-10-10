@@ -1202,6 +1202,17 @@ THUMB_XMP_FLAG = "jxlphoto-thumb"
 
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
+ORIGIN_PREFIX = "jxlphoto-origin:"
+# dc:Relation token naming what the FIRST master of this photo was made from:
+# tiff8 / tiff16 (encoder), jpeg / png8 / png16 (transcoder, pixel re-encode),
+# jpeg (recompressor re-encoding a jbrd JXL), jxl (recompressor, a JXL no
+# toolkit script wrote). Written once by the script that first touches a clean
+# input, then carried forward unchanged — absent means unknown, never guessed.
+# Informational only: no gate or policy reads it.
+_TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
+# An encode record anywhere in Description/Software: the input came from this
+# toolkit (an older version, before the origin marker existed).
+_ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # The recipe marker the recompressor/transcoder write on a DERIVATIVE (colour
 # conversion, resize, sharpening). Must match theirs. Never copied onward:
@@ -2584,6 +2595,7 @@ _INTERNAL_RELATION_PREFIXES = (
     # PIXSUM_PREFIX): it describes THAT TIFF, never a master encoded from it.
     "jxlphoto-pixsum:",
     DERIVED_XMP_PREFIX,
+    ORIGIN_PREFIX,
 )
 
 
@@ -2845,6 +2857,15 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # Always store original bit depth in dc:Relation so the decoder can restore
     # the original BitsPerSample per page according to --depth-policy.
     args_lines.append(f"-XMP-dc:Relation+={DEPTH_XMP_PREFIX}{original_depth}")
+
+    # WHERE the first master of this photo came from (ORIGIN_PREFIX): carried
+    # forward when the TIFF already names it (a decode of one of our masters),
+    # this TIFF's own depth when the TIFF is clean, nothing when the toolkit
+    # touched it before without recording one.
+    _o_tokens, _o_record = _read_origin_inputs(tiff_path)
+    _origin, _inh = _origin_for_output(_o_tokens, _o_record, f"tiff{original_depth}")
+    if _origin:
+        args_lines.append(f"-XMP-dc:Relation+={ORIGIN_PREFIX}{_argfile_safe(_origin)}")
 
     # WHICH source made this output. Written for every output, not just for
     # multi-page splits: it is what lets a later run tell "the same photo,
@@ -3641,6 +3662,45 @@ def _provenance_marker_args(src_paths):
     except OSError:
         pass        # never fail a conversion over a marker
     return lines
+
+
+def _read_origin_inputs(path):
+    """(dc:Relation tokens, has_record) of an INPUT file, for
+    _origin_for_output. tokens is None when exiftool could not read the file:
+    the caller then writes no origin (unknown is never guessed)."""
+    try:
+        r = _run_exiftool_argfile(
+            ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
+             str(path)], timeout=EXIFTOOL_TIMEOUT)
+        if r.returncode != 0 or not r.stdout:
+            return None, False
+        data = json.loads(r.stdout)
+        entry = data[0] if data else {}
+    except Exception:
+        return None, False
+    rel = entry.get("Relation")
+    values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
+    tokens = [str(v).strip() for v in values if str(v).strip()]
+    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}"
+    return tokens, bool(_ORIGIN_RECORD_RE.search(text))
+
+
+def _origin_for_output(tokens, has_record, fresh):
+    """(value, inherited) for the jxlphoto-origin token of a new output.
+
+    tokens: the INPUT's dc:Relation items, or None when unreadable.
+    has_record: the input carries a gen=/cjxl lineage record.
+    fresh: the origin this script assigns to a clean input.
+    An inherited origin wins; an input this toolkit already touched without
+    one (an older version) stays unknown; only a clean input gets `fresh`."""
+    if tokens is None:
+        return None, False
+    for t in tokens:
+        if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
+            return t[len(ORIGIN_PREFIX):], True
+    if has_record or any(t.startswith(_TOOLKIT_MARKER_NAMESPACE) for t in tokens):
+        return None, False
+    return fresh, False
 
 
 def has_jbrd_box(jxl_path: Path) -> bool:

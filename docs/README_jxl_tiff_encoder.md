@@ -1085,6 +1085,22 @@ Since v1.8.1, split pages also carry `jxlphoto-page:<N>` (the TIFF page index) a
 
 Since v2.0.0, every page also carries `jxlphoto-pages:<N>` — **how many JXLs the split produced**. It is what lets the decoder tell a complete split from a truncated one: pages `{0,1}` of a three-page scan otherwise look exactly like a two-page scan, and a decode of that writes a valid short TIFF whose sources `--delete-source` would then destroy. The count is the number of JXLs **written**, not the pages the source TIFF had — a thumbnail dropped by `--thumbnail-mode exclude` is not part of the group, so the decoder must not go looking for it. See "Incomplete splits" in the decoder README.
 
+### Where the first master came from (`jxlphoto-origin`)
+
+Every JXL this script writes also records what the **first master** of the photo
+was made from, in `XMP-dc:Relation` as `jxlphoto-origin:<value>` — `tiff8` or
+`tiff16` for the TIFF it read. The transcoder adds `jpeg`/`png8`/`png16` when
+it re-encodes JPEG/PNG pixels, and the recompressor adds `jxl` for a JXL no
+script of the toolkit wrote (`jpeg` when it converts a `jbrd` JXL). The rule is
+**written once, then carried forward unchanged**: an input that already names
+an origin keeps that value (a decoded TIFF carries the JXL's origin, so a
+re-encode inherits it), a clean input gets the value above, and an input the
+toolkit touched before this marker existed — it carries any other `jxlphoto-*`
+token or a `cjxl d=` record — stays **unknown**: absent means unknown, never
+guessed. `--strip` drops it like the rest of the metadata, and nothing in the
+toolkit decides anything from it: it tells the story of the file, it gates
+nothing.
+
 ### Per-Page ICC Preservation (v1.7.0)
 
 When splitting, each page is encoded with its own effective ICC profile (read from the page's own ICC tag 34675; if absent, page N > 0 inherits IFD0's profile for color interpretation). Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`, so the decoder can reconstruct them without an ICC tag when the original page also had none.
