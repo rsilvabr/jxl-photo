@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.10.0](#v2100)** | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
+| **[v2.11.0](#v2110)** | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
+| [v2.10.0](#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
 | [v2.9.0](#v290) | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
 | [v2.8.2](#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script (round 51, 1 fix) |
 | [v2.8.1](#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening (round 50, 7 fixes) |
@@ -61,9 +62,58 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.11.0
+
+**Released 2026-10-11.** Supersedes v2.10.0. The first use of the
+`jxlphoto-origin` marker, and one hardening fix (round 53).
+
+### The regeneration guard counts the loss before the toolkit (recompressor)
+
+`--on-regeneration` fires when the source already carries two lossy
+generations (`gen >= 2`) and the request is lossy — the encoder's own masters
+are born at `gen=1`, so their first recompression passes. But `gen=` only
+counts the encodes this toolkit recorded. A master made from a JPEG, or from a
+lossy JXL of another program, already came out of one lossy step, so the guard
+fired one generation late and a third lossy re-encode happened silently.
+
+The guard now adds one hidden generation for origin `jpeg`, `jxl-lossy` and
+plain `jxl` (written by v2.10.0, kind unknown — treated as lossy, the side that
+only asks): such a file at `gen=1` is treated as `gen=2` for this decision
+only. The stored `gen=` never changes; `tiff8`/`tiff16`, `png8`/`png16`/`png`
+and `jxl-lossless` sources are unaffected. The origin is read in the planning
+batch (the same exiftool call as the encode record), and the skip names it:
+`already at generation 1 (+1 before this toolkit: the first master came from
+'jxl-lossy')`. An unattended run resolves the default `ask` as skip — see
+[upgrading](upgrading.md#v2110-the-regeneration-guard-can-fire-one-generation-earlier).
+
+Proved against v2.10.0 with the same input: a third-party `cjxl -d 1` JXL
+recompressed once (`gen=1`, origin `jxl-lossy`), then again with
+`--on-regeneration skip` — v2.10.0 re-encodes it, v2.11.0 skips it.
+
+### `jxl-lossy` / `jxl-lossless` origins
+
+A JXL no toolkit script wrote now gets `jxlphoto-origin:jxl-lossy` or
+`jxl-lossless` from the `jxlinfo` header line (`lossy` = XYB, certain loss;
+`(possibly) lossless` = the last encode was lossless, the history before it is
+unknown). The recompressor already read that bit for its colour route and
+discarded it. Plain `jxl` stays for when `jxlinfo` is missing or unreadable.
+
+### One provenance pair in transcoder outputs (#530)
+
+The transcoder copies its source's metadata and then adds its own
+`jxlphoto-src`/`srcsum` pair, so a JPEG/PNG decoded from a master carried the
+master's pair (naming the TIFF) next to its own, and a JXL re-encoded from it
+carried three. Every reader keeps the last value — always the output's own —
+so no gate erred; the same exiftool call now removes the copied pairs.
+
+Tests: `tests/test_regen_origin.py` (unit + real-codec; 32 of its 36 tests
+fail against v2.10.0, the 4 that pass are the controls). **2399 tests**;
+battery 49/49 (two new checks: one provenance pair on a real decode, and a
+JPEG-origin photo at `gen=1` meeting the guard).
+
 ## v2.10.0
 
-**Released 2026-10-10.** Supersedes v2.9.0. One new metadata marker; no
+**Released 2026-10-10, superseded by v2.11.0.** Supersedes v2.9.0. One new metadata marker; no
 command line changes behaviour.
 
 ### Where the first master came from (`jxlphoto-origin`)

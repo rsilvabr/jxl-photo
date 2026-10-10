@@ -11,6 +11,17 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.11.0: the regeneration guard can fire one generation earlier
+
+Nothing to check for masters made from TIFFs. A recompressor run over a file
+whose first master came from a JPEG or from a lossy JXL of another program
+(`jxlphoto-origin:jpeg`, `jxl-lossy` or `jxl` — only files written since
+v2.10.0 carry it) now meets `--on-regeneration` already at `gen=1`. With the
+default `ask`, an unattended run (wrapper, manifest, scheduled task) **skips**
+such a file where it used to re-encode it; the log says
+`SKIP (policy) | … (+1 before this toolkit: …)`. Pass
+`--on-regeneration convert` if you do want the re-encode.
+
 ## v2.9.0: the recompressor may run more workers than encodes
 
 Nothing to check; the outputs are the same. On the big-memory settings

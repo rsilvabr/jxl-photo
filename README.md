@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.10.0** (2026-10-10) · [What's new](#whats-new-in-v2100) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.11.0** (2026-10-11) · [What's new](#whats-new-in-v2110) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.10.0](#whats-new-in-v2100)
+- [What's new in v2.11.0](#whats-new-in-v2110)
 - [More about this project](#more-about-this-project)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -381,24 +381,25 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.10.0
+## What's new in v2.11.0
 
-Released 2026-10-10. New JXLs remember where their first master came from. Nothing to do when upgrading.
+Released 2026-10-11. The recompressor's regeneration guard now knows about the loss that happened before the toolkit. Masters made from TIFFs are not affected.
 
-- **`jxlphoto-origin` in the metadata.** Each new JXL records what the first master of the photo was made from — `tiff16`/`tiff8`, `jpeg`, `png16`/`png8`, or `jxl` for a JXL from another program — in `XMP-dc:Relation`, next to the other `jxlphoto-*` markers. It is written once and then carried along: a TIFF decoded from the JXL, a derivative, or a master re-encoded from its own decode keeps the original value.
-- Files written by older versions stay without it (unknown, never guessed), and lossless JPEG containers (`jbrd`) never get it. Nothing decides from it yet; it is there so the history of a file is readable.
+- **The guard counts the loss before the toolkit.** A file whose first master came from a JPEG, or from a lossy JXL of another program, already had one lossy generation the `gen=` count never saw. Such a file now meets `--on-regeneration` one generation earlier, so a third lossy re-encode is asked about instead of happening silently — an unattended run skips it ([upgrading](docs/upgrading.md)).
+- A JXL from another program is now recorded as `jxl-lossy` or `jxl-lossless`, as `jxlinfo` reads its header.
+- Small hardening: a JPEG/PNG the transcoder writes carries one provenance pair, its own (#530).
 
-Full notes: [version history](docs/version_history.md#v2100) · [the marker](docs/README_jxl_tiff_encoder.md#where-the-first-master-came-from-jxlphoto-origin). **2363 tests**, and the real-photo battery passes (47 checks).
+Full notes: [version history](docs/version_history.md#v2110) · [bug tracker](docs/bug_tracking_since_v1.0.md) (#530). **2399 tests**, and the real-photo battery passes (49 checks).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.10.0** | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`) |
+| **v2.11.0** | 2026-10-11 | The regeneration guard counts the loss before the toolkit (JPEG or lossy third-party origins) |
+| [v2.10.0](docs/version_history.md#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`) |
 | [v2.9.0](docs/version_history.md#v290) | 2026-10-10 | The recompressor keeps its encodes busy: extra workers prepare the next files |
 | [v2.8.2](docs/version_history.md#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script |
 | [v2.8.1](docs/version_history.md#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; smaller hardening |
-| [v2.8.0](docs/version_history.md#v280) | 2026-10-08 | Overwrites check whose output they replace; scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
