@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.9.0](#v290)** | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
+| **[v2.10.0](#v2100)** | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
+| [v2.9.0](#v290) | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
 | [v2.8.2](#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script (round 51, 1 fix) |
 | [v2.8.1](#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone, smaller hardening (round 50, 7 fixes) |
 | [v2.8.0](#v280) | 2026-10-08 | Overwrites check whose output they replace (all four scripts, every mode); scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too; round-49 audit (25 fixes) |
@@ -60,9 +61,64 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.10.0
+
+**Released 2026-10-10.** Supersedes v2.9.0. One new metadata marker; no
+command line changes behaviour.
+
+### Where the first master came from (`jxlphoto-origin`)
+
+The lineage chain (`gen=N | cjxl d= e= | …`) says how many lossy generations a
+file had, but not what its first master was made from. Three cases were
+invisible: a JXL from another program, recompressed once, looked like one of
+our own `gen=1` masters; a master made from a decoded JPEG carried the JPEG's
+loss without saying so; and an 8-bit TIFF master's ceiling disappeared once
+the decoder dropped `jxlphoto-depth`.
+
+A new token in `XMP-dc:Relation`, `jxlphoto-origin:<value>`, now names it:
+
+| Value | Written by | When |
+|---|---|---|
+| `tiff16` / `tiff8` | encoder | the TIFF it reads, by its bit depth |
+| `jpeg` | transcoder | JPEG pixels re-encoded (`--force-convert` at d > 0) |
+| `png16` / `png8` / `png` | transcoder | PNG pixels re-encoded (`png` when the depth cannot be read) |
+| `jxl` | recompressor | a JXL that carries nothing from this toolkit |
+| `jpeg` | recompressor | a `jbrd` JXL converted with `--jbrd-policy convert` |
+
+Rules:
+
+- **Written once, then carried forward.** An input that already names an
+  origin passes the same value on. The decoder copies it into the TIFF (no
+  code change there), derivatives keep it (unlike `jxlphoto-src`/`srcsum`), and
+  the transcoder's JXL → JPEG/PNG direction copies it, so master → decode →
+  re-encode still says `tiff16`.
+- **Absent means unknown, never guessed.** An input that carries any other
+  `jxlphoto-*` token or a `cjxl d=` record but no origin was written by an
+  older version; its output gets no origin. An input exiftool cannot read gets
+  none either — the marker never fails a file.
+- **Never inside a `jbrd` container** (XMP there breaks
+  `djxl --reconstruct_jpeg`); the `jbrd` box already proves a JPEG origin.
+  Verbatim copies (policy copies, `jbrd` copies, the keep-smaller fallback)
+  change no metadata and gain none.
+- Only the encoder's `--strip` suppresses it; `ENCODE_TAG_MODE = "off"` does
+  not (it is provenance, not part of the `gen=` chain).
+- **Nothing decides from it yet** — no delete gate, `--on-regeneration`,
+  `--on-unknown` or `gen` count reads it.
+
+Details: [the encoder README](README_jxl_tiff_encoder.md#where-the-first-master-came-from-jxlphoto-origin).
+The read/decision helpers (`_read_origin_inputs`, `_origin_for_output`) are
+parity-pinned in the encoder, transcoder and recompressor; one extra exiftool
+read per output (~0.2 s, negligible next to cjxl).
+
+Tests: `tests/test_origin_marker.py` — unit tests plus real-codec runs of the
+whole chain (encoder, decoder round trip, foreign/jbrd/derivative recompress,
+JPEG/PNG re-encode, decode to JPEG and back). 44 of its 50 tests fail against
+v2.9.0; the six that pass assert that no origin is written. **2363 tests**;
+battery 47/47 (five new origin checks on real photos).
+
 ## v2.9.0
 
-**Released 2026-10-10.** Supersedes v2.8.2. Faster recompressor runs on the
+**Released 2026-10-10, superseded by v2.10.0.** Supersedes v2.8.2. Faster recompressor runs on the
 big-memory settings, and one small fix (round 52).
 
 ### cjxl slots apart from the workers (recompressor)

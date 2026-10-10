@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.9.0** (2026-10-10) · [What's new](#whats-new-in-v290) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.10.0** (2026-10-10) · [What's new](#whats-new-in-v2100) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.9.0](#whats-new-in-v290)
+- [What's new in v2.10.0](#whats-new-in-v2100)
 - [More about this project](#more-about-this-project)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -381,24 +381,24 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.9.0
+## What's new in v2.10.0
 
-Released 2026-10-10. Faster recompressor runs on the big-memory settings. Nothing to do when upgrading.
+Released 2026-10-10. New JXLs remember where their first master came from. Nothing to do when upgrading.
 
-- **The recompressor keeps its encodes busy.** At effort 8–9 (or effort 7 from distance 3) each cjxl needs a lot of memory, so the memory cap allowed only a few workers, and each one also spent time decoding and converting while its encode share sat idle. Now the cap limits the encodes themselves, and the memory left over runs extra workers that prepare the next files. A 45 MP run at d=3 e=9 goes from 3 workers to 3 encodes + 3 workers preparing. The log says `workers W, cjxl at a time S`.
-- `WORKER_MEMORY_FRACTION` in the recompressor is now 1.0 (was 0.8); the TIFF encoder keeps 0.8.
+- **`jxlphoto-origin` in the metadata.** Each new JXL records what the first master of the photo was made from — `tiff16`/`tiff8`, `jpeg`, `png16`/`png8`, or `jxl` for a JXL from another program — in `XMP-dc:Relation`, next to the other `jxlphoto-*` markers. It is written once and then carried along: a TIFF decoded from the JXL, a derivative, or a master re-encoded from its own decode keeps the original value.
+- Files written by older versions stay without it (unknown, never guessed), and lossless JPEG containers (`jbrd`) never get it. Nothing decides from it yet; it is there so the history of a file is readable.
 
-Full notes: [version history](docs/version_history.md#v290) · [bug tracker](docs/bug_tracking_since_v1.0.md) (#529) · [Memory and --workers](docs/README_jxl_recompressor.md#memory-and---workers). **2311 tests**, and the real-photo battery passes (42 checks).
+Full notes: [version history](docs/version_history.md#v2100) · [the marker](docs/README_jxl_tiff_encoder.md#where-the-first-master-came-from-jxlphoto-origin). **2363 tests**, and the real-photo battery passes (47 checks).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.9.0** | 2026-10-10 | The recompressor keeps its encodes busy: extra workers prepare the next files |
+| **v2.10.0** | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`) |
+| [v2.9.0](docs/version_history.md#v290) | 2026-10-10 | The recompressor keeps its encodes busy: extra workers prepare the next files |
 | [v2.8.2](docs/version_history.md#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script |
 | [v2.8.1](docs/version_history.md#v281) | 2026-10-08 | The rest of the 2026-10-08 audit: a scan's IR channel keeps its role, an edited decode is left alone; smaller hardening |
 | [v2.8.0](docs/version_history.md#v280) | 2026-10-08 | Overwrites check whose output they replace; scans keep their colours when recompressed; more delete-gate edge cases closed; workers capped by physical RAM too |
-| [v2.7.0](docs/version_history.md#v270) | 2026-10-06 | Recompressor derivatives re-derived when distance/effort change; per-file exiftool calls get the codec timeout |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
