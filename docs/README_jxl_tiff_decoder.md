@@ -506,6 +506,7 @@ Arguments:
   output          Output folder (modes 0 and 2; other modes ignore it)
 
 Options:
+  --version           Print the toolkit version and exit
   --mode 0-8          Output folder mode (default: 0)
   --workers N         Parallel threads (tested up to 32 on a Ryzen 9 5950X)
   --overwrite         Always overwrite existing TIFFs — including an
@@ -782,6 +783,11 @@ that metadata. The delete gate fails closed here, like everywhere else.
 A `jxlphoto-origin` token in the JXL's `dc:Relation` (what the first master of
 the photo was made from) is copied into the TIFF like any other `dc:Relation`
 value, so a TIFF re-encoded later inherits it.
+
+The decode also appends one `xmpMM:History` entry to the TIFF, naming this
+toolkit's version and the `image/jxl → image/tiff` conversion, after the entries
+the JXL carried. The ICC strategy `none` writes no XMP at all and so no entry.
+The exact format is in [Processing history (`xmpMM:History`)](README_jxl_tiff_encoder.md#processing-history-xmpmmhistory).
 
 ---
 

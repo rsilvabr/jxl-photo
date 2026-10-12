@@ -96,6 +96,30 @@ def relation(path):
     return [] if rel is None else [str(v) for v in (rel if isinstance(rel, list) else [rel])]
 
 
+def history(path):
+    """xmpMM:History entries as read by `exiftool -struct -j` (a list)."""
+    r = subprocess.run(["exiftool", "-struct", "-j", "-XMP-xmpMM:History", str(path)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        h = json.loads(r.stdout)[0].get("History")
+    except Exception:
+        return []
+    return [] if h is None else (h if isinstance(h, list) else [h])
+
+
+def _last_history_entry(path, action, parameters, label):
+    """check() that the LAST xmpMM:History entry of `path` is this toolkit's."""
+    h = history(path)
+    ok = (bool(h) and h[-1].get("Action") == action
+          and str(h[-1].get("SoftwareAgent", "")).startswith("jxl-photo ")
+          and h[-1].get("Parameters") == parameters)
+    check(label, ok, f"{len(h)} entries" if h else "no History")
+
+
+def _count_history(path):
+    return len(history(path))
+
+
 def origins_of(path):
     """The jxlphoto-origin tokens of a file (a list, so a duplicate shows)."""
     return [tok for tok in relation(path) if tok.startswith("jxlphoto-origin:")]
@@ -151,6 +175,29 @@ def encoder_checks(A1, A2, A3, pool_jxl):
     origins = origins_of(pool_jxl / A1.with_suffix(".jxl").name)
     check("a clean 16-bit TIFF master records jxlphoto-origin:tiff16",
           origins == ["jxlphoto-origin:tiff16"], str(origins))
+
+    out_jxl = pool_jxl / A1.with_suffix(".jxl").name
+    _last_history_entry(out_jxl, "converted",
+                        "jxl_tiff_encoder: from image/tiff to image/jxl",
+                        "encoder: the output carries this run's xmpMM:History entry")
+    check("encoder: the output has the source's History entries + 1",
+          _count_history(out_jxl) == _count_history(A1) + 1,
+          f"source {_count_history(A1)} -> output {_count_history(out_jxl)}")
+
+    # The fixtures may carry no History at all; seed one on a COPY so the
+    # "earlier entries are kept" claim is really exercised.
+    e = B / "e_history"
+    cp(A1, e / "hist.tif")
+    exif(["-q", "-overwrite_original",
+          "-XMP-xmpMM:History={Action=saved,When=2026:10:01 10:00:00,"
+          "SoftwareAgent=Capture One 16}", e / "hist.tif"])
+    rc, _ = run("enc_history", [ENC, e, "--mode", "1"] + FAST)
+    h = history(e / "converted_jxl" / "hist.jxl")
+    check("encoder: an earlier History entry (Capture One) is kept, ours appended",
+          rc == 0 and len(h) == 2 and h[0].get("SoftwareAgent") == "Capture One 16"
+          and h[0].get("Action") == "saved"
+          and h[1].get("Parameters") == "jxl_tiff_encoder: from image/tiff to image/jxl",
+          f"rc={rc} {len(h)} entries")
 
     e = B / "e_caption"
     cp(A1, e / "cap.tif")
@@ -245,6 +292,12 @@ def decoder_checks(A1, pool_jxl):
         check(f"d={dist}: original ICC restored byte-for-byte", icc_same)
         check(f"d={dist}: pixels == an independent djxl decode",
               ref is not None and np.array_equal(ref, dec), f"PSNR vs master {psnr:.1f} dB")
+        _last_history_entry(out_t, "converted",
+                            "jxl_tiff_decoder: from image/jxl to image/tiff",
+                            f"d={dist}: the decode appends this run's History entry")
+        check(f"d={dist}: the decoded TIFF has one History entry more than the JXL",
+              _count_history(out_t) == _count_history(jxl) + 1,
+              f"jxl {_count_history(jxl)} -> tiff {_count_history(out_t)}")
 
     a = B / "d_own"
     cp(pool_jxl / A1.with_suffix(".jxl").name, a / "p.jxl")
@@ -331,6 +384,7 @@ def multipage_and_recompressor_checks(A1, pool_jxl, scan):
         cp(p, r / p.name)
     cp(pool_jxl / A1.with_suffix(".jxl").name, r / "single.jxl")
     before = {p.name: md5(p) for p in r.glob("*.jxl")}
+    hist_before = {p.name: _count_history(p) for p in r.glob("*.jxl")}
     rc, _ = run("rec_inplace", [REC, r] + ARGS)
     changed = sorted(n for n in before if md5(r / n) != before[n])
     check("in place: a single file AND every page of a group replaced, no .tmp left",
@@ -340,6 +394,15 @@ def multipage_and_recompressor_checks(A1, pool_jxl, scan):
           all("jxlphoto-mpg" in exif(["-s3", "-XMP-dc:Relation", r / p.name]) for p in pages))
     lin = exif(["-s3", "-XMP-dc:Description", r / "single.jxl"])
     check("in place: lineage records the second generation", "gen=2" in lin, lin[:120])
+    # The single file goes straight through cjxl (its XMP carried, #531), the
+    # scan pages through the 'skip' route (decoded, no carried XMP): both must
+    # gain exactly ONE entry, the full one even from the '<uuid>_<stem>.tmp'.
+    grown = {n: _count_history(r / n) - hist_before[n] for n in hist_before}
+    check("in place: every re-encode has exactly one History entry more",
+          all(v == 1 for v in grown.values()), str(grown))
+    _last_history_entry(r / "single.jxl", "converted",
+                        "jxl_recompressor: from image/jxl to image/jxl",
+                        "in place: the recompressor's entry names both types")
 
     # R1 (2026-10-08 audit): the COLOURS, not only markers and lineage. The
     # scan's profile (a film scanner's: A2B tables, no B2A) has no native JXL
@@ -458,6 +521,12 @@ def derivative_rederive_checks(A1, pool_jxl):
     rel = exif(["-s3", "-XMP-dc:Relation", outs[0]]) if outs else ""
     check("recompressor: the derivative records its distance/effort",
           len(outs) == 1 and "jxlphoto-derived:sRGB/d2e3" in rel, rel[:160])
+    if outs:
+        h = history(outs[0])
+        check("recompressor: the last History entry of the derivative says derived",
+              bool(h) and h[-1].get("Action") == "derived"
+              and str(h[-1].get("SoftwareAgent", "")).startswith("jxl-photo "),
+              f"{len(h)} entries")
     master_origins = origins_of(r / "p.jxl")
     origins = origins_of(outs[0]) if outs else []
     check("recompressor: the derivative keeps the master's origin",
@@ -527,6 +596,9 @@ def transcoder_checks(A1, A2):
     origins = origins_of(t / "out" / "j.jxl")
     check("jbrd JXL (-d 0): no origin marker written (XMP would break recovery)",
           origins == [], str(origins))
+    check("jbrd JXL (-d 0): no xmpMM:History entry written (same count as the JPEG)",
+          _count_history(t / "out" / "j.jxl") == _count_history(t / "j.jpg"),
+          f"jpeg {_count_history(t / 'j.jpg')} -> jxl {_count_history(t / 'out' / 'j.jxl')}")
     rd = B / "t_rec"
     cp(t / "out" / "j.jxl", rd / "j.jxl")
     rc, _ = run("tr_reconstruct", [TR, rd, rd / "out", "--mode", "2", "--decode",

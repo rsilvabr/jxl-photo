@@ -364,6 +364,7 @@ Arguments:
                   destination from each source's own folder and ignore it)
 
 Options:
+  --version       Print the toolkit version and exit
   --mode 0-8      Output folder mode (default: 0)
   --workers N     Parallel threads (tested up to 32 on a Ryzen 9 5950X).
                   RAM is the real ceiling — see "RAM per worker" in Performance
@@ -1094,6 +1095,17 @@ token or a `cjxl d=` record — stays **unknown**: absent means unknown, never
 guessed. `--strip` drops it like the rest of the metadata. The only thing that
 reads it is the recompressor's `--on-regeneration` guard (see the recompressor
 README); no delete gate does.
+
+### Processing history (`xmpMM:History`)
+
+Every output this script (and the other three) writes also gains ONE entry in
+`xmpMM:History` — `Action` (`converted`, or `derived` for a derivative), `When`,
+`SoftwareAgent` = `jxl-photo <version> (<repo link>)` and `Parameters` = the
+script and the conversion. Earlier entries the file already had (Capture One, a
+previous run of the toolkit) are kept; nothing in the toolkit ever reads it back
+— no gate, no policy. `--strip` writes none. The exact format, the per-script
+differences and how to read it yourself:
+[What jxl-photo writes into your photos](metadata_written.md#processing-history-xmpmmhistory).
 
 ### Per-Page ICC Preservation (v1.7.0)
 

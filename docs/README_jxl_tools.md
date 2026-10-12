@@ -167,10 +167,16 @@ py jxl_photo.py --run-preset nightly-sync --overwrite
 `--list-presets` is read-only and works even with no codecs installed — useful
 for checking what a config carries before copying it to another machine.
 
-The only other command-line flag is `--recheck`, which re-runs the dependency
-detection (cjxl/djxl/exiftool/ImageMagick) and refreshes what the status line at
-the top of the menu reports — use it after installing or moving a tool, instead
-of wondering why the menu still shows it as missing.
+The other command-line flags are `--version` (print the toolkit version and
+exit) and `--recheck`, which re-runs the dependency detection
+(cjxl/djxl/exiftool/ImageMagick) and refreshes what the status line at the top
+of the menu reports — use it after installing or moving a tool, instead of
+wondering why the menu still shows it as missing.
+
+At startup the wrapper also warns, without blocking, when a script in its folder
+carries a different `TOOLKIT_VERSION` than itself — a copy forgotten during an
+update. Each output records the version of the script that wrote it in its
+`xmpMM:History`, so such a mix would otherwise only show up in the files.
 
 `--run-preset` runs once and exits — safe to point a scheduled task at, since it
 never waits on stdin.

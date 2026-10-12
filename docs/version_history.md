@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.12.0](#v2120)** | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
+| **[v2.13.0](#v2130)** | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
+| [v2.12.0](#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
 | [v2.11.0](#v2110) | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
 | [v2.10.0](#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
 | [v2.9.0](#v290) | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
@@ -63,10 +64,68 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.13.0
+
+**Released 2026-10-13.** Supersedes v2.12.0. Files now say which version of
+the toolkit wrote them, and one hardening fix (round 54).
+
+### Each output records the toolkit version (`xmpMM:History`)
+
+Every file the four scripts write gains one entry in `xmpMM:History`, the
+standard XMP field Lightroom, Photoshop and Capture One already use:
+`Action` (`converted`, or `derived` for a derivative), `When`,
+`SoftwareAgent` = `jxl-photo 2.13.0 (https://github.com/rsilvabr/jxl-photo)`
+and `Parameters` = the script and the conversion
+(`jxl_tiff_encoder: from image/tiff to image/jxl`). Entries the file already
+had are kept, so a master encoded from a Capture One export, then
+recompressed, reads as three steps. The entry is written by the script that
+actually ran, so a folder with scripts from mixed releases still records the
+true version of each file. When a bug only affects some versions (as
+v2.0.0–v2.0.3 did with `--repair-jbrd`), the affected files can now be found
+with one exiftool filter.
+
+It rides on an exiftool call each script already makes — no extra process
+per file — and nothing in the toolkit reads it back: no gate, policy or `gen=`
+calculation depends on it. Not written: the `jbrd` container and the
+bit-exact JPEG reconstruction (XMP would break them), verbatim copies,
+`--strip`, and the decoder's ICC strategy `none`. Details:
+[What jxl-photo writes into your photos](metadata_written.md#processing-history-xmpmmhistory).
+
+A side effect worth knowing: since each write carries its own timestamp, two
+runs over the same source no longer produce byte-identical files. A backup
+that compares hashes sees an `--overwrite` re-run as a changed file.
+
+### `--version` and the mixed-versions warning
+
+All five scripts print `jxl-photo 2.13.0` with `--version`; the version is
+also the first line of every log. `TOOLKIT_VERSION` is the same in all five
+and is bumped on every release, even when only one script changed. At
+startup the wrapper warns, without blocking, when a script in its folder
+carries a different version than itself — a copy forgotten during an update.
+
+### The recompressor no longer doubles the lists it appends to (#531)
+
+cjxl carries the source's XMP into its output, and the recompressor then
+copied the same XMP again with exiftool; wherever that call also appended to
+a list, exiftool added the copied list to the carried one. A third-party JXL
+with its own `dc:Relation` values came back with each of them twice next to
+the new `jxlphoto-origin` (since v2.10.0), and the new History entry would
+have doubled the History on every run. Masters written by the toolkit were
+never affected. cjxl now runs with `-x strip=xmp`, so exiftool rebuilds the
+XMP alone, as in every other script. As a result, an XMP field in a
+namespace exiftool does not know (rare; some third-party apps) is no longer
+carried through a recompression, which was already the case for the
+encoder, decoder and transcoder.
+
+Proved against v2.12.0: a `cjxl -d 1` JXL with
+`dc:Relation=urn:example:album-7` recompressed once —
+`[album-7, album-7, jxlphoto-origin:jxl-lossy]` before,
+`[album-7, jxlphoto-origin:jxl-lossy]` now.
+
 ## v2.12.0
 
-**Released 2026-10-12.** Supersedes v2.11.0. One option removed; no other
-change.
+**Released 2026-10-12, superseded by v2.13.0.** Supersedes v2.11.0. One
+option removed; no other change.
 
 **Removed: `--embed-thumbnail`.** The optional EXIF thumbnail in JXL
 outputs was meant for fast previews, but no viewer tested reads it —

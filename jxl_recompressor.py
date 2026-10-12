@@ -36,6 +36,19 @@ import argparse
 
 import numpy as np
 
+# Who wrote a file: recorded in every output's xmpMM:History and printed by
+# --version. NOT a user setting. Bumped in ALL FIVE scripts on every release,
+# even when only one script changed — tests/test_toolkit_version.py pins the
+# five to each other and to the newest section of docs/version_history.md.
+TOOLKIT_NAME = "jxl-photo"
+TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# MIME types named in the xmpMM:History entry (_history_args).
+_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
+                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".png": "image/png"}
+
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
 logger = logging.getLogger("jxl_recompress")
 
@@ -1403,6 +1416,7 @@ def setup_logger():
 
     logger.addHandler(fh)
     logger.addHandler(ch)
+    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
     logger.info(f"Log saved to: {log_file}")
     return log_file
 
@@ -1853,6 +1867,39 @@ def _argfile_safe(value) -> str:
     bogus ones. Collapse all CR/LF runs into a single space.
     """
     return re.sub(r"[\r\n]+", " ", str(value))
+
+
+def _struct_escape(value) -> str:
+    """A value inside an exiftool serialized structure ({Field=value,...}):
+    , [ ] { } and | are escaped with a leading |, and newlines are flattened
+    like every other argfile value."""
+    return re.sub(r"([,\[\]{}|])", r"|\1", _argfile_safe(value))
+
+
+def _history_mime(path):
+    """MIME type of a path for the History entry, or None. A staging temp
+    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
+    p = Path(str(path))
+    if p.suffix.lower() == ".tmp":
+        p = Path(p.stem)
+    return _HISTORY_MIME.get(p.suffix.lower())
+
+
+def _history_args(action: str, src_path, dst_path) -> list:
+    """The one exiftool line appending this run's entry to xmpMM:History:
+    which toolkit version wrote the file, when, and from what. Write-only:
+    nothing in the toolkit reads it back. Callers never use it for a jbrd
+    container or a verbatim copy."""
+    when = datetime.now().astimezone().isoformat(timespec="seconds")
+    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
+    params = Path(__file__).stem
+    src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
+    if src_mime and dst_mime:
+        params += f": from {src_mime} to {dst_mime}"
+    fields = [f"Action={_struct_escape(action)}", f"When={when}",
+              f"SoftwareAgent={_struct_escape(agent)}",
+              f"Parameters={_struct_escape(params)}"]
+    return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
 
 
 # Charset directives for exiftool argfiles:
@@ -3292,7 +3339,16 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
                 "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT),
                 # --container=1 UNCONDITIONALLY: a bare-codestream output is
                 # refused by the exiftool restamp ("Will wrap JXL codestream").
-                "--container=1"] + _keep_invisible_flag() + _cjxl_buffering_flag())
+                "--container=1",
+                # strip=xmp: the restamp copies the source's XMP itself
+                # (-tagsfromfile -xmp:all), so cjxl's carried copy is
+                # redundant — and harmful: with it in place, exiftool ADDS
+                # the copied list to the carried one wherever that same
+                # call appends an entry (the xmpMM:History+= line), writing
+                # every entry twice and doubling the list on every run.
+                # EXIF is still carried (plain boxes via -api Compress=0).
+                # The coder report for xmp-history has the probe.
+                "-x", "strip=xmp"] + _keep_invisible_flag() + _cjxl_buffering_flag())
         r = _run_cjxl_full(cmd)
         if r.returncode != 0:
             raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
@@ -3985,6 +4041,12 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             _extra = _extra + _skip_icc_creator_line(jxl_path, skip_icc)
         # jxlphoto-origin for a source that has none (ORIGIN_PREFIX).
         _extra = _extra + _origin_marker_lines(jxl_path, src_distance is not None)
+        # Which toolkit version wrote this output (write-only; see
+        # _history_args). A derivative is "derived", a re-encode "converted".
+        # final_path, not write_path: the in-place temp is '<uuid>_<stem>.tmp'
+        # (no extension left to name the type); only the MIME type is read.
+        _extra = _extra + _history_args("derived" if DERIVATIVE else "converted",
+                                        jxl_path, final_path)
         r2 = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
              "-tagsfromfile", str(jxl_path),
@@ -4758,6 +4820,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
+    parser.add_argument("--version", action="version",
+                        version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("input", type=Path, nargs="?", help="Input JXL file or root folder")
     parser.add_argument("output", nargs="?", type=Path,
                         help="Output folder (modes 0 and 2 only)")

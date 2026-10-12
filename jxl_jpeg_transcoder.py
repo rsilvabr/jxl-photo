@@ -41,6 +41,19 @@ from datetime import datetime
 import time
 from typing import Optional
 
+# Who wrote a file: recorded in every output's xmpMM:History and printed by
+# --version. NOT a user setting. Bumped in ALL FIVE scripts on every release,
+# even when only one script changed — tests/test_toolkit_version.py pins the
+# five to each other and to the newest section of docs/version_history.md.
+TOOLKIT_NAME = "jxl-photo"
+TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# MIME types named in the xmpMM:History entry (_history_args).
+_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
+                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".png": "image/png"}
+
 
 def _jpeg_main_eoi(file_path: Path) -> bool:
     """Does this JPEG reach the EOI of its MAIN image?
@@ -967,6 +980,39 @@ def _argfile_safe(value) -> str:
     return re.sub(r"[\r\n]+", " ", str(value))
 
 
+def _struct_escape(value) -> str:
+    """A value inside an exiftool serialized structure ({Field=value,...}):
+    , [ ] { } and | are escaped with a leading |, and newlines are flattened
+    like every other argfile value."""
+    return re.sub(r"([,\[\]{}|])", r"|\1", _argfile_safe(value))
+
+
+def _history_mime(path):
+    """MIME type of a path for the History entry, or None. A staging temp
+    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
+    p = Path(str(path))
+    if p.suffix.lower() == ".tmp":
+        p = Path(p.stem)
+    return _HISTORY_MIME.get(p.suffix.lower())
+
+
+def _history_args(action: str, src_path, dst_path) -> list:
+    """The one exiftool line appending this run's entry to xmpMM:History:
+    which toolkit version wrote the file, when, and from what. Write-only:
+    nothing in the toolkit reads it back. Callers never use it for a jbrd
+    container or a verbatim copy."""
+    when = datetime.now().astimezone().isoformat(timespec="seconds")
+    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
+    params = Path(__file__).stem
+    src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
+    if src_mime and dst_mime:
+        params += f": from {src_mime} to {dst_mime}"
+    fields = [f"Action={_struct_escape(action)}", f"When={when}",
+              f"SoftwareAgent={_struct_escape(agent)}",
+              f"Parameters={_struct_escape(params)}"]
+    return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
+
+
 # Charset directives for exiftool argfiles:
 # - FileName=UTF8: file paths in the argfile are UTF-8.
 # - UTF8: tag VALUES read/written are UTF-8 (non-ASCII metadata round-trips
@@ -1645,6 +1691,7 @@ def setup_logger():
     ch.setFormatter(fmt)
     logger.addHandler(fh)
     logger.addHandler(ch)
+    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
     # (No delete summary here: setup_logger runs BEFORE anything is deleted, so
     # calling it printed "Sources DELETED: 0 | kept by a gate: 0" at the top of
     # every archive run — a line that reads like a result and is only ever
@@ -2365,6 +2412,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             if not has_jbrd_box(write_path):
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _provenance_marker_args(src_path)
+                    + _history_args("converted", src_path, write_path)
                     + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
@@ -4052,6 +4100,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                     ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
                     + _provenance_marker_args(src_path)
                     + _origin_marker_lines(src_path)
+                    + _history_args("converted", src_path, write_path)
                     + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
         except Exception as _e_prov:
             logger.debug(f"Provenance marker skipped: {_e_prov}")
@@ -4920,6 +4969,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             r2 = _run_exiftool_argfile(
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
+                + _history_args("derived", jxl_path, actual_out)
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r2.returncode != 0:
                 raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
@@ -4928,6 +4978,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 _run_exiftool_argfile(
                     ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
                     + _provenance_marker_args(jxl_path)
+                    + _history_args("converted", jxl_path, actual_out)
                     + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             except Exception as _e_prov:
                 logger.debug(f"Provenance marker skipped: {_e_prov}")
@@ -6081,6 +6132,9 @@ Examples:
   %(prog)s photo.jxl --force-convert --format jpeg --quality 95
         """
     )
+
+    parser.add_argument("--version", action="version",
+                        version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
 
     # Global options
     parser.add_argument("input", type=Path, help="Input file or folder")

@@ -197,6 +197,11 @@ jbrd copies, the keep-smaller fallback) change no metadata and so gain none.
 A source that carries other `jxlphoto-*` markers but no origin stays unknown —
 never guessed.
 
+Each re-encode also appends one `xmpMM:History` entry naming this toolkit's
+version (`derived` for a derivative), keeping the entries the source carried;
+the verbatim copies above gain none, since their bytes are the source's. The
+exact format is in [Processing history (`xmpMM:History`)](README_jxl_tiff_encoder.md#processing-history-xmpmmhistory).
+
 The `gen=` token at the head of the chain is **derived, never incremented**:
 every write recounts the lossy (`d>0`) entries and keeps
 `max(stored gen, count)`, so a hand-edited field self-corrects on the next
@@ -663,6 +668,7 @@ py jxl_recompressor.py <input> [output] [flags]
 
 input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       other modes warn that the output positional is ignored)
+--version             Print the toolkit version and exit
 --mode 0-8            Output folder mode (default 0)
 --workers N           Parallel workers (default: min(CPU, 16))
 --overwrite           Always recompress, even if the output exists

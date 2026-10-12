@@ -25,6 +25,19 @@ import numpy as np
 import tifffile
 from PIL import Image
 
+# Who wrote a file: recorded in every output's xmpMM:History and printed by
+# --version. NOT a user setting. Bumped in ALL FIVE scripts on every release,
+# even when only one script changed — tests/test_toolkit_version.py pins the
+# five to each other and to the newest section of docs/version_history.md.
+TOOLKIT_NAME = "jxl-photo"
+TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# MIME types named in the xmpMM:History entry (_history_args).
+_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
+                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
+                 ".jpeg": "image/jpeg", ".png": "image/png"}
+
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
 logger = logging.getLogger("jxl_convert")
 
@@ -1578,6 +1591,7 @@ def setup_logger():
 
     logger.addHandler(fh)
     logger.addHandler(ch)
+    logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
     logger.info(f"Log saved to: {log_file}")
     return log_file
 
@@ -1810,6 +1824,39 @@ def _argfile_safe(value) -> str:
     bogus ones. Collapse all CR/LF runs into a single space.
     """
     return re.sub(r"[\r\n]+", " ", str(value))
+
+
+def _struct_escape(value) -> str:
+    """A value inside an exiftool serialized structure ({Field=value,...}):
+    , [ ] { } and | are escaped with a leading |, and newlines are flattened
+    like every other argfile value."""
+    return re.sub(r"([,\[\]{}|])", r"|\1", _argfile_safe(value))
+
+
+def _history_mime(path):
+    """MIME type of a path for the History entry, or None. A staging temp
+    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
+    p = Path(str(path))
+    if p.suffix.lower() == ".tmp":
+        p = Path(p.stem)
+    return _HISTORY_MIME.get(p.suffix.lower())
+
+
+def _history_args(action: str, src_path, dst_path) -> list:
+    """The one exiftool line appending this run's entry to xmpMM:History:
+    which toolkit version wrote the file, when, and from what. Write-only:
+    nothing in the toolkit reads it back. Callers never use it for a jbrd
+    container or a verbatim copy."""
+    when = datetime.now().astimezone().isoformat(timespec="seconds")
+    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
+    params = Path(__file__).stem
+    src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
+    if src_mime and dst_mime:
+        params += f": from {src_mime} to {dst_mime}"
+    fields = [f"Action={_struct_escape(action)}", f"When={when}",
+              f"SoftwareAgent={_struct_escape(agent)}",
+              f"Parameters={_struct_escape(params)}"]
+    return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
 
 
 # Charset directives for exiftool argfiles:
@@ -2856,6 +2903,9 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     _origin, _inh = _origin_for_output(_o_tokens, _o_record, f"tiff{original_depth}")
     if _origin:
         args_lines.append(f"-XMP-dc:Relation+={ORIGIN_PREFIX}{_argfile_safe(_origin)}")
+
+    # Which toolkit version wrote this master (write-only; see _history_args).
+    args_lines += _history_args("converted", tiff_path, write_path)
 
     # WHICH source made this output. Written for every output, not just for
     # multi-page splits: it is what lets a later run tell "the same photo,
@@ -5345,6 +5395,8 @@ def find_tiffs_mode7(input_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
+    parser.add_argument("--version", action="version",
+                        version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("input",             type=Path, nargs="?", help="Input root folder")
     parser.add_argument("output", nargs="?", type=Path,
                         help="Output folder (modes 0 and 2; ignored by the others, "

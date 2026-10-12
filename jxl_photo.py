@@ -22,6 +22,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Who wrote a file: recorded in every output's xmpMM:History and printed by
+# --version. NOT a user setting. Bumped in ALL FIVE scripts on every release,
+# even when only one script changed — tests/test_toolkit_version.py pins the
+# five to each other and to the newest section of docs/version_history.md.
+TOOLKIT_NAME = "jxl-photo"
+TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
 # Initialize wrapper logger early so manifest/path validation code can log safely.
 # Without a handler these messages would hit Python's lastResort (raw stderr,
 # unformatted, outside the rich flow).
@@ -2294,6 +2302,39 @@ def _child_bool_setting(module: str, name: str, fallback: bool) -> bool:
         return fallback
     value = getattr(mod, name, None)
     return fallback if value is None else bool(value)
+
+
+# The four child scripts whose TOOLKIT_VERSION must match the wrapper's.
+_VERSIONED_CHILDREN = ("jxl_tiff_encoder.py", "jxl_tiff_decoder.py",
+                       "jxl_jpeg_transcoder.py", "jxl_recompressor.py")
+_TOOLKIT_VERSION_RE = re.compile(r'^TOOLKIT_VERSION\s*=\s*"([^"]+)"', re.MULTILINE)
+
+
+def _script_version(path: Path):
+    """TOOLKIT_VERSION as written in a script's source, or None (a script from
+    before the constant existed, or unreadable). Read as TEXT, never imported:
+    a child that fails to import must still be reported."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _TOOLKIT_VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _mixed_version_messages(script_dir: Path) -> list:
+    """One line per child script whose version differs from the wrapper's.
+    A missing child is not reported here (the dependency check owns that)."""
+    msgs = []
+    for name in _VERSIONED_CHILDREN:
+        p = script_dir / name
+        if not p.exists():
+            continue
+        v = _script_version(p)
+        if v != TOOLKIT_VERSION:
+            shown = v if v else "an older version (no TOOLKIT_VERSION)"
+            msgs.append(f"{name} is {shown}; jxl_photo.py is {TOOLKIT_VERSION}")
+    return msgs
 
 
 # Wizard option -> the setting at the top of the child script that is its
@@ -9375,6 +9416,8 @@ def main():
 
 def _main():
     parser = argparse.ArgumentParser(description="JXL Tools v2 - JPEG XL Processing with Auto Mode")
+    parser.add_argument("--version", action="version",
+                        version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
     parser.add_argument("--recheck", action="store_true", help="Force dependency recheck")
     parser.add_argument("--run-preset", metavar="NAME",
                         help="Run a saved preset without the menu (Task Scheduler / cron) and exit")
@@ -9407,6 +9450,16 @@ def _main():
                                         persist=not args.list_presets)
 
     menu.display_status(status)
+
+    # Scripts from different releases in one folder: each output records the
+    # version of the script that wrote it, so a forgotten copy shows up in
+    # the files' History. Warn now instead (never blocks the run).
+    _mixed = _mixed_version_messages(SCRIPT_DIR)
+    for _m in _mixed:
+        print(f"WARNING: mixed versions — {_m}")
+        logger.warning(f"Mixed versions: {_m}")
+    if _mixed:
+        print("         Copy all five scripts from the same release.")
 
     if args.list_presets:
         # Read-only: listing what is saved must work even on a machine with no

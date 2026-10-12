@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #531.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #532.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-54 — the recompressor doubled the lists it appended to](#round-54--the-recompressor-doubled-the-lists-it-appended-to-2026-10-13) | 2026-10-13 | v2.13.0 | #531 (1) |
 | [Round-53 — one provenance pair in the transcoder's outputs](#round-53--one-provenance-pair-in-the-transcoders-outputs-2026-10-11) | 2026-10-11 | v2.11.0 | #530 (1) |
 | [Round-52 — the recompressor's `--output-icc` is reset between runs](#round-52--the-recompressors---output-icc-is-reset-between-runs-2026-10-10) | 2026-10-10 | v2.9.0 | #529 (1) |
 | [Round-51 — the wizard's defaults are the scripts' settings](#round-51--the-wizards-defaults-are-the-scripts-settings-2026-10-09) | 2026-10-09 | v2.8.2 | #528 (1) |
@@ -60,6 +61,22 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-54 — the recompressor doubled the lists it appended to (2026-10-13)
+
+Found while reviewing the `xmpMM:History` entry of v2.13.0
+(`AI_tools/261013_Claude_review_xmp-history.md`): the History entry came out
+twice, and the same mechanism was already at work on `dc:Relation`. Never on
+a master written by the toolkit — a file with `jxlphoto-*` tokens gains no
+origin, so nothing is appended to its Relation. Regression test:
+`tests/test_xmp_history.py::test_h11_recompressor_never_doubles_a_list_it_appends_to`
+(real codecs; fails against v2.12.0 with the value twice).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 531 | **A recompressed third-party JXL came back with its `dc:Relation` values doubled.** cjxl carries the source's XMP into its output, and the restamp then copies the same XMP with `-tagsfromfile -xmp:all`; wherever that call also appends to a list (`+=`), exiftool adds the copied list to the carried one. A JXL from another program with its own `dc:Relation` values got each of them twice next to the new `jxlphoto-origin` (v2.10.0–v2.12.0). | recompressor | ✅ FIXED (cjxl runs with `-x strip=xmp`: the restamp rebuilds the XMP alone, so every list keeps its entries once. Side effect: an XMP field in a namespace exiftool does not know is no longer carried, as in every other script — `docs/metadata_written.md`) |
 
 ---
 

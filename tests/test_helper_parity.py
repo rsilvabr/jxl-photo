@@ -77,6 +77,11 @@ SHARED_HELPERS = [
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.
     "_argfile_safe",
+    # The xmpMM:History entry: a copy drifting would make one script write a
+    # History entry the others do not (or one exiftool cannot parse).
+    "_struct_escape",
+    "_history_mime",
+    "_history_args",
     "_get_exiftool_cmd",
     "_tool_version",
     "_tool_at_least",

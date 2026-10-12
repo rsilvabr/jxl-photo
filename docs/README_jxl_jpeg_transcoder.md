@@ -330,6 +330,7 @@ Arguments:
   output             Output folder (optional, for mode 0)
 
 Options:
+  --version          Print the toolkit version and exit
   --mode 0-8         Output folder mode (default: 0 for in-place)
   --workers N        Parallel threads (tested up to 32 on a Ryzen 9 5950X)
   --overwrite        Always overwrite existing files
@@ -835,6 +836,11 @@ so a JPEG decoded from a master and later re-encoded as JXL keeps the master's
 origin. Every output carries exactly ONE `jxlphoto-src`/`jxlphoto-srcsum`
 pair — its own: the source's pair, copied along with the metadata, is removed
 in the same exiftool write that adds this output's pair.
+
+The `--force-convert` encode and the JXL → JPEG/PNG decode each append one
+`xmpMM:History` entry naming this toolkit's version (`derived` when resized or
+sharpened), while the lossless `jbrd` directions write no XMP and gain none. The
+exact format is in [Processing history (`xmpMM:History`)](README_jxl_tiff_encoder.md#processing-history-xmpmmhistory).
 
 * * *
 

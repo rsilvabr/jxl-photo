@@ -11,6 +11,20 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.13.0: each output records the version that wrote it
+
+Nothing to check. Two things you may notice:
+
+- Every write now carries its own timestamp in `xmpMM:History`, so re-running
+  with `--overwrite` gives a file with a different hash. A backup that compares
+  hashes copies it again.
+- The recompressor no longer carries XMP fields in a namespace exiftool does
+  not know (rare; some third-party apps write their own). The other three
+  scripts never did.
+
+When you update a folder of the scripts by copying, copy all five: the
+wrapper now warns when one of them is from another release.
+
 ## v2.12.0: `--embed-thumbnail` does nothing
 
 Nothing to check. The encoder no longer writes the optional EXIF thumbnail —

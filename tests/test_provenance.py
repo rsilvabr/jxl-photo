@@ -220,12 +220,18 @@ def test_decoder_allows_redecoding_the_same_source(tmp_path):
 
 
 def test_decoder_content_matching_survives_a_moved_source(tmp_path):
-    _make_jxl(tmp_path, tmp_path / "root" / "A" / "foto.jxl", 1000)
+    src = tmp_path / "root" / "A" / "foto.jxl"
+    _make_jxl(tmp_path, src, 1000)
+    # The SAME jxl bytes, kept before the first run deletes the original. A
+    # re-encode is NOT the same file any more: every output carries an
+    # xmpMM:History entry with its own timestamp, so the encoder is no longer
+    # byte-reproducible — and this test is about the same BYTES at a new path.
+    same_bytes = src.read_bytes()
     assert _rund("root", *DEC_ARCHIVE, cwd=tmp_path).returncode == 0
 
-    # the SAME jxl bytes, at a different location
     moved = tmp_path / "root" / "C" / "foto.jxl"
-    _make_jxl(tmp_path, moved, 1000)
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    moved.write_bytes(same_bytes)
 
     r = _rund("root", *DEC_ARCHIVE, "--delete-skipped", cwd=tmp_path)
     assert "REFUSING" in r.stdout

@@ -113,6 +113,16 @@
   (`_hidden_generations`); no delete gate reads it. The transcoder writes ONE
   src/srcsum pair: `_inherited_marker_removal_lines` drops the copied one in
   the same call.
+- **`xmpMM:History` (v2.13.0) records which toolkit version wrote each
+  output**: one entry per write (`converted`, or `derived` for a
+  derivative), appended by `_history_args` (parity-pinned in the four
+  backends) inside a metadata call that already exists — never a new
+  exiftool spawn, never in a jbrd container or a verbatim copy, never
+  read back by any gate. The version is `TOOLKIT_VERSION`, identical in
+  all five scripts. The recompressor's cjxl runs with `-x strip=xmp`: its
+  carried XMP plus the restamp's `-tagsfromfile -xmp:all` makes exiftool
+  ADD the copied list to the carried one for every `+=` in that call,
+  doubling the History and `dc:Relation` (#531). Do not remove it.
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
@@ -288,6 +298,11 @@ must-fix / should-fix items and a commit verdict.
   section per release that changed an existing command line's behaviour)
 - `docs/behavior_and_limitations.md` — defaults, limits and viewer quirks
   (the README's "Good to know" links into it)
+- `docs/metadata_written.md` — every field the toolkit writes into a photo
+  (CreatorTool ICC, encode record, each `jxlphoto-*` token, xmpMM:History)
+  and what it reveals. A new token or a new written field goes there in the
+  same change — `tests/test_metadata_doc.py` fails on an undocumented
+  `jxlphoto-*` token
 - `docs/README_jxl_tiff_encoder.md`, `docs/README_jxl_tiff_decoder.md`,
   `docs/README_jxl_jpeg_transcoder.md`, `docs/README_jxl_recompressor.md` —
   per-script CLI, settings and modes (every `--flag` must appear in its doc:
@@ -322,6 +337,10 @@ must-fix / should-fix items and a commit verdict.
   not a change to announce: it stays out of the release notes, the README's
   "What's new" and the release tables — one plain line in
   `docs/version_history.md` at most.
+- **Every release bumps `TOOLKIT_VERSION` in ALL FIVE scripts**, even
+  when only one changed, to the version of the newest
+  `docs/version_history.md` section — `tests/test_toolkit_version.py`
+  fails until they match.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
   `Claude-Session` trailers** (AI assistance is credited in the README's
   Acknowledgments instead, and more than one assistant is used).
