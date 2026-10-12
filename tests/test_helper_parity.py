@@ -46,6 +46,9 @@ SHARED_HELPERS = [
     # back; a copy that dropped `srcsum` would silently write an archive no
     # other backend could verify.
     "_provenance_marker_args",
+    # Every refusal gives the same way out (the two likely causes and the
+    # options), so the sentence must not drift between the four backends.
+    "_guard_refusal_hint",
     # The jxlphoto-origin read/decision pair: a copy diverging would make one
     # script inherit the origin while another guesses it (or drops it).
     "_read_origin_inputs",

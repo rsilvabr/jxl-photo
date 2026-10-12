@@ -123,6 +123,16 @@
   carried XMP plus the restamp's `-tagsfromfile -xmp:all` makes exiftool
   ADD the copied list to the carried one for every `+=` in that call,
   doubling the History and `dc:Relation` (#531). Do not remove it.
+- **`OVERWRITE_GUARD` (v2.14.0)** turns off ONLY the "marker names another
+  source" refusal (encoder `_foreign_overwrite_reason`, decoder main()
+  block + `_decode_output_is_ours`, recompressor
+  `_foreign_overwrite_refusals`, transcoder `_foreign_overwrite_filter`'s
+  marker branch). Off + `--delete-source` exits 2 in every backend. It
+  never relaxes the jbrd/checksum refusals, the decoder's original-master
+  and edited-TIFF refusals, the derivative own-output check or any delete
+  gate. The encoder's `--restamp-moved` and the adopt stamp rewrite a
+  master only through `_rewrite_master_relation` (temp + reorder +
+  integrity + read-back + mtime kept + os.replace) and write no History.
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
@@ -142,7 +152,9 @@
   (`_memory_capped_pipeline` + `_run_cjxl_full`, a semaphore) and spends the
   leftover memory on extra workers that run djxl/magick/exiftool for the next
   files. Its `WORKER_MEMORY_FRACTION` is 1.0, the encoder's 0.8 — on purpose
-  (v2.9.0); `test_constants_agree` no longer compares them.
+  (v2.9.0); `test_constants_agree` no longer compares them. A resized
+  derivative budgets cjxl by the size it ENCODES (`cjxl_pixels` from
+  `_largest_encode_pixels`, #535) and the side steps by the full source.
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
@@ -182,9 +194,17 @@
 
 ## Verification
 - After editing any script, run `python -m py_compile` on the changed files.
-- Tests: `python -m pytest tests/`. On the owner's machine `py` resolves to a
+- Tests: `python -m pytest tests/ -n 8 -q` (pytest-xdist; ~2.5 min on the
+  owner's machine, ~16 min serial). On the owner's machine `py` resolves to a
   Python 3.13 without pytest/numpy/tifffile; `python` (3.12) has them — use
-  `python` for the suite, the pre-fix proofs and the battery.
+  `python` for the suite, the pre-fix proofs and the battery. A test must be
+  safe in parallel: its own `tmp_path`, no fixed temp/home path, no assertion
+  on a phrase rich may wrap (conftest sets `COLUMNS=240`; normalise
+  whitespace when a long path precedes the phrase).
+- Baseline: a plan states the suite result of its base commit (verified at the
+  last review). The coder does not re-run the whole suite before starting; a
+  test that fails at the end is re-run alone against the extracted HEAD
+  (`git show HEAD:<file>`) to tell a new failure from an old one.
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,

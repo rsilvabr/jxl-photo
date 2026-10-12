@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.13.0](#v2130)** | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
+| **[v2.14.0](#v2140)** | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
+| [v2.13.0](#v2130) | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
 | [v2.12.0](#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
 | [v2.11.0](#v2110) | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
 | [v2.10.0](#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
@@ -64,9 +65,70 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.14.0
+
+**Released 2026-10-13.** Supersedes v2.13.0. Renamed folders no longer have to
+end in a refusal, and resized derivatives use far more workers (round 55, 4
+fixes).
+
+### The overwrite guard can be turned off (`--no-overwrite-guard`)
+
+Every output records the full path of the file that made it
+(`jxlphoto-src`), and every run refuses to overwrite an output made from
+another path. That protects the only copy of a photo when an earlier run
+deleted its source and a different photo with the same name lands on the same
+output. A renamed or moved folder changes the path too: renaming alone breaks
+nothing (the next sync skips), but re-exporting a photo after renaming its
+folder, or a full `--overwrite` rebuild, was refused.
+
+For libraries whose sources are never deleted, the guard can now be turned off:
+`--no-overwrite-guard` in all four scripts, `OVERWRITE_GUARD = False` at the top
+of each, or "Overwrite guard: off" in the wizard (saved in the preset). Each
+overwrite it would have refused is logged. Turning it off only lifts that one
+refusal: a lossless JPEG archive of a different JPEG, an original TIFF master
+or an edited decode, a file a derivative run did not write, and every delete
+gate stay as they were. The guard off together with `--delete-source` is
+refused (exit 2) — that is the combination that could lose a photo.
+
+The refusal message now says what happened, the two likely causes (a renamed
+folder, or another photo with the same name), what to do about each, and links
+to [Renamed folders and the overwrite guard](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard).
+
+### `--restamp-moved` (encoder)
+
+For those who keep the guard on: after renaming a folder, one run with
+`--restamp-moved` rewrites the path record of every master whose TIFF is
+unchanged (its content hash still matches), in seconds and without
+re-encoding. Pixels, file dates and History stay as they are, so derivative
+runs do not redo those masters. Masters whose TIFF was already edited are
+listed and left alone.
+
+### Resized derivatives use many more workers (#535)
+
+The recompressor's memory cap sized every cjxl by the source image, so a
+2048 px derivative of a 45 MP master was budgeted as a 45 MP encode at d=1 e=9
+— about 11 GB each, 6 workers on a 42 GB machine. It now budgets the encode by
+the size cjxl really writes (~3 MP), and the full-size decode and resize as
+before: 27 workers on the same machine.
+
+### Fixes
+
+- **#532** The encoder and the decoder warned that `--provenance` "has no
+  effect without `--delete-source`" (and the encoder "in mode N"). Wrong since
+  v2.8.0, when every run started checking the outputs it overwrites; the
+  warnings are gone.
+- **#533** The wrapper passed a saved `--provenance` choice to the child only
+  when the run deleted sources.
+- **#534** The `--provenance adopt` stamp edited the master directly: it gave
+  the JXL a new date (derivative runs then redid it) and left the EXIF after
+  the codestream, where IrfanView does not see it. It now goes through a temp
+  copy, the box reorder, an integrity check and a read-back, and keeps the
+  date.
+- **#535** The memory cap above.
+
 ## v2.13.0
 
-**Released 2026-10-13.** Supersedes v2.12.0. Files now say which version of
+**Released 2026-10-13, superseded by v2.14.0.** Supersedes v2.12.0. Files now say which version of
 the toolkit wrote them, and one hardening fix (round 54).
 
 ### Each output records the toolkit version (`xmpMM:History`)

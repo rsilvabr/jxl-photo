@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_VERSION = "2.14.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Initialize wrapper logger early so manifest/path validation code can log safely.
@@ -876,6 +876,9 @@ class ToolConfig:
     last_provenance: Optional[str] = None
     # False only when the user explicitly turned the adopt scan off.
     last_adopt_scan: Optional[bool] = None
+    # False only when the user turned the overwrite guard off (renamed
+    # folders, sources never deleted). None = the child's OVERWRITE_GUARD.
+    last_overwrite_guard: Optional[bool] = None
     last_advanced_options: Optional[Dict] = None
     last_use_ram: Optional[bool] = None
     last_compression: Optional[str] = None
@@ -2350,6 +2353,7 @@ _CHILD_OPTION_DEFAULTS = {
         'encode_tag': ('ENCODE_TAG_MODE', 'xmp'),
         'use_ram': ('USE_RAM_FOR_PNG', True),
         'provenance': ('PROVENANCE_CHECK', 'path'),
+        'overwrite_guard': ('OVERWRITE_GUARD', True),
     },
     'jxl_tiff_decoder': {
         'thumbnail_handling': ('THUMBNAIL_HANDLING', 'include'),
@@ -2360,14 +2364,17 @@ _CHILD_OPTION_DEFAULTS = {
         'add_preview': ('ADD_JPEG_PREVIEW', True),
         'reconstruct_multipage': ('RECONSTRUCT_MULTIPAGE', True),
         'provenance': ('PROVENANCE_CHECK', 'path'),
+        'overwrite_guard': ('OVERWRITE_GUARD', True),
     },
     'jxl_jpeg_transcoder': {
         'bit_depth': ('PNG_DEFAULT_BIT_DEPTH', 16),
         'provenance': ('PROVENANCE_CHECK', 'path'),
+        'overwrite_guard': ('OVERWRITE_GUARD', True),
     },
     'jxl_recompressor': {
         'distance': ('CJXL_DISTANCE', 1.0),
         'provenance': ('PROVENANCE_CHECK', 'path'),
+        'overwrite_guard': ('OVERWRITE_GUARD', True),
     },
 }
 
@@ -5011,6 +5018,26 @@ class InteractiveMenu:
             ow = Prompt.ask("If exists", choices=["1", "2"], default="2")
             workflow['overwrite_mode'] = ow
 
+            # Expert flags are typed later (Step 6E): a --delete-source there
+            # with the guard off is refused by the child (exit 2), loudly.
+            if not _step6_delete_on(workflow):
+                _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
+                _og_last = self.config.config.last_overwrite_guard
+                _og_default = _og_child if _og_last is None else bool(_og_last)
+                console.print(
+                    "[dim]Overwrite guard: an output records the full path of the file "
+                    "that made it.\n"
+                    "  on  = (default) an output made from ANOTHER path is never "
+                    "overwritten — protects photos whose source an earlier run deleted.\n"
+                    "  off = overwrite it (logged). Choose off if you never delete "
+                    "sources and you rename or move folders: otherwise re-editing a "
+                    "photo after renaming its folder is refused.[/dim]")
+                _og = Confirm.ask(
+                    "Overwrite guard (refuse outputs made from another path)?",
+                    default=_og_default)
+                workflow['overwrite_guard'] = bool(_og)
+                workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
+
             if origin == 'tiff' and dest == 'jxl':
                 d50 = Prompt.ask("D50 patch", choices=["auto", "on", "off"],
                                  default=_child_default('jxl_tiff_encoder', 'd50_patch'))
@@ -5183,6 +5210,28 @@ class InteractiveMenu:
             ow_input = input("Existing file handling (1=overwrite, 2=sync) [2]: ").strip() or "2"
             workflow['overwrite_mode'] = ow_input
 
+            # Expert flags are typed later (Step 6E): a --delete-source there
+            # with the guard off is refused by the child (exit 2), loudly.
+            if not _step6_delete_on(workflow):
+                _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
+                _og_last = self.config.config.last_overwrite_guard
+                _og_default = _og_child if _og_last is None else bool(_og_last)
+                print("Overwrite guard: an output records the full path of the file "
+                      "that made it.")
+                print("  on  = (default) an output made from ANOTHER path is never "
+                      "overwritten —")
+                print("        protects photos whose source an earlier run deleted.")
+                print("  off = overwrite it (logged). Choose off if you never delete "
+                      "sources and")
+                print("        you rename or move folders: otherwise re-editing a photo "
+                      "after")
+                print("        renaming its folder is refused.")
+                _og_in = input(f"Overwrite guard (refuse outputs made from another "
+                               f"path)? [{'Y/n' if _og_default else 'y/N'}]: ").strip().lower()
+                _og = _og_default if not _og_in else _og_in.startswith('y')
+                workflow['overwrite_guard'] = bool(_og)
+                workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
+
         # Nothing is persisted here: all session state is saved once, at the
         # end of the wizard in main(), so cancelling mid-wizard never mutates
         # saved defaults.
@@ -5264,6 +5313,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('overwrite_guard') is False:
+                advanced_options['overwrite_guard'] = False
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
             _carry_recompress_policies(advanced_options)
@@ -5380,6 +5431,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('overwrite_guard') is False:
+                advanced_options['overwrite_guard'] = False
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
             advanced_options['multipage_mode'] = multipage_mode
@@ -5531,6 +5584,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('overwrite_guard') is False:
+                advanced_options['overwrite_guard'] = False
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
             advanced_options['thumbnail_handling'] = thumbnail_handling
@@ -5646,6 +5701,8 @@ class InteractiveMenu:
                 advanced_options['delete_skipped'] = True
             if workflow.get('provenance'):
                 advanced_options['provenance'] = workflow['provenance']
+            if workflow.get('overwrite_guard') is False:
+                advanced_options['overwrite_guard'] = False
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
             if not _is_recompress:
@@ -5759,6 +5816,10 @@ class InteractiveMenu:
                 extra_info.append(f"Match existing outputs by: {_adv['provenance']}")
             if _adv.get('adopt_scan') is False:
                 extra_info.append("Adopt scan: OFF (pairing trusted, not verified)")
+        # Outside the delete block on purpose: the guard-off state can never
+        # coexist with a delete (the child refuses that combination).
+        if _adv.get('overwrite_guard') is False:
+            extra_info.append("Overwrite guard: off")
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('exclude_folders'):
@@ -7709,6 +7770,13 @@ class InteractiveMenu:
         if pv == 'adopt' and advanced.get('adopt_scan') is False:
             cmd.append('--no-adopt-scan')
 
+    def _append_overwrite_guard_flag(self, cmd: List, advanced: Dict) -> None:
+        """--no-overwrite-guard when the run turned the guard off. Never with
+        a delete: the child refuses that combination (exit 2) and the
+        wizard does not offer it, so a hand-edited preset fails loudly."""
+        if advanced.get('overwrite_guard') is False:
+            cmd.append('--no-overwrite-guard')
+
     def _warn_exclude_folders_unsupported(self, origin: str, dest: str,
                                           value: str, at_most_once: bool = False) -> None:
         """Warn that --exclude-folders does not exist for this direction.
@@ -7828,7 +7896,8 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -7865,7 +7934,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if workflow.get('add_preview') is False:
                 cmd.append('--no-preview')
             if advanced.get('thumbnail_handling'):
@@ -7937,7 +8007,8 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
 
         else:
             # JPEG/JXL/PNG transcoder
@@ -8027,7 +8098,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -8488,7 +8560,8 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if advanced.get('sync'):
                 cmd.append('--sync')
             if workflow.get('staging'):
@@ -8563,7 +8636,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if advanced.get('overwrite'):
                 cmd.append('--overwrite')
             if advanced.get('sync'):
@@ -8676,7 +8750,8 @@ class InteractiveMenu:
                     cmd.append('--verify-roundtrip')
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
 
         else:
             conv_type = workflow.get('conversion_type', '')
@@ -8784,7 +8859,8 @@ class InteractiveMenu:
                 # sources the deletion covers, it does not enable one.
                 if advanced.get('delete_skipped'):
                     cmd.append('--delete-skipped')
-                self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_provenance_flags(cmd, advanced, origin, dest)
+            self._append_overwrite_guard_flag(cmd, advanced)
             if advanced.get('output_suffix'):
                 cmd.extend(['--output-suffix', advanced['output_suffix']])
 
@@ -9087,6 +9163,8 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 settings.append(["Delete source", "ON"])
+            if session.get('last_overwrite_guard') is False:
+                settings.append(["Overwrite guard", "off"])
             if session.get('last_expert_flags'):
                 settings.append(["Expert flags", session.get('last_expert_flags')])
             
@@ -9118,6 +9196,8 @@ class InteractiveMenu:
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
                 print(f"  Delete source: ON")
+            if session.get('last_overwrite_guard') is False:
+                print(f"  Overwrite guard: off")
             if session.get('last_expert_flags'):
                 print(f"  Expert flags: {session.get('last_expert_flags')}")
             print()
@@ -9354,6 +9434,8 @@ class InteractiveMenu:
             workflow['advanced_options']['delete_skipped'] = True
         if session.get('last_provenance'):
             workflow['advanced_options']['provenance'] = session['last_provenance']
+        if session.get('last_overwrite_guard') is False:
+            workflow['advanced_options']['overwrite_guard'] = False
         if session.get('last_adopt_scan') is False:
             workflow['advanced_options']['adopt_scan'] = False
         workflow['expert_flags'] = session.get('last_expert_flags') or ''

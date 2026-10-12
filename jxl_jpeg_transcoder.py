@@ -46,8 +46,12 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_VERSION = "2.14.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
+GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
+                 f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
@@ -785,6 +789,21 @@ PROVENANCE_CHECK = "path"
 # instead: the stored hash IS the original JPEG, so an existing output that
 # matches it came from this JXL.
 
+OVERWRITE_GUARD = True
+# Refuse to OVERWRITE an existing output whose jxlphoto-src marker names a
+# DIFFERENT source (every run, every mode — #496-#499). That protects the
+# only copy of a photo when an earlier run deleted its source and a different
+# photo with the same name now lands on its output.
+# The marker records the source's full PATH, so a renamed or moved folder
+# reads as "a different source" too: re-exporting a photo after renaming its
+# folder is refused. If you never delete sources with this toolkit and you
+# rename folders, set False (or pass --no-overwrite-guard). Never combined
+# with --delete-source: that run exits 2. Still refused with the guard off:
+# a lossless JPEG archive (jbrd) of another JPEG, a TIFF that is an original
+# master or was edited (decoder), a file that is not one of a derivative
+# run's own outputs. Details: docs/behavior_and_limitations.md, "Renamed
+# folders and the overwrite guard".
+
 DELETE_SKIPPED = False
 # [DELETE_SOURCE only] Also delete sources whose output ALREADY EXISTS — the
 # files this run reports as SKIP.
@@ -1011,6 +1030,28 @@ def _history_args(action: str, src_path, dst_path) -> list:
               f"SoftwareAgent={_struct_escape(agent)}",
               f"Parameters={_struct_escape(params)}"]
     return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
+
+
+def _guard_refusal_hint(restamp: bool) -> list:
+    """The lines every non-delete provenance refusal ends with: the two likely
+    causes, what to do about each, and where the details are. `restamp` names
+    --restamp-moved, which only the encoder has."""
+    lines = [
+        "  Why: every output records the full PATH of the file that made it. This "
+        "output names a different path, so it is either (a) the same photo after "
+        "its folder was renamed or moved, or (b) a different photo with the same "
+        "name.",
+        "  (a) Renamed/moved folder:"
+        + (" if the source was not edited since, run once with --restamp-moved "
+           "(rewrites the record, no re-encode), or" if restamp else "")
+        + " re-run with --overwrite --provenance content (accepts an unchanged "
+        "source). If you never delete sources and rename folders often, turn the "
+        "guard off: --no-overwrite-guard, or OVERWRITE_GUARD = False at the top "
+        "of the script, or 'Overwrite guard: off' in the wizard.",
+        "  (b) Different photo: rename one of them, or write into another folder.",
+        f"  Details: {GUARD_DOC_URL}",
+    ]
+    return lines
 
 
 # Charset directives for exiftool argfiles:
@@ -3412,13 +3453,19 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
         return pairs, []
     marks = _read_source_markers_batch(sorted({out for _s, out in targets}))
     refused = []
+    _marker_refusal = False
     for src, out in targets:
         why = None
         info = marks.get(str(out)) or {"src": None, "srcsum": None}
         if info.get("src") or info.get("srcsum"):
             if not _provenance_ok(info, src, PROVENANCE_CHECK):
-                why = ("it was made from a different source (its provenance "
-                       "marker names another file)")
+                if OVERWRITE_GUARD:
+                    why = ("it was made from a different source (its provenance "
+                           "marker names another file)")
+                    _marker_refusal = True
+                else:
+                    logger.warning(f"  OVERWRITE (overwrite guard off) | {out.name}: "
+                                   f"its provenance marker names another source path")
         elif decode_lossless:
             stored = read_md5_db(src)
             if stored is not None:
@@ -3461,6 +3508,9 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
         "into another folder." +
         ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
          " If you MOVED the sources, re-run with --provenance content."))
+    if _marker_refusal:
+        for _l in _guard_refusal_hint(False):
+            logger.error(_l)
     return kept, refused
 
 
@@ -3566,6 +3616,7 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
             "mode that keeps folder structure (0/1/3/8), or drop --delete-source." +
             ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
              " If you MOVED the sources, re-run with --provenance content."))
+        logger.error(f"  Details: {GUARD_DOC_URL}")
     return kept, refused
 
 
@@ -3720,6 +3771,9 @@ def cmd_transcode(args, auto_decode: bool = False):
                 f"Store MD5: {STORE_MD5} | delete_source={DELETE_SOURCE} | "
                 f"{mode_str} | Staging: {TEMP2_DIR or 'disabled'} | Workers: {args.workers}")
     logger.info(f"Input: {args.input}")
+    if not OVERWRITE_GUARD:
+        logger.warning("Overwrite guard OFF: an existing output made from another "
+                       "source path is overwritten (and logged) instead of refused.")
 
     # resolve_output_transcode has no rename parameters: only the lossy
     # convert path applies --rename-from/--rename-to. Accepting the flags
@@ -5289,6 +5343,9 @@ def cmd_convert(args, from_jxl: bool = True):
     if args.rename_from:
         logger.info(f"Filename rename: '{args.rename_from}' -> '{args.rename_to}'")
     logger.info(f"Input: {args.input}")
+    if not OVERWRITE_GUARD:
+        logger.warning("Overwrite guard OFF: an existing output made from another "
+                       "source path is overwritten (and logged) instead of refused.")
     logger.info(f"Files found: {len(files)}")
 
     # Build pairs
@@ -5673,6 +5730,9 @@ def cmd_auto(args):
     logger.info(f"JXL with jbrd (lossless decode): {len(jxl_transcode_files)}")
     logger.info(f"JXL without jbrd (lossy): {len(jxl_convert_files)}")
     logger.info(f"Mode: {args.mode} | Workers: {args.workers} | Staging: {TEMP2_DIR or 'disabled'}")
+    if not OVERWRITE_GUARD:
+        logger.warning("Overwrite guard OFF: an existing output made from another "
+                       "source path is overwritten (and logged) instead of refused.")
 
     # JPEG does not support 16-bit. Switch format to PNG before any group is
     # processed so that staging files and final paths use the correct extension.
@@ -6212,6 +6272,13 @@ Examples:
                              "survives MOVED folders. The lossless JXL->JPEG path "
                              "uses checksums.md5 instead, since its output must stay "
                              "byte-identical and cannot carry a marker.")
+    parser.add_argument("--no-overwrite-guard", action="store_true",
+                        help="Allow overwriting an existing output whose provenance "
+                             "marker names a DIFFERENT source (a renamed or moved "
+                             "folder, or another photo with the same name). Each such "
+                             "overwrite is logged. For libraries whose sources are "
+                             "never deleted; refused together with --delete-source. "
+                             "Same as OVERWRITE_GUARD = False.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (reported as SKIP), so an archive interrupted "
@@ -6299,6 +6366,7 @@ _RUN_DEFAULTS = {
     "DELETE_SOURCE": DELETE_SOURCE,
     "DELETE_SKIPPED": DELETE_SKIPPED,
     "PROVENANCE_CHECK": PROVENANCE_CHECK,
+    "OVERWRITE_GUARD": OVERWRITE_GUARD,
     "STORE_MD5": STORE_MD5,
     "TEMP2_DIR": TEMP2_DIR,
 }
@@ -6413,7 +6481,7 @@ def main():
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5, OVERWRITE_GUARD
     # Each global was restored to its SCRIPT setting at the top of main()
     # (_RUN_DEFAULTS); the flags override it here, one way.
     if args.export_marker is not None:
@@ -6431,6 +6499,21 @@ def main():
         DELETE_SKIPPED = True
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
+    if args.no_overwrite_guard:
+        OVERWRITE_GUARD = False
+    # AFTER both flags are applied: checked before --no-overwrite-guard was
+    # read, the combination slipped through and a JPEG was converted and
+    # deleted with the guard off (review 261013).
+    if not OVERWRITE_GUARD and DELETE_SOURCE:
+        # setup_logger() runs inside each cmd_*: print, like the neighbouring
+        # validations.
+        print("ERROR: The overwrite guard is off (--no-overwrite-guard or "
+              "OVERWRITE_GUARD = False) and this run deletes sources "
+              "(--delete-source). That combination can overwrite the only "
+              "copy of another photo and then delete the file that could "
+              "rebuild it, so it is refused. Turn the guard back on for "
+              "delete runs.")
+        sys.exit(2)
     if args.no_md5:
         STORE_MD5 = False
 

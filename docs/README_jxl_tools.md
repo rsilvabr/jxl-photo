@@ -682,6 +682,14 @@ Basic parameters always shown:
 - **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
 - **TIFF compression** — zip / lzw / none
 - **Bit depth** — 8 or 16
+- **Overwrite guard** — asked right after "Existing file handling" (only when the
+  run does not delete): `on` (default) never overwrites an output whose
+  provenance marker names another source path; `off` (passed as
+  `--no-overwrite-guard`, saved in the preset) does, with a log line per file.
+  Choose `off` if you never delete sources and you rename or move folders —
+  otherwise re-editing a photo after renaming its folder is refused. Never
+  offered with `[D]` on: the child refuses that combination (exit 2).
+  [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **Dry run** — simulate without converting
 
 Optional advanced and expert flags follow.
@@ -823,6 +831,7 @@ exception: they are set in menu option 4.
 | `WORKER_MEMORY_FRACTION` | `0.8` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
 | `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
+| `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance marker names another source path (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2). [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
 **CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
 
@@ -839,6 +848,7 @@ exception: they are set in menu option 4.
 | `JPEG_PREVIEW_SIZE` | `256` | Max preview dimension |
 | `USE_MATRIX_MODE` | `False` | Force ICC matrix conversion |
 | `CLEANUP_XMP_ICC_MARKER` | `True` | Remove ICC base64 from XMP after extraction |
+| `OVERWRITE_GUARD` | `True` | `False` = overwrite a TIFF whose provenance marker names different JXLs (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2); an original master is still kept. [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
 #### jxl_jpeg_transcoder.py
 | Variable | Default | What it does |
@@ -853,6 +863,7 @@ exception: they are set in menu option 4.
 | `DELETE_CONFIRM` | `True` | Require confirmation before deleting (`--delete-source` works in every mode) |
 | `FORCE_CONTAINER_FOR_LOSSY` | `True` | Always pass `--container=1` for lossy encode |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for lossy pixel encodes (setting only, no CLI flag); `None` = use cjxl default (fast); `0` = best compression, slower |
+| `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance marker names another source path (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2); a jbrd archive of another JPEG is still refused. [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
 #### jxl_recompressor.py
 | Variable | Default | What it does |
@@ -874,6 +885,7 @@ exception: they are set in menu option 4.
 | `WORKER_MEMORY_FRACTION` | `1.0` | Caps how many cjxl run at once (and `--workers`) so the run fits in this share of the memory budget; extra workers prepare the next files with what is left; `0` = no cap |
 | `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
+| `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance markers name a different origin (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2). [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
 **Heavy settings and `--buffering 1` (encoder and recompressor).** At
 **effort 7 with distance ≥ 3**, **effort 8–9 with distance > 0.5** and

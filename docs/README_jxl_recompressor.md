@@ -727,6 +727,12 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --verify-roundtrip    Decode and compare pixels before deleting
 --delete-confirm-off  Skip the interactive delete confirmation (wrapper passes this)
 --provenance MODE     path/content — how an existing output is matched to its source
+--no-overwrite-guard  Overwrite an existing output whose markers name a DIFFERENT
+                      origin anyway, with a log line per file (renamed folders,
+                      sources never deleted). Refused with --delete-source (exit 2).
+                      Still refused: the derivative own-output check. Same as
+                      OVERWRITE_GUARD = False. See "Renamed folders and the
+                      overwrite guard" in behavior_and_limitations.md
 --staging DIR         Staging directory on a fast SSD (overrides TEMP2_DIR)
 --clean-staging       Sweep staging leftovers older than 1h before the run
 --no-preflight        Skip the advisory free-space check
@@ -785,6 +791,9 @@ VERIFY_ROUNDTRIP = False     # Pixel comparison before any delete
 DELETE_SOURCE = False        # Delete sources after verification
 DELETE_SKIPPED = False       # Also delete already-archived sources
 PROVENANCE_CHECK = "path"    # path | content
+OVERWRITE_GUARD = True       # False = overwrite an output made from another
+                             # source path (also --no-overwrite-guard); never
+                             # with DELETE_SOURCE (that run exits 2)
 DELETE_CONFIRM = True        # Interactive confirmations before deleting
 
 RESIZE_MODE = None           # None | "long" | "short" | "percent" (--resize-long/-short/-percent)

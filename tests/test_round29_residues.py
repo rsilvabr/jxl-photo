@@ -135,13 +135,14 @@ def test_mode0_with_a_real_output_folder_still_warns(tmp_path):
     assert "--strip writes NO provenance marker" in r.stdout, r.stdout
 
 
-def test_provenance_is_reported_inert_for_mode0_in_place(tmp_path):
-    """The mirror image: the ad-hoc test suppressed this warning."""
+def test_provenance_is_not_reported_inert_for_mode0_in_place(tmp_path):
+    """B1 (round 53): the warning was false — the overwrite guard reads
+    PROVENANCE_CHECK in every mode, mode 0 in place included."""
     _tiff(tmp_path / "src" / "a.tif")
     r = _run(ENCODER, "src", "src", "--mode", "0", "--distance", "0",
              "--delete-source", "--delete-confirm-off", "--provenance", "content",
              cwd=tmp_path)
-    assert "has no effect in mode 0" in r.stdout, r.stdout
+    assert "has no effect in mode 0" not in r.stdout, r.stdout
 
 
 def test_provenance_is_not_reported_inert_when_mode0_collapses(tmp_path):

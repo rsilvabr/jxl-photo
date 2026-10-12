@@ -430,6 +430,17 @@ Options:
                      lossy directions have no way to prove after the fact which
                      source produced it. Such outputs are refused in those modes --
                      use a structure-preserving mode (0/1/3/8) for them.
+  --no-overwrite-guard
+                     Turn OFF the "marker names another source" refusal: overwrite
+                     the output anyway, with a log line per file. For libraries
+                     whose sources are never deleted and whose folders get renamed
+                     (the marker records the source's full PATH, so a renamed folder
+                     reads as "a different source"). Refused together with
+                     --delete-source (exit 2). Still refused: a lossless JPEG
+                     archive (jbrd) of a different JPEG, and a recovered JPEG whose
+                     checksum does not match. Same as OVERWRITE_GUARD = False.
+                     Details: behavior_and_limitations.md, "Renamed folders and the
+                     overwrite guard" (#renamed-folders-and-the-overwrite-guard)
   --delete-skipped   [with --delete-source] Also delete sources whose output ALREADY
                      EXISTS (reported as SKIP), so an archive interrupted between
                      the conversion and the unlink can be finished. What backs it up

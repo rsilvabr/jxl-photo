@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #532.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #536.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#535 (4) |
 | [Round-54 — the recompressor doubled the lists it appended to](#round-54--the-recompressor-doubled-the-lists-it-appended-to-2026-10-13) | 2026-10-13 | v2.13.0 | #531 (1) |
 | [Round-53 — one provenance pair in the transcoder's outputs](#round-53--one-provenance-pair-in-the-transcoders-outputs-2026-10-11) | 2026-10-11 | v2.11.0 | #530 (1) |
 | [Round-52 — the recompressor's `--output-icc` is reset between runs](#round-52--the-recompressors---output-icc-is-reset-between-runs-2026-10-10) | 2026-10-10 | v2.9.0 | #529 (1) |
@@ -61,6 +62,25 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-55 — the overwrite guard and `--provenance` (2026-10-13)
+
+Found while planning the switchable overwrite guard of v2.14.0
+(`AI_tools/261013_Claude_plan_overwrite-guard.md`) and reviewing it. None of
+them could lose a file: #532 and #533 made `--provenance` look inert or kept it
+from reaching the child, #534 touched only file dates and box order, #535 only
+the worker count. Regression tests: `tests/test_overwrite_guard.py` R7 (#534)
+and R8 (#532), U5 (#533), `tests/test_resize_memory_cap.py` (#535) — each fails
+against v2.13.0.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 532 | **`--provenance` was reported inert when it was not.** The encoder warned "has no effect without --delete-source" and "has no effect in mode N", the decoder the first of the two. Wrong since v2.8.0 (#496–#499), when every run started checking the provenance of each output it overwrites, in every mode — a user who read the warning dropped the one option that lets a moved folder re-encode. | encoder, decoder | ✅ FIXED (warnings removed; the transcoder's, which is correct, kept) |
+| 533 | **The wrapper passed a saved `--provenance` choice only to delete runs.** Every `_append_provenance_flags` call sat inside the `delete_source` branch, so a preset could not pick `content` for the overwrite check of a plain sync. | wrapper | ✅ FIXED (the eight calls moved out of the branch) |
+| 534 | **The `--provenance adopt` stamp rewrote the master in place, carelessly.** One exiftool call on the archive itself: the JXL got a new date (every derivative run then re-derived it), exiftool's appended boxes left the EXIF after the codestream (IrfanView stops reading there), and nothing re-checked the file. | encoder | ✅ FIXED (`_rewrite_master_relation`: temp copy, box reorder, integrity check, read-back of the record, original date restored, atomic `os.replace` — shared with `--restamp-moved`) |
+| 535 | **The recompressor's memory cap sized a resized derivative's encode by the source.** `_memory_capped_pipeline` received the source's pixel count only, so a 2048 px copy of a 45 MP master at d=1 e=9 was budgeted at ~11 GB per cjxl: 6 workers (3 encoding) on a machine with 42 GB to commit, where the real encode is ~3 MP. | recompressor | ✅ FIXED (`cjxl_pixels`: the largest output `_resize_geometry` gives; the side steps still use the full size; unknown dimensions keep the full estimate — 27 workers on the same machine) |
 
 ---
 

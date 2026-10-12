@@ -58,6 +58,22 @@ The spread across photos at one distance is 1.1×–2.1×, so treat any single n
 
 Counter-intuitive but reproducible across four real photos: at 8 bits, `--distance 0` produced a **smaller** file than `--distance 0.05` (38.6% vs 46.4% of source on one, 42.6% vs 47.8% on another). JXL's lossless mode is very efficient at 8 bits, while VarDCT at a very low distance carries overhead it cannot amortise. If your source is 8-bit and you want small files, measure before assuming lossy wins.
 
+## Renamed folders and the overwrite guard
+
+Every output records the full path of the file that made it (`jxlphoto-src`) and a hash of its bytes (`jxlphoto-srcsum`). Before overwriting an existing output, every run checks that record: one made from another path is refused. That protects the only copy of a photo when an earlier run deleted its source and a different photo with the same name now lands on the same output.
+
+A renamed or moved folder changes the path. Renaming alone breaks nothing: the next sync sees nothing newer and skips. But re-exporting a photo after renaming its folder (or a full `--overwrite` rebuild) is refused, with a message that points here. Renaming inside Lightroom's Folders panel, in Capture One or in Explorer is the same thing on disk.
+
+**Which setting to use:**
+
+- **You sync, and you rename or move folders anywhere on the path to the photo** (an event folder, a year folder, a drive letter) — and you never delete sources with the toolkit: turn the guard off. CLI `--no-overwrite-guard`, `OVERWRITE_GUARD = False` at the top of the script, or "Overwrite guard: off" in the wizard (saved in the preset). Each overwrite it would have refused is logged.
+- **You keep your folder names stable** — typical with Lightroom, whose catalog tracks folders by path: keep the default.
+- **You keep the guard on but renamed a folder:** before re-editing any photo in it, run the encoder once with `--restamp-moved` on that folder. It rewrites the path record of every master whose TIFF is unchanged, in seconds, without re-encoding (file dates kept, so derivative runs do not redo them). Masters whose TIFF was already edited are listed: delete those old JXLs by hand (the TIFF is kept) and sync again.
+
+**Never with deletion:** `--no-overwrite-guard` together with `--delete-source` is refused (exit 2).
+
+**Still protected with the guard off:** a lossless JPEG archive (`jbrd`) of a different JPEG, an original TIFF master (the decoder never overwrites a TIFF it did not write) or an edited decode, and a file a derivative run did not write.
+
 ## Default re-run behavior differs per script
 
 The TIFF encoder/decoder default to **smart sync** (reconvert when the source is newer than the existing output — there is no plain "skip existing" CLI mode), while the JPEG transcoder **skips existing outputs** by default. Use `--overwrite` (always) or `--sync` (source newer) to control it explicitly. See each script's README for details.

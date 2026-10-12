@@ -413,6 +413,27 @@ Options:
                   tell", never "I can tell it is wrong". This script is the only one
                   with adopt -- the decoder and the transcoder have no way to prove
                   the pairing after the fact
+  --no-overwrite-guard
+                  Turn OFF the "marker names another source" refusal: overwrite the
+                  output anyway, with a log line per file. For libraries whose sources
+                  are never deleted and whose folders get renamed (the marker records
+                  the source's full PATH, so a renamed folder reads as "another
+                  source"). Refused together with --delete-source (exit 2), which is
+                  the combination that can lose a photo. Still refused: a lossless
+                  JPEG archive (jbrd) of another JPEG. Same as OVERWRITE_GUARD = False.
+                  Details: behavior_and_limitations.md, "Renamed folders and the
+                  overwrite guard" (#renamed-folders-and-the-overwrite-guard)
+  --restamp-moved
+                  Fix ONLY the provenance record of masters whose folder was renamed
+                  or moved: for each existing output whose jxlphoto-src names another
+                  path but whose jxlphoto-srcsum matches this TIFF's bytes, rewrite
+                  jxlphoto-src to the new path. Nothing is encoded, the pixels and the
+                  file date are kept (so derivative --sync runs do not redo them), and
+                  no xmpMM:History entry is written. Outputs whose content no longer
+                  matches (renamed AND edited since) are listed and left alone: delete
+                  those old JXLs by hand and sync again. Refused with --delete-source,
+                  --delete-skipped or --overwrite. See "Renamed folders and the
+                  overwrite guard" in behavior_and_limitations.md
   --no-adopt-scan [with --provenance adopt] Skip the decode-and-compare and TRUST the
                   existing pairing, warning per file. The scan is what makes adoption
                   safe rather than a rubber stamp; only defensible when you know the

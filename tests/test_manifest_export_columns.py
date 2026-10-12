@@ -247,7 +247,10 @@ def test_subfolder_on_a_non_mode_7_row_is_refused(tmp_path, capsys):
     _write_manifest(m6, [(src, dst, 6, "tiff2jxl", "TIFF16")], header=hdr)
     entries, _ = _load(_menu(), m6)
     assert entries is None
-    out = capsys.readouterr().out
+    # Whitespace-normalised: the rich console wraps at the terminal width, and
+    # a longer tmp_path (pytest-xdist's popen-gwN) moved the wrap INTO the
+    # phrase ("Mode 7 \nrows").
+    out = " ".join(capsys.readouterr().out.split())
     assert "column ExportSubfolder only applies to Mode 7 rows" in out
     assert "row is mode 6" in out
 

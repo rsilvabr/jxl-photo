@@ -57,7 +57,7 @@ carries.
 
 | Token | Meaning | Written by | Removed by |
 |---|---|---|---|
-| `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([Privacy](#privacy)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it |
+| `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([Privacy](#privacy)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it; rewritten by the encoder's `--restamp-moved` after a folder rename |
 | `jxlphoto-srcsum:<16 hex>` | the same source's **content**: a hash of its bytes | same as `src` | derivatives drop it |
 | `jxlphoto-origin:<v>` | what the **first** master was made from: `tiff8`, `tiff16`, `jpeg`, `png8`, `png16`, `png`, `jxl-lossy`, `jxl-lossless`, `jxl`. Absent = unknown (also every file written before v2.10.0) | encoder, transcoder, recompressor; carried by the decoder and by derivatives | never |
 | `jxlphoto-depth:<8\|16>` | bit depth of the TIFF that was encoded | encoder | decoder |
@@ -85,12 +85,12 @@ master encoded by the toolkit, then its recompression:
 ```
 Action        : converted
 When          : 2026:10:13 14:02:11-03:00
-SoftwareAgent : jxl-photo 2.13.0 (https://github.com/rsilvabr/jxl-photo)
+SoftwareAgent : jxl-photo 2.14.0 (https://github.com/rsilvabr/jxl-photo)
 Parameters    : jxl_tiff_encoder: from image/tiff to image/jxl
 
 Action        : converted
 When          : 2026:10:13 14:07:48-03:00
-SoftwareAgent : jxl-photo 2.13.0 (https://github.com/rsilvabr/jxl-photo)
+SoftwareAgent : jxl-photo 2.14.0 (https://github.com/rsilvabr/jxl-photo)
 Parameters    : jxl_recompressor: from image/jxl to image/jxl
 ```
 

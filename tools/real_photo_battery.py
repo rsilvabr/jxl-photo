@@ -471,6 +471,81 @@ def recompressor_foreign_check(A1, A3, pool_jxl):
           f"rc={rc}")
 
 
+def overwrite_guard_checks(A1, A2):
+    section("Renamed folders and the overwrite guard")
+    sys.path.insert(0, str(REPO))
+    import jxl_tiff_encoder as _enc
+
+    def _src(path):
+        return [t for t in relation(path) if t.startswith("jxlphoto-src:")]
+
+    def _srcsum(path):
+        return [t for t in relation(path) if t.startswith("jxlphoto-srcsum:")]
+
+    def _pixels_md5(png):
+        r = subprocess.run(["magick", str(png), "-depth", "16", "-endian", "LSB",
+                            "rgb:-"], capture_output=True)
+        return hashlib.md5(r.stdout).hexdigest()
+
+    FAST8 = ["--mode", "8", "--distance", "1", "--effort", "3", "--no-preflight"]
+
+    # (a) renamed folder + re-export: refused by default, overwritten with the
+    # guard off (the record then names the new path).
+    g = B / "og1" / "2024-05 Viagem"
+    cp(A1, g / "a.tif")
+    rc, _ = run("og1_encode", [ENC, B / "og1"] + FAST8)
+    (B / "og1" / "2024-05 Viagem").rename(B / "og1" / "2024-05 Kyoto")
+    g = B / "og1" / "2024-05 Kyoto"
+    cp(A2, g / "a.tif")                       # re-exported, other pixels
+    touch(g / "a.tif", 60)
+    jxl = g / "a.jxl"
+    rc, out = run("og1_refused", [ENC, B / "og1"] + FAST8 + ["--sync"])
+    check("renamed + re-exported: refused by default, message points to the docs",
+          rc == 1 and _enc.GUARD_DOC_URL in out and "--no-overwrite-guard" in out,
+          f"rc={rc}")
+    before = _src(jxl)
+    rc, out = run("og1_guard_off", [ENC, B / "og1"] + FAST8 + ["--sync",
+                                                               "--no-overwrite-guard"])
+    check("guard off: re-encoded, the record names the new path",
+          rc == 0 and "overwrite guard off" in out
+          and _src(jxl) == [f"jxlphoto-src:{_enc._source_path_id(g / 'a.tif')}"]
+          and _src(jxl) != before, f"rc={rc} src={_src(jxl)}")
+
+    # (b) renamed folder + --restamp-moved: the record is rewritten, the pixels,
+    # the file date and the History are untouched; a later re-export syncs.
+    g = B / "og2" / "2024-05 Viagem"
+    cp(A1, g / "a.tif")
+    rc, _ = run("og2_encode", [ENC, B / "og2"] + FAST8)
+    (B / "og2" / "2024-05 Viagem").rename(B / "og2" / "2024-05 Kyoto")
+    g = B / "og2" / "2024-05 Kyoto"
+    jxl = g / "a.jxl"
+    png_before = B / "og2_before.png"
+    subprocess.run(["djxl", str(jxl), str(png_before)], capture_output=True)
+    md5_before = _pixels_md5(png_before)
+    mtime_before = jxl.stat().st_mtime_ns
+    hist_before = _count_history(jxl)
+    src_before, srcsum_before = _src(jxl), _srcsum(jxl)
+
+    rc, out = run("og2_restamp", [ENC, B / "og2"] + FAST8 + ["--restamp-moved"])
+    png_after = B / "og2_after.png"
+    subprocess.run(["djxl", str(jxl), str(png_after)], capture_output=True)
+    check("restamp: record rewritten, pixels/date/History unchanged",
+          rc == 0 and "RESTAMP |" in out
+          and _src(jxl) == [f"jxlphoto-src:{_enc._source_path_id(g / 'a.tif')}"]
+          and _src(jxl) != src_before
+          and _srcsum(jxl) == srcsum_before
+          and _pixels_md5(png_after) == md5_before
+          and jxl.stat().st_mtime_ns == mtime_before
+          and _count_history(jxl) == hist_before
+          and not list(g.glob("*.tmp")), f"rc={rc}")
+
+    cp(A2, g / "a.tif")                       # re-exported after the restamp
+    touch(g / "a.tif", 60)
+    rc, out = run("og2_sync", [ENC, B / "og2"] + FAST8 + ["--sync"])
+    check("after restamp, a re-export syncs without a refusal",
+          rc == 0 and "REFUSING" not in out, f"rc={rc}")
+
+
 def memory_cap_checks(A1, pool_jxl):
     section("Worker memory cap")
     with tifffile.TiffFile(A1) as _t:
@@ -697,6 +772,7 @@ def main():
         else:
             print("\n(no multi-page scan in raw_scan/: multi-page and in-place checks skipped)")
         recompressor_foreign_check(A1, A3, pool_jxl)
+        overwrite_guard_checks(A1, A2)
         memory_cap_checks(A1, pool_jxl)
         derivative_rederive_checks(A1, pool_jxl)
         transcoder_checks(A1, A2)

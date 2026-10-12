@@ -563,6 +563,16 @@ Options:
                      record and this script cannot verify one after the fact. Such
                      outputs are refused in those modes -- use a structure-preserving
                      mode (0/1/3/8) for them, or re-decode without --none.
+  --no-overwrite-guard
+                     Turn OFF the "marker names DIFFERENT JXLs" refusal: overwrite
+                     the TIFF anyway, with a log line per file. For libraries whose
+                     sources are never deleted and whose folders get renamed (the
+                     marker records the source's full PATH, so a renamed folder reads
+                     as "a different source"). Refused together with --delete-source
+                     (exit 2). Still kept: a TIFF with NO marker (the original master)
+                     and an edited decode. Same as OVERWRITE_GUARD = False. Details:
+                     behavior_and_limitations.md, "Renamed folders and the overwrite
+                     guard" (#renamed-folders-and-the-overwrite-guard)
   --allow-incomplete-groups
                      [with --delete-source] Delete the JXLs of a multi-page split
                      even when pages of it are MISSING. By default those sources

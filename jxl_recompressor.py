@@ -41,8 +41,12 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_VERSION = "2.14.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
+GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
+                 f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
@@ -856,6 +860,21 @@ PROVENANCE_CHECK = "path"
 # There is no "adopt" here: recompressor outputs keep the source JXL's own
 # markers verbatim, so an archive made by jxl_tiff_encoder.py is provable as-is.
 
+OVERWRITE_GUARD = True
+# Refuse to OVERWRITE an existing output whose jxlphoto-src marker names a
+# DIFFERENT source (every run, every mode — #496-#499). That protects the
+# only copy of a photo when an earlier run deleted its source and a different
+# photo with the same name now lands on its output.
+# The marker records the source's full PATH, so a renamed or moved folder
+# reads as "a different source" too: re-exporting a photo after renaming its
+# folder is refused. If you never delete sources with this toolkit and you
+# rename folders, set False (or pass --no-overwrite-guard). Never combined
+# with --delete-source: that run exits 2. Still refused with the guard off:
+# a lossless JPEG archive (jbrd) of another JPEG, a TIFF that is an original
+# master or was edited (decoder), a file that is not one of a derivative
+# run's own outputs. Details: docs/behavior_and_limitations.md, "Renamed
+# folders and the overwrite guard".
+
 # ─────────────────────────────────────────────
 # USER SETTINGS - MODES CONFIGURATION
 # ─────────────────────────────────────────────
@@ -961,6 +980,7 @@ _RUN_DEFAULTS = {
     "CJXL_EFFORT": CJXL_EFFORT,
     "CJXL_BUFFERING": CJXL_BUFFERING,
     "PROVENANCE_CHECK": PROVENANCE_CHECK,
+    "OVERWRITE_GUARD": OVERWRITE_GUARD,
     "TEMP2_DIR": TEMP2_DIR,
     "REDERIVE_ON_LOWER_EFFORT": REDERIVE_ON_LOWER_EFFORT,
     # --output-icc only assigns it when the flag is given: without the reset a
@@ -1276,8 +1296,25 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
     return workers
 
 
+def _largest_encode_pixels(items):
+    """The largest image cjxl will ENCODE this run, or None when the source
+    size is the answer: only a resized derivative encodes fewer pixels than
+    it decodes. An item whose dimensions are unknown counts at its full size
+    (fail closed: a smaller estimate could oversubscribe the memory)."""
+    if not (DERIVATIVE and RESIZE_MODE):
+        return None
+    largest = 0
+    for it in items:
+        w, h = it.get("dims") or (0, 0)
+        if not (w and h):
+            return None
+        geom = _resize_geometry(w, h, RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE)
+        largest = max(largest, geom[0] * geom[1] if geom else w * h)
+    return largest or None
+
+
 def _memory_capped_pipeline(requested, max_pixels, distance, effort,
-                            buffering=None):
+                            buffering=None, cjxl_pixels=None):
     """(workers, cjxl_slots) for the recompressor's pool.
 
     The peak that matters is cjxl's; the other steps of a file (djxl, the
@@ -1289,6 +1326,10 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     worker at its side-step peak, within WORKER_MEMORY_FRACTION of the budget
     (_available_memory_bytes). cjxl_slots is None when nothing is capped
     (fraction 0, memory unknown).
+
+    `cjxl_pixels` is the largest image cjxl will really ENCODE when that is
+    smaller than the source (a resized derivative: a 2048 px copy of a 45 MP
+    master is ~3 MP); the side steps still decode the full `max_pixels`.
     """
     if WORKER_MEMORY_FRACTION <= 0:
         return requested, None
@@ -1296,7 +1337,9 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
         logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
                        f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_cjxl = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering)
+    enc_pixels = (min(cjxl_pixels, pixels) if cjxl_pixels and cjxl_pixels > 0
+                  else pixels)
+    per_cjxl = enc_pixels * _cjxl_bytes_per_pixel(distance, effort, buffering)
     per_side = pixels * _SIDE_STEP_BYTES_PER_PIXEL
     avail, budget = _available_memory_bytes()
     if avail is None:
@@ -1317,7 +1360,7 @@ def _memory_capped_pipeline(requested, max_pixels, distance, effort,
     else:
         kind = "streaming"
     logger.info(f"Memory: ~{per_cjxl / 2**30:.1f} GB per cjxl ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}), "
+                f"{enc_pixels / 1e6:.0f} MP, d={distance} e={effort}), "
                 f"~{per_side / 2**30:.1f} GB per file being prepared | "
                 f"{avail / 2**30:.1f} GB available ({budget}) | "
                 f"workers {workers}, cjxl at a time {slots}")
@@ -1902,6 +1945,28 @@ def _history_args(action: str, src_path, dst_path) -> list:
     return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
 
 
+def _guard_refusal_hint(restamp: bool) -> list:
+    """The lines every non-delete provenance refusal ends with: the two likely
+    causes, what to do about each, and where the details are. `restamp` names
+    --restamp-moved, which only the encoder has."""
+    lines = [
+        "  Why: every output records the full PATH of the file that made it. This "
+        "output names a different path, so it is either (a) the same photo after "
+        "its folder was renamed or moved, or (b) a different photo with the same "
+        "name.",
+        "  (a) Renamed/moved folder:"
+        + (" if the source was not edited since, run once with --restamp-moved "
+           "(rewrites the record, no re-encode), or" if restamp else "")
+        + " re-run with --overwrite --provenance content (accepts an unchanged "
+        "source). If you never delete sources and rename folders often, turn the "
+        "guard off: --no-overwrite-guard, or OVERWRITE_GUARD = False at the top "
+        "of the script, or 'Overwrite guard: off' in the wizard.",
+        "  (b) Different photo: rename one of them, or write into another folder.",
+        f"  Details: {GUARD_DOC_URL}",
+    ]
+    return lines
+
+
 # Charset directives for exiftool argfiles:
 # - FileName=UTF8: file paths in the argfile are UTF-8 (Windows default is the
 #   system codepage, so non-ASCII paths would not be found).
@@ -2155,7 +2220,7 @@ def _read_encode_params_batch(paths: list) -> dict:
     'pixels' is width*height (0 = unknown), read in the same exiftool call for the worker memory cap.
     """
     info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0,
-                     "pixels": 0, "origin": None}
+                     "pixels": 0, "width": 0, "height": 0, "origin": None}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
@@ -2222,10 +2287,11 @@ def _read_encode_params_batch(paths: list) -> dict:
                 gen = max(merged_stored, counted) if (merged_entries
                                                       or merged_stored) else 0
                 try:
-                    pixels = int(entry.get("ImageWidth") or 0) * int(
-                        entry.get("ImageHeight") or 0)
+                    width = int(entry.get("ImageWidth") or 0)
+                    height = int(entry.get("ImageHeight") or 0)
                 except (TypeError, ValueError):
-                    pixels = 0
+                    width = height = 0
+                pixels = width * height
                 # jxlphoto-origin (ORIGIN_PREFIX): what the first master came
                 # from, for the --on-regeneration guard (_hidden_generations).
                 rel = entry.get("Relation")
@@ -2239,7 +2305,8 @@ def _read_encode_params_batch(paths: list) -> dict:
                         break
                 info[index[key]] = {"desc": desc, "software": software,
                                     "params": params, "gen": gen,
-                                    "pixels": pixels, "origin": origin}
+                                    "pixels": pixels, "width": width,
+                                    "height": height, "origin": origin}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -4455,6 +4522,10 @@ def _foreign_overwrite_refusals(items):
         if out_info.get("src") is None and out_info.get("srcsum") is None:
             continue    # markerless (or unreadable): nothing to compare
         if not _markers_match(out_info, src_info, PROVENANCE_CHECK):
+            if not OVERWRITE_GUARD:
+                logger.warning(f"  OVERWRITE (overwrite guard off) | {it['final'].name}: "
+                               f"its provenance markers name a different origin")
+                continue
             refused.append((it, (
                 f"the existing output's provenance markers name a different origin "
                 f"({out_info.get('src') or out_info.get('srcsum')}) — it is another "
@@ -4779,6 +4850,7 @@ def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
     global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
+    global OVERWRITE_GUARD
     global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
     global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
     global OUTPUT_ICC
@@ -4934,6 +5006,13 @@ def main():
                              "collapsing mode every existing output must also match. "
                              "path (default) compares the recorded location; content "
                              "also accepts matching source bytes (moved folders)")
+    parser.add_argument("--no-overwrite-guard", action="store_true",
+                        help="Allow overwriting an existing output whose provenance "
+                             "marker names a DIFFERENT source (a renamed or moved "
+                             "folder, or another photo with the same name). Each such "
+                             "overwrite is logged. For libraries whose sources are "
+                             "never deleted; refused together with --delete-source. "
+                             "Same as OVERWRITE_GUARD = False.")
     parser.add_argument("--staging", type=str, default=None,
                         help="Staging directory (fast SSD); overrides the TEMP2_DIR setting")
     parser.add_argument("--clean-staging", action="store_true",
@@ -4995,6 +5074,8 @@ def main():
         ENCODE_TAG_MODE = args.encode_tag
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
+    if args.no_overwrite_guard:
+        OVERWRITE_GUARD = False
     if args.export_marker is not None:
         # `is not None`, mirroring --export-subfolder: `if args.export_marker:`
         # treated --export-marker "" (an explicit "export NOTHING here") as
@@ -5016,6 +5097,15 @@ def main():
         OVERWRITE = True
     if args.delete_source:
         DELETE_SOURCE = True
+    if not OVERWRITE_GUARD and DELETE_SOURCE:
+        # setup_logger() runs below: print, like the neighbouring validations.
+        print("ERROR: The overwrite guard is off (--no-overwrite-guard or "
+              "OVERWRITE_GUARD = False) and this run deletes sources "
+              "(--delete-source). That combination can overwrite the only "
+              "copy of another photo and then delete the file that could "
+              "rebuild it, so it is refused. Turn the guard back on for "
+              "delete runs.")
+        sys.exit(2)
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.verify_roundtrip:
@@ -5224,6 +5314,9 @@ def main():
     logger.info(f"Input: {args.input}")
     logger.info(f"Mode: {args.mode} | distance: {CJXL_DISTANCE} | effort: {CJXL_EFFORT} | "
                 f"workers: {args.workers} | output ICC: {_OUTPUT_ICC_LABEL or 'keep source'}")
+    if not OVERWRITE_GUARD:
+        logger.warning("Overwrite guard OFF: an existing output made from another "
+                       "source path is overwritten (and logged) instead of refused.")
     if DERIVATIVE:
         logger.info(f"Derivative: {_DERIVED_LABEL} | resize: "
                     f"{_resize_label(RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE) or 'none'}"
@@ -5406,6 +5499,7 @@ def main():
         it["src_d"] = info["params"][0] if info["params"] else None
         it["gen"] = info["gen"]
         it["pixels"] = info.get("pixels", 0)
+        it["dims"] = (info.get("width", 0), info.get("height", 0))
         it["origin"] = info.get("origin")
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
@@ -5569,6 +5663,7 @@ def main():
                 if not args.dry_run:
                     items = [it for it in items if id(it) not in refused_ids]
                     provenance_refused = refused
+                    logger.error(f"  Details: {GUARD_DOC_URL}")
     else:
         # Every other run: an output about to be OVERWRITTEN whose markers
         # name a DIFFERENT origin is refused (see _foreign_overwrite_refusals).
@@ -5589,6 +5684,8 @@ def main():
             if not args.dry_run:
                 items = [it for it in items if id(it) not in refused_ids]
                 provenance_refused = refused
+                for _l in _guard_refusal_hint(False):
+                    logger.error(_l)
 
     # In-place multi-page documents are replaced all-or-nothing: a page that
     # cannot take part must hold the whole group (process_group also vetoes a
@@ -5777,7 +5874,8 @@ def main():
             if _to_encode:
                 workers, _slots = _memory_capped_pipeline(
                     args.workers, max(it.get("pixels", 0) for it in _to_encode),
-                    CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING)
+                    CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
+                    cjxl_pixels=_largest_encode_pixels(_to_encode))
             # The semaphore only matters when some workers must wait for a slot.
             _set_cjxl_slots(_slots if _slots is not None and _slots < workers
                             else None)

@@ -11,6 +11,15 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.14.0: the overwrite guard can be turned off
+
+Nothing to check: the guard stays ON unless you turn it off. If you rename or
+move folders and never delete sources with the toolkit, consider turning it off
+(`--no-overwrite-guard`, `OVERWRITE_GUARD = False`, or "Overwrite guard: off"
+in the wizard) — see
+[Renamed folders and the overwrite guard](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard).
+A preset that deletes sources keeps the guard on: the two together are refused.
+
 ## v2.13.0: each output records the version that wrote it
 
 Nothing to check. Two things you may notice:

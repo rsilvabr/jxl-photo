@@ -39,8 +39,12 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.13.0"
+TOOLKIT_VERSION = "2.14.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+# Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
+GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
+                 f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
 _HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
@@ -522,6 +526,28 @@ def _history_args(action: str, src_path, dst_path) -> list:
               f"SoftwareAgent={_struct_escape(agent)}",
               f"Parameters={_struct_escape(params)}"]
     return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
+
+
+def _guard_refusal_hint(restamp: bool) -> list:
+    """The lines every non-delete provenance refusal ends with: the two likely
+    causes, what to do about each, and where the details are. `restamp` names
+    --restamp-moved, which only the encoder has."""
+    lines = [
+        "  Why: every output records the full PATH of the file that made it. This "
+        "output names a different path, so it is either (a) the same photo after "
+        "its folder was renamed or moved, or (b) a different photo with the same "
+        "name.",
+        "  (a) Renamed/moved folder:"
+        + (" if the source was not edited since, run once with --restamp-moved "
+           "(rewrites the record, no re-encode), or" if restamp else "")
+        + " re-run with --overwrite --provenance content (accepts an unchanged "
+        "source). If you never delete sources and rename folders often, turn the "
+        "guard off: --no-overwrite-guard, or OVERWRITE_GUARD = False at the top "
+        "of the script, or 'Overwrite guard: off' in the wizard.",
+        "  (b) Different photo: rename one of them, or write into another folder.",
+        f"  Details: {GUARD_DOC_URL}",
+    ]
+    return lines
 
 
 # Charset directives for exiftool argfiles:
@@ -1063,6 +1089,21 @@ PROVENANCE_CHECK = "path"
 # "content" -> also accepts matching source BYTES, so it survives moved
 #              folders, at the cost of reading each source. A superset of
 #              "path" on purpose (see _provenance_ok).
+
+OVERWRITE_GUARD = True
+# Refuse to OVERWRITE an existing output whose jxlphoto-src marker names a
+# DIFFERENT source (every run, every mode — #496-#499). That protects the
+# only copy of a photo when an earlier run deleted its source and a different
+# photo with the same name now lands on its output.
+# The marker records the source's full PATH, so a renamed or moved folder
+# reads as "a different source" too: re-exporting a photo after renaming its
+# folder is refused. If you never delete sources with this toolkit and you
+# rename folders, set False (or pass --no-overwrite-guard). Never combined
+# with --delete-source: that run exits 2. Still refused with the guard off:
+# a lossless JPEG archive (jbrd) of another JPEG, a TIFF that is an original
+# master or was edited (decoder), a file that is not one of a derivative
+# run's own outputs. Details: docs/behavior_and_limitations.md, "Renamed
+# folders and the overwrite guard".
 
 ALLOW_INCOMPLETE_GROUPS = False
 # [DELETE_SOURCE only] Delete the JXLs of a multi-page split even when pages of
@@ -2928,7 +2969,11 @@ def _decode_output_is_ours(tiff_path: Path, src_paths=None) -> bool:
             or {"src": None, "srcsum": None})
     if src_paths is None:
         return bool(info.get("src") or info.get("srcsum"))
-    return _provenance_ok(info, list(src_paths), PROVENANCE_CHECK)
+    if _provenance_ok(info, list(src_paths), PROVENANCE_CHECK):
+        return True
+    # Guard off: a decode of ANOTHER path (a renamed folder) is still a TIFF
+    # this tool wrote — never an original master, which carries no marker.
+    return (not OVERWRITE_GUARD) and bool(info.get("src") or info.get("srcsum"))
 
 
 def _pixel_sum(arrays) -> str:
@@ -3031,7 +3076,7 @@ def _not_ours_why(tiff_path: Path) -> str:
                 "JXL was deleted. Rename one of them or decode into another "
                 "folder" + ("" if PROVENANCE_CHECK == "content" else
                             "; if these JXLs MOVED, re-run with --provenance "
-                            "content"))
+                            "content") + f". Renamed folder? See {GUARD_DOC_URL}")
     return ("carries no jxlphoto-src marker, so it is not a file this tool "
             "decoded — it looks like the original master. Re-run with "
             "--overwrite to replace it anyway.")
@@ -4561,7 +4606,7 @@ def collect_multipage_groups(jxls: list) -> dict:
 # is a config change, not a leak, and must survive a later run with no flag.)
 _RUN_ASSIGNABLE = (
     "OVERWRITE", "DELETE_SOURCE", "DELETE_SKIPPED", "ALLOW_INCOMPLETE_GROUPS",
-    "PROVENANCE_CHECK", "DELETE_CONFIRM", "EXPORT_JXL_SUBFOLDER", "DEPTH_POLICY",
+    "PROVENANCE_CHECK", "OVERWRITE_GUARD", "DELETE_CONFIRM", "EXPORT_JXL_SUBFOLDER", "DEPTH_POLICY",
     "USE_MATRIX_MODE", "FORCE_BASIC_MODE", "FORCE_NONE_MODE",
     "CLEANUP_XMP_ICC_MARKER", "DJXL_OUTPUT_DEPTH", "TIFF_COMPRESSION",
     "TEMP2_DIR", "EXPORT_MARKER", "EXCLUDE_FOLDERS", "ADD_JPEG_PREVIEW",
@@ -4603,7 +4648,7 @@ def main():
     # the top so no assignment can ever textually precede its declaration when
     # the validation order below changes.
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
     global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
 
     parser = argparse.ArgumentParser(
@@ -4697,6 +4742,13 @@ Examples:
                              "content also accepts matching source bytes, so it "
                              "survives MOVED folders at the cost of reading each "
                              "source. A mismatch fails closed.")
+    parser.add_argument("--no-overwrite-guard", action="store_true",
+                        help="Allow overwriting an existing output whose provenance "
+                             "marker names a DIFFERENT source (a renamed or moved "
+                             "folder, or another photo with the same name). Each such "
+                             "overwrite is logged. For libraries whose sources are "
+                             "never deleted; refused together with --delete-source. "
+                             "Same as OVERWRITE_GUARD = False.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (reported as SKIP), so a decode interrupted "
@@ -4822,6 +4874,8 @@ Examples:
         ALLOW_INCOMPLETE_GROUPS = True
     if args.provenance is not None:
         PROVENANCE_CHECK = args.provenance
+    if args.no_overwrite_guard:
+        OVERWRITE_GUARD = False
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.export_subfolder is not None:
@@ -4899,14 +4953,25 @@ Examples:
         else:
             _clean_staging(TEMP2_DIR)
 
+    # Rule 2: the guard off PLUS a delete is the exact combination that lost
+    # photos — the only copy of another photo overwritten, then its source
+    # deleted. Refused before any conversion.
+    if not OVERWRITE_GUARD and DELETE_SOURCE:
+        logger.error("The overwrite guard is off (--no-overwrite-guard or "
+                     "OVERWRITE_GUARD = False) and this run deletes sources "
+                     "(--delete-source). That combination can overwrite the only "
+                     "copy of another photo and then delete the file that could "
+                     "rebuild it, so it is refused. Turn the guard back on for "
+                     "delete runs.")
+        sys.exit(2)
+
     # Required tools first: a missing djxl/exiftool must be one clear message,
     # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
     # to standalone pages).
-    if args.provenance is not None and not DELETE_SOURCE:
-        logger.warning(f"--provenance {args.provenance} has no effect without "
-                       f"--delete-source: it only decides whether an EXISTING output "
-                       f"may be overwritten, or certify the deletion of a skipped source.")
-
+    # (No "--provenance has no effect without --delete-source" warning any
+    # more: the main() provenance block below checks every output this run is
+    # about to OVERWRITE, in every mode, and the smart sync's marker check
+    # reads PROVENANCE_CHECK too.)
     if ALLOW_INCOMPLETE_GROUPS and not DELETE_SOURCE:
         logger.warning("--allow-incomplete-groups has no effect without --delete-source: "
                        "it only lifts a gate in front of the deletion. Incomplete groups "
@@ -4965,6 +5030,9 @@ Examples:
     logger.info(f"Matrix: {USE_MATRIX_MODE} | Basic: {FORCE_BASIC_MODE} | None: {FORCE_NONE_MODE} | "
                 f"Overwrite: {_overwrite_str} | Thumbnail: {THUMBNAIL_HANDLING}")
     logger.info(f"Input: {args.input}")
+    if not OVERWRITE_GUARD:
+        logger.warning("Overwrite guard OFF: an existing output made from another "
+                       "source path is overwritten (and logged) instead of refused.")
 
     # Collect files
     single_file = args.input.is_file()
@@ -5118,6 +5186,12 @@ Examples:
             _unmarked = not (_info.get("src") or _info.get("srcsum"))
             if _unmarked and not _strict_guard:
                 continue    # no proof either way: the old handling applies
+            if not _unmarked and not _strict_guard and not OVERWRITE_GUARD:
+                logger.warning(f"  OVERWRITE (overwrite guard off) | "
+                               f"{_t['final_tiff'].name}: its provenance marker "
+                               f"names other JXLs (renamed/moved folder, or a "
+                               f"different photo)")
+                continue
             _why = ("no provenance marker (written by an older version)"
                     if _unmarked
                     else "it was made from a different source")
@@ -5157,6 +5231,11 @@ Examples:
                        "or decode them into another folder.") +
                     ("" if PROVENANCE_CHECK == "content" else
                      " If you MOVED the sources, re-run with --provenance content."))
+                if _strict_guard:
+                    logger.error(f"  Details: {GUARD_DOC_URL}")
+                else:
+                    for _l in _guard_refusal_hint(False):
+                        logger.error(_l)
                 _bad = {id(_t) for _t, _ in _blocked}
                 tasks = [t for t in tasks if id(t) not in _bad]
                 # total is re-initialised for the reduced task list; done must

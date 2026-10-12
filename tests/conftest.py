@@ -44,6 +44,13 @@ import pytest
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="jxlphoto_test_logs_")
 os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
 
+# A wide console for rich: it wraps at the terminal width, so a phrase the
+# tests look for could be split by the wrap — and under pytest-xdist
+# (`-n 8`, the suite's normal command) the tmp paths are longer and the
+# worker has no real terminal. Set before any test module imports the
+# wrapper, which builds its Console at import time.
+os.environ.setdefault("COLUMNS", "240")
+
 
 def pytest_sessionfinish(session, exitstatus):
     # The scripts' FileHandlers keep their last log open, and Windows cannot

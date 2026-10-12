@@ -98,11 +98,13 @@ def test_a_real_run_still_creates_it(tmp_path):
 
 # ── flags that do nothing must say so ───────────────────────────────────────
 
-def test_provenance_without_delete_source_warns(tmp_path):
+def test_provenance_without_delete_source_is_not_reported_inert(tmp_path):
+    # B1 (round 53): the warning was FALSE since v2.8.0 — every run checks the
+    # provenance of each output it is about to overwrite (_foreign_overwrite_reason).
     _tiff(tmp_path / "src" / "a.tif")
     r = _run(ENCODER, "src", "--mode", "5", "--distance", "0",
              "--provenance", "content", cwd=tmp_path)
-    assert "has no effect without --delete-source" in r.stdout, r.stdout
+    assert "has no effect without --delete-source" not in r.stdout, r.stdout
 
 
 def test_no_adopt_scan_without_adopt_warns(tmp_path):
@@ -113,20 +115,23 @@ def test_no_adopt_scan_without_adopt_warns(tmp_path):
     assert "--no-adopt-scan has no effect" in r.stdout, r.stdout
 
 
-def test_provenance_in_a_non_collapsing_mode_warns(tmp_path):
+def test_provenance_in_a_non_collapsing_mode_is_not_reported_inert(tmp_path):
+    # B1 (round 53): the overwrite guard reads PROVENANCE_CHECK in EVERY mode.
     _tiff(tmp_path / "src" / "a.tif")
     r = _run(ENCODER, "src", "--mode", "3", "--distance", "0", "--delete-source",
              "--delete-confirm-off", "--provenance", "content", cwd=tmp_path)
-    assert "has no effect in mode 3" in r.stdout, r.stdout
+    assert "has no effect in mode 3" not in r.stdout, r.stdout
 
 
-def test_the_decoder_warns_too(tmp_path):
+def test_the_decoder_does_not_report_provenance_inert(tmp_path):
+    # B1 (round 53): the decoder's main() provenance block uses PROVENANCE_CHECK
+    # in every mode, with or without --delete-source.
     _tiff(tmp_path / "src" / "a.tif")
     assert _run(ENCODER, "src", "jxl", "--mode", "2", "--distance", "0",
                 cwd=tmp_path).returncode == 0
     r = _run(DECODER, "jxl", "out", "--mode", "5", "--provenance", "content",
              cwd=tmp_path)
-    assert "has no effect without --delete-source" in r.stdout, r.stdout
+    assert "has no effect without --delete-source" not in r.stdout, r.stdout
 
 
 # ── the dry-run summary must not contradict its own failure list ────────────
