@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #536.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #537.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#535 (4) |
+| [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#536 (5) |
 | [Round-54 — the recompressor doubled the lists it appended to](#round-54--the-recompressor-doubled-the-lists-it-appended-to-2026-10-13) | 2026-10-13 | v2.13.0 | #531 (1) |
 | [Round-53 — one provenance pair in the transcoder's outputs](#round-53--one-provenance-pair-in-the-transcoders-outputs-2026-10-11) | 2026-10-11 | v2.11.0 | #530 (1) |
 | [Round-52 — the recompressor's `--output-icc` is reset between runs](#round-52--the-recompressors---output-icc-is-reset-between-runs-2026-10-10) | 2026-10-10 | v2.9.0 | #529 (1) |
@@ -81,6 +81,7 @@ against v2.13.0.
 | 533 | **The wrapper passed a saved `--provenance` choice only to delete runs.** Every `_append_provenance_flags` call sat inside the `delete_source` branch, so a preset could not pick `content` for the overwrite check of a plain sync. | wrapper | ✅ FIXED (the eight calls moved out of the branch) |
 | 534 | **The `--provenance adopt` stamp rewrote the master in place, carelessly.** One exiftool call on the archive itself: the JXL got a new date (every derivative run then re-derived it), exiftool's appended boxes left the EXIF after the codestream (IrfanView stops reading there), and nothing re-checked the file. | encoder | ✅ FIXED (`_rewrite_master_relation`: temp copy, box reorder, integrity check, read-back of the record, original date restored, atomic `os.replace` — shared with `--restamp-moved`) |
 | 535 | **The recompressor's memory cap sized a resized derivative's encode by the source.** `_memory_capped_pipeline` received the source's pixel count only, so a 2048 px copy of a 45 MP master at d=1 e=9 was budgeted at ~11 GB per cjxl: 6 workers (3 encoding) on a machine with 42 GB to commit, where the real encode is ~3 MP. | recompressor | ✅ FIXED (`cjxl_pixels`: the largest output `_resize_geometry` gives; the side steps still use the full size; unknown dimensions keep the full estimate — 27 workers on the same machine) |
+| 536 | **The D50 patch was documented as a Capture One bug that made cjxl fail.** The illuminant it rewrites comes from Kodak's `ProPhoto.icm` (Z stored as `0xD32B`, 2/65536 off the spec's `0xD32D`), which Capture One embeds unchanged; no cjxl failure was ever traced to it, and the "Capture One writes X = 0.964202, Z = 0.824905" given as the error are the exact spec values. Elle profiles carry the exact bytes, which is why the patch stopped changing anything once exports moved to them. | encoder (docs) | ✅ FIXED (README section, setting comments; the code is unchanged) |
 
 ---
 

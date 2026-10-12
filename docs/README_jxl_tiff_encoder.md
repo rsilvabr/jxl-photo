@@ -181,9 +181,10 @@ CJXL_MODULAR = False
 # Can also be set via --modular CLI argument (on/off).
 
 D50_PATCH_MODE = "auto"
-# D50 illuminant patch for Capture One ICC compatibility.
-# Capture One has a bug where the D50 illuminant values are slightly off
-# (rounding error). This patch fixes them for cjxl compatibility.
+# Normalises the ICC header's illuminant field to the exact bytes of the ICC
+# spec. Kodak's ProPhoto.icm (the ProPhoto RGB Capture One exports with) rounds
+# it slightly differently; no failure was ever traced to that. See
+# "D50 Illuminant Patch" below.
 # "on"   → Always apply the patch
 # "off"  → Never apply the patch (use original ICC values)
 # "auto" → Only apply if source software matches D50_PATCH_SOFTWARE_LIST
@@ -191,7 +192,7 @@ D50_PATCH_MODE = "auto"
 
 D50_PATCH_SOFTWARE_LIST = ["capture one", "captureone"]
 # Software names that trigger D50 patch when D50_PATCH_MODE="auto".
-# Case-insensitive matching. Add your own software here if it has the same ICC bug.
+# Case-insensitive matching. Add the software that embeds such a profile.
 # The list is checked against EXIF Software field.
 
 CLEANUP_XMP_ICC_MARKER = False
@@ -619,11 +620,11 @@ The base64 string is not human-readable but preserves the **exact binary ICC dat
 
 The script uses **two separate ICC extractions**:
 
-1. **ICC for PNG (cjxl encoding)**: Patched D50 illuminant for Capture One compatibility
+1. **ICC for PNG (cjxl encoding)**: with the header illuminant normalised (D50 patch, below)
 2. **ICC for XMP (preservation)**: Original unmodified ICC for perfect round-trip
 
 This ensures:
-- cjxl receives a compatible ICC for encoding
+- cjxl receives a spec-exact ICC header
 - The exact original ICC is preserved for restoration
 
 → See [JXL Color Internals](jxl_color_internals.md) for more technical details.
@@ -634,17 +635,28 @@ This ensures:
 
 ### What is it?
 
-Capture One (and some other software) **may create** ICC profiles with a **slightly incorrect D50 illuminant value** due to a rounding error. The ICC specification defines D50 as:
-- X = 0.9642, Y = 1.0000, Z = 0.8249
+Every ICC profile has an *illuminant* field in its header (bytes 68–79). The ICC
+specification requires D50 there in **every** profile — sRGB and Adobe RGB
+included; it is the reference of the conversion space, not the white point of
+the colour space (that one is the `wtpt` tag, which the patch never touches).
+Stored as 1/65536 fixed-point numbers, D50 is `0000F6D6 00010000 0000D32D`
+(X = 0.964202, Y = 1.000000, Z = 0.824905).
 
-But Capture One writes:
-- X = 0.964202, Y = 1.000000, Z = 0.824905
+Kodak's `ProPhoto.icm` — the ProPhoto RGB profile that ships with Windows and
+that Capture One embeds in a ProPhoto RGB export — stores Z as `0000D32B`
+(0.824875): 2/65536 off. The patch rewrites those 12 bytes to the exact value.
 
-This tiny difference causes `cjxl` to fail or produce warnings when encoding with the ICC profile.
+**What it changes in practice: nothing visible.** The difference is about
+0.004 % in a field colour engines barely use, and no `cjxl` failure or warning
+was ever traced to it (older versions of this page said otherwise — that was
+wrong, as was calling it a Capture One bug: the profile is Kodak's, and Capture
+One embeds it unchanged). Profiles that already carry the exact bytes — Adobe
+RGB, sRGB, eciRGB and the Elle ProPhoto-class profiles among them — come out
+byte-identical, and the summary counts them as `already correct`.
 
 ### How the patch works
 
-The script automatically **corrects the D50 illuminant bytes** in the ICC profile before passing it to cjxl:
+The script **normalises the illuminant bytes** of the ICC profile before passing it to cjxl:
 
 ```
 Original ICC → Patch D50 bytes → cjxl encoding
@@ -660,7 +672,7 @@ Original ICC → Patch D50 bytes → cjxl encoding
 |------|----------|
 | `on` | Always apply D50 patch (forces correction on all files) |
 | `off` | Never apply D50 patch (use original ICC values) |
-| `auto` | Only apply if EXIF Software matches known buggy software (default) |
+| `auto` | Only apply if the EXIF Software matches `D50_PATCH_SOFTWARE_LIST` (default). Reads the Software tag with one exiftool call per TIFF |
 
 **Default detection list:**
 ```python
@@ -671,7 +683,7 @@ D50_PATCH_SOFTWARE_LIST = [
 ]
 ```
 
-You can customize this list in the script settings to add other software with the same bug.
+You can customize this list in the script settings to add other software that embeds such a profile.
 
 ### Summary output
 

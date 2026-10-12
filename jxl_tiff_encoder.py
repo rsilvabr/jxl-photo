@@ -994,12 +994,15 @@ ICC_CACHE_DIR_OVERRIDE: Optional[Path] = None
 # (%APPDATA%/jxl-photo/icc-cache on Windows, ~/.config/jxl-photo/icc-cache on Linux).
 
 D50_PATCH_MODE = "auto"
-# Controls the D50 illuminant patch for Capture One compatibility.
-# "on"   -> Always apply D50 patch (fixes Capture One ICC non-conformance)
+# Controls the D50 illuminant patch: rewrites the ICC header's illuminant field
+# (bytes 68-79) to the exact bytes of the ICC spec before cjxl sees the profile.
+# Kodak's ProPhoto.icm (the ProPhoto RGB Capture One exports with) stores Z as
+# 0xD32B instead of 0xD32D, 2/65536 off; no cjxl failure was ever traced to it.
+# "on"   -> Always apply D50 patch
 # "off"  -> Never apply D50 patch (use original ICC values)
 # "auto" -> Apply only if source software matches D50_PATCH_SOFTWARE_LIST
-# The patch fixes a rounding error in ICC profiles from Capture One.
-# "auto" is recommended and safe for all workflows.
+#           (one exiftool call per TIFF reads the Software tag)
+# Profiles that already carry the exact bytes come out unchanged in every mode.
 
 D50_PATCH_SOFTWARE_LIST = [
     "capture one",
@@ -1007,7 +1010,7 @@ D50_PATCH_SOFTWARE_LIST = [
     # "my software",  # <-- add more software names here (uncomment to enable)
 ]
 # Software names that trigger D50 patch when D50_PATCH_MODE="auto".
-# Case-insensitive matching. Add your own software if it has the same ICC bug.
+# Case-insensitive matching. Add the software that embeds such a profile.
 # Example: ["capture one", "myapp"] will match "Capture One 23" or "MYAPP Pro"
 
 CLEANUP_XMP_ICC_MARKER = False
