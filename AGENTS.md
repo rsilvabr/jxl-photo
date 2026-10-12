@@ -201,10 +201,11 @@
   safe in parallel: its own `tmp_path`, no fixed temp/home path, no assertion
   on a phrase rich may wrap (conftest sets `COLUMNS=240`; normalise
   whitespace when a long path precedes the phrase).
-- Baseline: a plan states the suite result of its base commit (verified at the
-  last review). The coder does not re-run the whole suite before starting; a
-  test that fails at the end is re-run alone against the extracted HEAD
-  (`git show HEAD:<file>`) to tell a new failure from an old one.
+- Baseline: run the whole suite (`-n 8`, ~2.5 min) BEFORE changing anything
+  and record the summary — it tells a new failure from an old one or from the
+  environment (a codec update). A plan also states the result of its base
+  commit. A test that fails at the end is re-run alone against the extracted
+  HEAD (`git show HEAD:<file>`).
 - The suite and the battery set `JXLPHOTO_LOG_DIR` (conftest / `run()`), so no
   test writes to `Logs\`. Every subprocess call in the four backends goes
   through `_run_captured` except the version probes (`_tool_version`,
