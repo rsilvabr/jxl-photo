@@ -11,8 +11,11 @@ own) is not carried over. That has always been true of the encoder, the decoder
 and the transcoder's re-encodes; since v2.13.0 it is true of the recompressor's
 re-encodes too. Verbatim copies and the `jbrd` container keep every byte.
 
-Nothing here contains a readable file name, folder, user name or computer
-name. See [Privacy](#privacy) for what the hashes can and cannot reveal.
+No field the toolkit writes contains a readable file name, folder, user name
+or computer name. Two of them are hashes of the source's path, so they cover
+whatever that path holds (`C:\Users\<name>\...` includes your user name). See
+[What these fields reveal](#what-these-fields-reveal) for what a hash can and
+cannot give away.
 
 ## The fields at a glance
 
@@ -57,7 +60,7 @@ carries.
 
 | Token | Meaning | Written by | Removed by |
 |---|---|---|---|
-| `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([Privacy](#privacy)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it; rewritten by the encoder's `--restamp-moved` after a folder rename |
+| `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([what it reveals](#what-these-fields-reveal)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it; rewritten by the encoder's `--restamp-moved` after a folder rename |
 | `jxlphoto-srcsum:<16 hex>` | the same source's **content**: a hash of its bytes | same as `src` | derivatives drop it |
 | `jxlphoto-origin:<v>` | what the **first** master was made from: `tiff8`, `tiff16`, `jpeg`, `png8`, `png16`, `png`, `jxl-lossy`, `jxl-lossless`, `jxl`. Absent = unknown (also every file written before v2.10.0) | encoder, transcoder, recompressor; carried by the decoder and by derivatives | never |
 | `jxlphoto-depth:<8\|16>` | bit depth of the TIFF that was encoded | encoder | decoder |
@@ -132,7 +135,7 @@ verbatim copy's bytes are the source's, and `--strip` writes no XMP. The
 decoder's ICC strategy `none` (`--none`) writes no XMP to the TIFF, so no
 History entry there too.
 
-## Privacy
+## What these fields reveal
 
 - **No path in clear text.** `jxlphoto-src` is the first 16 hex digits of a
   SHA-256 of the source's full, normalised path. It cannot be turned back into
@@ -142,13 +145,29 @@ History entry there too.
   the year, the event folder and the export subfolders — but only because the
   guesses already contained the exact event name. `jxlphoto-srcsum` likewise
   only confirms a file you already have.
+- **Guessing works on the whole path, never letter by letter.** A path with
+  one wrong character hashes to something completely different, so there is
+  no partial hit to build on, and trying every possible name is out of reach
+  for anything longer than a few characters. A dictionary attack is not: the
+  photo's own date, its file name and a typical folder layout leave only the
+  event text unknown, and a graphics card tests billions of candidates a
+  second. A one-word event name falls in under a second, two words from a
+  long list of place names in minutes; three free words and a status tag
+  take decades. The hash hides a path from a casual reader, not from someone
+  determined who guesses well.
+- **The path is hashed as it is.** Photos under your user profile
+  (`C:\Users\<name>\Pictures\...`) put the user name into what is hashed:
+  not readable, but part of what a guess has to get right. `jxlphoto-mpg`
+  (split multi-page TIFFs) is built from the path too.
 - **The file name itself** usually says more than any field: an encoder output
   keeps the TIFF's name.
 - **Derivatives carry neither hash.** They do carry the encode record (so the
   master's distance is visible), the recipe, the origin, the bit depth and the
   ICC profile.
-- **What comes from your raw developer is copied as is**: camera and lens
-  serial numbers, GPS, ratings, labels. To keep them out of shared files,
+- **What comes from your camera and raw developer is copied as is**: camera
+  and lens serial numbers, the owner / artist name set in the camera, GPS,
+  ratings, labels. GPS and the capture time say far more about where and
+  when than any hash. To keep them out of shared files,
   remove them in the export recipe there; the toolkit does not filter them.
 - **`xmpMM:History` names the tool, its version, the repository link and the
   time of each conversion.** It never names a file, a folder, a user name or a
