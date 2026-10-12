@@ -42,7 +42,7 @@ ENCODER_EDIT = {
     "MULTIPAGE_TIFF_MODE": "split_all", "THUMBNAIL_MODE": "include",
     "THUMBNAIL_SUFFIX": "_thumb", "D50_PATCH_MODE": "off",
     "ENCODE_TAG_MODE": "software", "USE_RAM_FOR_PNG": False,
-    "EMBED_JPEG_THUMBNAIL": True, "PROVENANCE_CHECK": "content",
+    "PROVENANCE_CHECK": "content",
 }
 DECODER_EDIT = {
     "THUMBNAIL_HANDLING": "ignore", "THUMBNAIL_SUFFIX": "_t",
@@ -177,10 +177,11 @@ def test_advanced_encoder_questions_offer_the_encoder_settings(menu, monkeypatch
 
     adv = wf["advanced_options"]
     assert adv["encode_tag"] == "software"
-    assert adv["embed_thumbnail"] is True
+    assert "embed_thumbnail" not in adv
     assert adv["multipage_mode"] == "split_all"
     assert adv["thumbnail_suffix"] == "_thumb"
     shown = "\n".join(prompts)
+    assert "thumbnail? (~20KB)" not in shown
     assert "[software]" in shown and "[split_all]" in shown and "[_thumb]" in shown
 
 
@@ -320,6 +321,20 @@ def test_preset_tiff_run_passes_the_encoder_settings(wp, menu, launched, tmp_pat
     assert _flag(cmd, "--d50-patch") == "off"
     assert _flag(cmd, "--encode-tag") == "software"
     assert "--no-ram" in cmd and "--ram" not in cmd
+
+
+def test_an_old_preset_with_the_thumbnail_does_not_pass_it(wp, menu, launched, tmp_path):
+    src = tmp_path / "photos"
+    src.mkdir()
+    session = _session(wp, last_input_dir=str(src), last_distance=0.1,
+                       last_origin_format="tiff", last_dest_format="jxl",
+                       last_conversion_type="jxl_tiff_encoder",
+                       last_advanced_options={"overwrite": False, "sync": True,
+                                              "embed_thumbnail": True})
+    session["last_jpeg_thumbnail"] = True   # a config written before v2.12.0
+    assert menu._run_saved_session(session, STATUS,
+                                   answers={"overwrite": False, "dry_run": False})
+    assert "--embed-thumbnail" not in launched[-1]
 
 
 def test_preset_tiff_output_passes_the_decoder_settings(wp, menu, launched, tmp_path,

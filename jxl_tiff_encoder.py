@@ -998,17 +998,6 @@ CLEANUP_XMP_ICC_MARKER = False
 # True  -> clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
 # False -> keeps existing ICC markers (default)
 
-EMBED_JPEG_THUMBNAIL = False
-# Embed a JPEG thumbnail (256px) in the JXL file EXIF metadata.
-# True  -> creates a 256px JPEG preview and embeds it as EXIF thumbnail
-#          Increases file size by ~10-30KB per image
-#          Useful for fast preview in IrfanView, XnView, digiKam
-#          (Windows Explorer with JXL codec usually ignores EXIF thumbnail)
-# False -> no embedded thumbnail (default, smaller files)
-#
-# The thumbnail is generated from the PNG intermediate and injected via exiftool
-# after the JXL encoding is complete.
-
 VERIFY_ROUNDTRIP = False
 # Opt-in extra gate before DELETE_SOURCE removes a source TIFF: decode the JXL
 # that was just written and compare it against the source page. Costs one full
@@ -1427,7 +1416,6 @@ _RUN_DEFAULTS = {
     "TEMP2_DIR": TEMP2_DIR,
     "ENCODE_TAG_MODE": ENCODE_TAG_MODE,
     "D50_PATCH_MODE": D50_PATCH_MODE,
-    "EMBED_JPEG_THUMBNAIL": EMBED_JPEG_THUMBNAIL,
     "MULTIPAGE_TIFF_MODE": MULTIPAGE_TIFF_MODE,
     "THUMBNAIL_MODE": THUMBNAIL_MODE,
     "THUMBNAIL_SUFFIX": THUMBNAIL_SUFFIX,
@@ -4232,126 +4220,6 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
 
-            # 7. Embed JPEG thumbnail if enabled
-            # 7. Embed JPEG thumbnail if enabled (suppressed under --strip:
-            # "strip all metadata" must not leave an EXIF thumbnail behind)
-            if EMBED_JPEG_THUMBNAIL and not STRIP_METADATA:
-                try:
-                    from PIL import Image, ImageCms
-                    import io
-                    # Apply user's PIL pixel limit setting (for large panoramas)
-                    Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
-                    # Read the original TIFF to generate thumbnail (use the page being encoded)
-                    with Image.open(str(tiff_path)) as img:
-                        if page_idx > 0 and page_idx < getattr(img, 'n_frames', 1):
-                            img.seek(page_idx)
-                        # Extract ICC profile BEFORE any conversion
-                        icc_profile = img.info.get('icc_profile')
-                        
-                        # Convert color space if ICC profile exists
-                        if icc_profile:
-                            try:
-                                rgb_profile = ImageCms.createProfile('sRGB')
-                                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
-                                # Convert to sRGB using LittleCMS
-                                img = ImageCms.profileToProfile(img, src_profile, rgb_profile)
-                            except Exception as e:
-                                logger.debug(f"  >Thumbnail color conversion failed: {e}")
-                                # Fallback: convert to RGB without color management
-                                if img.mode != 'RGB':
-                                    img = img.convert('RGB')
-                        else:
-                            # No ICC, just convert to RGB
-                            if img.mode != 'RGB':
-                                img = img.convert('RGB')
-                        
-                        # Calculate thumbnail size (max 256px, never upscale)
-                        max_size = 256
-                        ratio = min(1.0, max_size / img.width, max_size / img.height)
-                        new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
-                        thumb = img.resize(new_size, Image.Resampling.LANCZOS)
-                        # Save as JPEG temporary (sRGB, no ICC embedded)
-                        thumb_path = tmp_dir / "thumbnail.jpg"
-                        thumb.save(str(thumb_path), "JPEG", quality=85)
-                        # Inject thumbnail into JXL
-                        r_thumb = _run_exiftool_argfile(
-                            ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                            timeout=EXIFTOOL_TIMEOUT
-                        )
-                        if r_thumb.returncode == 0:
-                            logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
-                        else:
-                            logger.debug(f"  >Thumbnail embedding failed (non-critical)")
-                except Exception as e:
-                    logger.debug(f"  >Thumbnail PIL approach failed: {e}")
-
-                    # Fallback: try tifffile approach (only if PIL AND the
-                    # optional names this block needs are actually available —
-                    # otherwise we'd die with NameError here and hide the cause)
-                    if 'Image' not in locals() or 'ImageCms' not in locals() or 'io' not in locals():
-                        logger.debug("  >PIL/ImageCms not available, skipping thumbnail entirely")
-                    else:
-                        try:
-                            # Read TIFF with tifffile (preserves ICC and bit depth)
-                            with tifffile.TiffFile(str(tiff_path)) as tif:
-                                # Read the page being encoded
-                                page = tif.pages[page_idx] if page_idx < len(tif.pages) else tif.pages[0]
-                                img_array = page.asarray()
-                                # Extract ICC profile
-                                icc_profile = None
-                                try:
-                                    icc_profile = page.icc_profile
-                                except Exception:
-                                    pass
-
-                            # Convert 16-bit to 8-bit if necessary (rounded,
-                            # like the rest of the pipeline)
-                            if img_array.dtype == np.uint16:
-                                img_8bit = np.rint(img_array / 257).astype(np.uint8)
-                            else:
-                                img_8bit = img_array
-
-                            # Ensure RGB
-                            if img_8bit.ndim == 2:
-                                img_8bit = np.stack([img_8bit] * 3, axis=-1)
-                            elif img_8bit.shape[2] == 4:
-                                img_8bit = img_8bit[:, :, :3]  # Remove alpha
-
-                            # Create PIL Image from array
-                            pil_img = Image.fromarray(img_8bit)
-
-                            # Convert to sRGB using ICC profile (same as decoder)
-                            if icc_profile:
-                                try:
-                                    rgb_profile = ImageCms.createProfile('sRGB')
-                                    src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_profile))
-                                    pil_img = ImageCms.profileToProfile(pil_img, src_profile, rgb_profile)
-                                except Exception as e:
-                                    logger.debug(f"  >Thumbnail color conversion failed: {e}, using original")
-
-                            # Calculate thumbnail size (max 256px, never upscale)
-                            max_size = 256
-                            ratio = min(1.0, max_size / pil_img.width, max_size / pil_img.height)
-                            new_size = (max(1, int(pil_img.width * ratio)), max(1, int(pil_img.height * ratio)))
-                            thumb = pil_img.resize(new_size, Image.Resampling.LANCZOS)
-
-                            # Save as JPEG temporary (sRGB, no ICC embedded)
-                            thumb_path = tmp_dir / "thumbnail.jpg"
-                            thumb.save(str(thumb_path), "JPEG", quality=85)
-
-                            # Inject thumbnail into JXL
-                            r_thumb = _run_exiftool_argfile(
-                                ["-overwrite_original", "-ThumbnailImage<=" + str(thumb_path), str(write_path)],
-                                timeout=EXIFTOOL_TIMEOUT
-                            )
-                            if r_thumb.returncode == 0:
-                                logger.debug(f"  >Embedded sRGB thumbnail ({new_size[0]}x{new_size[1]})")
-                            else:
-                                logger.debug(f"  >Thumbnail embedding failed (non-critical)")
-                        except Exception as e2:
-                            logger.debug(f"  >Thumbnail fallback also failed: {e2}")
-
-
             # Multi-page group marker: tag split pages so the decoder reconstructs
             # only genuinely-split files. Stored as an ADDITIONAL value in the
             # dc:Relation list (a bag), so any Relation the user already had is
@@ -5614,10 +5482,11 @@ def main():
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
     parser.add_argument("--embed-thumbnail", action="store_true",
-                        help="Embed a 256px JPEG thumbnail in EXIF for fast preview in viewers (~20KB)")
+                        help="Deprecated since v2.12.0 and ignored: no viewer "
+                             "tested reads an EXIF thumbnail in a JXL.")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, EMBED_JPEG_THUMBNAIL, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
@@ -5768,9 +5637,6 @@ def main():
     if args.icc_png_strategy is not None:
         ICC_PNG_STRATEGY = args.icc_png_strategy
 
-    if args.embed_thumbnail:
-        EMBED_JPEG_THUMBNAIL = True
-
     if args.multipage_mode is not None:
         MULTIPAGE_TIFF_MODE = args.multipage_mode
     if args.thumbnail_mode is not None:
@@ -5857,6 +5723,11 @@ def main():
         sys.exit(1)
     if not args.dry_run:
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
+
+    if args.embed_thumbnail:
+        logger.warning("--embed-thumbnail is ignored since v2.12.0: no viewer "
+                       "tested (Windows Explorer, XnView MP, IrfanView) reads "
+                       "an EXIF thumbnail in a JXL. No thumbnail is written.")
 
     # --strip means "no metadata", and the provenance marker IS metadata, so
     # build_metadata_injection_args returns before writing it. That is the right

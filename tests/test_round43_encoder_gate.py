@@ -51,7 +51,7 @@ import jxl_tiff_encoder as enc
 # script, never against a literal copy of the shipped default.
 _SCRIPT_SETTINGS = {name: getattr(enc, name) for name in (
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "VERIFY_ROUNDTRIP",
-    "STRIP_METADATA", "PROVENANCE_CHECK", "ADOPT_SCAN", "EMBED_JPEG_THUMBNAIL",
+    "STRIP_METADATA", "PROVENANCE_CHECK", "ADOPT_SCAN",
     "EXPORT_MARKER", "TEMP2_DIR", "OVERWRITE")}
 
 _JXL_SIG = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
@@ -62,7 +62,7 @@ _JXL_SIG = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
 _RUN_FLAGS = ("OVERWRITE", "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED",
               "VERIFY_ROUNDTRIP", "PROVENANCE_CHECK", "ADOPT_SCAN",
               "STRIP_METADATA", "TEMP2_DIR", "EXPORT_MARKER", "EXPORT_JXL_FOLDER",
-              "EXPORT_TIFF_SUBFOLDER", "EXCLUDE_FOLDERS", "EMBED_JPEG_THUMBNAIL",
+              "EXPORT_TIFF_SUBFOLDER", "EXCLUDE_FOLDERS",
               "MULTIPAGE_TIFF_MODE", "CJXL_DISTANCE")
 _DEFAULTS = {
     "OVERWRITE": "smart", "DELETE_SOURCE": False, "DELETE_CONFIRM": True,
@@ -70,7 +70,7 @@ _DEFAULTS = {
     "PROVENANCE_CHECK": "path", "ADOPT_SCAN": True, "STRIP_METADATA": False,
     "TEMP2_DIR": None, "EXPORT_MARKER": "_EXPORT", "EXPORT_JXL_FOLDER": "16B_JXL",
     "EXPORT_TIFF_SUBFOLDER": "", "EXCLUDE_FOLDERS": (),
-    "EMBED_JPEG_THUMBNAIL": False, "MULTIPAGE_TIFF_MODE": "split",
+    "MULTIPAGE_TIFF_MODE": "split",
     "CJXL_DISTANCE": 0.1,
 }
 
@@ -571,7 +571,6 @@ def test_second_main_run_falls_back_to_defaults(tmp_path, monkeypatch):
     assert enc.STRIP_METADATA is True
     assert enc.PROVENANCE_CHECK == "content"
     assert enc.ADOPT_SCAN is False
-    assert enc.EMBED_JPEG_THUMBNAIL is True
     assert enc.EXPORT_MARKER == "_X"
     assert enc.TEMP2_DIR == str(stg)
 
@@ -589,7 +588,6 @@ def test_second_main_run_falls_back_to_defaults(tmp_path, monkeypatch):
     assert enc.STRIP_METADATA == _SCRIPT_SETTINGS["STRIP_METADATA"]
     assert enc.PROVENANCE_CHECK == _SCRIPT_SETTINGS["PROVENANCE_CHECK"]
     assert enc.ADOPT_SCAN == _SCRIPT_SETTINGS["ADOPT_SCAN"]
-    assert enc.EMBED_JPEG_THUMBNAIL == _SCRIPT_SETTINGS["EMBED_JPEG_THUMBNAIL"]
     assert enc.EXPORT_MARKER == _SCRIPT_SETTINGS["EXPORT_MARKER"]
     assert enc.TEMP2_DIR == _SCRIPT_SETTINGS["TEMP2_DIR"], \
         "--staging leaked into run 2"

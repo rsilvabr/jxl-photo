@@ -2013,34 +2013,6 @@ def test_marker_bare_token_first_last_only():
         assert not m("reexport", "_export")
 
 
-def test_strip_suppresses_embedded_thumbnail(monkeypatch, tmp_path):
-    """--strip + --embed-thumbnail must not leave an EXIF thumbnail behind."""
-    tif = tmp_path / "photo.tif"
-    tifffile.imwrite(tif, np.zeros((16, 16, 3), dtype=np.uint16), photometric="rgb")
-    final = tmp_path / "photo.jxl"
-    monkeypatch.setattr(enc, "extract_exif_raw", lambda *a, **k: None)
-    monkeypatch.setattr(enc, "extract_xmp_original", lambda *a, **k: None)
-    monkeypatch.setattr(enc, "get_page_icc", lambda *a, **k: (None, False))
-    monkeypatch.setattr(enc, "apply_d50_policy", lambda icc, p: icc)
-    monkeypatch.setattr(enc, "reorder_jxl_boxes", lambda p: None)
-    monkeypatch.setattr(enc, "EMBED_JPEG_THUMBNAIL", True)
-    monkeypatch.setattr(enc, "STRIP_METADATA", True)
-    thumb_calls = []
-
-    def fake_run(cmd, **kw):
-        if any("ThumbnailImage" in str(c) for c in cmd):
-            thumb_calls.append(cmd)
-        return _FakeRun()
-
-    monkeypatch.setattr(enc.subprocess, "run", fake_run)
-    enc.setup_logger()
-    enc.OVERWRITE = True
-    enc.convert_one(tif, final, final)
-    assert thumb_calls == [], "thumbnail embedded despite --strip"
-    monkeypatch.setattr(enc, "EMBED_JPEG_THUMBNAIL", False)
-    monkeypatch.setattr(enc, "STRIP_METADATA", False)
-
-
 def test_icc_blob_regex_no_pipe_variant():
     import re
     blob = "QUJDRAEAA" * 12  # 108 chars, realistic ICC base64 length

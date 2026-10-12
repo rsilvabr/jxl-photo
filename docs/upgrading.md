@@ -11,6 +11,14 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.12.0: `--embed-thumbnail` does nothing
+
+Nothing to check. The encoder no longer writes the optional EXIF thumbnail —
+no viewer tested reads it. `--embed-thumbnail` is still accepted and only logs
+a warning, so scripts, manifests and presets keep working. The
+`EMBED_JPEG_THUMBNAIL` setting at the top of `jxl_tiff_encoder.py` no longer
+exists; nothing to carry over.
+
 ## v2.11.0: the regeneration guard can fire one generation earlier
 
 Nothing to check for masters made from TIFFs. A recompressor run over a file

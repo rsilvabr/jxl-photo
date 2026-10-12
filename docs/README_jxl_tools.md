@@ -811,7 +811,6 @@ exception: they are set in menu option 4.
 | `JXL_SUFFIX_REPLACE` | `"JXL"` | Mode 4 suffix replacement |
 | `EMBED_ICC_IN_JXL` | `True` | Embed ICC in JXL metadata |
 | `ENCODE_TAG_MODE` | `"xmp"` | Where to record d=/e= (now also via `--encode-tag`) |
-| `EMBED_JPEG_THUMBNAIL` | `False` | Embed 256px JPEG thumbnail in JXL (also `--embed-thumbnail`) |
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |

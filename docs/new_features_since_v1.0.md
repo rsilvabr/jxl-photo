@@ -848,6 +848,8 @@ Date: 2026-04-11
 
 ### Feature #7 — Embedded JPEG Thumbnail in JXL (Optional)
 
+> **Removed in v2.12.0** — no viewer tested in 2026-10 (Windows Explorer, XnView MP 1.10.5, IrfanView 4.75) reads an EXIF thumbnail in a JXL.
+
 **Location:** `jxl_tiff_encoder.py`
 
 **What changed:** Optional embedded JPEG thumbnail (256px, sRGB) in JXL files for fast preview in image viewers.
@@ -932,6 +934,8 @@ Scripts: `jxl_photo.py` (formerly v2), `jxl_tiff_decoder.py`, `jxl_tiff_encoder.
 
 ### Feature #7 — Embedded JPEG Thumbnail in JXL (Optional)
 
+> **Removed in v2.12.0** — no viewer tested in 2026-10 (Windows Explorer, XnView MP 1.10.5, IrfanView 4.75) reads an EXIF thumbnail in a JXL.
+
 **Location:** `jxl_tiff_encoder.py`
 
 **What changed:** Optional embedded JPEG thumbnail (256px, sRGB) in JXL files for fast preview in image viewers.
@@ -954,10 +958,6 @@ python jxl_tiff_encoder.py folder/ --embed-thumbnail
 ```
 
 **Supported viewers:**
-- ✅ IrfanView — shows thumbnail in file list (color fix reported, test with latest plugin)
-- ✅ XnView MP — fast thumbnail preview
-- ✅ digiKam — uses embedded thumbnail
-- ✅ darktable — EXIF thumbnail support
 - ❌ Windows Explorer — current WIC codec ignores embedded thumbnail and generates its own without color management
 
 **Important — Windows Limitation:**
@@ -965,7 +965,7 @@ The Windows JXL WIC codec (from Microsoft Store) has two problems:
 1. **Ignores the embedded EXIF thumbnail** — generates its own from scratch
 2. **No color management** — converts ProPhoto/Adobe RGB to thumbnail without ICC profile, resulting in wrong/washed-out colors
 
-This is a **Windows codec limitation**, not a bug in this software. The embedded thumbnail is correct (sRGB, properly converted), but Windows doesn't use it. For accurate thumbnails on Windows, use IrfanView, XnView MP, or digiKam.
+This is a **Windows codec limitation**, not a bug in this software. The embedded thumbnail is correct (sRGB, properly converted), but Windows doesn't use it. XnView MP and IrfanView ignore it as well (checked 2026-10).
 
 **Note on EXIF in IrfanView:** While thumbnails display correctly with the latest plugin, EXIF visibility depends on JXL source:
 - **TIFF → JXL:** EXIF visible ✅ (boxes reordered)

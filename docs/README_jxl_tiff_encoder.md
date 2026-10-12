@@ -163,14 +163,6 @@ ENCODE_TAG_MODE = "xmp"
 # NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP:CreatorTool
 # and encoding params are concatenated to dc:Description.
 
-EMBED_JPEG_THUMBNAIL = False
-# Embed a JPEG thumbnail (256px) in the JXL file EXIF metadata.
-# True  → creates a 256px JPEG preview and embeds it as EXIF thumbnail
-#          Increases file size by ~10-30KB per image
-#          Useful for fast preview in IrfanView, XnView, digiKam
-# False → no embedded thumbnail (default, smaller files)
-# Can also be set via --embed-thumbnail CLI argument.
-
 CJXL_MODULAR = False
 # False (default) — lossy uses VarDCT encoder + XYB colorspace.
 # True  — forces Modular encoder for lossy (--modular=1).
@@ -472,7 +464,7 @@ Options:
                     multi-page reconstruction and grayscale markers, so split
                     pages decode as standalone files and faithful multipage/
                     grayscale reconstruction is not possible)
-  --embed-thumbnail Embed a 256px JPEG thumbnail in EXIF for fast preview (~20KB)
+  --embed-thumbnail Deprecated since v2.12.0 and ignored (no viewer tested reads an EXIF thumbnail in a JXL)
   --dry-run         Preview operations without converting
   --summary-json  Emit ONE machine-readable line per run:
                   `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`

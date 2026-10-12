@@ -851,7 +851,6 @@ class ToolConfig:
     last_conversion_type: Optional[str] = None
     last_d50_patch: Optional[str] = None
     last_encode_tag: Optional[str] = None
-    last_jpeg_thumbnail: Optional[bool] = None  # True = embed, False = don't embed, None = ask each time
     last_multipage_mode: Optional[str] = None
     last_thumbnail_mode: Optional[str] = None
     last_thumbnail_suffix: Optional[str] = None
@@ -995,7 +994,6 @@ class ConfigManager:
                           expert_flags: Optional[str] = None,
                           d50_patch: Optional[str] = None,
                           encode_tag: Optional[str] = None,
-                          jpeg_thumbnail: Optional[bool] = None,
                           multipage_mode: Optional[str] = None,
                           thumbnail_mode: Optional[str] = None,
                           thumbnail_suffix: Optional[str] = None,
@@ -1044,8 +1042,6 @@ class ConfigManager:
             self.config.last_d50_patch = d50_patch
         if encode_tag is not None:
             self.config.last_encode_tag = encode_tag
-        if jpeg_thumbnail is not None:
-            self.config.last_jpeg_thumbnail = jpeg_thumbnail
         if multipage_mode is not None:
             self.config.last_multipage_mode = multipage_mode
         if thumbnail_mode is not None:
@@ -2312,7 +2308,6 @@ _CHILD_OPTION_DEFAULTS = {
         'd50_patch': ('D50_PATCH_MODE', 'auto'),
         'encode_tag': ('ENCODE_TAG_MODE', 'xmp'),
         'use_ram': ('USE_RAM_FOR_PNG', True),
-        'embed_thumbnail': ('EMBED_JPEG_THUMBNAIL', False),
         'provenance': ('PROVENANCE_CHECK', 'path'),
     },
     'jxl_tiff_decoder': {
@@ -5244,11 +5239,6 @@ class InteractiveMenu:
                 force_modular = Confirm.ask(
                     "Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only)",
                     default=False)
-                # Thumbnail option
-                thumb_default = (self.config.config.last_jpeg_thumbnail
-                                 if self.config.config.last_jpeg_thumbnail is not None
-                                 else _child_default('jxl_tiff_encoder', 'embed_thumbnail'))
-                embed_thumb = Confirm.ask("Embed JPEG thumbnail for fast preview? (~20KB per file)", default=thumb_default)
                 # Multi-page TIFF options
                 mp_default = (self.config.config.last_multipage_mode
                               or _child_default('jxl_tiff_encoder', 'multipage_mode'))
@@ -5294,13 +5284,6 @@ class InteractiveMenu:
                 encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else et_default
                 modular_input = input("Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only) [y/N]: ").strip().lower()
                 force_modular = modular_input.startswith('y')
-                # Thumbnail option
-                _thumb_on = (self.config.config.last_jpeg_thumbnail
-                             if self.config.config.last_jpeg_thumbnail is not None
-                             else _child_default('jxl_tiff_encoder', 'embed_thumbnail'))
-                thumb_default = "y" if _thumb_on else "n"
-                thumb_input = input(f"Embed JPEG thumbnail? (~20KB) [{thumb_default}/n]: ").strip().lower() or thumb_default
-                embed_thumb = thumb_input.startswith('y')
                 # Multi-page TIFF options
                 mp_default = (self.config.config.last_multipage_mode
                               or _child_default('jxl_tiff_encoder', 'multipage_mode'))
@@ -5358,7 +5341,6 @@ class InteractiveMenu:
                 advanced_options['provenance'] = workflow['provenance']
             if workflow.get('adopt_scan') is False:
                 advanced_options['adopt_scan'] = False
-            advanced_options['embed_thumbnail'] = embed_thumb
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
@@ -7793,8 +7775,6 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('encode_tag'):
                 cmd.extend(['--encode-tag', advanced['encode_tag']])
-            if advanced.get('embed_thumbnail'):
-                cmd.append('--embed-thumbnail')
             if advanced.get('delete_source'):
                 cmd.append('--delete-source')
                 # Wrapper already confirmed deletion (HHMM in step 4); without
@@ -8474,8 +8454,6 @@ class InteractiveMenu:
                 cmd.extend(['--staging', workflow['staging']])
             if advanced.get('encode_tag'):
                 cmd.extend(['--encode-tag', advanced['encode_tag']])
-            if advanced.get('embed_thumbnail'):
-                cmd.append('--embed-thumbnail')
             if advanced.get('multipage_mode'):
                 cmd.extend(['--multipage-mode', advanced['multipage_mode']])
             if advanced.get('thumbnail_mode'):
@@ -9300,7 +9278,6 @@ class InteractiveMenu:
             'sync': sync,
             'd50_patch': last_d50_patch if origin == 'tiff' else None,
             'encode_tag': last_encode_tag if origin == 'tiff' else None,
-            'embed_thumbnail': session.get('last_jpeg_thumbnail') if origin == 'tiff' else None,
             'multipage_mode': (session.get('last_multipage_mode')
                                or _child_default('jxl_tiff_encoder', 'multipage_mode')),
             'thumbnail_mode': (session.get('last_thumbnail_mode')
@@ -9520,8 +9497,6 @@ def _main():
                     expert_flags=workflow.get('expert_flags'),
                     d50_patch=workflow.get('advanced_options', {}).get('d50_patch'),
                     encode_tag=workflow.get('advanced_options', {}).get('encode_tag'),
-                    # The advanced-options dict stores it as 'embed_thumbnail'
-                    jpeg_thumbnail=workflow.get('advanced_options', {}).get('embed_thumbnail'),
                     multipage_mode=workflow.get('advanced_options', {}).get('multipage_mode'),
                     thumbnail_mode=workflow.get('advanced_options', {}).get('thumbnail_mode'),
                     thumbnail_suffix=workflow.get('advanced_options', {}).get('thumbnail_suffix'),

@@ -62,6 +62,18 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.12.0
+
+**(unreleased)** Supersedes v2.11.0.
+
+**Removed: `--embed-thumbnail`.** The optional EXIF thumbnail in JXL
+outputs was meant for fast previews, but no viewer tested reads it —
+Windows Explorer, XnView MP 1.10.5 and IrfanView 4.75 all decode the image
+themselves. The encoder no longer writes it; the flag is still accepted and
+only logs a warning, so existing scripts and manifests keep working. The
+wizard no longer asks about it. Thumbnails already embedded in existing
+files are left as they are.
+
 ## v2.11.0
 
 **Released 2026-10-11.** Supersedes v2.10.0. The first use of the
@@ -868,13 +880,13 @@ Step 2 now offers three clear choices:
 - Use with `--sync` to re-process only changed files
 
 ### Embedded JPEG Thumbnail in JXL (Optional)
-Optional embedded 256px sRGB thumbnail in JXL files for fast preview in IrfanView, XnView, digiKam.
+Optional embedded 256px sRGB thumbnail in JXL files (removed in v2.12.0: no viewer tested in 2026-10 — Windows Explorer, XnView MP, IrfanView — reads it).
 ```bash
 python jxl_tiff_encoder.py folder/ --embed-thumbnail
 ```
 Adds ~20KB per file.
 
-**Windows Explorer Note:** The current JXL WIC codec from Microsoft Store generates its own thumbnail and **ignores the embedded EXIF thumbnail**. Worse, it does so **without color management** — so if your image uses ProPhoto RGB or Adobe RGB, the thumbnail will show wrong/washed-out colors. This is a **Windows codec limitation, not a bug in this software**. Use IrfanView, XnView MP, or digiKam for accurate thumbnails.
+**Windows Explorer Note:** The current JXL WIC codec from Microsoft Store generates its own thumbnail and **ignores the embedded EXIF thumbnail**. Worse, it does so **without color management** — so if your image uses ProPhoto RGB or Adobe RGB, the thumbnail will show wrong/washed-out colors. This is a **Windows codec limitation, not a bug in this software**. XnView MP and IrfanView make their own thumbnails too (checked 2026-10).
 
 **IrfanView Note:** EXIF display in JXL has limitations with this software:
 
