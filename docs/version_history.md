@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.11.0](#v2110)** | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
+| **[v2.12.0](#v2120)** | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
+| [v2.11.0](#v2110) | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
 | [v2.10.0](#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`: `tiff8`/`tiff16`, `jpeg`, `png8`/`png16`, `jxl`), written once and carried forward |
 | [v2.9.0](#v290) | 2026-10-10 | Recompressor: cjxl slots apart from the workers — big-memory encodes stay busy while extra workers prepare the next files; `WORKER_MEMORY_FRACTION` 1.0 (round 52, 1 fix) |
 | [v2.8.2](#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script (round 51, 1 fix) |
@@ -64,7 +65,8 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.12.0
 
-**(unreleased)** Supersedes v2.11.0.
+**Released 2026-10-12.** Supersedes v2.11.0. One option removed; no other
+change.
 
 **Removed: `--embed-thumbnail`.** The optional EXIF thumbnail in JXL
 outputs was meant for fast previews, but no viewer tested reads it —
@@ -76,7 +78,7 @@ files are left as they are.
 
 ## v2.11.0
 
-**Released 2026-10-11.** Supersedes v2.10.0. The first use of the
+**Released 2026-10-11, superseded by v2.12.0.** Supersedes v2.10.0. The first use of the
 `jxlphoto-origin` marker, and one hardening fix (round 53).
 
 ### The regeneration guard counts the loss before the toolkit (recompressor)
