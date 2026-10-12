@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.12.0** (2026-10-12) · [What's new](#whats-new-in-v2120) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.13.0** (2026-10-13) · [What's new](#whats-new-in-v2130) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.12.0](#whats-new-in-v2120)
+- [What's new in v2.13.0](#whats-new-in-v2130)
 - [More about this project](#more-about-this-project)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -357,6 +357,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Film scans:** the IR page is kept, but scanner software may not recognize it for dust removal after the round trip — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
 - **Viewers:** Windows Explorer thumbnails are not colour-managed, IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
 ---
 
@@ -371,6 +372,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | JPEG ↔ JXL / JXL → PNG |
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | JXL → JXL recompression |
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
+| [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [docs/upgrading.md](docs/upgrading.md) | What to check when you upgrade from an older version |
 | [docs/version_history.md](docs/version_history.md) | Every release in detail, and the full release table |
@@ -381,23 +383,26 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.12.0
+## What's new in v2.13.0
 
-Released 2026-10-12. One option goes away; nothing else changes.
+Released 2026-10-13. Your files now say which version of the toolkit wrote them.
 
-- **`--embed-thumbnail` no longer does anything.** The optional EXIF thumbnail was meant for fast previews, but no viewer tested reads it in a JXL (Windows Explorer, XnView MP, IrfanView all build their own). The flag is still accepted and only logs a warning, so scripts, manifests and presets keep working; the wizard no longer asks about it ([upgrading](docs/upgrading.md)).
+- **Each output records the toolkit version in `xmpMM:History`**, the standard field Lightroom and Capture One already use: one entry per conversion, after the entries the file already had. Nothing in the toolkit reads it back. Not written into the lossless JPEG container or verbatim copies ([details](docs/metadata_written.md#processing-history-xmpmmhistory)).
+- **`--version`** in all five scripts, and the wrapper warns when a script in its folder is from another release.
+- The recompressor no longer doubles the `dc:Relation` values of a JXL made by another program (#531). This closes an edge case; the toolkit's own masters were never affected.
+- Re-runs with `--overwrite` now give a file with a different hash, since each write is timestamped ([upgrading](docs/upgrading.md)).
 
-Full notes: [version history](docs/version_history.md#v2120). **2400 tests**, and the real-photo battery passes (49 checks).
+Full notes: [version history](docs/version_history.md#v2130). **2464 tests**, and the real-photo battery passes (60 checks).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.12.0** | 2026-10-12 | `--embed-thumbnail` removed: no viewer reads an EXIF thumbnail in a JXL |
+| **v2.13.0** | 2026-10-13 | Each output records the toolkit version that wrote it (`xmpMM:History`); `--version` |
+| [v2.12.0](docs/version_history.md#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer reads an EXIF thumbnail in a JXL |
 | [v2.11.0](docs/version_history.md#v2110) | 2026-10-11 | The regeneration guard counts the loss before the toolkit (JPEG or lossy third-party origins) |
 | [v2.10.0](docs/version_history.md#v2100) | 2026-10-10 | New JXLs record where their first master came from (`jxlphoto-origin`) |
 | [v2.9.0](docs/version_history.md#v290) | 2026-10-10 | The recompressor keeps its encodes busy: extra workers prepare the next files |
-| [v2.8.2](docs/version_history.md#v282) | 2026-10-09 | The wizard's defaults follow the settings at the top of each script |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
