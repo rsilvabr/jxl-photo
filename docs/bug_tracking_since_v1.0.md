@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #537.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #538.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-56 — planning-time exiftool batches on a slow disk](#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16) | 2026-10-16 | v2.15.0 | #537 (1) |
 | [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#536 (5) |
 | [Round-54 — the recompressor doubled the lists it appended to](#round-54--the-recompressor-doubled-the-lists-it-appended-to-2026-10-13) | 2026-10-13 | v2.13.0 | #531 (1) |
 | [Round-53 — one provenance pair in the transcoder's outputs](#round-53--one-provenance-pair-in-the-transcoders-outputs-2026-10-11) | 2026-10-11 | v2.11.0 | #530 (1) |
@@ -62,6 +63,24 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-56 — planning-time exiftool batches on a slow disk (2026-10-16)
+
+Found in the log of the 2026-10-13 scheduled SRGB run of the recompressor
+(`G:\2025`, 10:44–11:11): all nine planning-time marker batches of 3 454 files
+hit the fixed 180 s limit, so those files could not be checked for "another
+origin". Harmless that run (an unreadable marker only skips that check), but a
+fixed limit per 400 files does not scale. Measured on the same disk the next
+day, with nothing else running, a re-run of the same reads finished without a
+timeout: the disk had been several times slower, and a fixed limit cannot tell
+slow from hung. Regression tests: `tests/test_batch_stall.py` (W1–W5 and W7 fail against
+v2.14.0; W8 pins that an error while polling still kills the child).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 537 | **A slow disk made every planning-time marker batch give up.** Each batch of up to 400 paths ran under a fixed wall-clock limit (180 s; 120 s in the decoder's multipage reader); a busy disk pushed batches past it, the reads were reported as failed and the files as "cannot be verified". Nothing was written wrongly, but the checks the batch existed for were skipped. Now a batch is stopped only when exiftool has printed nothing for `EXIFTOOL_BATCH_STALL` seconds (a hang), or after `EXIFTOOL_BATCH_TIMEOUT` seconds in all; a slow disk keeps printing and is left to finish. | all four | ✅ FIXED (`_run_captured(..., stall=)`, the eleven batch sites; settings `EXIFTOOL_BATCH_STALL = 180`, `EXIFTOOL_BATCH_TIMEOUT = 1800`) |
 
 ---
 

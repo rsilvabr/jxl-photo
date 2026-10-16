@@ -187,13 +187,9 @@ D50_PATCH_MODE = "auto"
 # "D50 Illuminant Patch" below.
 # "on"   → Always apply the patch
 # "off"  → Never apply the patch (use original ICC values)
-# "auto" → Only apply if source software matches D50_PATCH_SOFTWARE_LIST
+# "auto" → Only a near-miss illuminant (e.g. Kodak's ProPhoto.icm, Z 0xD32B);
+#          decided from the ICC profile itself, no extra exiftool call
 # Can also be set via --d50-patch CLI argument (on/off/auto)
-
-D50_PATCH_SOFTWARE_LIST = ["capture one", "captureone"]
-# Software names that trigger D50 patch when D50_PATCH_MODE="auto".
-# Case-insensitive matching. Add the software that embeds such a profile.
-# The list is checked against EXIF Software field.
 
 CLEANUP_XMP_ICC_MARKER = False
 # Remove legacy ICC markers from XMP if present.
@@ -217,7 +213,15 @@ CJXL_TIMEOUT = 900
 EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
 # Timeout for each per-file exiftool call (metadata copy, markers, thumbnail).
 # Same patience as the codec: many workers on a busy hard disk can stall a
-# metadata rewrite for minutes. Planning-time batch reads keep their own limit.
+# metadata rewrite for minutes. The planning-time batch reads use the two
+# settings below.
+
+EXIFTOOL_BATCH_STALL = 180
+# A planning-time batch read (up to 400 files per exiftool call) is stopped only
+# after this many seconds with no output from exiftool (a hang).
+EXIFTOOL_BATCH_TIMEOUT = 1800
+# … or after this many seconds in all. A slow disk that keeps printing is left
+# to finish (#537).
 
 TEMP2_DIR = None
 # Staging SSD for output JXLs. Separates read I/O (HDD with TIFFs) from write I/O.
@@ -435,6 +439,19 @@ Options:
                   those old JXLs by hand and sync again. Refused with --delete-source,
                   --delete-skipped or --overwrite. See "Renamed folders and the
                   overwrite guard" in behavior_and_limitations.md
+                  To restamp and sync in one run, use --restamp-then-sync.
+  --restamp-then-sync
+                  The --restamp-moved rewrite, then the run continues as --sync in the
+                  same pass: unchanged photos stay up to date, a TIFF newer than its
+                  JXL is re-encoded. The restamp runs before the overwrite guard, so a
+                  touched-but-unchanged TIFF is not refused. Moved AND edited outputs
+                  are left to the guard, as in a plain sync. It reads the record of
+                  every existing master (one batched exiftool read, a few minutes on a
+                  large library from a hard disk; the guard then reads them again), so
+                  a plain sync that reads none for up-to-date files costs more here.
+                  Opt-in: a sync without the flag never rewrites a record. Refused with
+                  --delete-source, --delete-skipped, --overwrite and --restamp-moved
+                  (exit 2): a record rewritten in this run must never decide a deletion.
   --no-adopt-scan [with --provenance adopt] Skip the decode-and-compare and TRUST the
                   existing pairing, warning per file. The scan is what makes adoption
                   safe rather than a rubber stamp; only defensible when you know the
@@ -473,7 +490,7 @@ Options:
   --encode-tag      Where to record encoding params: xmp (default), software, off
                     ('off' also strips any gen=/cjxl record the source TIFF
                     carries — the only way to deliberately discard the lineage)
-  --d50-patch       D50 illuminant patch: on (always), off (never), auto (detect)
+  --d50-patch       D50 illuminant patch: on (always), off (never), auto (only a near-D50 illuminant, e.g. Kodak's ProPhoto.icm)
   --modular         on/off — force the Modular encoder for LOSSY output (default off:
                     cjxl's VarDCT). Screenshots/graphics only — measured on real
                     photos: equal quality, bigger files, 20-100x slower (see
@@ -672,18 +689,13 @@ Original ICC → Patch D50 bytes → cjxl encoding
 |------|----------|
 | `on` | Always apply D50 patch (forces correction on all files) |
 | `off` | Never apply D50 patch (use original ICC values) |
-| `auto` | Only apply if the EXIF Software matches `D50_PATCH_SOFTWARE_LIST` (default). Reads the Software tag with one exiftool call per TIFF |
+| `auto` | Only a near-miss illuminant (each of X, Y, Z within 4/65536 of the spec bytes, e.g. Kodak's ProPhoto.icm) — decided from the profile itself, no extra exiftool call (default) |
 
-**Default detection list:**
-```python
-D50_PATCH_SOFTWARE_LIST = [
-    "capture one",
-    "captureone",
-    # "my software",  # <-- add more software names here (uncomment to enable)
-]
-```
-
-You can customize this list in the script settings to add other software that embeds such a profile.
+A profile whose illuminant is far from D50 (Capture One's
+`PhaseOne RGB(Trinitron G18 D50).icm`, for one) is left as it is by `auto` and
+counted as "other illuminant"; `on` still overwrites it. Until v2.14.0, `auto`
+decided by the EXIF Software tag instead; that list is gone (see
+[upgrading](upgrading.md)).
 
 ### Summary output
 
@@ -691,8 +703,11 @@ After conversion completes, the script shows D50 patch statistics:
 
 ```
 Done: 42 OK | 0 overwrites | 0 skipped | 0 errors
-D50 patch: 15 applied | 27 skipped (mode: auto)
+D50 patch: 0 applied | 0 skipped (already correct) | 0 needed patch, 42 already correct (mode: auto)
 ```
+
+When a run meets profiles `auto` leaves alone, the line gains
+`| N other illuminant (left as is)`.
 
 This helps you verify that the auto-detection is working correctly for your files.
 
@@ -955,7 +970,7 @@ Mode: 7 | Effort: 7 | Distance: 0.1 | RAM PNG: False | D50: auto | Workers: 16
 Final summary includes D50 patch statistics (when applicable):
 ```
 Done: 42 OK | 0 overwrites | 0 skipped | 0 errors
-D50 patch: 15 applied | 27 skipped (mode: auto)
+D50 patch: 0 applied | 0 skipped (already correct) | 0 needed patch, 42 already correct (mode: auto)
 ```
 
 
@@ -970,7 +985,7 @@ exiftool -XMP-xmp:CreatorTool photo.jxl | findstr "ICC:"
 # Check encoding params (they live in dc:Description)
 exiftool -XMP-dc:Description photo.jxl
 
-# Check EXIF Software (for D50 patch detection)
+# Check EXIF Software (informational; the D50 patch no longer reads it)
 exiftool -Software photo.jxl
 
 # Full JXL info

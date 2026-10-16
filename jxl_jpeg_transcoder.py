@@ -854,8 +854,17 @@ EXIFTOOL_TIMEOUT = CODEC_TIMEOUT
 # markers). Same patience as the codec: with many workers on a busy hard disk
 # a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
 # good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
-# reported as a codec timeout). The planning-time batch reads keep their own
-# per-batch timeout.
+# reported as a codec timeout). The planning-time batch reads use the two
+# EXIFTOOL_BATCH_* settings below instead.
+
+# Planning-time exiftool BATCH reads (markers of up to 400 files per call).
+# A batch is stopped only when exiftool has printed nothing for
+# EXIFTOOL_BATCH_STALL seconds (a hang), or after EXIFTOOL_BATCH_TIMEOUT
+# seconds in all. A slow disk keeps printing and is left to finish: the
+# old fixed 180 s per batch lost every batch of a 2025 library on a busy
+# disk (#537).
+EXIFTOOL_BATCH_STALL = 180
+EXIFTOOL_BATCH_TIMEOUT = 1800
 
 TEMP2_DIR = None
 # Staging directory for output files during conversion
@@ -1066,7 +1075,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False, input=None):
+def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -1080,22 +1089,58 @@ def _run_captured(cmd, timeout, text=False, input=None):
     `input` (bytes) goes to the child's stdin, written from THIS thread:
     communicate() starts reader threads only for PIPE stdout/stderr, never
     for stdin.
+
+    `stall` (seconds) is for the planning-time exiftool BATCH reads (#537):
+    the child is stopped only when its stdout has not grown for `stall`
+    seconds, or after `timeout` seconds in all — a slow disk keeps printing
+    and is left to finish, a hung exiftool prints nothing. Polled with
+    Popen.wait(timeout=1), which starts no thread. Not combinable with
+    `input`.
     """
+    if stall is not None and input is not None:
+        raise ValueError("_run_captured: stall cannot be combined with input")
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
-                           **stdin_kw)
+        if stall is None:
+            r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                               **stdin_kw)
+            rc, o, e = r.returncode, r.stdout, r.stderr
+        else:
+            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            try:
+                started = grew = time.monotonic()
+                size = 0
+                while True:
+                    try:
+                        rc = p.wait(timeout=1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    now = time.monotonic()
+                    cur = os.fstat(out.fileno()).st_size
+                    if cur != size:
+                        size, grew = cur, now
+                    if now - grew >= stall or now - started >= timeout:
+                        raise subprocess.TimeoutExpired(
+                            cmd, stall if now - grew >= stall else timeout)
+            except BaseException:
+                # Like subprocess.run: a timeout, a Ctrl+C or an fstat error
+                # never leaves the child running.
+                p.kill()
+                p.wait()
+                raise
+            o = e = None
         out.seek(0)
         err.seek(0)
-        o = r.stdout if r.stdout is not None else out.read()
-        e = r.stderr if r.stderr is not None else err.read()
+        o = o if o is not None else out.read()
+        e = e if e is not None else err.read()
     if text:
         if isinstance(o, bytes):
             o = o.decode("utf-8", "replace").replace("\r\n", "\n")
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
-    return _CompletedProcess(cmd, r.returncode, o, e)
+    return _CompletedProcess(cmd, rc, o, e)
 
 
 def _stderr_tail(stderr, limit=200):
@@ -1272,7 +1317,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10))
                 argfile = af.name
             r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              180, text=True)
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -1346,7 +1392,8 @@ def _read_derived_markers_batch(paths: list) -> dict:
                 af.write(chr(10))
                 argfile = af.name
             r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              180, text=True)
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
             if not r.stdout:
                 logger.warning(f"Derivative check: could not read markers for a batch "
                                f"of {len(chunk)} file(s) (rc={r.returncode})")

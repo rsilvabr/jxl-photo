@@ -787,6 +787,11 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
                              # Per-file exiftool calls (metadata copy, source
                              # profile read): same patience as the codec — a
                              # busy hard disk can stall them for minutes
+EXIFTOOL_BATCH_STALL = 180   # Planning-time batch reads (up to 400 files per
+                             # call): stopped after this long with no output
+                             # from exiftool (a hang) …
+EXIFTOOL_BATCH_TIMEOUT = 1800  # … or after this long in all; a slow disk that
+                             # keeps printing is left to finish (#537)
 VERIFY_ROUNDTRIP = False     # Pixel comparison before any delete
 DELETE_SOURCE = False        # Delete sources after verification
 DELETE_SKIPPED = False       # Also delete already-archived sources

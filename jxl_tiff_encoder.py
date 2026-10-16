@@ -913,8 +913,17 @@ EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
 # markers). Same patience as the codec: with many workers on a busy hard disk
 # a metadata rewrite can stall for minutes, and the old 15-180 s limits turned
 # good files into errors (2026-10-06: twelve exiftool timeouts in one run, all
-# reported as a codec timeout). The planning-time batch reads keep their own
-# per-batch timeout.
+# reported as a codec timeout). The planning-time batch reads use the two
+# EXIFTOOL_BATCH_* settings below instead.
+
+# Planning-time exiftool BATCH reads (markers of up to 400 files per call).
+# A batch is stopped only when exiftool has printed nothing for
+# EXIFTOOL_BATCH_STALL seconds (a hang), or after EXIFTOOL_BATCH_TIMEOUT
+# seconds in all. A slow disk keeps printing and is left to finish: the
+# old fixed 180 s per batch lost every batch of a 2025 library on a busy
+# disk (#537).
+EXIFTOOL_BATCH_STALL = 180
+EXIFTOOL_BATCH_TIMEOUT = 1800
 
 TEMP2_DIR = None
 # Staging directory for output JXLs during conversion.
@@ -1000,18 +1009,10 @@ D50_PATCH_MODE = "auto"
 # 0xD32B instead of 0xD32D, 2/65536 off; no cjxl failure was ever traced to it.
 # "on"   -> Always apply D50 patch
 # "off"  -> Never apply D50 patch (use original ICC values)
-# "auto" -> Apply only if source software matches D50_PATCH_SOFTWARE_LIST
-#           (one exiftool call per TIFF reads the Software tag)
+# "auto" -> patch only a near-miss illuminant (e.g. Kodak's ProPhoto.icm,
+#           Z 0xD32B); exact profiles and far-off ones are left as they are.
+#           Decided from the ICC bytes; no extra exiftool call.
 # Profiles that already carry the exact bytes come out unchanged in every mode.
-
-D50_PATCH_SOFTWARE_LIST = [
-    "capture one",
-    "captureone",
-    # "my software",  # <-- add more software names here (uncomment to enable)
-]
-# Software names that trigger D50 patch when D50_PATCH_MODE="auto".
-# Case-insensitive matching. Add the software that embeds such a profile.
-# Example: ["capture one", "myapp"] will match "Capture One 23" or "MYAPP Pro"
 
 CLEANUP_XMP_ICC_MARKER = False
 # Remove legacy ICC markers from XMP if present.
@@ -1393,7 +1394,8 @@ LOG_DIR = (Path(os.environ["JXLPHOTO_LOG_DIR"]) if os.environ.get("JXLPHOTO_LOG_
 counter_lock = threading.Lock()
 _counter = {"done": 0, "total": 0}
 _d50_patch_count = {"applied": 0, "skipped": 0, "already_correct": 0, "skipped_needed": 0,
-                    "applied_already_correct": 0, "skipped_already_correct": 0}
+                    "applied_already_correct": 0, "skipped_already_correct": 0,
+                    "other_illuminant": 0}
 # Unique ICC profiles patched (by md5 of the original ICC bytes). The counters
 # above increment per page in multipage splits; this set deduplicates profiles.
 _d50_patched_hashes = set()
@@ -1916,7 +1918,7 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
-def _run_captured(cmd, timeout, text=False, input=None):
+def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
     capture_output=True makes communicate() start two reader threads per call
@@ -1930,22 +1932,58 @@ def _run_captured(cmd, timeout, text=False, input=None):
     `input` (bytes) goes to the child's stdin, written from THIS thread:
     communicate() starts reader threads only for PIPE stdout/stderr, never
     for stdin.
+
+    `stall` (seconds) is for the planning-time exiftool BATCH reads (#537):
+    the child is stopped only when its stdout has not grown for `stall`
+    seconds, or after `timeout` seconds in all — a slow disk keeps printing
+    and is left to finish, a hung exiftool prints nothing. Polled with
+    Popen.wait(timeout=1), which starts no thread. Not combinable with
+    `input`.
     """
+    if stall is not None and input is not None:
+        raise ValueError("_run_captured: stall cannot be combined with input")
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
-                           **stdin_kw)
+        if stall is None:
+            r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
+                               **stdin_kw)
+            rc, o, e = r.returncode, r.stdout, r.stderr
+        else:
+            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            try:
+                started = grew = time.monotonic()
+                size = 0
+                while True:
+                    try:
+                        rc = p.wait(timeout=1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    now = time.monotonic()
+                    cur = os.fstat(out.fileno()).st_size
+                    if cur != size:
+                        size, grew = cur, now
+                    if now - grew >= stall or now - started >= timeout:
+                        raise subprocess.TimeoutExpired(
+                            cmd, stall if now - grew >= stall else timeout)
+            except BaseException:
+                # Like subprocess.run: a timeout, a Ctrl+C or an fstat error
+                # never leaves the child running.
+                p.kill()
+                p.wait()
+                raise
+            o = e = None
         out.seek(0)
         err.seek(0)
-        o = r.stdout if r.stdout is not None else out.read()
-        e = r.stderr if r.stderr is not None else err.read()
+        o = o if o is not None else out.read()
+        e = e if e is not None else err.read()
     if text:
         if isinstance(o, bytes):
             o = o.decode("utf-8", "replace").replace("\r\n", "\n")
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
-    return _CompletedProcess(cmd, r.returncode, o, e)
+    return _CompletedProcess(cmd, rc, o, e)
 
 
 def _stderr_tail(stderr, limit=200):
@@ -1996,33 +2034,6 @@ def extract_exif_raw(tiff_path, tmp_dir):
         return p
     return None
 
-@functools.lru_cache(maxsize=1024)
-def get_exif_software(tiff_path_str):
-    """Extracts Software field from EXIF metadata.
-    Returns software string or empty string if not found.
-    Cached per path: D50 auto-detection calls this once per PAGE, so a
-    split_all scan would otherwise spawn one exiftool per page. Bounded so
-    a huge library scan cannot grow the cache without limit."""
-    tiff_path = Path(tiff_path_str)
-    try:
-        # Use -@ argument file to avoid wildcard expansion issues with brackets in paths
-        with tempfile.TemporaryDirectory(prefix="exiftmp_") as tmp:
-            arg_file = Path(tmp) / "args.txt"
-            arg_file.write_text(f"{_ARGFILE_CHARSET}-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-            r = _run_captured(
-                [_get_exiftool_cmd(), "-@", str(arg_file)], EXIFTOOL_TIMEOUT, text=True
-            )
-        if r.returncode == 0 and r.stdout:
-            stdout = r.stdout.strip()
-            # Parse "Software : Capture One 23" format
-            if " : " in stdout:
-                return stdout.split(" : ", 1)[1].strip()
-            elif ":" in stdout:
-                return stdout.split(":", 1)[1].strip()
-    except Exception:
-        pass
-    return ""
-
 def _is_d50_already_correct(icc_bytes: bytes) -> bool:
     """Check if ICC profile already has correct D50 illuminant values.
     Returns True if D50 bytes are already correct (no patch needed)."""
@@ -2031,7 +2042,20 @@ def _is_d50_already_correct(icc_bytes: bytes) -> bool:
     CORRECT_D50 = bytes.fromhex("0000f6d6000100000000d32d")
     return icc_bytes[68:80] == CORRECT_D50
 
-def should_apply_d50_patch(tiff_path):
+_D50_SPEC = (63190, 65536, 54061)   # 0000F6D6 00010000 0000D32D
+_D50_NEAR_MISS_UNITS = 4
+
+def _d50_near_miss(icc_bytes: bytes) -> bool:
+    """True when the header illuminant is within _D50_NEAR_MISS_UNITS
+    (1/65536 each) of the spec D50 on X, Y and Z but not exact - Kodak's
+    ProPhoto.icm stores Z as 0xD32B. Far-off values are not D50 attempts
+    and are left alone by "auto"."""
+    if len(icc_bytes) < 80 or _is_d50_already_correct(icc_bytes):
+        return False
+    vals = struct.unpack(">iii", bytes(icc_bytes[68:80]))
+    return all(abs(v - s) <= _D50_NEAR_MISS_UNITS for v, s in zip(vals, _D50_SPEC))
+
+def should_apply_d50_patch(icc_bytes):
     """Determine if D50 patch should be applied based on D50_PATCH_MODE setting.
     Returns True if patch should be applied, False otherwise."""
     mode = D50_PATCH_MODE.lower()
@@ -2041,19 +2065,11 @@ def should_apply_d50_patch(tiff_path):
     elif mode == "off":
         return False
     elif mode == "auto":
-        software = get_exif_software(tiff_path).lower()
-        for pattern in D50_PATCH_SOFTWARE_LIST:
-            if pattern.lower() in software:
-                return True
-        return False
+        return _d50_near_miss(icc_bytes)
     else:
         # Invalid mode, default to auto
         logger.warning(f"Invalid D50_PATCH_MODE '{D50_PATCH_MODE}', using 'auto'")
-        software = get_exif_software(tiff_path).lower()
-        for pattern in D50_PATCH_SOFTWARE_LIST:
-            if pattern.lower() in software:
-                return True
-        return False
+        return _d50_near_miss(icc_bytes)
 
 def apply_d50_policy(icc_bytes, tiff_path):
     """Apply the D50 illuminant patch (if policy says so) and update stats.
@@ -2062,7 +2078,7 @@ def apply_d50_policy(icc_bytes, tiff_path):
         return None
     icc = bytearray(icc_bytes)
 
-    if should_apply_d50_patch(tiff_path):
+    if should_apply_d50_patch(bytes(icc)):
         if len(icc) < 80:
             logger.warning(f"ICC profile too short ({len(icc)} bytes) for D50 patch; skipping patch for {Path(tiff_path).name}")
             with _d50_patch_lock:
@@ -2086,9 +2102,16 @@ def apply_d50_policy(icc_bytes, tiff_path):
             if was_correct:
                 _d50_patch_count["already_correct"] += 1
                 _d50_patch_count["skipped_already_correct"] += 1
-            else:
+            elif _d50_near_miss(bytes(icc)):
                 _d50_patch_count["skipped_needed"] += 1
-        logger.debug(f"D50 patch skipped for {Path(tiff_path).name}" + (" (already correct)" if was_correct else " (would have needed patch)"))
+            else:
+                _d50_patch_count["other_illuminant"] += 1
+        if was_correct:
+            logger.debug(f"D50 patch skipped for {Path(tiff_path).name} (already correct)")
+        elif _d50_near_miss(bytes(icc)):
+            logger.debug(f"D50 patch skipped for {Path(tiff_path).name} (would have needed patch)")
+        else:
+            logger.debug(f"D50 patch skipped for {Path(tiff_path).name} (other illuminant, left as is)")
 
     return bytes(icc)
 
@@ -3672,7 +3695,8 @@ def _read_source_markers_batch(outputs: list) -> dict:
                 af.write(chr(10))
                 argfile = af.name
             r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              180, text=True)
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
             if not r.stdout:
                 logger.warning(f"Provenance: could not read markers for a batch of "
                                f"{len(chunk)} file(s) (rc={r.returncode})")
@@ -3787,7 +3811,7 @@ def _rewrite_master_relation(jxl_path: Path, arg_lines: list, expect_src: str):
             pass
 
 
-def _restamp_moved(all_items, dry_run) -> int:
+def _restamp_moved(all_items, dry_run):
     """--restamp-moved: rewrite the jxlphoto-src of masters whose folder was
     renamed or moved, leaving the pixels alone.
 
@@ -3796,11 +3820,19 @@ def _restamp_moved(all_items, dry_run) -> int:
     rewritten through _rewrite_master_relation. Anything that does not match
     on content is listed and left alone: it was renamed AND edited, or it is
     another photo. Nothing is encoded, nothing is deleted, no History entry
-    is written (this is not a conversion)."""
+    is written (this is not a conversion).
+
+    Returns (rc, restamped, failures): rc as --restamp-moved exits with;
+    restamped maps each output Path rewritten (or, in a dry run, to be
+    rewritten) to its new path id; failures lists (tiff, "restamp failed: ...")
+    for every failed rewrite. --restamp-then-sync uses the last two."""
     outs = sorted({j for _t, j, *_ in all_items if j.exists()})
     not_encoded = len({j for _t, j, *_ in all_items}) - len(outs)
+    if outs:
+        logger.info(f"Restamp: reading the provenance record of {len(outs)} existing output(s)...")
     marks = _read_source_markers_batch(outs)
     restamped = already = differs = unmarked = failed = 0
+    restamped_map, failures = {}, []
     _differs_list = []
     _seen = set()
     for t, j, *_rest in all_items:
@@ -3821,6 +3853,7 @@ def _restamp_moved(all_items, dry_run) -> int:
                     if dry_run:
                         logger.info(f" DRY | RESTAMP | {j.name}")
                         restamped += 1
+                        restamped_map[j] = new
                         continue
                     lines = []
                     if info.get("src"):
@@ -3830,13 +3863,16 @@ def _restamp_moved(all_items, dry_run) -> int:
                     if why is None:
                         logger.info(f"RESTAMP | {j.name}: record now names {t}")
                         restamped += 1
+                        restamped_map[j] = new
                     else:
                         logger.error(f"RESTAMP FAILED | {j.name}: {why}")
                         failed += 1
+                        failures.append((str(t), f"restamp failed: {why}"))
                     continue
             except OSError as e:
                 logger.error(f"RESTAMP FAILED | {j.name}: {e}")
                 failed += 1
+                failures.append((str(t), f"restamp failed: {e}"))
                 continue
         differs += 1
         _differs_list.append(str(j))
@@ -3855,7 +3891,7 @@ def _restamp_moved(all_items, dry_run) -> int:
                 f"{already} already correct, {differs} content differs (not touched), "
                 f"{unmarked} without a record (see --provenance adopt), "
                 f"{not_encoded} not encoded yet, {failed} failed")
-    return 1 if failed else 0
+    return (1 if failed else 0), restamped_map, failures
 
 
 def _read_origin_inputs(path):
@@ -4900,7 +4936,8 @@ def _read_group_markers_batch(outputs: list) -> dict:
                 af.write(chr(10))
                 argfile = af.name
             r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              180, text=True)
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
             if not r.stdout:
                 continue
             for entry in json.loads(r.stdout):
@@ -5615,6 +5652,14 @@ def main():
                              "Outputs whose content no longer matches are listed and left "
                              "alone. Refused with --delete-source, --delete-skipped and "
                              "--overwrite.")
+    parser.add_argument("--restamp-then-sync", action="store_true",
+                        help="Like --restamp-moved (rewrite jxlphoto-src of masters whose "
+                             "folder was renamed or moved, when jxlphoto-srcsum still "
+                             "matches the TIFF), then continue as --sync in the same run: "
+                             "unchanged photos stay up to date, newer TIFFs are re-encoded. "
+                             "Reads the record of every existing master. Refused with "
+                             "--delete-source, --delete-skipped, --overwrite and "
+                             "--restamp-moved.")
     parser.add_argument("--no-adopt-scan", action="store_true",
                         help="[with --provenance adopt] Skip the verification and TRUST "
                              "the existing pairing. Much faster on a large library, and "
@@ -5688,7 +5733,8 @@ def main():
                              "'off' records nothing AND strips any existing gen=/cjxl d=/e= "
                              "record from the output — the lineage is deliberately discarded")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
-                        help="D50 illuminant patch: on (always), off (never), auto (detect from software)")
+                        help="D50 illuminant patch: on (always), off (never), auto (only a near-D50 "
+                             "illuminant, e.g. Kodak's ProPhoto.icm)")
     parser.add_argument("--modular",        type=str, default=None, choices=["on", "off"],
                         help="Force the Modular encoder for LOSSY output (default off: cjxl's "
                              "VarDCT). For screenshots/graphics only — measured on real photos: "
@@ -5785,6 +5831,16 @@ def main():
     # only ever sees the script-set value.)
     if TEMP2_DIR:
         _check_dir(TEMP2_DIR, "TEMP2_DIR (staging)")
+
+    # --restamp-then-sync is a sync that fixes the records first: it must be
+    # checked here, and it sets args.sync BEFORE the block below reads it.
+    if args.restamp_then_sync and (args.delete_source or args.delete_skipped
+                                   or args.overwrite or args.restamp_moved):
+        parser.error("--restamp-then-sync cannot be combined with --delete-source, "
+                     "--delete-skipped, --overwrite or --restamp-moved: a record "
+                     "rewritten in this run must not decide a deletion.")
+    if args.restamp_then_sync:
+        args.sync = True
 
     if args.sync:
         OVERWRITE = "smart"
@@ -6258,7 +6314,13 @@ def main():
 
     # --restamp-moved stops here: no preflight, no conversion, no delete.
     if args.restamp_moved:
-        sys.exit(_restamp_moved(all_items, args.dry_run))
+        sys.exit(_restamp_moved(all_items, args.dry_run)[0])
+    # --restamp-then-sync: the same rewrite, BEFORE the overwrite guard below
+    # reads the records, then the run goes on as --sync.
+    _restamped, _restamp_failures = {}, []
+    if args.restamp_then_sync:
+        _rc_restamp, _restamped, _restamp_failures = _restamp_moved(all_items, args.dry_run)
+        failed_files.extend(_restamp_failures)
 
     # Cross-RUN output collision. The guard above only sees collisions inside
     # THIS run; an output written by an earlier run can belong to a different
@@ -6299,6 +6361,10 @@ def main():
             if j not in _existing_set:
                 continue
             info = _marks.get(str(j)) or {"src": None, "srcsum": None}
+            if j in _restamped:
+                # Rewritten (or, in a dry run, about to be) by --restamp-then-sync:
+                # the preview must judge the record the real run will see.
+                info = dict(info, src=_restamped[j])
             if not _strict_guard:
                 _why_x = _foreign_overwrite_reason(info, t, j)
                 if _why_x:
@@ -6510,11 +6576,12 @@ def main():
             # files would not be converted. The EXIT CODE is untouched — a
             # simulation still returns 0, so a scripted dry-run-then-run flow
             # keeps working.
-            errors=analyze_errors + len(provenance_failures),
+            errors=analyze_errors + len(provenance_failures) + len(_restamp_failures),
             log_file=log_file,
             extras={
                 "Thumbnails excluded": _thumbnails_dropped["pages"],
                 "Multipage pages ignored": _multipage_ignored["pages"],
+                "Records restamped (moved folder)": len(_restamped),
             },
             failures=failed_files,
             unreadable=unreadable_files,
@@ -6593,7 +6660,7 @@ def main():
             logger.debug(f"Preflight skipped: {e}")
 
     ok = skipped = overwritten = synced = aborted = 0
-    err = analyze_errors + len(provenance_failures)  # count TIFFs that couldn't be analyzed at planning time
+    err = analyze_errors + len(provenance_failures) + len(_restamp_failures)  # count TIFFs that couldn't be analyzed at planning time
     _reset_abort()  # a fresh run must not inherit a previous one's latch
     _source_identity.clear()
 
@@ -6664,6 +6731,7 @@ def main():
     skipped_needed = _d50_patch_count["skipped_needed"]
     applied_already_correct = _d50_patch_count["applied_already_correct"]
     skipped_already_correct = _d50_patch_count["skipped_already_correct"]
+    other_illuminant = _d50_patch_count["other_illuminant"]
 
     # Total files analyzed for D50 = those where patch was applied + those skipped
     total_analyzed = applied + d50_skipped
@@ -6671,7 +6739,8 @@ def main():
     if total_analyzed > 0:
         if D50_PATCH_MODE == "off":
             # For mode off, we still tracked correctness so user knows how many would have needed patch
-            logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)")
+            logger.info(f"D50 patch: {already_correct} already correct | {skipped_needed} would have needed (mode: off)"
+                        + (f" | {other_illuminant} other illuminant (left as is)" if other_illuminant > 0 else ""))
         else:
             # Files that were actually patched (had wrong D50)
             actually_patched = applied - applied_already_correct
@@ -6681,7 +6750,8 @@ def main():
             # deduplicates pages that share the same ICC.
             unique_profiles = len(_d50_patched_hashes)
             unique_label = f" ({unique_profiles} unique profiles)" if unique_profiles != actually_patched else ""
-            logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})")
+            logger.info(f"D50 patch: {actually_patched} applied{unique_label} | {skipped_already_correct} skipped (already correct) | {total_needed_patch} needed patch, {already_correct} already correct (mode: {D50_PATCH_MODE})"
+                        + (f" | {other_illuminant} other illuminant (left as is)" if other_illuminant > 0 else ""))
 
     if DELETE_SOURCE:
         logger.info(f"Sources DELETED: {_delete_stats['deleted']}"
@@ -6711,6 +6781,7 @@ def main():
             "Sources deleted (already archived)": _delete_stats["deleted_archived"],
             "Sources KEPT by a delete gate": _delete_stats["kept"],
             "Refused (output belongs to another source)": len(provenance_blocked),
+            "Records restamped (moved folder)": len(_restamped),
         },
         failures=failed_files,
         unreadable=unreadable_files,

@@ -627,19 +627,20 @@ class TestReadEncodeParamsBatch:
             {"SourceFile": str(b), "Software": "C1 | cjxl d=0.05 e=9"},
         ]
 
-        def fake_run(cmd, **kwargs):
+        def fake_run(cmd, timeout=None, text=False, input=None, stall=None):
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload),
                                                stderr="")
-        monkeypatch.setattr(rec.subprocess, "run", fake_run)
+        # _run_captured: the batch read's stall path uses Popen, not subprocess.run
+        monkeypatch.setattr(rec, "_run_captured", fake_run)
         info = rec._read_encode_params_batch([a, b])
         assert info[str(a)]["params"] == (0.1, 7)
         assert info[str(b)]["params"] == (0.05, 9)
 
     def test_unreadable_file_is_unknown(self, tmp_path, monkeypatch):
         a = _fake_jxl(tmp_path / "A.jxl")
-        monkeypatch.setattr(rec.subprocess, "run",
-                            lambda cmd, **kw: subprocess.CompletedProcess(
-                                cmd, 1, stdout="", stderr="io error"))
+        monkeypatch.setattr(rec, "_run_captured",
+                            lambda cmd, timeout=None, text=False, input=None, stall=None:
+                            subprocess.CompletedProcess(cmd, 1, stdout="", stderr="io error"))
         info = rec._read_encode_params_batch([a])
         assert info[str(a)]["params"] is None
 

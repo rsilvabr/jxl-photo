@@ -529,7 +529,7 @@ def test_memory_failures_are_recognised(tmp_path, monkeypatch, failure):
     and a bare MemoryError (empty message) by its type name."""
     assert _CJXL_OOM_STDERR.index(b"JxlEncoderProcessOutput") > 200
 
-    def fake(cmd, timeout, text=False):
+    def fake(cmd, timeout, text=False, stall=None):
         if failure == "memoryerror":
             raise MemoryError()
         return subprocess.CompletedProcess(cmd, 1, b"", _CJXL_OOM_STDERR)

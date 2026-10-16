@@ -1,5 +1,21 @@
 # New Features Since v1.0
 
+## v2.15.0 (unreleased)
+
+### The D50 patch's `auto` reads the profile, not the Software tag (encoder)
+
+`--d50-patch auto` decides from the ICC profile itself: it patches a
+near-miss illuminant (Kodak's ProPhoto.icm) and leaves every other profile
+alone, with no exiftool call per TIFF. See the
+[encoder README](README_jxl_tiff_encoder.md#d50-illuminant-patch).
+
+### `--restamp-then-sync`: fix moved records and sync in one run (encoder)
+
+`--restamp-then-sync` runs the `--restamp-moved` rewrite of renamed or moved
+folders, then continues as `--sync` in the same pass, so a scheduled sync needs
+one command. Opt-in; see the
+[encoder README](README_jxl_tiff_encoder.md).
+
 ## v2.11.0 (2026-10-11)
 
 ### The regeneration guard counts the loss before the toolkit (recompressor)

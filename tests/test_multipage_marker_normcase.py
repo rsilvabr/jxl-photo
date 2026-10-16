@@ -41,7 +41,7 @@ def test_multipage_marker_lookup_survives_a_recased_path(monkeypatch, tmp_path, 
                            "Relation": [dec.MULTIPAGE_MARKER_PREFIX + "GRP1",
                                         dec.PAGES_PREFIX + "3",
                                         dec.PAGE_PREFIX + "1"]}])
-    monkeypatch.setattr(dec.subprocess, "run",
+    monkeypatch.setattr(dec, "_run_captured",
                         lambda *a, **k: _FakeRun(stdout=payload, returncode=0))
 
     markers = dec._read_multipage_markers_batch([jxl])

@@ -255,8 +255,15 @@ DJXL_TIMEOUT = 900
 EXIFTOOL_TIMEOUT = DJXL_TIMEOUT
 # Timeout for each per-file exiftool call (metadata copy into the TIFF, tag
 # cleanup). Same patience as the codec: many workers on a busy hard disk can
-# stall a metadata rewrite for minutes. Planning-time batch reads keep their
-# own limit.
+# stall a metadata rewrite for minutes. The planning-time batch reads use the
+# two settings below.
+
+EXIFTOOL_BATCH_STALL = 180
+# A planning-time batch read (up to 400 files per exiftool call) is stopped only
+# after this many seconds with no output from exiftool (a hang).
+EXIFTOOL_BATCH_TIMEOUT = 1800
+# … or after this many seconds in all. A slow disk that keeps printing is left
+# to finish (#537).
 
 TEMP2_DIR = None
 # Staging SSD for output TIFFs. Separates read I/O (HDD with JXLs) from write I/O.

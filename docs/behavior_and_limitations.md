@@ -69,6 +69,7 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 - **You sync, and you rename or move folders anywhere on the path to the photo** (an event folder, a year folder, a drive letter) — and you never delete sources with the toolkit: turn the guard off. CLI `--no-overwrite-guard`, `OVERWRITE_GUARD = False` at the top of the script, or "Overwrite guard: off" in the wizard (saved in the preset). Each overwrite it would have refused is logged.
 - **You keep your folder names stable** — typical with Lightroom, whose catalog tracks folders by path: keep the default.
 - **You keep the guard on but renamed a folder:** before re-editing any photo in it, run the encoder once with `--restamp-moved` on that folder. It rewrites the path record of every master whose TIFF is unchanged, in seconds, without re-encoding (file dates kept, so derivative runs do not redo them). Masters whose TIFF was already edited are listed: delete those old JXLs by hand (the TIFF is kept) and sync again.
+- **A scheduled sync can do this on every run:** `--restamp-then-sync` restamps the unchanged masters first and then syncs in the same pass (opt-in; it reads the record of every existing master, and it is refused with any deletion).
 
 **Never with deletion:** `--no-overwrite-guard` together with `--delete-source` is refused (exit 2).
 

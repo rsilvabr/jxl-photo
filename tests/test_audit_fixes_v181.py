@@ -107,7 +107,9 @@ def test_marker_batch_uses_argfile(monkeypatch, tmp_path):
             return _FakeRun(stdout="[]")
         return _FakeRun()
 
-    monkeypatch.setattr(dec.subprocess, "run", fake_run)
+    monkeypatch.setattr(dec, "_run_captured",
+                        lambda cmd, timeout, text=False, input=None, stall=None:
+                        fake_run(cmd, timeout=timeout, text=text))
     dec._read_multipage_markers_batch(jxls)
     assert calls and calls[0][1] == "-@"
     # argfile was cleaned up

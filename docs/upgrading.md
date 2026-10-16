@@ -11,6 +11,19 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.15.0: the D50 patch decides by the profile
+
+Nothing to check for the usual setup. `--d50-patch auto` (and `D50_PATCH_MODE
+= "auto"`, the default) now looks at the ICC profile instead of the EXIF
+Software tag:
+
+- It patches only a near-miss illuminant (Kodak's ProPhoto.icm, which Capture
+  One and other programs embed). No exiftool call per TIFF any more.
+- A TIFF from another program carrying that profile now gets the same
+  normalisation as a Capture One one. The change is invisible.
+- `D50_PATCH_SOFTWARE_LIST` is gone. An edited copy of the encoder that sets it
+  just stops using it.
+
 ## v2.14.0: the overwrite guard can be turned off
 
 Nothing to check: the guard stays ON unless you turn it off. If you rename or

@@ -142,9 +142,9 @@ class _FakeExiftoolRun:
 
 def _batch(monkeypatch, entries):
     run = _FakeExiftoolRun(json.dumps(entries))
-    monkeypatch.setattr(rec, "subprocess", type(
-        "S", (), {"run": staticmethod(lambda *a, **k: run),
-                  "TimeoutExpired": subprocess.TimeoutExpired}))
+    # The batch read goes through _run_captured (the stall path uses Popen,
+    # not subprocess.run) — stub the function the reader calls.
+    monkeypatch.setattr(rec, "_run_captured", lambda *a, **k: run)
     monkeypatch.setattr(rec, "_get_exiftool_cmd", lambda: "exiftool")
     return rec._read_encode_params_batch(["NOFILE.jxl"])
 

@@ -466,9 +466,8 @@ def test_read_encode_params_batch_unions_desc_and_software(monkeypatch):
         "Description": "caption | cjxl d=0.2 e=7",
         "Software": "prior tool | cjxl d=0.8 e=6",
     }]))
-    monkeypatch.setattr(rec, "subprocess", type(
-        "S", (), {"run": staticmethod(lambda *a, **k: run),
-                  "TimeoutExpired": subprocess.TimeoutExpired}))
+    # _run_captured, not subprocess.run: the batch read's stall path uses Popen.
+    monkeypatch.setattr(rec, "_run_captured", lambda *a, **k: run)
     monkeypatch.setattr(rec, "_get_exiftool_cmd", lambda: "exiftool")
     info = rec._read_encode_params_batch(["NOFILE.jxl"])
     # The LAST entry of the MERGED chain is the current file's parameters.

@@ -148,7 +148,7 @@ def test_marker_batch_keeps_results_when_exiftool_exits_nonzero(monkeypatch, tmp
                   dec.MULTIPAGE_MARKER_PREFIX))
 
     # exiftool exits 1 because of `bad`, but still prints JSON for `good`.
-    monkeypatch.setattr(dec.subprocess, "run",
+    monkeypatch.setattr(dec, "_run_captured",
                         lambda *a, **k: _FakeRun(stdout=payload, returncode=1))
 
     markers = dec._read_multipage_markers_batch([good, bad])
@@ -160,7 +160,7 @@ def test_marker_batch_gives_up_only_when_stdout_is_empty(monkeypatch, tmp_path):
     j = tmp_path / "a.jxl"
     j.write_bytes(b"\x00")
     dec.setup_logger()
-    monkeypatch.setattr(dec.subprocess, "run",
+    monkeypatch.setattr(dec, "_run_captured",
                         lambda *a, **k: _FakeRun(stdout="", returncode=1))
     markers = dec._read_multipage_markers_batch([j])
     assert markers[str(j)]["group"] is None

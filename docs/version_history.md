@@ -65,6 +65,36 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.15.0
+
+**Unreleased.**
+
+### The D50 patch's `auto` decides by the profile (encoder)
+
+`--d50-patch auto` no longer reads the EXIF Software tag (one exiftool call
+per TIFF). It patches only a near-miss illuminant — Kodak's ProPhoto.icm,
+whose Z is off by 2/65536 — decided from the ICC bytes already in memory. A
+profile far from D50 (Capture One's `PhaseOne RGB(Trinitron G18 D50).icm`) is
+left as it is and counted as "other illuminant". `D50_PATCH_SOFTWARE_LIST` is
+removed. See [upgrading](upgrading.md#v2150-the-d50-patch-decides-by-the-profile).
+
+### Fixes
+
+- On a very busy disk the planning phase could give up reading the markers of a
+  large library, and skip the provenance check for those files. A batch now
+  stops only when exiftool stops responding, not after a fixed time (all four scripts,
+  [#537](bug_tracking_since_v1.0.md#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16)).
+
+### `--restamp-then-sync` (encoder)
+
+A scheduled sync can fix the records of renamed folders and sync in the same
+run: `--restamp-then-sync` does the `--restamp-moved` rewrite first and then
+continues as `--sync`. It is opt-in, reads the record of every existing master,
+and is refused with `--delete-source`, `--delete-skipped`, `--overwrite` and
+`--restamp-moved`.
+
+---
+
 ## v2.14.0
 
 **Released 2026-10-13.** Supersedes v2.13.0. Renamed folders no longer have to

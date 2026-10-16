@@ -71,7 +71,7 @@ def _slow_disk(monkeypatch, secs_per_batch):
     clock = {"t": 1000.0}
     calls = []
 
-    def fake_run(cmd, timeout, text=False, input=None):
+    def fake_run(cmd, timeout, text=False, input=None, stall=None):
         calls.append(cmd)
         clock["t"] += secs_per_batch
         return rec._CompletedProcess(cmd, 0, "[]", "")

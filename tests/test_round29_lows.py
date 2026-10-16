@@ -61,7 +61,7 @@ def test_marker_lookup_survives_a_recased_path(mod, tmp_path, monkeypatch):
         stdout = __import__("json").dumps(payload)
         stderr = ""
 
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _R())
+    monkeypatch.setattr(mod, "_run_captured", lambda *a, **k: _R())
     got = mod._read_source_markers_batch([out])[str(out)]
     assert got == {"src": "abc123", "srcsum": "def456"}
 

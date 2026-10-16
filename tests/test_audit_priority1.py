@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Regressions for the priority-1 audit fixes:
 
-  * E1/E2 — FALSE POSITIVES (kept as locking tests): the audit suspected the
-    exiftool `-s` output was a bare value breaking get_exif_software and
-    read_existing_creator_tool. Proven wrong against real exiftool + a real
-    Capture One TIFF: single `-s` still prints "Tag : value", the parse was
-    correct, and D50 "auto" already fired. No code change; tests pin the
-    real output format.
+  * E1/E2 — removed in v2.15.0: D50 "auto" no longer reads the EXIF Software
+    tag (it decides from the ICC bytes; see tests/test_d50_by_bytes.py), so
+    the get_exif_software locking tests left with the function.
   * W3 — the children's argparse accepts unambiguous abbreviations
     (allow_abbrev=True), so `--delete-s` deletes sources exactly like
     `--delete-source`, but _flags_request_delete only matched the full
@@ -55,36 +52,9 @@ def _args(tmp_path, **kw):
 
 
 # ---------------------------------------------------------------------------
-# E1/E2 — LOCKING tests (the audit's suspected bug here was a FALSE POSITIVE,
-# proven against real exiftool + a real Capture One TIFF): exiftool with a
-# single -s still prints "Tag Name        : value" (only -s -s -s prints the
-# bare value), so the " : " parse was already correct and D50 "auto" already
-# fired. These tests pin the REAL output format so a future "simplification"
-# of the parser (or a switch to -s -s -s in the argfile) gets caught.
+# E2 — the " : " parse of a single exiftool -s read (still real: the
+# CreatorTool reader below relies on it).
 # ---------------------------------------------------------------------------
-
-def _stub_exiftool_value(monkeypatch, value):
-    monkeypatch.setattr(enc, "_get_exiftool_cmd", lambda: "exiftool")
-    monkeypatch.setattr(enc, "subprocess",
-                        SimpleNamespace(run=lambda *a, **k: SimpleNamespace(
-                            returncode=0, stdout=value, stderr="")))
-    enc.get_exif_software.cache_clear()
-
-
-def test_get_exif_software_parses_real_s_output(monkeypatch):
-    """Verified against ExifTool 13.x: single -s pads the tag name and keeps
-    the " : " separator."""
-    _stub_exiftool_value(monkeypatch,
-                         "Software                        : Capture One Windows\n")
-    assert enc.get_exif_software("photo.tif") == "Capture One Windows"
-
-
-def test_d50_auto_fires_for_capture_one_software(monkeypatch):
-    _stub_exiftool_value(monkeypatch,
-                         "Software                        : Capture One Windows\n")
-    monkeypatch.setattr(enc, "D50_PATCH_MODE", "auto")
-    assert enc.should_apply_d50_patch("photo.tif") is True
-
 
 def test_read_existing_creator_tool_preserves_icc_prefix(monkeypatch, tmp_path):
     """Real -s output of an "ICC:<base64>" CreatorTool is

@@ -158,7 +158,7 @@ def test_run_cjxl_full_limits_concurrency(monkeypatch):
     lock = threading.Lock()
     state = {"cur": 0, "max": 0}
 
-    def fake(cmd, timeout, text=False, input=None):
+    def fake(cmd, timeout, text=False, input=None, stall=None):
         with lock:
             state["cur"] += 1
             state["max"] = max(state["max"], state["cur"])
@@ -190,7 +190,7 @@ def test_run_cjxl_full_limits_concurrency(monkeypatch):
 
 def test_run_cjxl_full_releases_on_error(monkeypatch):
     """A failed encode must release its slot: three in a row cannot deadlock."""
-    def fake(cmd, timeout, text=False, input=None):
+    def fake(cmd, timeout, text=False, input=None, stall=None):
         raise subprocess.TimeoutExpired(cmd, 1)
 
     monkeypatch.setattr(rec, "_run_captured", fake)
@@ -307,7 +307,7 @@ def test_real_run_overlaps_side_steps_with_one_cjxl_slot(
     state = {"cur": 0, "max": 0}
     intervals = []
 
-    def spy(cmd, timeout, text=False, input=None):
+    def spy(cmd, timeout, text=False, input=None, stall=None):
         exe = Path(str(cmd[0])).stem.lower()
         full = exe == "cjxl" and "probe" not in str(cmd[1])
         t0 = time.monotonic()
@@ -316,7 +316,7 @@ def test_real_run_overlaps_side_steps_with_one_cjxl_slot(
                 state["cur"] += 1
                 state["max"] = max(state["max"], state["cur"])
         try:
-            return real(cmd, timeout, text=text, input=input)
+            return real(cmd, timeout, text=text, input=input, stall=stall)
         finally:
             if full:
                 time.sleep(0.4)
