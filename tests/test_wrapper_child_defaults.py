@@ -387,7 +387,8 @@ _LITERAL_FALLBACK = re.compile(
     r"depth_policy|compression|bit_depth|d50_patch|encode_tag|provenance)"
     r"""['")]*\)?\s+or\s+['"0-9]""")
 _LITERAL_GET = re.compile(
-    r"""\.get\('(compression|bit_depth|add_preview|d50_patch|encode_tag)',\s*['"0-9TF]""")
+    r"""\.get\('(compression|bit_depth|add_preview|d50_patch|encode_tag|effort|quality)',\s*['"0-9TF]"""
+    r"""|\.get\('distance',\s*0\.1""")
 
 
 def test_no_literal_default_for_a_child_option():
@@ -395,3 +396,52 @@ def test_no_literal_default_for_a_child_option():
     hits = [f"{i}: {line.strip()}" for i, line in enumerate(src.splitlines(), 1)
             if _LITERAL_FALLBACK.search(line) or _LITERAL_GET.search(line)]
     assert hits == []
+
+
+# ---------------------------------------------------------------------------
+# v2.15.0: distance / effort / quality on the child's command line follow the
+# child's settings when the run carries no value of its own (the builders had
+# literal 0.1 / 7 / 95 fallbacks), and a PNG output gets no --quality.
+# ---------------------------------------------------------------------------
+
+def _entry(menu, script, origin, dest, workflow):
+    return menu._build_manifest_entry_cmd(
+        script=script, source=str(Path("F:/lib")), dest_path=str(Path("F:/out")),
+        mode=1, origin=origin, dest=dest, workers=2,
+        workflow=dict({"mode_config": {}}, **workflow), advanced={})
+
+
+def test_encoder_distance_and_effort_follow_the_encoder(menu, monkeypatch):
+    # 0 is lossless: a real value, not "unset" (the `value or fallback` trap)
+    monkeypatch.setattr(enc, "CJXL_DISTANCE", 0)
+    monkeypatch.setattr(enc, "CJXL_EFFORT", 5)
+    cmd = _entry(menu, "jxl_tiff_encoder.py", "tiff", "jxl", {})
+    assert _flag(cmd, "--distance") == "0"
+    assert _flag(cmd, "--effort") == "5"
+
+
+def test_recompressor_effort_follows_the_recompressor(menu, monkeypatch):
+    monkeypatch.setattr(rec, "CJXL_EFFORT", 3)
+    cmd = _entry(menu, "jxl_recompressor.py", "jxl", "jxl", {"distance": 1.0})
+    assert _flag(cmd, "--effort") == "3"
+
+
+def test_jpeg_quality_and_effort_follow_the_transcoder(menu, monkeypatch):
+    monkeypatch.setattr(tra, "JPEG_DEFAULT_QUALITY", 80)
+    monkeypatch.setattr(tra, "CJXL_EFFORT", 4)
+    cmd = _entry(menu, "jxl_jpeg_transcoder.py", "jxl", "jpeg",
+                 {"conversion_type": "jxl_to_jpeg_force"})
+    assert _flag(cmd, "--quality") == "80"
+    assert _flag(cmd, "--effort") == "4"
+
+
+def test_png_output_gets_no_quality(menu):
+    cmd = _entry(menu, "jxl_jpeg_transcoder.py", "jxl", "png",
+                 {"conversion_type": "jxl_to_png", "quality": 90})
+    assert "--quality" not in cmd
+
+
+def test_lossy_jpeg_to_jxl_without_a_distance_leaves_the_transcoder_default(menu):
+    cmd = _entry(menu, "jxl_jpeg_transcoder.py", "jpeg", "jxl",
+                 {"conversion_type": "convert_lossy"})
+    assert "--from-jpeg" in cmd and "--distance" not in cmd

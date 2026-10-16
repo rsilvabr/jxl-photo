@@ -2354,6 +2354,8 @@ _CHILD_OPTION_DEFAULTS = {
         'use_ram': ('USE_RAM_FOR_PNG', True),
         'provenance': ('PROVENANCE_CHECK', 'path'),
         'overwrite_guard': ('OVERWRITE_GUARD', True),
+        'distance': ('CJXL_DISTANCE', 0.1),
+        'effort': ('CJXL_EFFORT', 7),
     },
     'jxl_tiff_decoder': {
         'thumbnail_handling': ('THUMBNAIL_HANDLING', 'include'),
@@ -2370,13 +2372,28 @@ _CHILD_OPTION_DEFAULTS = {
         'bit_depth': ('PNG_DEFAULT_BIT_DEPTH', 16),
         'provenance': ('PROVENANCE_CHECK', 'path'),
         'overwrite_guard': ('OVERWRITE_GUARD', True),
+        'quality': ('JPEG_DEFAULT_QUALITY', 95),
+        'effort': ('CJXL_EFFORT', 7),
     },
     'jxl_recompressor': {
         'distance': ('CJXL_DISTANCE', 1.0),
+        'effort': ('CJXL_EFFORT', 7),
         'provenance': ('PROVENANCE_CHECK', 'path'),
         'overwrite_guard': ('OVERWRITE_GUARD', True),
     },
 }
+
+
+def _child_number_setting(module: str, name: str, fallback):
+    """_child_setting for a NUMBER: 0 is a real value (CJXL_DISTANCE = 0 is
+    lossless), not "unset" — `value if value else fallback` would replace it
+    with the fallback."""
+    try:
+        mod = importlib.import_module(module)
+    except Exception:
+        return fallback
+    value = getattr(mod, name, None)
+    return fallback if value is None else value
 
 
 def _child_default(module: str, option: str):
@@ -2385,7 +2402,16 @@ def _child_default(module: str, option: str):
     name, fallback = _CHILD_OPTION_DEFAULTS[module][option]
     if isinstance(fallback, bool):
         return _child_bool_setting(module, name, fallback)
+    if isinstance(fallback, (int, float)):
+        return _child_number_setting(module, name, fallback)
     return _child_setting(module, name, fallback)
+
+
+def _workflow_or_child(workflow: Dict, key: str, module: str):
+    """The run's own answer for `key`, else the child script's setting —
+    never a literal copy of the shipped default."""
+    value = workflow.get(key)
+    return value if value is not None else _child_default(module, key)
 
 
 def _child_module(origin: str, dest: str) -> str:
@@ -4840,7 +4866,7 @@ class InteractiveMenu:
             workflow['workers'] = max(1, min(workers, 32))
 
             if origin == 'tiff' and dest == 'jxl':
-                q = workflow.get('distance', 0.1)
+                q = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
                 console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
                 console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
 
@@ -4940,7 +4966,7 @@ class InteractiveMenu:
 
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
             if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                quality = IntPrompt.ask("Quality (1-100)", default=workflow.get('quality', 95))
+                quality = IntPrompt.ask("Quality (1-100)", default=_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))
                 workflow['quality'] = max(1, min(quality, 100))
 
             # ICC conversion applies to both JPEG and PNG outputs
@@ -5058,7 +5084,7 @@ class InteractiveMenu:
             workflow['workers'] = max(1, min(int(workers), 32)) if workers.isdigit() else workflow['workers']
 
             if origin == 'tiff' and dest == 'jxl':
-                print(f"Distance: {workflow.get('distance', 0.1):.2f} (set in Step 2)")
+                print(f"Distance: {_workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder'):.2f} (set in Step 2)")
                 print(f"Effort: {workflow['effort']} (set in Step 2)")
             elif origin == 'jxl' and dest == 'tiff':
                 # No effort parameter for JXL decoding - djxl doesn't use it
@@ -5137,7 +5163,7 @@ class InteractiveMenu:
 
             # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
             if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                quality = input(f"Quality (1-100) [{workflow.get('quality', 95)}]: ").strip()
+                quality = input(f"Quality (1-100) [{_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')}]: ").strip()
                 if quality.isdigit():
                     workflow['quality'] = max(1, min(int(quality), 100))
 
@@ -5926,7 +5952,7 @@ class InteractiveMenu:
             elif origin == 'jxl' and dest == 'jpeg':
                 # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
                 if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                    table.add_row("Quality:", str(workflow.get('quality', 95)))
+                    table.add_row("Quality:", str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')))
             elif origin == 'jxl' and dest == 'tiff':
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get(
@@ -6010,7 +6036,7 @@ class InteractiveMenu:
             elif origin == 'jxl' and dest == 'jpeg':
                 # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
                 if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                    print(f"Quality: {workflow.get('quality', 95)}")
+                    print(f"Quality: {_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')}")
             elif origin == 'jxl' and dest == 'tiff':
                 # JXL->TIFF: show preview option
                 preview_status = "Yes" if workflow.get(
@@ -7861,9 +7887,9 @@ class InteractiveMenu:
                                                        at_most_once=True)
 
         if origin == 'tiff' and dest == 'jxl':
-            distance = workflow.get('distance', 0.1)
+            distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
             cmd.extend(['--distance', str(distance)])
-            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_tiff_encoder'))])
 
             if workflow.get('use_ram'):
                 cmd.append('--ram')
@@ -7949,8 +7975,8 @@ class InteractiveMenu:
 
         elif origin == 'jxl' and dest == 'jxl':
             # JXL -> JXL recompressor
-            cmd.extend(['--distance', str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))])
-            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+            cmd.extend(['--distance', str(_workflow_or_child(workflow, 'distance', 'jxl_recompressor'))])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_recompressor'))])
 
             if _recompress_entry_in_place(source, dest_path, mode):
                 # In-place entry: replaces the sources. The wrapper charged
@@ -8022,7 +8048,8 @@ class InteractiveMenu:
                 # see the wizard path for why)
                 cmd.append('--force-convert')
                 cmd.append('--from-jpeg')
-                cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+                if workflow.get('distance') is not None:
+                    cmd.extend(['--distance', str(workflow['distance'])])
             elif conv_type == 'jxl_to_jpeg_auto':
                 # JXL->JPEG: auto-detect per-file, restricted to .jxl inputs
                 # (see the wizard path for why --from-jxl is required).
@@ -8040,11 +8067,12 @@ class InteractiveMenu:
                 cmd.append('--force-convert')
                 cmd.append('--decode')
 
-            # Add quality for JXL->JPEG/PNG (used in convert mode)
-            if origin == 'jxl' and dest in ['jpeg', 'png']:
-                cmd.extend(['--quality', str(workflow.get('quality', 95))])
+            # Quality for JXL->JPEG (a PNG output has none: the transcoder
+            # ignores it there)
+            if origin == 'jxl' and dest == 'jpeg':
+                cmd.extend(['--quality', str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))])
 
-            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_jpeg_transcoder'))])
 
             if workflow.get('icc_profile'):
                 cmd.extend(['--icc-profile', workflow['icc_profile']])
@@ -8531,9 +8559,9 @@ class InteractiveMenu:
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
                     cmd.insert(3, output_dir)
 
-            distance = workflow.get('distance', 0.1)
+            distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
             cmd.extend(['--distance', str(distance)])
-            cmd.extend(['--effort', str(workflow['effort'])])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_tiff_encoder'))])
 
             if workflow.get('use_ram'):
                 cmd.append('--ram')
@@ -8692,8 +8720,8 @@ class InteractiveMenu:
                     # ("unrecognized arguments", gh-59317). Same order as the manifest path.
                     cmd.insert(3, output_dir)
 
-            cmd.extend(['--distance', str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))])
-            cmd.extend(['--effort', str(workflow.get('effort', 7))])
+            cmd.extend(['--distance', str(_workflow_or_child(workflow, 'distance', 'jxl_recompressor'))])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_recompressor'))])
 
             if advanced.get('on_downgrade'):
                 cmd.extend(['--on-downgrade', advanced['on_downgrade']])
@@ -8801,7 +8829,8 @@ class InteractiveMenu:
                 # delete) PNG files found in the folder.
                 cmd.append('--force-convert')
                 cmd.append('--from-jpeg')
-                cmd.extend(['--distance', str(workflow.get('distance', 1.0))])
+                if workflow.get('distance') is not None:
+                    cmd.extend(['--distance', str(workflow['distance'])])
             elif conv_type == 'jxl_to_jpeg_auto':
                 # JXL->JPEG: auto-detect per-file. MUST pass --from-jxl so the
                 # transcoder's auto mode only processes .jxl files — otherwise
@@ -8823,11 +8852,12 @@ class InteractiveMenu:
                 cmd.append('--decode')
             # Note: --format is added later based on dest, no need to duplicate here
             
-            # Add quality for JXL->JPEG/PNG (used in convert mode)
-            if origin == 'jxl' and dest in ['jpeg', 'png']:
-                cmd.extend(['--quality', str(workflow.get('quality', 95))])
+            # Quality for JXL->JPEG (a PNG output has none: the transcoder
+            # ignores it there)
+            if origin == 'jxl' and dest == 'jpeg':
+                cmd.extend(['--quality', str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))])
 
-            cmd.extend(['--effort', str(workflow['effort'])])
+            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_jpeg_transcoder'))])
 
             if workflow.get('icc_profile'):
                 cmd.extend(['--icc-profile', workflow['icc_profile']])
@@ -9585,10 +9615,10 @@ def _main():
                 dest = workflow['dest_format']
 
                 if origin == 'tiff' and dest == 'jxl':
-                    saved_distance = workflow.get('distance') if workflow.get('distance') is not None else 0.1
+                    saved_distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
                     saved_quality = None
                 elif 'lossy' in workflow['conversion_type'] or workflow['conversion_type'] in ('jxl_to_jpeg_force', 'jxl_to_jpeg_auto'):
-                    saved_quality = workflow.get('quality') if workflow.get('quality') is not None else 95
+                    saved_quality = _workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')
                     # Lossy JXL encode also uses distance; preserve it for repeat
                     saved_distance = workflow.get('distance')
                 elif workflow['conversion_type'] == 'jxl_recompress':

@@ -84,6 +84,10 @@ removed. See [upgrading](upgrading.md#v2150-the-d50-patch-decides-by-the-profile
   large library, and skip the provenance check for those files. A batch now
   stops only when exiftool stops responding, not after a fixed time (all four scripts,
   [#537](bug_tracking_since_v1.0.md#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16)).
+- The wizard no longer passes a JPEG quality to PNG outputs, and when a run
+  carries no distance, effort or quality of its own it now uses the scripts'
+  settings instead of a copy of their shipped values (wrapper,
+  [#538](bug_tracking_since_v1.0.md#round-57--the-wrappers-last-literal-fallbacks-2026-10-16)).
 
 ### `--restamp-then-sync` (encoder)
 

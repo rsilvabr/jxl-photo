@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #538.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #539.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |
 | [Round-56 — planning-time exiftool batches on a slow disk](#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16) | 2026-10-16 | v2.15.0 | #537 (1) |
 | [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#536 (5) |
 | [Round-54 — the recompressor doubled the lists it appended to](#round-54--the-recompressor-doubled-the-lists-it-appended-to-2026-10-13) | 2026-10-13 | v2.13.0 | #531 (1) |
@@ -63,6 +64,23 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-57 — the wrapper's last literal fallbacks (2026-10-16)
+
+Found by the v2.15.0 wrapper flag survey
+(`AI_tools/261016_DeepSeek_report_wrapper-flag-survey.md`). Harmless in
+practice: a wizard run and a preset always carry the wrapper's own quality,
+effort and distance (menu option 4, unchanged on purpose since #528), so the
+fallbacks were almost never reached, and a PNG output ignores `--quality`.
+Regression tests: the five v2.15.0 tests at the end of
+`tests/test_wrapper_child_defaults.py` (plus the extended literal scan) fail
+against the v2.14.0 wrapper via `JXLPHOTO_SCRIPTS_UNDER_TEST`.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 538 | **The command builders still had literal fallbacks, and a numeric setting of 0 read as "unset".** With no value in the run, the wrapper sent `--distance 0.1` / `--effort 7` to the encoder, `--effort 7` to the recompressor, `--quality 95` / `--effort 7` and `--distance 1.0` to the transcoder, and saved 0.1 / 95 into a preset — literal copies of the scripts' settings. `--quality` also went to JXL → PNG runs, where it does nothing. And `_child_default` read a setting through `value if value else fallback`, so `CJXL_DISTANCE = 0` (lossless) in the recompressor showed up in the wizard as 1.0. | wrapper | ✅ FIXED (`_workflow_or_child`: the run's value, else the script's setting through `_CHILD_OPTION_DEFAULTS`, which gains the encoder's distance/effort, the recompressor's effort and the transcoder's quality/effort; numeric settings read through `_child_number_setting`, where 0 is a value; `--quality` only for JPEG; the transcoder's lossy distance is omitted when the run has none, so its own default applies) |
 
 ---
 
