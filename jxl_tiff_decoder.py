@@ -899,6 +899,29 @@ def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
     return False
 
 
+def _provenance_proves_archive(info: dict, src_paths, mode_check: str) -> bool:
+    """The DELETE-side proof for a source whose conversion was SKIPPED: the
+    existing output must be an archive of the source's CURRENT bytes.
+
+    `_provenance_ok` answers "may this run overwrite that output?", where the
+    recorded location is enough. Deleting a source on the strength of an output
+    this run never wrote needs more: a source replaced in place by a different
+    file with an older date (a restored backup, a copy that kept its
+    timestamps) still matches the recorded path, smart sync skips it, and the
+    gate deleted the only copy of the new version. So the recorded `srcsum`
+    must also match the source as it is now; an output without one proves
+    nothing. Fail closed: an unreadable source keeps it.
+    """
+    if not _provenance_ok(info, src_paths, mode_check):
+        return False
+    if not info.get("srcsum"):
+        return False
+    try:
+        return info["srcsum"] == _file_content_id(src_paths)
+    except OSError:
+        return False
+
+
 def _provenance_marker_args(src_paths):
     """exiftool argfile lines recording WHICH source made an output."""
     first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
@@ -3748,11 +3771,27 @@ def process_group(group_tasks, workers, target_icc=None):
             # a marker pointing at DIFFERENT sources — or no marker at all,
             # or an unreadable one — must never certify a deletion, no
             # matter how fresh its mtime looks. Fail closed: keep the sources.
+            # A matching PATH is not enough either: a JXL replaced in place
+            # by an older-dated different file still matches it, and the
+            # stale TIFF deleted the new JXL — its srcsum must match too.
             if was_skipped:
                 _skip_info = (_skip_marks.get(str(final_tiff))
                               or {"src": None, "srcsum": None})
-                if not _provenance_ok(_skip_info, [e[0] for e in task["entries"]],
-                                      PROVENANCE_CHECK):
+                _skip_srcs = [e[0] for e in task["entries"]]
+                if (_provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK)
+                        and not _provenance_proves_archive(_skip_info, _skip_srcs,
+                                                           PROVENANCE_CHECK)):
+                    _delete_stats["kept"] += (len(task["entries"])
+                                              + len(task.get("ignored_thumbs", [])))
+                    logger.warning(
+                        f" KEPT {len(task['entries'])} source(s) | "
+                        f"{task['main_jxl'].name} | "
+                        f"the existing {final_tiff.name} was decoded from an "
+                        f"EARLIER version of these sources (their bytes no "
+                        f"longer match its jxlphoto-srcsum) — it cannot prove "
+                        f"the sources are archived; re-decode with --overwrite")
+                    continue
+                if not _provenance_ok(_skip_info, _skip_srcs, PROVENANCE_CHECK):
                     _delete_stats["kept"] += (len(task["entries"])
                                               + len(task.get("ignored_thumbs", [])))
                     logger.warning(
@@ -5471,7 +5510,16 @@ Examples:
                 _proven = []
                 for t in _would_delete:
                     _info = _marks.get(str(t["final_tiff"])) or {"src": None, "srcsum": None}
-                    if _provenance_ok(_info, [e[0] for e in t["entries"]], PROVENANCE_CHECK):
+                    _srcs = [e[0] for e in t["entries"]]
+                    if (_provenance_ok(_info, _srcs, PROVENANCE_CHECK)
+                            and not _provenance_proves_archive(_info, _srcs,
+                                                               PROVENANCE_CHECK)):
+                        # The gate's srcsum check, previewed.
+                        _would_keep.append((t["main_jxl"],
+                                            "existing TIFF was decoded from an "
+                                            "earlier version of this source",
+                                            len(t["entries"])))
+                    elif _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
                         _edited = _decoded_tiff_edited(t["final_tiff"])
                         if _edited:
                             # The gate's D5 check, previewed.

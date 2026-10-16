@@ -3778,6 +3778,29 @@ def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
     return False
 
 
+def _provenance_proves_archive(info: dict, src_paths, mode_check: str) -> bool:
+    """The DELETE-side proof for a source whose conversion was SKIPPED: the
+    existing output must be an archive of the source's CURRENT bytes.
+
+    `_provenance_ok` answers "may this run overwrite that output?", where the
+    recorded location is enough. Deleting a source on the strength of an output
+    this run never wrote needs more: a source replaced in place by a different
+    file with an older date (a restored backup, a copy that kept its
+    timestamps) still matches the recorded path, smart sync skips it, and the
+    gate deleted the only copy of the new version. So the recorded `srcsum`
+    must also match the source as it is now; an output without one proves
+    nothing. Fail closed: an unreadable source keeps it.
+    """
+    if not _provenance_ok(info, src_paths, mode_check):
+        return False
+    if not info.get("srcsum"):
+        return False
+    try:
+        return info["srcsum"] == _file_content_id(src_paths)
+    except OSError:
+        return False
+
+
 def _provenance_marker_args(src_paths):
     """exiftool argfile lines recording WHICH source made an output."""
     first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
@@ -4034,14 +4057,15 @@ def _skipped_archive_proof(pairs: list) -> dict:
 
     The source is the master TIFF, so there is no marker on the source side to
     compare against (unlike the recompressor, whose source JXLs carry the pair
-    verbatim): `_provenance_ok` recomputes the proof from the TIFF itself —
-    the recorded path id (or, with --provenance content, the source-bytes id)
-    must match. This is EXACTLY the predicate the collapsing modes check at
-    the plan stage (:5399), now also required for the already-archived
-    deletions in modes that keep folder structure. Fail closed: a markerless
-    legacy archive, an unreadable batch or a foreign marker all read False →
-    the source is KEPT (heal by re-encoding, or by --provenance adopt in a
-    collapsing mode).
+    verbatim): `_provenance_proves_archive` recomputes the proof from the TIFF
+    itself — the recorded path id (or, with --provenance content, the
+    source-bytes id) must match, AND the recorded source-bytes id must match
+    the TIFF as it is NOW. The path alone is the overwrite guard's question;
+    a TIFF replaced in place by an older-dated different file still matches
+    it, smart sync skips it, and the stale archive deleted the new version.
+    Fail closed: a markerless legacy archive, an unreadable batch, a foreign
+    marker or a changed TIFF all read False → the source is KEPT (heal by
+    re-encoding, or by --provenance adopt in a collapsing mode).
 
     Returns {(tiff_path, final_path) -> bool}; keys are normcased to line up
     with the string paths the delete gate and the preview carry.
@@ -4052,7 +4076,7 @@ def _skipped_archive_proof(pairs: list) -> dict:
     for src, dst in pairs:
         info = marks.get(str(dst)) or {"src": None, "srcsum": None}
         proof[(os.path.normcase(str(src)), os.path.normcase(str(dst)))] = \
-            _provenance_ok(info, Path(src), PROVENANCE_CHECK)
+            _provenance_proves_archive(info, Path(src), PROVENANCE_CHECK)
     return proof
 
 
@@ -5351,9 +5375,11 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     can_delete = False
                     _prov_reject = ("its existing output failed the provenance "
                                     "check — the markers do not prove that file "
-                                    "is an archive of THIS photo (absent, "
-                                    "unreadable, or foreign); re-encode it, or "
-                                    "run --provenance adopt with a "
+                                    "is an archive of THIS photo as it is now "
+                                    "(absent, unreadable, foreign, or the TIFF "
+                                    "changed since that output was written); "
+                                    "re-encode it with --overwrite, or run "
+                                    "--provenance adopt with a "
                                     "folder-collapsing mode")
                     break
 
@@ -6096,10 +6122,9 @@ def main():
         logger.warning(
             "--delete-skipped without --verify-roundtrip: sources whose output already "
             "exists will be deleted once that output carries THIS source's provenance "
-            "marker and passes the structural check. The marker names the source FILE: "
-            "nothing compares the pixels, so a stale archive of a file re-exported in "
-            "place since would pass. Add --verify-roundtrip unless you know the "
-            "archive is current.")
+            "marker, the TIFF's bytes still match the hash recorded in it, and it "
+            "passes the structural check. Nothing decodes the archive itself: add "
+            "--verify-roundtrip to compare its pixels before the delete.")
 
     # --verify-roundtrip needs tools the rest of the encoder does not. Checked
     # up front, and fatally: a verification that silently could not run would
@@ -6555,9 +6580,10 @@ def main():
                                          os.path.normcase(str(j))), False)
                              for j in _finals):
                     _would_keep.append((_src, "output carries no matching "
-                                                "provenance marker — it cannot "
-                                                "prove it is an archive of THIS "
-                                                "photo"))
+                                                "provenance marker, or the TIFF "
+                                                "changed since it was written — "
+                                                "it cannot prove it is an "
+                                                "archive of THIS photo"))
                 elif all(_verify_jxl_integrity(j) for j in _finals):
                     _would_delete.append(_src)
                 else:

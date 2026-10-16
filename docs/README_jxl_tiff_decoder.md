@@ -599,12 +599,12 @@ Options:
                      unreadable, absent or foreign marker KEEPS the sources, with a
                      log line naming the fix (re-decode into place; if the sources
                      MOVED, re-run with --provenance content).
+                     The source's BYTES must also still match the TIFF's
+                     `jxlphoto-srcsum`: a JXL replaced since that decode (a
+                     restored backup with an older date, which sync skips) is
+                     KEPT, in every --provenance mode. Re-decode with --overwrite.
                      WARNING: the marker proves the pairing, not the pixels. This
-                     script has no --verify-roundtrip (the encoder does): under the
-                     default --provenance path the marker is tied to the source's
-                     LOCATION, so a different JXL written over the same same-named
-                     source still passes -- --provenance content binds the source
-                     BYTES instead
+                     script has no --verify-roundtrip (the encoder does)
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                      automation that already asked the user)
   --export-subfolder NAME

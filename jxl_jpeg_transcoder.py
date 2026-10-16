@@ -1504,6 +1504,29 @@ def _provenance_ok(info: dict, src_paths, mode_check: str) -> bool:
     return False
 
 
+def _provenance_proves_archive(info: dict, src_paths, mode_check: str) -> bool:
+    """The DELETE-side proof for a source whose conversion was SKIPPED: the
+    existing output must be an archive of the source's CURRENT bytes.
+
+    `_provenance_ok` answers "may this run overwrite that output?", where the
+    recorded location is enough. Deleting a source on the strength of an output
+    this run never wrote needs more: a source replaced in place by a different
+    file with an older date (a restored backup, a copy that kept its
+    timestamps) still matches the recorded path, smart sync skips it, and the
+    gate deleted the only copy of the new version. So the recorded `srcsum`
+    must also match the source as it is now; an output without one proves
+    nothing. Fail closed: an unreadable source keeps it.
+    """
+    if not _provenance_ok(info, src_paths, mode_check):
+        return False
+    if not info.get("srcsum"):
+        return False
+    try:
+        return info["srcsum"] == _file_content_id(src_paths)
+    except OSError:
+        return False
+
+
 def _provenance_marker_args(src_paths):
     """exiftool argfile lines recording WHICH source made an output."""
     first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
@@ -3683,8 +3706,9 @@ def _lossy_skip_marks(results, src_map) -> dict:
 
 def _lossy_skip_unproven(src_path, final_file, marks) -> bool:
     """True when an already-existing LOSSY output cannot prove it was made
-    from `src_path`: its provenance marker is absent, unreadable or names
-    another file. A jbrd JPEG archive is proven by the reconstruction test
+    from `src_path` as it is now: its provenance marker is absent, unreadable
+    or names another file, or the source's bytes no longer match the recorded
+    srcsum. A jbrd JPEG archive is proven by the reconstruction test
     instead, so it is never judged here. Before this, a same-named JPEG from
     anywhere (the camera's own, next to the archived master) deleted the
     master JXL — reproduced in the 2026-10-08 audit."""
@@ -3693,12 +3717,17 @@ def _lossy_skip_unproven(src_path, final_file, marks) -> bool:
             and has_jbrd_box(final_file)):
         return False
     info = marks.get(str(final_file)) or {"src": None, "srcsum": None}
-    return not _provenance_ok(info, src_path, PROVENANCE_CHECK)
+    # The path alone is the overwrite guard's question; deleting the source
+    # also needs its CURRENT bytes to match the recorded srcsum — a source
+    # replaced in place since that output was written is SKIPPED here (the
+    # output exists), and the stale output deleted the only copy of it.
+    return not _provenance_proves_archive(info, src_path, PROVENANCE_CHECK)
 
 
 _LOSSY_SKIP_KEEP = ("KEEP (the existing output carries no provenance marker "
-                    "MATCHING this source, so it cannot prove it is this file's "
-                    "conversion)")
+                    "MATCHING this source as it is now — absent, foreign, or the "
+                    "source changed since that output was written — so it cannot "
+                    "prove it is this file's conversion)")
 
 
 def _plan_would_delete_source(pairs, smart_mode, reconvert_explicit) -> bool:

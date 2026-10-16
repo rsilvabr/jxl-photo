@@ -287,7 +287,10 @@ floors when a lossy step is involved (`VERIFY_LOSSY_MIN_MEAN_RATIO`,
 whose output already existed (finishing an interrupted archive). The existing
 output must pass every gate — and for a skipped **re-encode** that includes the
 provenance proof, in **every** mode: its `jxlphoto-src`/`jxlphoto-srcsum`
-markers must match the source's. The folder-preserving modes (1/3) used to
+markers must match the source's — the `srcsum` included, so the output of an
+older master is never the proof for a master rebuilt since from a changed
+TIFF (`KEEP (existing output was made from an EARLIER version of this
+master …)`; re-run with `--overwrite`). The folder-preserving modes (1/3) used to
 delete on the structural check alone, so a valid, newer, same-named output
 written by a different photo could destroy the only copy of the source. The
 recompressor copies the markers verbatim from the source, so a genuine previous
@@ -309,10 +312,14 @@ In-place runs (mode 0/8, and staging promotions) replace the source only
 after the re-encode passed every gate, via a temp file in the destination
 folder and a same-volume atomic `os.replace` — a cross-volume move failure
 can no longer leave the original destroyed with the only good copy stranded
-in staging under a UUID name. Multi-page documents replaced in place are
+in staging under a UUID name. The source must also still be the file the run
+read: one rewritten by another program during its re-encode is not replaced
+(`REPLACE REFUSED, source kept`, counted as an error; the next run re-encodes
+the new version). Multi-page documents replaced in place are
 held together as well: pages of one `jxlphoto-mpg:` id are swapped only
-after every page of the group has settled, and a page that failed — or one
-whose siblings did not all take part this run — vetoes the replacement of
+after every page of the group has settled, and a page that failed, one
+rewritten during the run, or one whose siblings did not all take part this
+run vetoes the replacement of
 the whole group (`GROUP HELD IN PLACE`, the re-encodes discarded). The
 all-or-nothing rule the delete gate applies to deletion therefore extends
 to the replacement itself, and no document is ever left spread across two

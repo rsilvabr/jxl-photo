@@ -191,7 +191,7 @@ def test_delete_skipped_deletes_source_when_existing_output_marker_matches(
     src, final, task = _d2_setup(monkeypatch, tmp_path)
     monkeypatch.setattr(dec, "_read_source_markers_batch",
                         _marker_reader({str(final): {"src": dec._source_path_id(src),
-                                                     "srcsum": None}}))
+                                                     "srcsum": dec._file_content_id(src)}}))
 
     results = dec.process_group([task], 1)
 
@@ -217,7 +217,9 @@ def test_dry_run_preview_agrees_with_the_marker_gate(tmp_path, monkeypatch):
         final.write_bytes(_JXL_SIG + b"\x00" * 16)
         marker_src = "unrelated_id" if name == "mismatch" else dec._source_path_id(src)
         outcomes[name] = (src, final,
-                          {str(final): {"src": marker_src, "srcsum": None}})
+                          {str(final): {"src": marker_src,
+                                        "srcsum": (dec._file_content_id(src)
+                                                   if name == "match" else None)}})
     match_src, _match_final, _ = outcomes["match"]
     mismatch_src, _mismatch_final, _ = outcomes["mismatch"]
 

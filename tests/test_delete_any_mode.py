@@ -504,7 +504,7 @@ def _skip_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     # the "already archived" fixture really is provably archived.
     monkeypatch.setattr(enc, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": enc._source_path_id(src),
-                                                "srcsum": None}
+                                                "srcsum": enc._file_content_id(src)}
                                        for p in paths})
     if verify is not None:
         monkeypatch.setattr(enc, "_verify_roundtrip_page",
@@ -630,7 +630,7 @@ def test_delete_skipped_needs_every_page_of_a_split(tmp_path, monkeypatch):
     # KEEP below can only come from page 2's missing output (Round 43, E-1).
     monkeypatch.setattr(enc, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": enc._source_path_id(src),
-                                                "srcsum": None}
+                                                "srcsum": enc._file_content_id(src)}
                                        for p in paths})
     real_convert = enc.convert_one
     monkeypatch.setattr(enc, "convert_one",

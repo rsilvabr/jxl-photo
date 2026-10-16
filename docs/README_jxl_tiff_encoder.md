@@ -465,7 +465,11 @@ Options:
                   output must exist, pass the integrity check, AND carry a
                   provenance marker MATCHING this source (jxlphoto-src/srcsum --
                   the same check the folder-collapsing modes run before an
-                  overwrite). A markerless (a pre-marker legacy archive) or
+                  overwrite), AND the TIFF's bytes must still match the
+                  jxlphoto-srcsum recorded in it: a TIFF replaced since that
+                  encode (a restored backup with an older date, which sync
+                  skips) is KEPT -- rebuild its archive with --overwrite.
+                  A markerless (a pre-marker legacy archive) or
                   foreign output is KEPT, with a log line saying how to heal it:
                   re-encode, or stamp it once with --provenance adopt in a
                   folder-collapsing mode. Pair it with --verify-roundtrip as

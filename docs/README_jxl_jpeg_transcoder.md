@@ -537,8 +537,10 @@ entirely on the direction, and the difference is large**:
 > (`--provenance content` also accepts the same source bytes), so an
 > unrelated file with the same name — the camera's own JPEG next to an
 > archived master, say — keeps the source (until the 2026-10-08 audit it was
-> enough to delete it). Outputs written before the markers, or by another
-> tool, keep their source too.
+> enough to delete it). The source's bytes must also still match the
+> `jxlphoto-srcsum` the output recorded: a source replaced since that
+> conversion keeps itself (re-convert it with `--overwrite`). Outputs written
+> before the markers, or by another tool, keep their source too.
 >
 > The one exception: a JPEG archived with `--force-convert --distance 0` produces
 > a `jbrd` container (XMP provenance markers must never go there), and that encode

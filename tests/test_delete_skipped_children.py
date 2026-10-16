@@ -105,7 +105,7 @@ def _dec_run(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     # Round 43 (D-2): the skipped path's delete gate certifies the existing TIFF
     # by its provenance marker MATCHING these sources, not by mere marker
     # presence. `ours` now stands for a matching jxlphoto-src marker.
-    _mark = ({"src": dec._source_path_id(src), "srcsum": None} if ours
+    _mark = ({"src": dec._source_path_id(src), "srcsum": dec._file_content_id(src)} if ours
              else {"src": "someone-elses-id", "srcsum": None})
     monkeypatch.setattr(dec, "_read_source_markers_batch",
                         lambda paths: {str(p): dict(_mark) for p in paths})
@@ -279,7 +279,9 @@ def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
     _ids = {"this": tr._source_path_id(src), "other": "0123456789abcdef",
             None: None}
     monkeypatch.setattr(tr, "_read_source_markers_batch",
-                        lambda paths: {str(p): {"src": _ids[marker], "srcsum": None}
+                        lambda paths: {str(p): {"src": _ids[marker],
+                                                "srcsum": (tr._file_content_id(src)
+                                                           if marker == "this" else None)}
                                        for p in paths})
     args = tr.build_parser().parse_args(
         [str(tmp_path), "--force-convert", "--decode", "--mode", "3"])

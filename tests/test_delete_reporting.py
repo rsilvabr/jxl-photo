@@ -147,7 +147,7 @@ def test_mixed_source_is_not_labelled_already_archived(tmp_path, monkeypatch, ca
     # stub the marker read to match — the point here stays the #270 LABEL.
     monkeypatch.setattr(enc, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": enc._source_path_id(src),
-                                                "srcsum": None}
+                                                "srcsum": enc._file_content_id(src)}
                                        for p in paths})
     monkeypatch.setattr(
         enc, "convert_one",

@@ -200,7 +200,7 @@ def test_delete_skipped_deletes_master_when_marker_matches(tmp_path, monkeypatch
     monkeypatch.setattr(enc, "PROVENANCE_CHECK", "path")
     monkeypatch.setattr(enc, "TEMP2_DIR", None)
     monkeypatch.setattr(enc, "_verify_jxl_integrity", lambda p: True)
-    out_mark = {"src": enc._source_path_id(tiff), "srcsum": "irrelevant"}
+    out_mark = {"src": enc._source_path_id(tiff), "srcsum": enc._file_content_id(tiff)}
     monkeypatch.setattr(enc, "_read_source_markers_batch",
                         _marker_reader({str(final): out_mark}))
 
@@ -264,7 +264,7 @@ def test_dry_run_preview_matches_the_marker_gate(tmp_path, monkeypatch):
         _make_newer(j, t)
         out_mark = ({"src": "unrelated-id", "srcsum": None}
                     if name == "foreign"
-                    else {"src": enc._source_path_id(t), "srcsum": None})
+                    else {"src": enc._source_path_id(t), "srcsum": enc._file_content_id(t)})
         outcomes[name] = (t, j, out_mark)
 
     fake = _FakeLogger()

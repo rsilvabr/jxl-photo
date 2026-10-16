@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #539.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #541.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | not released yet | #539–#540 (2) |
 | [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |
 | [Round-56 — planning-time exiftool batches on a slow disk](#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16) | 2026-10-16 | v2.15.0 | #537 (1) |
 | [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#536 (5) |
@@ -64,6 +65,24 @@ were never tagged and never shipped.
 | [Post-v1.8.1 — Real-batch usability fixes](#post-v181--real-batch-usability-fixes-2026-07-27) | 2026-07-27 | — | #481–#492 (12) |
 | [v1.8.1 — The Audit Release](#v181--the-audit-release-2026-07) | 2026-07 | v1.8.1 | #172–#209 (38) |
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
+
+---
+
+## Round-58 — stale archives and in-place races (2026-10-17)
+
+Found by an external review of v2.15.0 (commit `52bdbe1`) and confirmed
+against the code. Both need an unusual setup: a source replaced by a
+different file that carries an OLDER date than its output (a restored
+backup, a copy that kept its timestamps) together with
+`--delete-source --delete-skipped`, or another program writing a JXL while
+the recompressor re-encodes it in place. Regression tests:
+`tests/test_stale_archive_gate.py` (real codecs; all six fail against
+`52bdbe1` via `SAG_SCRIPTS`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 539 | **`--delete-skipped` deleted a source replaced in place since its output was written.** The gate proved a skipped source with `_provenance_ok`, which returns as soon as the recorded PATH matches — the overwrite guard's question — and never compares `jxlphoto-srcsum` then, not even under `--provenance content`. A source swapped for a different file with an older date was skipped by smart sync (or, in the transcoder, simply because the output existed), and the stale output certified its deletion: only the archive of the OLD version was left. The recompressor's `_markers_match` had the same shape (a master rebuilt from a changed TIFF keeps the TIFF's path id). | encoder, decoder, transcoder (lossy gate), recompressor | ✅ FIXED (`_provenance_proves_archive`, parity-pinned in the encoder/decoder/transcoder: the path test AND the recorded srcsum equal to the source's CURRENT bytes; recompressor `_markers_prove_archive`: marker match AND equal srcsum on both sides. Used by every skipped-source delete gate and its dry-run preview; the overwrite guards keep the path test. An output without a srcsum keeps its source) |
+| 540 | **The recompressor's in-place replacement could overwrite a newer version.** `_replace_in_place` swapped the verified re-encode over the source with an atomic `os.replace` but never checked that the source was still the file it had read; `_source_changed_since_read` existed and guarded only the delete gate. A version written by another program during the re-encode was replaced by the re-encode of the old one. A multi-page group replaced page by page, so a check per page alone would still split a document. | recompressor | ✅ FIXED (`_replace_in_place` refuses a changed source: the re-encode is discarded, the file is an error with `_CHANGED_IN_PLACE` as its detail, and the next run re-encodes the new version; `_release_group` checks EVERY page before replacing the first and holds the whole group otherwise) |
 
 ---
 

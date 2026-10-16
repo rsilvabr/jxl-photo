@@ -252,6 +252,23 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
+# Why an in-place replacement was refused (process_group). Logged and kept as
+# the file's error detail; the next run re-encodes the new version.
+_CHANGED_IN_PLACE = ("the source changed while it was being re-encoded (another "
+                     "program or run wrote it) — replacing it would overwrite "
+                     "that newer version with a re-encode of the old one")
+
+
+def _discard_in_place_temp(it) -> None:
+    """Remove the verified re-encode of an in-place item that will NOT replace
+    its source. It sits in staging or beside the source under a .tmp name;
+    the source itself is never touched here."""
+    try:
+        it["write"].unlink()
+    except OSError:
+        pass
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -1911,6 +1928,24 @@ def _markers_match(out_info: dict, src_info: dict, mode_check: str = "path") -> 
         return bool(out_info.get("srcsum") and src_info.get("srcsum")
                     and out_info["srcsum"] == src_info["srcsum"])
     return False
+
+
+def _markers_prove_archive(out_info: dict, src_info: dict,
+                           mode_check: str = "path") -> bool:
+    """The DELETE-side proof for a SKIPPED source: `_markers_match` (the
+    overwrite guard's question, where the recorded location is enough) AND the
+    same recorded source-bytes id on both sides.
+
+    A master re-encoded from a CHANGED TIFF keeps the TIFF's path but carries
+    a new srcsum. If it lands with an older date than the existing output
+    (a restored backup), smart sync skips it, and the path alone let the
+    output of the OLD master delete the new one. An output or a source
+    without a srcsum proves nothing: fail closed.
+    """
+    if not _markers_match(out_info, src_info, mode_check):
+        return False
+    return bool(out_info.get("srcsum") and src_info.get("srcsum")
+                and out_info["srcsum"] == src_info["srcsum"])
 
 
 def _argfile_safe(value) -> str:
@@ -4306,8 +4341,21 @@ def process_group(items, workers: int):
         and a cross-volume shutil.move onto it is not atomic. A single file is
         replaced the moment it settles; a page of a multi-page group only once
         the whole group has (see _settle_in_place).
+
+        Atomic is not the same as safe: a source rewritten by another process
+        while it was being re-encoded (an export, a second run) would be
+        replaced by the re-encode of its OLD version. The source must still be
+        the file this run recorded before reading it; otherwise the re-encode
+        is discarded and the new version stays.
         """
         src_str = str(it["src"])
+        if _source_changed_since_read(it["src"]):
+            _discard_in_place_temp(it)
+            results[src_str] = ("error", str(final_path))
+            _error_details[src_str] = _CHANGED_IN_PLACE
+            logger.error(f"  REPLACE REFUSED, source kept | {final_path.name} | "
+                         f"{_CHANGED_IN_PLACE}")
+            return
         if staging_used:
             # Same .tmp rule as the in-place write temps: if the promotion
             # fails the temp stays behind (deliberately, see below) and must
@@ -4381,6 +4429,27 @@ def process_group(items, workers: int):
                     f" GROUP HELD IN PLACE | {it['src'].name} | a sibling page of "
                     f"the same multi-page document did not convert this run — no "
                     f"page of the group was replaced")
+            return
+        # Every page must still be the file this run read BEFORE the first
+        # one is replaced: _replace_in_place would refuse only the changed
+        # page, after its siblings were already swapped — one document, two
+        # versions.
+        changed = {id(it) for it in ready if _source_changed_since_read(it["src"])}
+        if changed:
+            for it in ready:
+                _discard_in_place_temp(it)
+                src_str = str(it["src"])
+                if id(it) in changed:
+                    results[src_str] = ("error", str(it["final"]))
+                    _error_details[src_str] = _CHANGED_IN_PLACE
+                    logger.error(f"  REPLACE REFUSED, source kept | "
+                                 f"{it['src'].name} | {_CHANGED_IN_PLACE}")
+                else:
+                    results[src_str] = ("skipped", str(it["final"]))
+                    logger.warning(
+                        f" GROUP HELD IN PLACE | {it['src'].name} | a sibling page "
+                        f"of the same multi-page document changed during the run "
+                        f"— no page of the group was replaced")
             return
         for it in ready:
             try:
@@ -4766,6 +4835,10 @@ def _delete_gate(items, results, promoted):
             elif not _markers_match(out_info, src_info, PROVENANCE_CHECK):
                 ok, reason = False, ("existing output carries no matching "
                                      "provenance marker")
+            elif not _markers_prove_archive(out_info, src_info, PROVENANCE_CHECK):
+                ok, reason = False, ("existing output was made from an EARLIER "
+                                     "version of this master (its jxlphoto-srcsum "
+                                     "differs) — re-run with --overwrite")
             elif VERIFY_ROUNDTRIP:
                 _rt_ok, detail = _verify_roundtrip_jxl(src, final_path, it["src_d"],
                                                        CJXL_DISTANCE)
@@ -5779,7 +5852,7 @@ def main():
                 _pm = _read_source_markers_batch(
                     [it["final"] for it in _sk] + [it["src"] for it in _sk])
                 for it in _sk:
-                    _dry_prov_ok[id(it)] = _markers_match(
+                    _dry_prov_ok[id(it)] = _markers_prove_archive(
                         _pm.get(str(it["final"])) or {"src": None, "srcsum": None},
                         _pm.get(str(it["src"])) or {"src": None, "srcsum": None},
                         PROVENANCE_CHECK)

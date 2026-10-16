@@ -41,6 +41,10 @@ SHARED_HELPERS = [
     "_file_digest_cached",
     "_read_source_markers_batch",
     "_provenance_ok",
+    # The delete-side proof for a SKIPPED source (path AND current srcsum).
+    # A copy drifting back to the path alone is one backend deleting a source
+    # replaced in place since its archive was written.
+    "_provenance_proves_archive",
     # The argfile lines that RECORD which source made an output. Encoder,
     # decoder and transcoder each write the markers their delete gates read
     # back; a copy that dropped `srcsum` would silently write an archive no

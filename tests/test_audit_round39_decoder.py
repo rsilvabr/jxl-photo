@@ -196,7 +196,7 @@ def test_delete_gate_still_deletes_a_proven_skip(tmp_path, monkeypatch):
     # check `_decode_output_is_ours` above (which only drives the skip itself).
     monkeypatch.setattr(dec, "_read_source_markers_batch",
                         lambda paths: {str(p): {"src": dec._source_path_id(src),
-                                                "srcsum": None}
+                                                "srcsum": dec._file_content_id(src)}
                                        for p in paths})
     monkeypatch.setattr(dec, "convert_multipage_jxl_group",
                         lambda m, e, w, f, *a: (str(m), "skipped", str(f)))

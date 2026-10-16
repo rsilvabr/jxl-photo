@@ -4019,11 +4019,12 @@ class InteractiveMenu:
         # W2 (2026-10-08 audit): the transcoder's lossy gate requires the
         # output's provenance marker now (T1); "nothing ties it to the
         # original" was no longer true. What remains true is that the marker
-        # names the source FILE and nothing compares the pixels.
+        # names the source FILE (and the hash its bytes had then: an original
+        # replaced since is kept) and nothing compares the pixels.
         msg = ("This direction is LOSSY and stores no checksum. For originals that were "
                "already converted, what ties the existing output to the original being "
-               "deleted is its provenance marker (it names the source FILE) and a "
-               "structural check — nothing compares the pixels.")
+               "deleted is its provenance marker (it names the source FILE and the hash "
+               "of its bytes) and a structural check — nothing compares the pixels.")
         if RICH_AVAILABLE and console:
             console.print()
             console.print(Panel(f"[bold red]{msg}[/bold red]", border_style="red"))
