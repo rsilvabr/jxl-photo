@@ -6277,7 +6277,7 @@ Examples:
                              "A file path, or a built-in name: sRGB, AdobeRGB "
                              "(Adobe RGB (1998)-compatible)")
     parser.add_argument("--to-srgb", action="store_true",
-                        help="Shortcut: convert to sRGB using ImageMagick built-in color space")
+                        help="Shortcut for --icc-profile sRGB")
 
     # Output shaping (JXL -> JPEG/PNG only; ignored with a warning when encoding)
     _resize_group = parser.add_mutually_exclusive_group()

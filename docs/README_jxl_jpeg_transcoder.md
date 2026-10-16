@@ -363,8 +363,8 @@ Options:
                      no gamut to map, and an RGB profile on one is invalid (PNG
                      rejects a mismatched iCCP, and a 1-component JPEG carrying
                      sRGB is wrong the same way). Each one is named in the log.
-  --to-srgb          Shortcut: convert to sRGB using ImageMagick built-in
-                     (shorthand for --icc-profile sRGB)
+  --to-srgb          Shortcut for --icc-profile sRGB (see the note under
+                     "ICC Color Management")
 
   --resize-long PX   Output long edge in pixels (JPEG/PNG decode only).
   --resize-short PX  Output short edge in pixels. Aspect ratio is always kept;
@@ -677,10 +677,10 @@ py jxl_jpeg_transcoder.py photo.jxl
 **2. Converting to sRGB (web/standard delivery)**
 
 ```powershell
-# Using ImageMagick built-in (fast, no file needed):
+# Built-in sRGB profile (no file needed; same as --icc-profile sRGB):
 py jxl_jpeg_transcoder.py photo.jxl --to-srgb
 
-# Using specific ICC file (professional accuracy):
+# Using a specific ICC file of your own:
 py jxl_jpeg_transcoder.py photo.jxl --icc-profile "C:\ICC\sRGB.icc"
 ```
 
