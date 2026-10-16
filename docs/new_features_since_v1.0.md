@@ -16,6 +16,12 @@ folders, then continues as `--sync` in the same pass, so a scheduled sync needs
 one command. Opt-in; see the
 [encoder README](README_jxl_tiff_encoder.md).
 
+### The space preflight counts only what the run writes (encoder, recompressor)
+
+In a sync, up-to-date outputs no longer count toward the free-space estimate:
+a quiet nightly run skips the estimate (and the encoder's sample encodes), and
+a busy one estimates the space of the files it really writes.
+
 ## v2.11.0 (2026-10-11)
 
 ### The regeneration guard counts the loss before the toolkit (recompressor)

@@ -2716,6 +2716,19 @@ def _would_skip(jxl_path: Path, final_path: Path) -> bool:
     return False        # OVERWRITE True: always reconvert, never a skip
 
 
+def _plan_item_would_skip(it) -> bool:
+    """Would the real run report SKIP for this planned item?
+
+    Mirrors convert_one's SKIP decision (which never applies to an in-place
+    item): an existing, up-to-date output means SKIP, not a conversion. A
+    derivative item whose existing output names ANOTHER recipe
+    (_FORCE_REDERIVE) is re-derived, not skipped. Used by the dry-run preview
+    and by the space preflight, which must not count skips."""
+    return (not it["in_place"] and it["action"] in ("convert", "copy")
+            and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
+            and _would_skip(it["src"], it["final"]))
+
+
 # ---------------------------------------------------------------------------
 # Output path resolution (modes 0-8). Modes 0/1 are resolved in main().
 # ---------------------------------------------------------------------------
@@ -5754,22 +5767,13 @@ def main():
         # count: the real run removes it and deletes nothing for it.
         _plan = [it for it in items if id(it) not in refused_ids]
 
-        def _dry_would_skip(it):
-            # Mirrors convert_one's SKIP decision (which never applies to an
-            # in-place item): an existing, up-to-date output means the real run
-            # reports SKIP, not a conversion. A derivative item whose existing
-            # output names ANOTHER recipe is re-derived, not skipped.
-            return (not it["in_place"] and it["action"] in ("convert", "copy")
-                    and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
-                    and _would_skip(it["src"], it["final"]))
-
         # A skipped CONVERT admitted by --delete-skipped is deleted only when
         # its pre-existing output carries this source's markers (the real gate
         # now requires it in every mode); the preview must not promise a
         # deletion the run will KEEP. A skipped COPY is proven by the MD5.
         _dry_prov_ok = {}
         if DELETE_SOURCE and DELETE_SKIPPED:
-            _sk = [it for it in _plan if _dry_would_skip(it)
+            _sk = [it for it in _plan if _plan_item_would_skip(it)
                    and it["action"] == "convert" and it["final"].exists()]
             if _sk:
                 _pm = _read_source_markers_batch(
@@ -5793,12 +5797,12 @@ def main():
             return True
 
         n_convert = sum(1 for it in _plan if it["action"] == "convert"
-                        and not _dry_would_skip(it))
+                        and not _plan_item_would_skip(it))
         n_copy = sum(1 for it in _plan if it["action"] == "copy"
-                     and not _dry_would_skip(it))
+                     and not _plan_item_would_skip(it))
         n_skip = len(_plan) - n_convert - n_copy
         for it in _plan:
-            if _dry_would_skip(it):
+            if _plan_item_would_skip(it):
                 logger.info(f" DRY | SKIP (exists) | {it['src'].name}")
                 continue
             tag = {"convert": "RECOMPRESS", "copy": "COPY"}.get(it["action"], "SKIP")
@@ -5865,8 +5869,12 @@ def main():
             sys.exit(3)
 
     # --- Preflight -----------------------------------------------------------
+    # Only what this run will WRITE: a policy skip or an up-to-date output
+    # needs no space (a nightly sync counted the whole library).
     if not args.no_preflight:
-        _preflight_space(items)
+        _preflight_space([it for it in items
+                          if it["action"] in ("convert", "copy")
+                          and not _plan_item_would_skip(it)])
 
     # --- Work ----------------------------------------------------------------
     work_items = []

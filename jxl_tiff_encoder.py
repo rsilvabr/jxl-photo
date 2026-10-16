@@ -3467,6 +3467,22 @@ def _measure_batch_ratio(tiffs, distance: float, effort: int):
     return max(r for _, r in out), out
 
 
+def _preflight_groups(groups: Dict[Path, list]) -> Dict[Path, list]:
+    """The part of the plan this run will WRITE, for the space preflight.
+
+    An up-to-date output is a SKIP and needs no space: a nightly sync over a
+    whole library used to sample three crops and project the space of every
+    TIFF in it (193 GB for a run that re-encoded 164 of 1 344 photos). The
+    check is the same mtime comparison convert_one makes (_would_skip), so it
+    costs a few stat calls the overwrite guard has already paid for."""
+    out = {}
+    for dest, items in groups.items():
+        todo = [it for it in items if not _would_skip(it[0], it[1])]
+        if todo:
+            out[dest] = todo
+    return out
+
+
 def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
                      staging_dir) -> None:
     """Warn -- never block -- when the projected output will not fit.
@@ -4132,8 +4148,9 @@ def _would_skip(tiff_path: Path, final_path: Path) -> bool:
 
     Mirrors the decision at the top of convert_one exactly — including its
     TOCTOU fallback, where an unreadable stat means "stale, convert it". Used
-    only by the dry-run preview of --delete-skipped: a destructive option that
-    could not be previewed would be the wrong kind of opt-in.
+    by the dry-run preview of --delete-skipped (a destructive option that
+    could not be previewed would be the wrong kind of opt-in), by the
+    overwrite guard and by the space preflight (_preflight_groups).
     """
     if not final_path.exists():
         return False
@@ -6654,7 +6671,8 @@ def main():
     # who does not want to pay the sample encodes.
     if not args.dry_run and not args.no_preflight:
         try:
-            _preflight_space(groups, CJXL_DISTANCE, CJXL_EFFORT, TEMP2_DIR)
+            _preflight_space(_preflight_groups(groups), CJXL_DISTANCE, CJXL_EFFORT,
+                             TEMP2_DIR)
         except Exception as e:
             # An advisory check must never be the thing that kills a run.
             logger.debug(f"Preflight skipped: {e}")

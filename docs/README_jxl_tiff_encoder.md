@@ -539,7 +539,9 @@ Options:
                   small crops of your own files to measure this batch's real
                   compression, then projects it against the free space on the
                   staging and destination drives. It only warns, never blocks,
-                  and is skipped automatically below 5 GB of input
+                  and is skipped automatically below 5 GB of input. It counts
+                  only the TIFFs this run will encode: in a sync, up-to-date
+                  masters are not counted, so a quiet night skips it
   --clean-staging Before converting, delete staging leftovers from EARLIER runs
                   (failed outputs kept for inspection). Only files this tool
                   wrote, never subfolders, and nothing touched in the last hour

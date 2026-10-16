@@ -97,6 +97,14 @@ continues as `--sync`. It is opt-in, reads the record of every existing master,
 and is refused with `--delete-source`, `--delete-skipped`, `--overwrite` and
 `--restamp-moved`.
 
+### The space preflight counts only what the run writes (encoder, recompressor)
+
+The advisory free-space estimate used to count every planned file, the
+up-to-date ones of a sync included: it sampled three crops and projected the
+whole library on a night that re-encoded a handful of photos. It now counts
+only the files the run will write, so a quiet sync skips it and a busy one
+gets an estimate that means something. It still only warns, never blocks.
+
 ---
 
 ## v2.14.0

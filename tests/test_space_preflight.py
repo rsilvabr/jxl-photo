@@ -285,7 +285,7 @@ def test_multipage_source_is_counted_once(tmp_path, monkeypatch, small_threshold
 def test_preflight_failure_cannot_kill_the_run():
     """The call site in main() must swallow anything the estimate throws."""
     src = Path(enc.__file__).read_text(encoding="utf-8")
-    call = "_preflight_space(groups, CJXL_DISTANCE"
+    call = "_preflight_space(_preflight_groups(groups), CJXL_DISTANCE"
     assert call in src, "preflight call site not found"
     idx = src.index(call)
     assert "except Exception" in src[idx:idx + 400], \
