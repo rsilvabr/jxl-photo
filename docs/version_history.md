@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.14.0](#v2140)** | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
+| **[v2.15.0](#v2150)** | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
+| [v2.14.0](#v2140) | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
 | [v2.13.0](#v2130) | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
 | [v2.12.0](#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
 | [v2.11.0](#v2110) | 2026-10-11 | The recompressor's regeneration guard counts the loss before the toolkit (origin `jpeg`/`jxl-lossy`/`jxl`); third-party JXLs recorded as `jxl-lossy`/`jxl-lossless`; one provenance pair in transcoder outputs (round 53, 1 fix) |
@@ -67,49 +68,64 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.15.0
 
-**Unreleased.**
+**Released 2026-10-16.** Supersedes v2.14.0. A scheduled sync can fix the
+records of renamed folders by itself; the D50 patch decides from the profile;
+a quiet nightly sync skips the space estimate (rounds 56–57, 2 fixes).
+
+### `--restamp-then-sync` (encoder)
+
+A scheduled sync can fix the records of renamed folders and sync in the same
+run: `--restamp-then-sync` does the `--restamp-moved` rewrite first (masters
+whose TIFF is unchanged, matched by `jxlphoto-srcsum`, without re-encoding and
+with the file date kept) and then continues as `--sync`. The restamp runs
+before the overwrite guard, so a TIFF that was only touched after the rename is
+re-encoded instead of refused; a photo renamed AND edited is still left to the
+guard. It is opt-in, reads the record of every existing master (one batched
+exiftool read), writes no `xmpMM:History` entry, and is refused with
+`--delete-source`, `--delete-skipped`, `--overwrite` and `--restamp-moved`
+(exit 2): a record rewritten in a run must never decide a deletion in it.
 
 ### The D50 patch's `auto` decides by the profile (encoder)
 
 `--d50-patch auto` no longer reads the EXIF Software tag (one exiftool call
-per TIFF). It patches only a near-miss illuminant — Kodak's ProPhoto.icm,
-whose Z is off by 2/65536 — decided from the ICC bytes already in memory. A
-profile far from D50 (Capture One's `PhaseOne RGB(Trinitron G18 D50).icm`) is
-left as it is and counted as "other illuminant". `D50_PATCH_SOFTWARE_LIST` is
-removed. See [upgrading](upgrading.md#v2150-the-d50-patch-decides-by-the-profile).
+per TIFF). It patches only a near-miss illuminant — each of X, Y, Z within
+4/65536 of the spec bytes; in practice Kodak's ProPhoto.icm, whose Z is off by
+2/65536 — decided from the ICC bytes already in memory. Checked against the 340
+profiles installed on the owner's machine: 338 exact, ProPhoto.icm the only
+near miss. A profile far from D50 (Capture One's
+`PhaseOne RGB(Trinitron G18 D50).icm`) is left as it is and counted as "other
+illuminant". `D50_PATCH_SOFTWARE_LIST` is removed. See
+[upgrading](upgrading.md#v2150-the-d50-patch-decides-by-the-profile).
+
+### The space preflight counts only what the run writes (encoder, recompressor)
+
+The advisory free-space estimate used to count every planned file, the
+up-to-date ones of a sync included: on 2026-10-13 it sampled three crops and
+projected 193 GB for a sync that re-encoded 164 of 1 344 photos. It now counts
+only the files the run will write (the same date comparison the run makes), so
+a quiet sync skips it and a busy one gets an estimate that means something. It
+still only warns, never blocks.
 
 ### Fixes
 
 - On a very busy disk the planning phase could give up reading the markers of a
   large library, and skip the provenance check for those files. A batch now
-  stops only when exiftool stops responding, not after a fixed time (all four scripts,
+  stops only when exiftool stops responding (`EXIFTOOL_BATCH_STALL = 180` s
+  without output) or after `EXIFTOOL_BATCH_TIMEOUT = 1800` s in all, not after
+  a fixed 180 s (all four scripts,
   [#537](bug_tracking_since_v1.0.md#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16)).
 - The wizard no longer passes a JPEG quality to PNG outputs, and when a run
   carries no distance, effort or quality of its own it now uses the scripts'
   settings instead of a copy of their shipped values (wrapper,
   [#538](bug_tracking_since_v1.0.md#round-57--the-wrappers-last-literal-fallbacks-2026-10-16)).
 
-### `--restamp-then-sync` (encoder)
-
-A scheduled sync can fix the records of renamed folders and sync in the same
-run: `--restamp-then-sync` does the `--restamp-moved` rewrite first and then
-continues as `--sync`. It is opt-in, reads the record of every existing master,
-and is refused with `--delete-source`, `--delete-skipped`, `--overwrite` and
-`--restamp-moved`.
-
-### The space preflight counts only what the run writes (encoder, recompressor)
-
-The advisory free-space estimate used to count every planned file, the
-up-to-date ones of a sync included: it sampled three crops and projected the
-whole library on a night that re-encoded a handful of photos. It now counts
-only the files the run will write, so a quiet sync skips it and a busy one
-gets an estimate that means something. It still only warns, never blocks.
+**2556 tests**; the real-photo battery passes (64 checks).
 
 ---
 
 ## v2.14.0
 
-**Released 2026-10-13.** Supersedes v2.13.0. Renamed folders no longer have to
+**Released 2026-10-13, superseded by v2.15.0.** Supersedes v2.13.0. Renamed folders no longer have to
 end in a refusal, and resized derivatives use far more workers (round 55, 4
 fixes).
 
