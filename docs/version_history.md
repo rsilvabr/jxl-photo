@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.15.0](#v2150)** | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
+| **[v2.15.1](#v2151)** | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
+| [v2.15.0](#v2150) | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
 | [v2.14.0](#v2140) | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
 | [v2.13.0](#v2130) | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
 | [v2.12.0](#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer tested (Explorer, XnView MP, IrfanView) reads an EXIF thumbnail in a JXL; the flag stays accepted and only warns |
@@ -66,9 +67,54 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.15.1
+
+**Released 2026-10-17.** Supersedes v2.15.0. Two hardening fixes found by an
+external review of v2.15.0 (round 58, 2 fixes). Both need an unusual setup;
+nothing to do when you upgrade.
+
+### `--delete-skipped` checks the source's bytes, not only its path (#539)
+
+`--delete-skipped` deletes a source whose output already exists, on the
+strength of that output's provenance marker. The marker records the source's
+path (`jxlphoto-src`) and a hash of its bytes (`jxlphoto-srcsum`), but the
+gate returned as soon as the path matched — even with `--provenance content`.
+A source replaced in place by a different file with an OLDER date than its
+output (a restored backup, a copy that kept its timestamps) was skipped by
+smart sync, and the output of its old version then certified its deletion.
+
+The delete gates of all four scripts (encoder, decoder, the transcoder's
+lossy directions, recompressor) and their dry-run previews now also require
+the recorded hash to match the source as it is now. A source that changed is
+kept with a log line saying so; rebuild its output with `--overwrite`. The
+overwrite guard is unchanged: it still matches by path, so a re-exported
+TIFF is re-encoded as before.
+
+One side effect, fail-closed: `--restamp-moved`, `--restamp-then-sync` and
+`--provenance adopt` rewrite a master's record, which changes its bytes. A
+TIFF or lossy JPEG decoded from that master before the rewrite no longer
+proves it, so the decoder's and the transcoder's `--delete-skipped` keep such
+a master until it is decoded again with `--overwrite`.
+
+### In-place recompression checks that the source is still the one it read (#540)
+
+An in-place recompression (mode 0 into its own folder, mode 8) replaces each
+source with its verified re-encode through an atomic `os.replace`. It did not
+check that the source was still the file it had read: a version written by
+another program during the re-encode was replaced by the re-encode of the old
+one. The replacement is now refused for a source that changed (`REPLACE
+REFUSED, source kept`, counted as an error; the next run re-encodes the new
+version), and a multi-page document checks every page before replacing the
+first, so it is never left split across two versions.
+
+Six new real-codec tests (`tests/test_stale_archive_gate.py`) fail against
+v2.15.0. **2563 tests**; battery 64/64.
+
+---
+
 ## v2.15.0
 
-**Released 2026-10-16.** Supersedes v2.14.0. A scheduled sync can fix the
+**Released 2026-10-16, superseded by v2.15.1.** Supersedes v2.14.0. A scheduled sync can fix the
 records of renamed folders by itself; the D50 patch decides from the profile;
 a quiet nightly sync skips the space estimate (rounds 56–57, 2 fixes).
 

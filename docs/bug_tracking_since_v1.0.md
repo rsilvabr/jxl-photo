@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | not released yet | #539–#540 (2) |
+| [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
 | [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |
 | [Round-56 — planning-time exiftool batches on a slow disk](#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16) | 2026-10-16 | v2.15.0 | #537 (1) |
 | [Round-55 — the overwrite guard and `--provenance`](#round-55--the-overwrite-guard-and---provenance-2026-10-13) | 2026-10-13 | v2.14.0 | #532–#536 (5) |

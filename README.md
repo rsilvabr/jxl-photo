@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.15.0** (2026-10-16) · [What's new](#whats-new-in-v2150) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.15.1** (2026-10-17) · [What's new](#whats-new-in-v2151) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.15.0](#whats-new-in-v2150)
+- [What's new in v2.15.1](#whats-new-in-v2151)
 - [More about this project](#more-about-this-project)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -384,26 +384,24 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.15.0
+## What's new in v2.15.1
 
-Released 2026-10-16. Nothing to do when you upgrade.
+Released 2026-10-17. Nothing to do when you upgrade. Two hardening fixes from an external review; both close rare edge cases.
 
-- **`--restamp-then-sync`** (encoder): a scheduled sync updates the path record of masters whose folder was renamed, then syncs as usual, in one run. Opt-in; never together with deletion ([details](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)).
-- **The D50 patch decides from the ICC profile**: `auto` normalises Kodak's ProPhoto.icm whatever program embedded it, and no longer spends an exiftool call per TIFF ([upgrading](docs/upgrading.md#v2150-the-d50-patch-decides-by-the-profile)).
-- **A quiet nightly sync skips the space estimate**: it counts only the files the run will write (encoder, recompressor).
-- Fixes: planning on a very busy disk no longer gives up reading markers (#537); the wizard's fallbacks follow the scripts' settings (#538).
+- **`--delete-skipped` checks the source's bytes**, not only its path: a source replaced since its output was written (a restored backup, a copy that kept an older date) is kept instead of deleted (#539).
+- **In-place recompression** never replaces a JXL that another program rewrote while it was being re-encoded; a multi-page document is held whole (#540).
 
-Full notes: [version history](docs/version_history.md#v2150). **2556 tests**, and the real-photo battery passes (64 checks).
+Full notes: [version history](docs/version_history.md#v2151). **2563 tests**, and the real-photo battery passes (64 checks).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.15.0** | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
+| **v2.15.1** | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
+| [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
 | [v2.14.0](docs/version_history.md#v2140) | 2026-10-13 | The overwrite guard can be turned off for renamed folders; `--restamp-moved`; faster resized derivatives |
 | [v2.13.0](docs/version_history.md#v2130) | 2026-10-13 | Each output records the toolkit version that wrote it (`xmpMM:History`); `--version` |
 | [v2.12.0](docs/version_history.md#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer reads an EXIF thumbnail in a JXL |
-| [v2.11.0](docs/version_history.md#v2110) | 2026-10-11 | The regeneration guard counts the loss before the toolkit (JPEG or lossy third-party origins) |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
