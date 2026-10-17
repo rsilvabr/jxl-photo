@@ -193,6 +193,19 @@
   imported child module and restores it afterwards.
 
 ## Verification
+- **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").
+  The owner's real library has every one of these, often in one path:
+  `G:\2025\250118_吾妻山公園_菜の花_Canola [FINAL]\01_Z7\_EXPORT\TIFF16\DSC_0001 (2).tif`
+  -- Japanese, `[ ]` brackets, spaces, parentheses, `%`, long paths, sources on
+  another drive than `%TEMP%`/the staging folder. Every change that touches a path
+  (discovery, cjxl/djxl/magick/exiftool calls, staging, moves, markers, reports)
+  gets a REAL test whose fixture path has Japanese characters AND `[ ]` AND a
+  space -- an ASCII `tmp_path` alone proves nothing. Known traps: exiftool reads
+  its command line in the ANSI code page (Japanese arrives mangled -> argfile with
+  `-charset filename=utf8`, `_run_exiftool_argfile`); ImageMagick globs `[ ]` and
+  expands `%`; a hard link cannot cross drives (a fallback copy must be released
+  per file); the 260-character limit. The sibling tiff-workflow shipped three such
+  bugs on 2026-10-17 because its tests used ASCII paths only.
 - After editing any script, run `python -m py_compile` on the changed files.
 - Tests: `python -m pytest tests/ -n 8 -q` (pytest-xdist; ~2.5 min on the
   owner's machine, ~16 min serial). On the owner's machine `py` resolves to a
