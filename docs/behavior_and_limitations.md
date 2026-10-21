@@ -91,7 +91,7 @@ Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce ver
 
 | Viewer | Behavior | Why |
 |--------|----------|-----|
-| **Windows Explorer** | Thumbnails decode the whole image (about 1.5 s for a 24 MP file, whatever the distance) and are **not color-managed** — ProPhoto/Adobe RGB images look washed out. Once made they come from Windows' thumbnail cache. **Fix:** [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) replaces the thumbnail handler (and with it the preview pane): ~14× faster on 25–45 MP masters, converted to sRGB | Limitation of Microsoft's JXL WIC codec |
+| **Windows Explorer** | Thumbnails decode the whole image (about 1.5 s for a 24 MP file, whatever the distance) and are **not color-managed** — ProPhoto/Adobe RGB images look washed out. Once made they come from Windows' thumbnail cache. **Fix:** [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) replaces the thumbnail handler (and with it the preview pane): ~40× faster thumbnails on 25–45 MP masters (preview pane ~14×), converted to sRGB | Limitation of Microsoft's JXL WIC codec |
 | **IrfanView** | EXIF visible for TIFF → JXL, **hidden** for JPEG → JXL (lossless or lossy) | JPEG → JXL uses Brotli (`brob` box), which IrfanView cannot read |
 | **IrfanView / XnView MP** | Wide-gamut JXL may look slightly muted on a calibrated monitor | Viewer rendering limitation — the file keeps the full gamut; decode back to TIFF to confirm |
 | **XnView MP** | Shows `Color Profile: sRGB` for lossy JXL regardless of the real space | Lossy JXL stores compact numeric primaries, not an ICC blob; XnView falls back to an "sRGB" label |

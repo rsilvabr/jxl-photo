@@ -425,7 +425,7 @@ Getting there required finding and fixing several bugs that appears because of t
 
 ## Related project: fast JXL thumbnails in Explorer
 
-[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails and the preview pane come out about 14× faster than with the Microsoft extension on 25–45 MP masters, with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights.
+[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails come out about 40× faster than with the Microsoft extension on 25–45 MP masters (the preview pane about 14×), with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights.
 
 ---
 
