@@ -21,6 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [Documentation](#documentation)
 - [What's new in v2.15.1](#whats-new-in-v2151)
 - [More about this project](#more-about-this-project)
+- [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
 
@@ -357,7 +358,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **Film scans:** the IR page is kept, but scanner software may not recognize it for dust removal after the round trip — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
-- **Viewers:** Windows Explorer thumbnails are not colour-managed, IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both), IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
 ---
@@ -419,6 +420,12 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
 Getting there required finding and fixing several bugs that appears because of the specific combination of softwares I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
+
+---
+
+## Related project: fast JXL thumbnails in Explorer
+
+[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails and the preview pane come out about 14× faster than with the Microsoft extension on 25–45 MP masters, with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights.
 
 ---
 
