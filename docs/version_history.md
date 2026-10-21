@@ -70,7 +70,7 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ## v2.15.2
 
-**Released 2026-10-22.** Round 59, 2 fixes, from an audit that ran the real
+**Released 2026-10-22.** Supersedes v2.15.1. Round 59, 2 fixes, from an audit that ran the real
 files through every script inside a hostile folder. One command line changes
 (see [Upgrading](upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode));
 otherwise nothing to do when you upgrade.
@@ -119,7 +119,7 @@ the lossless recovery of `jbrd` JXLs. The
 
 ## v2.15.1
 
-**Released 2026-10-17.** Supersedes v2.15.0. Two hardening fixes found by an
+**Released 2026-10-17, superseded by v2.15.2.** Supersedes v2.15.0. Two hardening fixes found by an
 external review of v2.15.0 (round 58, 2 fixes). Both need an unusual setup;
 nothing to do when you upgrade.
 
