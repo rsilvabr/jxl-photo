@@ -79,6 +79,9 @@ SHARED_HELPERS = [
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_run_captured",
+    # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
+    # failing on the long paths the others now handle.
+    "_long_codec_paths",
     "_stderr_tail",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not

@@ -204,7 +204,9 @@
   its command line in the ANSI code page (Japanese arrives mangled -> argfile with
   `-charset filename=utf8`, `_run_exiftool_argfile`); ImageMagick globs `[ ]` and
   expands `%`; a hard link cannot cross drives (a fallback copy must be released
-  per file); the 260-character limit. The sibling tiff-workflow shipped three such
+  per file); the 260-character limit (cjxl/djxl cannot open such a path:
+  `_long_codec_paths` inside `_run_captured` gives them the `\\?\` prefix,
+  #541 — never pass that prefix to ImageMagick, `?` is a wildcard there). The sibling tiff-workflow shipped three such
   bugs on 2026-10-17 because its tests used ASCII paths only.
 - After editing any script, run `python -m py_compile` on the changed files.
 - Tests: `python -m pytest tests/ -n 8 -q` (pytest-xdist; ~2.5 min on the
@@ -258,7 +260,14 @@
   confirmations on a closed stdin, markers, exclusions, ICC + pixels against
   an independent djxl decode, multi-page split → reconstruct, in-place group
   replacement and veto, JPEG ↔ JXL bit-exact, and that no run ends in a
-  Python traceback. ~4 minutes; the scratch folder is deleted on success and
+  Python traceback. Every check runs inside a HOSTILE folder (Japanese, `[ ]`,
+  a space, `%`, another drive than `%TEMP%`; `--ascii-paths` for a plain one
+  when telling a path bug from another), plus hostile file names and a path
+  past 260 characters. Optional fixture folders add the owner's variety:
+  `TIFF16_varied` (37 exports, 18 cameras/phones/a film scanner),
+  `TIFF_scans_varied` (23 film scans: 8/16-bit gray, no ICC, scanner profiles,
+  RGB+IR/alpha 4th sample, 84 MP) and `JPEG_varied` (25 JPEG structures, an
+  empty and a non-JPEG file). ~12 minutes; the scratch folder is deleted on success and
   the report lands in `AI_tools/<YYMMDD>_battery_report.md`. **Run it before
   every release** and after any change to what the codecs/exiftool read or
   write, to a delete gate, to the in-place paths, or to a function's

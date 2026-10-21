@@ -11,6 +11,22 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.15.2: a deleting transcoder run leaves JXLs alone unless told to decode
+
+One command line changes, and only when you call the transcoder yourself (the
+`jxl_photo.py` workflows already name their direction):
+
+- A **folder** run of `jxl_jpeg_transcoder.py` in auto mode (no `--decode`,
+  `--force-transcode` or `--force-convert`) with `--delete-source` now converts
+  only JPEGs and PNGs. The JXLs in the folder are left untouched, and the log
+  says how many.
+- To decode JXLs and delete them, say so: add `--from-jxl` (every JXL, lossy
+  ones converted) or `--decode` (lossless recovery of `jbrd` JXLs only).
+
+Before, such a run also decoded every JXL it found, and deleted it. For a
+lossy master from the TIFF encoder that meant an 8-bit JPEG in place of the
+16-bit master. Details: bug #542.
+
 ## v2.15.0: the D50 patch decides by the profile
 
 Nothing to check for the usual setup. `--d50-patch auto` (and `D50_PATCH_MODE

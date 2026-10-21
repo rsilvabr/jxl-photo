@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.15.1](#v2151)** | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
+| **[v2.15.2](#v2152)** | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode (round 59, 2 fixes) |
+| [v2.15.1](#v2151) | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
 | [v2.15.0](#v2150) | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
 | [v2.14.0](#v2140) | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
 | [v2.13.0](#v2130) | 2026-10-13 | Every output records the toolkit version that wrote it (`xmpMM:History`); `--version` in all five scripts; the wrapper warns about scripts from different releases; recompressor no longer doubles a third-party JXL's `dc:Relation` (round 54, 1 fix) |
@@ -66,6 +67,55 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.15.2
+
+**Released 2026-10-22.** Round 59, 2 fixes, from an audit that ran the real
+files through every script inside a hostile folder. One command line changes
+(see [Upgrading](upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode));
+otherwise nothing to do when you upgrade.
+
+### Paths of 260 characters or more (#541)
+
+cjxl and djxl cannot open a path at or past 260 characters, even with Windows
+long paths enabled. Every script first writes its output as a temp file
+beside the final name, about 50 characters longer than the source path, so a
+source path of around 210 characters was enough for the file to fail with
+"Could not write jxl file". Nothing was lost: the file was reported as an
+error and its source kept. In the owner's library 1459 files (mostly old JPEG
+backups) were long enough.
+
+All four scripts now hand such paths to cjxl and djxl with the Windows
+extended-length prefix (`\\?\`), which both accept, Japanese included.
+exiftool already handled long paths, and ImageMagick only ever sees short
+temp paths. Measured on a 320-character path with libjxl 0.12.
+
+### A deleting auto-mode transcoder run works in one direction (#542)
+
+Auto mode converts both ways in one folder: JPEGs to JXL, JXLs back to JPEG.
+A folder run with `--delete-source` (and `--delete-confirm-off`, as in a
+scheduled task) on a folder holding camera JPEGs next to TIFF-encoder masters
+decoded each master (a lossy JXL, no `jbrd`) into an 8-bit JPEG and deleted
+it. The next run of the same command transcoded that JPEG to JXL and deleted
+the JPEG, leaving a JPEG-quality copy where the 16-bit master had been.
+Lossless archives flipped back and forth the same way (bit-exact, but every
+run rewrote the folder).
+
+Such a run now converts only JPEGs and PNGs and logs how many JXLs it left
+alone. `--from-jxl` asks for the decode direction (every JXL), `--decode` for
+the lossless recovery of `jbrd` JXLs. The
+`jxl_photo.py` workflows were not affected: they always name their direction.
+
+### Tests and the real-photo battery
+
+- `tests/test_long_codec_paths.py` and `tests/test_auto_delete_one_direction.py`
+  (real codecs) fail against v2.15.1.
+- The battery runs every check inside a hostile folder (Japanese, `[ ]`, a
+  space, `%`, on another drive than `%TEMP%`). It also covers hostile file
+  names and a path past 260 characters in all four scripts, the features of
+  v2.9–v2.15 combined and fed their own output, and three new fixture sets
+  from the owner's library: exports from 18 cameras, 23 film scans and 25
+  JPEG structures.
 
 ## v2.15.1
 

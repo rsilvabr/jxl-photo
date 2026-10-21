@@ -158,7 +158,8 @@ def test_transcoder_lossy_keeps_a_jxl_replaced_since_its_jpeg(tmp_path):
 
     _jxl(src / "a.jxl", 99)
     _age(src / "a.jxl", outs["a"])
-    r = _run(TRANSCODER, src, "--mode", "1", "--format", "jpeg", *DELETE)
+    # --from-jxl: a deleting run decodes JXLs only when asked to (#542).
+    r = _run(TRANSCODER, src, "--mode", "1", "--format", "jpeg", "--from-jxl", *DELETE)
     assert r.returncode == 0, _log(r)
     assert (src / "a.jxl").exists(), (
         "the replaced JXL was deleted on the strength of a JPEG made from its "

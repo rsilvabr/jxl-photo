@@ -250,6 +250,15 @@ When processing a folder with JXL files, the transcoder automatically:
 
 This allows mixed archives (some lossless-transcodable, some not) to be processed optimally in one pass.
 
+**A deleting run works in one direction (since v2.15.2).** With
+`--delete-source`, a folder run in auto mode converts only the JPEGs and PNGs
+and leaves every JXL untouched, saying how many it left. To decode JXLs and
+delete them, add `--from-jxl` (every JXL, lossy ones converted) or `--decode`
+(lossless recovery of `jbrd` JXLs only). Without this rule, a folder of
+camera JPEGs next to masters from the TIFF encoder had each lossy 16-bit
+master decoded to an 8-bit JPEG and deleted, and the next run of the same
+command turned the JXLs it had archived back into JPEGs (bug #542).
+
 **Override flags** (when auto-detect isn't what you need):
 
 - `--force-transcode` → Force lossless transcoding (will fail if jbrd missing on decode). On a **directory** it only *encodes* (JPEG → JXL); to force *decode* of a JXL folder, combine with `--decode`

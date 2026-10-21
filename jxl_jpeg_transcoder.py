@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.15.1"
+TOOLKIT_VERSION = "2.15.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1075,6 +1075,37 @@ _DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
+# cjxl and djxl fail on a path of 260 characters or more ("Could not write
+# jxl file", "couldn't load") even with Windows long paths enabled; given the
+# extended-length prefix \\?\ they read and write it, Japanese included
+# (measured with libjxl 0.12 on a 320-character path, 2026-10-22). A temp
+# written beside the output adds ~50 characters to the source path, and 1459
+# files of the owner's library reach the limit that way. exiftool handles long
+# paths itself, and ImageMagick only ever sees short temp paths (and would
+# read the '?' of the prefix as a wildcard), so only the two codecs get it.
+_LONG_PATH_THRESHOLD = 240
+
+
+def _long_codec_paths(cmd):
+    """`cmd` with every long absolute path argument of cjxl/djxl given the
+    Windows extended-length prefix (Windows only; otherwise unchanged)."""
+    if os.name != "nt" or not cmd:
+        return cmd
+    exe = os.path.basename(str(cmd[0])).lower()
+    if not exe.startswith(("cjxl", "djxl")):
+        return cmd
+    out = [cmd[0]]
+    for a in cmd[1:]:
+        s = str(a) if isinstance(a, (str, os.PathLike)) else None
+        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
+                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+            out.append(a)
+            continue
+        s = os.path.abspath(s)
+        out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
+    return out
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -1097,6 +1128,7 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     Popen.wait(timeout=1), which starts no thread. Not combinable with
     `input`.
     """
+    cmd = _long_codec_paths(cmd)
     if stall is not None and input is not None:
         raise ValueError("_run_captured: stall cannot be combined with input")
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
@@ -5755,6 +5787,21 @@ def cmd_auto(args):
         if png_files:
             logger.info(f"--from-jpeg: ignoring {len(png_files)} PNG file(s)")
         png_files = []
+
+    # #542: a DELETING auto run acts in one direction. Auto mode converts
+    # both ways in one folder; armed with --delete-source it decoded a lossy
+    # 16-bit master (a TIFF-encoder JXL, no jbrd) into an 8-bit JPEG and
+    # deleted the master, and the next run of the same command turned the
+    # JXLs it had just archived back into JPEGs. A deleting run decodes JXLs
+    # only when that direction was asked for: --from-jxl (what the wrapper's
+    # JXL -> JPEG workflow passes) or --decode (which, on a folder, never
+    # reaches this function: it is the lossless jbrd recovery).
+    if (DELETE_SOURCE and jxl_files
+            and not (args.decode or getattr(args, "from_jxl", False))):
+        logger.warning(f"--delete-source: {len(jxl_files)} JXL file(s) left untouched. "
+                       f"A deleting run only decodes JXLs when asked to: "
+                       f"--from-jxl (every JXL) or --decode (lossless recovery).")
+        jxl_files = []
 
     if not jpeg_files and not png_files and not jxl_files:
         logger.warning("No JPEG, PNG or JXL files found.")

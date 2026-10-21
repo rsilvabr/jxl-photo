@@ -161,7 +161,8 @@ def test_real_auto_repair_decodes_from_a_copy_and_never_touches_the_jxl(tmp_path
 @real
 def test_real_delete_gate_keeps_an_auto_repaired_source(tmp_path):
     jxl = _damaged_jbrd(tmp_path)
-    work, r = _decode_dir_of(jxl, "--auto-repair-jbrd",
+    # --decode: a deleting run decodes JXLs only when asked to (#542).
+    work, r = _decode_dir_of(jxl, "--auto-repair-jbrd", "--decode",
                              "--delete-source", "--delete-confirm-off")
     assert list(work.rglob("*.jpg")), f"no JPEG decoded\n{r.stdout[-2000:]}"
     assert (work / jxl.name).exists(), "auto-repaired decode deleted the still-broken JXL"

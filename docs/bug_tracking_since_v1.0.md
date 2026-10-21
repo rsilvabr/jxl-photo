@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #541.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #543.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-59 — hostile paths, long paths and the deleting auto mode](#round-59--hostile-paths-long-paths-and-the-deleting-auto-mode-2026-10-22) | 2026-10-22 | v2.15.2 | #541–#542 (2) |
 | [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
 | [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |
 | [Round-56 — planning-time exiftool batches on a slow disk](#round-56--planning-time-exiftool-batches-on-a-slow-disk-2026-10-16) | 2026-10-16 | v2.15.0 | #537 (1) |
@@ -67,6 +68,23 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-59 — hostile paths, long paths and the deleting auto mode (2026-10-22)
+
+An audit that ran the real-photo battery inside a hostile folder (Japanese,
+`[ ]`, parentheses, a space and `%`, on another drive than `%TEMP%`) and added
+new fixtures from the owner's library: 37 exports from 18 cameras, phones and
+a film scanner, 23 film scans (8/16-bit gray, no ICC, scanner profiles, RGB+IR
+and alpha 4th samples, 84 MP) and 25 JPEG structures (progressive, 4:4:0,
+gray, MPF, broken MakerNotes, an empty file). Japanese, brackets and `%`
+passed everywhere; two bugs came out. Regression tests:
+`tests/test_long_codec_paths.py` and `tests/test_auto_delete_one_direction.py`
+(real codecs; both fail against `abe87c0`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 541 | **A file whose output path reached 260 characters failed to convert.** cjxl and djxl cannot open a path at or past MAX_PATH even with Windows long paths enabled ("Could not write jxl file", "couldn't load"). Every script writes its output first as a uuid temp beside the final name, ~50 characters longer than the source path, so a source of ~210 characters was enough: 1459 files of the owner's library (mostly old JPEG backups) reach the limit that way. The file was reported as an error and its source kept, so nothing was lost. | encoder, decoder, recompressor, transcoder | ✅ FIXED (`_long_codec_paths`, parity-pinned in the four backends and applied inside `_run_captured`: every absolute path argument of cjxl/djxl of 240 characters or more gets the `\\?\` extended-length prefix, which both codecs accept, Japanese included. exiftool handles long paths itself; ImageMagick is left alone, it only sees short temp paths and reads `?` as a wildcard) |
+| 542 | **A deleting auto-mode transcoder run decoded a lossy 16-bit master into a JPEG and deleted the master.** Auto mode converts both ways in one folder. With `--delete-source` (and `--delete-confirm-off`, as in a scheduled task), a folder holding camera JPEGs next to TIFF-encoder masters had each master (a JXL without `jbrd`) decoded to an 8-bit JPEG and deleted; the next run of the same command transcoded that JPEG to JXL and deleted it, leaving a JPEG-quality copy where the 16-bit master was. Lossless archives flipped back and forth the same way (bit-exact, but every run rewrote the folder). The wrapper was not affected: its JPEG -> JXL workflow passes `--force-transcode`, its JXL -> JPEG workflow `--from-jxl`. | transcoder | ✅ FIXED (`cmd_auto`: a run with `--delete-source` leaves every JXL untouched unless the decode direction was asked for with `--from-jxl` (`--decode` on a folder is the lossless recovery, which never reached this path), and says how many it left. Three tests that decoded a JXL folder while deleting now pass `--from-jxl`, and the collision-before-confirmation test uses a jpg/png pair) |
 
 ## Round-58 — stale archives and in-place races (2026-10-17)
 

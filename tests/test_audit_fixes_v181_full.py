@@ -1419,9 +1419,10 @@ def test_mode7_recommend_single_vs_multiple_subfolders(tmp_path):
 
 def test_collision_check_before_delete_confirmation(monkeypatch, tmp_path):
     """A run doomed by a collision must abort BEFORE asking for the HHMM token."""
+    # photo.jpg and photo.png both map to photo.jxl. (A deleting run leaves
+    # JXLs alone since #542, so a jpg/jxl pair no longer collides there.)
     (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8")
-    (tmp_path / "photo.jxl").write_bytes(b"\x00" * 32)
-    monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
+    (tmp_path / "photo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     tr.setup_logger()
     called = {"n": 0}
     monkeypatch.setattr(tr, "confirm_deletion_jpeg", lambda: called.__setitem__("n", 1) or True)

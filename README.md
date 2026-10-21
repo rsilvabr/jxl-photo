@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.15.1** (2026-10-17) · [What's new](#whats-new-in-v2151) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.15.2** (2026-10-22) · [What's new](#whats-new-in-v2152) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.15.1](#whats-new-in-v2151)
+- [What's new in v2.15.2](#whats-new-in-v2152)
 - [More about this project](#more-about-this-project)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
@@ -385,24 +385,24 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.15.1
+## What's new in v2.15.2
 
-Released 2026-10-17. Nothing to do when you upgrade. Two hardening fixes from an external review; both close rare edge cases.
+Released 2026-10-22. Two fixes from an audit that ran real photos through every script inside folders named the way real libraries are (Japanese, brackets, spaces, `%`).
 
-- **`--delete-skipped` checks the source's bytes**, not only its path: a source replaced since its output was written (a restored backup, a copy that kept an older date) is kept instead of deleted (#539).
-- **In-place recompression** never replaces a JXL that another program rewrote while it was being re-encoded; a multi-page document is held whole (#540).
+- **Long paths:** a file whose output path reaches 260 characters now converts instead of failing with "Could not write jxl file" (#541).
+- **Transcoder:** a folder run with `--delete-source` now leaves JXLs alone unless you add `--from-jxl` (or `--decode`). It used to decode them, lossy masters included, and delete them. If you call the transcoder yourself with `--delete-source`, see [Upgrading](docs/upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode); the `jxl_photo.py` workflows were not affected (#542).
 
-Full notes: [version history](docs/version_history.md#v2151). **2563 tests**, and the real-photo battery passes (64 checks).
+Full notes: [version history](docs/version_history.md#v2152). **2570 tests**, and the real-photo battery passes (99 checks, run inside a hostile folder).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.15.1** | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
+| **v2.15.2** | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode |
+| [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
 | [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
 | [v2.14.0](docs/version_history.md#v2140) | 2026-10-13 | The overwrite guard can be turned off for renamed folders; `--restamp-moved`; faster resized derivatives |
 | [v2.13.0](docs/version_history.md#v2130) | 2026-10-13 | Each output records the toolkit version that wrote it (`xmpMM:History`); `--version` |
-| [v2.12.0](docs/version_history.md#v2120) | 2026-10-12 | `--embed-thumbnail` removed: no viewer reads an EXIF thumbnail in a JXL |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
