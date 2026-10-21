@@ -18,9 +18,23 @@ Fixtures (never modified — everything is copied to a scratch folder first):
                                 ICC profile (camera/Capture One exports)
     <fixtures>/raw_scan/*.tif   optional: a multi-page film scan
                                 [image, thumbnail, IR] (the M/R checks)
+    <fixtures>/TIFF16_varied/*.tif  optional: many different exports (cameras,
+                                phones, scanners, ICC versions, ISO, sizes,
+                                smooth to noisy), each encoded and decoded
+    <fixtures>/TIFF_scans_varied/*.tif  optional: film scans and odd TIFFs
+                                (8/16-bit gray, no ICC, scanner profiles,
+                                RGB+IR / alpha 4th sample, LZW, 84 MP),
+                                lossless bit-exact and lossy colour checks
+    <fixtures>/JPEG_varied/*.jpg     optional: JPEG structures (progressive,
+                                4:4:0, gray, MPF, odd ICCs, broken MakerNotes,
+                                an empty and a non-JPEG file) through the
+                                transcoder, bit-exact, and its deleting mode
 
 The scratch folder (default <fixtures drive>\\jxlphoto_battery_<date>) is
-deleted at the end unless --keep. The report is written to
+deleted at the end unless --keep. Every check runs inside a HOSTILE folder
+below it (Japanese, [ ], parentheses, a space and %, on another drive than
+%TEMP%), the kind of path the owner's library is full of; --ascii-paths runs
+them in a plain folder instead, to tell a path bug from any other. The report is written to
 AI_tools/<YYMMDD>_battery_report.md (gitignored) and printed. Exit code 0 when
 every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
 """
@@ -32,6 +46,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -45,6 +60,9 @@ ENC, DEC, REC, TR = (str(REPO / n) for n in (
     "jxl_jpeg_transcoder.py"))
 
 results = []        # (section, name, ok, detail)
+# The folder every check runs in (see the docstring). The owner's library has
+# all of these in one path: G:\2025\250118_吾妻山公園_菜の花 [FINAL]\01_Z7\...
+HOSTILE_DIR = "250118_吾妻山公園 [FINAL] (2) 100%"
 B = LOGS = None
 _section = ""
 
@@ -79,18 +97,25 @@ def run(tag, args, timeout=7200):
 
 
 def exif(args):
-    r = subprocess.run(["exiftool"] + [str(a) for a in args], capture_output=True,
-                       text=True, encoding="utf-8", errors="replace")
+    """exiftool through a UTF-8 argfile, as the scripts call it: on the command
+    line Windows hands exiftool the path in the ANSI code page (Japanese arrives
+    mangled), so a hostile scratch folder would fail the battery's own reads."""
+    fd, argfile = tempfile.mkstemp(suffix=".args")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write("-charset\nfilename=utf8\n" + "\n".join(str(a) for a in args) + "\n")
+        r = subprocess.run(["exiftool", "-@", argfile], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+    finally:
+        os.unlink(argfile)
     return r.stdout.strip()
 
 
 def relation(path):
     """XMP-dc:Relation values as a list. exiftool -j keeps list items separate,
     while -s3 would join them with ', ' on one line."""
-    r = subprocess.run(["exiftool", "-j", "-XMP-dc:Relation", str(path)],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     try:
-        rel = json.loads(r.stdout)[0].get("Relation")
+        rel = json.loads(exif(["-j", "-XMP-dc:Relation", path]))[0].get("Relation")
     except Exception:
         return []
     return [] if rel is None else [str(v) for v in (rel if isinstance(rel, list) else [rel])]
@@ -98,10 +123,8 @@ def relation(path):
 
 def history(path):
     """xmpMM:History entries as read by `exiftool -struct -j` (a list)."""
-    r = subprocess.run(["exiftool", "-struct", "-j", "-XMP-xmpMM:History", str(path)],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     try:
-        h = json.loads(r.stdout)[0].get("History")
+        h = json.loads(exif(["-struct", "-j", "-XMP-xmpMM:History", path]))[0].get("History")
     except Exception:
         return []
     return [] if h is None else (h if isinstance(h, list) else [h])
@@ -138,6 +161,15 @@ def touch(p, offset):
     os.utime(p, (t, t))
 
 
+def rmtree(path):
+    """shutil.rmtree that also removes read-only files (fixtures rescued from
+    CDs keep the attribute, and copy2 carries it over)."""
+    def _clear(func, p, _exc):
+        os.chmod(p, 0o666)
+        func(p)
+    shutil.rmtree(path, onexc=_clear)
+
+
 def cp(src, dst):
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -145,12 +177,40 @@ def cp(src, dst):
     return dst
 
 
+def raw_rgb16_bytes(png):
+    """A PNG's pixels as raw little-endian 16-bit RGB, read from stdin: on the
+    command line ImageMagick would glob '[ ]' and expand '%' in the path."""
+    return subprocess.run(["magick", "png:-", "-depth", "16", "-endian", "LSB", "rgb:-"],
+                          input=Path(png).read_bytes(), capture_output=True).stdout
+
+
 def raw_rgb16(png, shape):
     """djxl's own PNG as raw little-endian 16-bit RGB (no colour management)."""
-    r = subprocess.run(["magick", str(png), "-depth", "16", "-endian", "LSB", "rgb:-"],
-                       capture_output=True)
-    a = np.frombuffer(r.stdout, dtype="<u2")
+    a = np.frombuffer(raw_rgb16_bytes(png), dtype="<u2")
     return a.reshape(shape) if a.size == int(np.prod(shape)) else None
+
+
+def _via_ascii(cmd_in_out, src, dst):
+    """Run a codec tool on an ASCII-named copy in %TEMP% and move the output to
+    `dst`: djxl opens paths in the ANSI code page, and magick globs/expands its
+    file names. Returns the CompletedProcess."""
+    tmp = Path(tempfile.mkdtemp(prefix="battery_"))
+    try:
+        s = tmp / ("in" + Path(src).suffix) if src is not None else None
+        if s is not None:
+            shutil.copyfile(src, s)
+        o = tmp / ("out" + Path(dst).suffix)
+        r = subprocess.run(cmd_in_out(s, o), capture_output=True)
+        if o.exists():
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(o), str(dst))
+        return r
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def djxl(src, dst, *extra):
+    return _via_ascii(lambda s, o: ["djxl", str(s), str(o), *extra], src, dst)
 
 
 def pick_fixtures(fx: Path):
@@ -284,8 +344,7 @@ def decoder_checks(A1, pool_jxl):
             master = t0.pages[0].asarray().astype(np.float64)
             dec = t1.pages[0].asarray()
         ref_png = d / "ref.png"
-        subprocess.run(["djxl", str(jxl), str(ref_png), "--bits_per_sample=16"],
-                       capture_output=True)
+        djxl(jxl, ref_png, "--bits_per_sample=16")
         ref = raw_rgb16(ref_png, dec.shape)
         mse = float(np.mean((master - dec.astype(np.float64)) ** 2))
         psnr = 10 * np.log10(65535.0 ** 2 / mse) if mse else 999.0
@@ -483,9 +542,7 @@ def overwrite_guard_checks(A1, A2):
         return [t for t in relation(path) if t.startswith("jxlphoto-srcsum:")]
 
     def _pixels_md5(png):
-        r = subprocess.run(["magick", str(png), "-depth", "16", "-endian", "LSB",
-                            "rgb:-"], capture_output=True)
-        return hashlib.md5(r.stdout).hexdigest()
+        return hashlib.md5(raw_rgb16_bytes(png)).hexdigest()
 
     FAST8 = ["--mode", "8", "--distance", "1", "--effort", "3", "--no-preflight"]
 
@@ -520,7 +577,7 @@ def overwrite_guard_checks(A1, A2):
     g = B / "og2" / "2024-05 Kyoto"
     jxl = g / "a.jxl"
     png_before = B / "og2_before.png"
-    subprocess.run(["djxl", str(jxl), str(png_before)], capture_output=True)
+    djxl(jxl, png_before)
     md5_before = _pixels_md5(png_before)
     mtime_before = jxl.stat().st_mtime_ns
     hist_before = _count_history(jxl)
@@ -528,7 +585,7 @@ def overwrite_guard_checks(A1, A2):
 
     rc, out = run("og2_restamp", [ENC, B / "og2"] + FAST8 + ["--restamp-moved"])
     png_after = B / "og2_after.png"
-    subprocess.run(["djxl", str(jxl), str(png_after)], capture_output=True)
+    djxl(jxl, png_after)
     check("restamp: record rewritten, pixels/date/History unchanged",
           rc == 0 and "RESTAMP |" in out
           and _src(jxl) == [f"jxlphoto-src:{_enc._source_path_id(g / 'a.tif')}"]
@@ -572,8 +629,7 @@ def memory_cap_checks(A1, pool_jxl):
     outs = [p for p in r.rglob("*.jxl") if p.parent != r]
     check("recompressor: --workers 512 at d=3 e=7 is reduced, output decodes",
           rc == 0 and "--workers 512 reduced to" in out and len(outs) == 1
-          and subprocess.run(["djxl", str(outs[0]), str(B / "mem_rec.png")],
-                             capture_output=True).returncode == 0, f"rc={rc}")
+          and djxl(outs[0], B / "mem_rec.png").returncode == 0, f"rc={rc}")
     _m = re.search(r"Memory: ~[\d.]+ GB per cjxl \([a-z-]+ encode, (\d+) MP", out)
     check(f"recompressor: the cap read the real image size ({_mp_expected} MP)",
           bool(_m) and _m.group(1) == _mp_expected,
@@ -658,8 +714,8 @@ def transcoder_checks(A1, A2):
     section("Transcoder (JPEG/PNG <-> JXL)")
     t = B / "t"
     t.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["magick", f"{A1}[0]", "-depth", "8", "-quality", "92", str(t / "j.jpg")],
-                   check=True, capture_output=True)
+    _via_ascii(lambda s, o: ["magick", f"{A1}[0]", "-depth", "8", "-quality", "92", str(o)],
+               None, t / "j.jpg").check_returncode()
     jpg_md5 = md5(t / "j.jpg")
     rc, _ = run("tr_d0_encode", [TR, t, t / "out", "--mode", "2", "--force-convert",
                                  "--distance", "0"])
@@ -689,8 +745,8 @@ def transcoder_checks(A1, A2):
 
     a = B / "t_auto"
     cp(rd / "out" / recs[0].name if recs else A1, a / "a.jpg")
-    subprocess.run(["magick", f"{A2}[0]", "-resize", "25%", "-depth", "16", str(a / "b.png")],
-                   check=True, capture_output=True)
+    _via_ascii(lambda s, o: ["magick", f"{A2}[0]", "-resize", "25%", "-depth", "16", str(o)],
+               None, a / "b.png").check_returncode()
     rc, _ = run("tr_auto", [TR, a, a / "out", "--mode", "2"])
     check("auto mode JPEG + PNG -> JXL completes",
           rc == 0 and (a / "out" / "a.jxl").exists() and (a / "out" / "b.jxl").exists(),
@@ -728,8 +784,407 @@ def transcoder_checks(A1, A2):
           and "before this toolkit" in out, f"rc={rc}")
 
 
+def interaction_checks(A1, A2):
+    """Features added after the 2026-10-08 audit, combined, each run fed its
+    own output: the restamp with an edited photo, the guard switched off
+    between runs, a master decoded and re-encoded (origin, lineage, History,
+    provenance), and the regeneration guard on that second generation."""
+    section("Feature interactions (runs fed their own output)")
+    FAST8 = ["--mode", "8", "--distance", "1", "--effort", "3", "--no-preflight"]
+
+    # (a) Folder renamed, then ONE of its two photos re-exported with other
+    # pixels. --restamp-then-sync must restamp the untouched master without
+    # re-encoding it and refuse the edited one (guard on); with the guard
+    # off the edited one is re-encoded and the untouched one still kept.
+    root = B / "ix_restamp"
+    g = root / "2024-05 Viagem"
+    cp(A1, g / "keep.tif")
+    cp(A1, g / "edit.tif")
+    run("ix_encode", [ENC, root] + FAST8)
+    g.rename(root / "2024-05 京都 [Kyoto]")
+    g = root / "2024-05 京都 [Kyoto]"
+    keep, edit = g / "keep.jxl", g / "edit.jxl"
+    k_mtime, k_hist = keep.stat().st_mtime_ns, _count_history(keep)
+    cp(A2, g / "edit.tif")
+    touch(g / "edit.tif", 60)
+    e_md5 = md5(edit)
+    rc, out = run("ix_restamp_sync", [ENC, root] + FAST8 + ["--restamp-then-sync"])
+    check("restamp-then-sync: untouched master restamped, not re-encoded",
+          keep.stat().st_mtime_ns == k_mtime and _count_history(keep) == k_hist
+          and "RESTAMP |" in out, f"rc={rc}")
+    check("restamp-then-sync: the re-exported photo is refused (guard on), master kept",
+          md5(edit) == e_md5 and rc != 0, f"rc={rc}")
+    rc, out = run("ix_restamp_sync_again", [ENC, root] + FAST8 + ["--restamp-then-sync"])
+    check("restamp-then-sync run again: nothing restamped twice",
+          keep.stat().st_mtime_ns == k_mtime and "RESTAMP |" not in out, f"rc={rc}")
+    rc, out = run("ix_guard_off", [ENC, root] + FAST8 + ["--restamp-then-sync",
+                                                         "--no-overwrite-guard"])
+    check("guard off: the re-exported photo is re-encoded, the untouched one kept",
+          rc == 0 and md5(edit) != e_md5 and keep.stat().st_mtime_ns == k_mtime
+          and _count_history(edit) == k_hist, f"rc={rc}")
+    rc, _ = run("ix_restamp_delete", [ENC, root] + FAST8 + ["--restamp-then-sync",
+                                                            "--delete-source",
+                                                            "--delete-confirm-off"])
+    check("restamp-then-sync with --delete-source is refused, nothing deleted",
+          rc == 2 and (g / "keep.tif").exists() and (g / "edit.tif").exists(), f"rc={rc}")
+
+    # (b) master -> decode -> re-encode: a second lossy generation.
+    m = B / "ix_gen"
+    cp(A1, m / "p.tif")
+    run("ix_gen1", [ENC, m, "--mode", "1"] + FAST8[2:])
+    j1 = m / "converted_jxl" / "p.jxl"
+    d = B / "ix_gen_dec"
+    if j1.exists():
+        cp(j1, d / "p.jxl")
+    run("ix_gen_decode", [DEC, d, "--mode", "1"])
+    t2 = d / "converted_tiff" / "p.tif"
+    e2 = B / "ix_gen2"
+    if t2.exists():
+        cp(t2, e2 / "p.tif")
+    rc, _ = run("ix_gen2", [ENC, e2, "--mode", "1"] + FAST8[2:])
+    j2 = e2 / "converted_jxl" / "p.jxl"
+    desc = exif(["-s3", "-XMP-dc:Description", j2]) if j2.exists() else ""
+    src2 = [x for x in relation(j2) if x.startswith("jxlphoto-src:")] if j2.exists() else []
+    src1 = [x for x in relation(j1) if x.startswith("jxlphoto-src:")] if j1.exists() else []
+    check("re-encoded decode: gen=2 lineage with both encode entries",
+          rc == 0 and "gen=2" in desc and desc.count("cjxl d=") == 2, desc[:120])
+    check("re-encoded decode: origin still tiff16, one src pair naming the decoded TIFF",
+          j2.exists() and origins_of(j2) == ["jxlphoto-origin:tiff16"]
+          and len(src2) == 1 and src2 != src1, f"{origins_of(j2) if j2.exists() else []}")
+    check("re-encoded decode: History = master 1 + decode 1 + encode 1",
+          j2.exists() and _count_history(j2) == 3,
+          f"{_count_history(j2) if j2.exists() else 'no output'} entries")
+    g2 = B / "ix_gen_rec"
+    if j2.exists():
+        cp(j2, g2 / "p.jxl")
+    rc, out = run("ix_gen_regen", [REC, g2, "--mode", "1", "--distance", "2", "--effort", "3",
+                                   "--no-preflight", "--on-regeneration", "skip"])
+    check("recompressor: a gen=2 master meets the regeneration guard (skipped)",
+          not list((g2).rglob("recompressed_jxl/*.jxl")) and rc == 0, f"rc={rc}")
+
+
+def varied_checks(varied):
+    """Every TIFF in <fixtures>/TIFF16_varied (cameras, phones, a film
+    scanner, ICC v2/v4, ISO 64-8000, portrait, odd sizes, smooth to noisy)
+    through encode -> decode: ICC back byte for byte, colours close to the
+    master, and the camera EXIF carried to the JXL and back to the TIFF."""
+    section("Varied exports (TIFF16_varied)")
+    srcs = sorted(varied.glob("*.tif"))
+    v = B / "varied"
+    for s in srcs:
+        cp(s, v / s.name)
+    rc, _ = run("var_encode", [ENC, v, "--mode", "1", "--distance", "0.1", "--effort", "3",
+                               "--no-preflight"])
+    jxls = sorted((v / "converted_jxl").glob("*.jxl"))
+    check(f"all {len(srcs)} varied TIFFs encoded", rc == 0 and len(jxls) == len(srcs),
+          f"rc={rc} {len(jxls)}/{len(srcs)}")
+    vd = B / "varied_dec"
+    for j in jxls:
+        cp(j, vd / j.name)
+    rc, _ = run("var_decode", [DEC, vd, "--mode", "1"])
+    tags = ["-Make", "-Model", "-DateTimeOriginal", "-ISO", "-LensModel"]
+
+    def _exif_rows(files):
+        try:
+            rows = json.loads(exif(["-j"] + tags + list(files)))
+        except Exception:
+            return {}
+        return {Path(r["SourceFile"]).stem: {t[1:]: r.get(t[1:]) for t in tags} for r in rows}
+
+    e_src = _exif_rows(v / s.name for s in srcs)
+    e_jxl = _exif_rows(jxls)
+    e_tif = _exif_rows(sorted((vd / "converted_tiff").glob("*.tif")))
+    bad_icc, bad_exif, worst = [], [], (999.0, "")
+    ratios = []
+    for s in srcs:
+        t = vd / "converted_tiff" / s.name
+        j = v / "converted_jxl" / s.with_suffix(".jxl").name
+        if not t.exists() or not j.exists():
+            bad_icc.append(s.name + " (missing)")
+            continue
+        ratios.append(j.stat().st_size / s.stat().st_size)
+        with tifffile.TiffFile(s) as t0, tifffile.TiffFile(t) as t1:
+            i0, i1 = t0.pages[0].tags.get(34675), t1.pages[0].tags.get(34675)
+            if i0 is None or i1 is None or i0.value != i1.value:
+                bad_icc.append(s.name)
+            x, y = t0.pages[0].asarray(), t1.pages[0].asarray()
+        if x.shape != y.shape:
+            bad_icc.append(s.name + " (shape)")
+            continue
+        sse = 0.0
+        for i in range(0, x.shape[0], 256):
+            d = x[i:i + 256].astype(np.float64) - y[i:i + 256].astype(np.float64)
+            sse += float((d * d).sum())
+        mse = sse / x.size
+        psnr = float("inf") if mse == 0 else 10 * np.log10(65535.0 ** 2 / mse)
+        worst = min(worst, (psnr, s.name))
+        st = s.stem
+        if not (e_src.get(st) == e_jxl.get(st) == e_tif.get(st)):
+            bad_exif.append(st)
+    check("varied: decode restores every original ICC byte for byte",
+          rc == 0 and not bad_icc, f"rc={rc} bad={bad_icc[:4]}")
+    check("varied: every decode within 40 dB of its master (d=0.1)", worst[0] >= 40.0,
+          f"worst {worst[0]:.1f} dB ({worst[1]})")
+    check("varied: Make/Model/date/ISO/lens carried to the JXL and back",
+          not bad_exif and len(e_src) == len(srcs), f"differ={bad_exif[:4]}")
+    if ratios:
+        check("varied: size ratio JXL/TIFF at d=0.1 (information)", True,
+              f"{min(ratios):.1%}-{max(ratios):.1%}")
+
+
+def scan_checks(scans):
+    """Every TIFF in <fixtures>/TIFF_scans_varied (8/16-bit gray and RGB,
+    LZW/Deflate/none, no ICC, scanner and EPSON gamma-1.8 profiles, linear
+    scans, RGB+IR and alpha as a 4th sample, 84 MP) through the encoder and
+    decoder: lossless must come back bit for bit with the same ICC (or none),
+    lossy must keep its colours."""
+    section("Varied scans (TIFF_scans_varied)")
+    srcs = sorted(p for p in scans.iterdir() if p.suffix.lower() in (".tif", ".tiff"))
+
+    def _page0(p):
+        with tifffile.TiffFile(p) as t:
+            pg = t.pages[0]
+            icc = pg.tags[34675].value if 34675 in pg.tags else None
+            return pg.asarray(), icc
+
+    for label, dist in (("lossless", "0"), ("lossy d=1", "1")):
+        tag = "0" if dist == "0" else "1"
+        e = B / f"scan_d{tag}"
+        for s in srcs:
+            cp(s, e / s.name)
+        rc, out = run(f"scan_enc_d{tag}", [ENC, e, "--mode", "1", "--distance", dist,
+                                          "--effort", "2", "--no-preflight"])
+        jx = {p.stem: p for p in (e / "converted_jxl").glob("*.jxl")}
+        missing = [s.name for s in srcs if s.stem not in jx]
+        check(f"scans {label}: every scan encoded", rc == 0 and not missing,
+              f"rc={rc} missing={missing[:4]}")
+        dd = B / f"scan_d{tag}_dec"
+        for p in jx.values():
+            cp(p, dd / p.name)
+        # preserve_original: the default (preserve_thumbnails) writes real
+        # pages at 16 bits by design, and this check wants the 8-bit scans
+        # back as 8-bit.
+        rc, _ = run(f"scan_dec_d{tag}", [DEC, dd, "--mode", "1",
+                                         "--depth-policy", "preserve_original"])
+        bad, psnrs, shifts = [], [], []
+        for s in srcs:
+            t = dd / "converted_tiff" / (s.stem + ".tif")
+            if not t.exists():
+                if s.stem in jx:
+                    bad.append(f"{s.stem}: no decode")
+                continue
+            a, icc_a = _page0(s)
+            b, icc_b = _page0(t)
+            if icc_a != icc_b:
+                bad.append(f"{s.stem}: ICC {'lost' if icc_a else 'added'}"
+                           if (icc_a is None) != (icc_b is None) else f"{s.stem}: ICC changed")
+            if a.shape != b.shape or a.dtype != b.dtype:
+                bad.append(f"{s.stem}: {a.shape}/{a.dtype} -> {b.shape}/{b.dtype}")
+                continue
+            if dist == "0":
+                if not np.array_equal(a, b):
+                    bad.append(f"{s.stem}: pixels differ")
+                continue
+            peak = 255.0 if a.dtype == np.uint8 else 65535.0
+            sse = 0.0
+            for i in range(0, a.shape[0], 256):
+                d = a[i:i + 256].astype(np.float64) - b[i:i + 256].astype(np.float64)
+                sse += float((d * d).sum())
+            mse = sse / a.size
+            psnr = float("inf") if mse == 0 else 10 * np.log10(peak ** 2 / mse)
+            psnrs.append((psnr, s.stem))
+            # Codec error is noise and averages out; a wrong profile moves
+            # the whole image.
+            ax = tuple(range(a.ndim - 1)) if a.ndim == 3 else None
+            shift = np.abs(a.mean(axis=ax, dtype=np.float64)
+                           - b.mean(axis=ax, dtype=np.float64)).max() / peak
+            shifts.append((float(shift), s.stem))
+        if dist == "0":
+            check("scans lossless: bit-exact round trip, same shape/depth/ICC",
+                  rc == 0 and not bad, f"rc={rc} {bad[:5]}")
+        else:
+            check("scans lossy: same shape/depth/ICC after the round trip",
+                  rc == 0 and not bad, f"rc={rc} {bad[:5]}")
+            # 28 dB, not the exports' 40: a grainy 8-bit film scan at d=1 is
+            # ~30 dB with plain cjxl/djxl too (measured 30.3 vs the toolkit's
+            # 30.5 on konica400-4, 2026-10-22). A colour bug lands far lower
+            # (the 2026-10-08 scanner-profile bug: 27 dB at d=2, 18 dB later).
+            psnrs.sort()
+            check("scans lossy d=1: every decode within 28 dB of the scan",
+                  bool(psnrs) and psnrs[0][0] >= 28.0,
+                  "worst " + ", ".join(f"{v:.1f} dB ({n})" for v, n in psnrs[:3]))
+            shifts.sort(reverse=True)
+            check("scans lossy d=1: no colour shift (channel means within 0.5% of full scale)",
+                  bool(shifts) and shifts[0][0] <= 0.005,
+                  "largest " + ", ".join(f"{v:.3%} ({n})" for v, n in shifts[:2]))
+
+
+def jpeg_checks(jpegs):
+    """Every file in <fixtures>/JPEG_varied (baseline/progressive, 4:2:0 to
+    4:4:4 and 4:4:0, gray, MPF trailers, P3/Adobe/odd ICCs, broken
+    MakerNotes, plus an EMPTY file and a macOS '._' file named .jpg) through
+    the transcoder: valid JPEGs come back bit for bit, invalid ones are
+    refused without a traceback, and the deleting mode removes only what it
+    proved -- twice, the second run fed its own output."""
+    section("Varied JPEGs (JPEG_varied)")
+    srcs = sorted(p for p in jpegs.iterdir() if p.suffix.lower() in (".jpg", ".jpeg"))
+    invalid = {p.name for p in srcs if p.stat().st_size < 1024}
+    valid = [p for p in srcs if p.name not in invalid]
+    j = B / "jpg"
+    for s in srcs:
+        cp(s, j / s.name)
+    rc, out = run("jpg_encode", [TR, j, "--mode", "1"])
+    made = {p.stem for p in (j / "converted_jxl").glob("*.jxl")}
+    missing = [s.name for s in valid if s.stem not in made]
+    check("JPEGs: every valid JPEG transcoded losslessly",
+          not missing, f"rc={rc} missing={missing[:4]}")
+    check("JPEGs: the empty and the non-JPEG file produce no output",
+          not any(Path(n).stem in made for n in invalid), f"invalid={sorted(invalid)}")
+    rj = B / "jpg_rec"
+    for p in (j / "converted_jxl").glob("*.jxl"):
+        cp(p, rj / p.name)
+    rc, _ = run("jpg_reconstruct", [TR, rj, "--mode", "1", "--decode", "--force-transcode"])
+    recs = {p.stem: p for p in rj.rglob("*.jp*g")}
+    bad = [s.name for s in valid if s.stem in made
+           and (s.stem not in recs or md5(recs[s.stem]) != md5(s))]
+    check("JPEGs: every transcoded JPEG reconstructs bit for bit", rc == 0 and not bad,
+          f"rc={rc} bad={bad[:4]}")
+
+    d = B / "jpg_del"
+    for s in srcs:
+        cp(s, d / s.name)
+    ARGS = [TR, d, "--mode", "8", "--delete-source", "--delete-confirm-off"]
+    rc, _ = run("jpg_delete", ARGS)
+    left = {p.name for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg")}
+    jx = {p.stem for p in d.glob("*.jxl")}
+    # A read-only JPEG (files rescued from a CD keep the attribute) cannot be
+    # deleted: kept next to its JXL is the right outcome for it.
+    ro = {n for n in left if not os.access(d / n, os.W_OK)}
+    wrong = [s.name for s in valid if (s.name in left) == (s.stem in jx)
+             and not (s.name in ro and s.name in left)]
+    check("mode 8: a JPEG is deleted exactly when its JXL was written (read-only kept)",
+          not wrong and invalid <= left,
+          f"rc={rc} wrong={wrong[:4]} read-only={sorted(ro)[:3]}")
+    rc, out = run("jpg_delete_again", ARGS)
+    left2 = {p.name for p in d.glob("*") if p.suffix.lower() in (".jpg", ".jpeg")}
+    check("mode 8 run again over its own output: nothing else deleted, no new JXL",
+          left2 == left and {p.stem for p in d.glob("*.jxl")} == jx, f"rc={rc}")
+
+
+def hostile_name_checks(A1):
+    """The four scripts on a FILE name as hostile as the folder (the folder of
+    every other check already is): Japanese, [ ], parentheses, a space and %,
+    then a path longer than 260 characters."""
+    section("Hostile file names and long paths")
+    name = "DSC_0001 (2) 菜の花 [v2] 5%"
+    FAST = ["--distance", "1", "--effort", "3", "--no-preflight"]
+    with tifffile.TiffFile(A1) as t:
+        icc0 = t.pages[0].tags[34675].value if 34675 in t.pages[0].tags else None
+
+    h = B / "h_enc"
+    cp(A1, h / f"{name}.tif")
+    rc, _ = run("h_enc", [ENC, h, "--mode", "1"] + FAST)
+    jxl = h / "converted_jxl" / f"{name}.jxl"
+    src = [x for x in relation(jxl) if x.startswith("jxlphoto-src:")] if jxl.exists() else []
+    check("encoder: hostile file name encoded, provenance recorded",
+          rc == 0 and jxl.exists() and len(src) == 1
+          and djxl(jxl, B / "h_enc.png").returncode == 0, f"rc={rc}")
+    if not jxl.exists():
+        return
+    mtime = jxl.stat().st_mtime_ns
+    rc, out = run("h_enc_again", [ENC, h, "--mode", "1"] + FAST)
+    check("encoder: a second run over its own output skips it (smart sync)",
+          rc == 0 and jxl.stat().st_mtime_ns == mtime, f"rc={rc}")
+
+    d = B / "h_dec"
+    cp(jxl, d / f"{name}.jxl")
+    rc, _ = run("h_dec", [DEC, d, "--mode", "1"])
+    tif = d / "converted_tiff" / f"{name}.tif"
+    icc1 = None
+    if tif.exists():
+        with tifffile.TiffFile(tif) as t:
+            icc1 = t.pages[0].tags[34675].value if 34675 in t.pages[0].tags else None
+    check("decoder: hostile file name decoded, original ICC restored",
+          rc == 0 and tif.exists() and icc0 is not None and icc1 == icc0, f"rc={rc}")
+
+    r = B / "h_rec"
+    cp(jxl, r / f"{name}.jxl")
+    before = md5(r / f"{name}.jxl")
+    rc, _ = run("h_rec_inplace", [REC, r, "--mode", "8", "--distance", "2", "--effort", "3",
+                                  "--on-unknown", "convert", "--on-regeneration", "convert",
+                                  "--on-downgrade", "convert", "--no-preflight",
+                                  "--delete-confirm-off"])
+    check("recompressor: hostile file name replaced in place, no .tmp left",
+          rc == 0 and md5(r / f"{name}.jxl") != before and not list(r.glob("*.tmp")),
+          f"rc={rc}")
+    rc, _ = run("h_rec_deriv", [REC, r, "--mode", "1", "--output-icc", "sRGB",
+                                "--distance", "2", "--effort", "3", "--no-preflight",
+                                "--on-unknown", "convert", "--on-regeneration", "convert",
+                                "--on-downgrade", "convert"])
+    outs = [p for p in r.rglob("*.jxl") if p.parent != r]
+    check("recompressor: sRGB derivative of a hostile file name",
+          rc == 0 and len(outs) == 1 and "jxlphoto-derived:sRGB" in exif(
+              ["-s3", "-XMP-dc:Relation", outs[0]]), f"rc={rc} outs={len(outs)}")
+
+    t = B / "h_tr"
+    _via_ascii(lambda s, o: ["magick", f"{A1}[0]", "-depth", "8", "-quality", "92", str(o)],
+               None, t / f"{name}.jpg").check_returncode()
+    jmd5 = md5(t / f"{name}.jpg")
+    rc, _ = run("h_tr_encode", [TR, t, "--mode", "1", "--force-convert", "--distance", "0"])
+    jx = t / "converted_jxl" / f"{name}.jxl"
+    rd = B / "h_tr_rec"
+    if jx.exists():
+        cp(jx, rd / f"{name}.jxl")
+    rc2, _ = run("h_tr_reconstruct", [TR, rd, "--mode", "1", "--decode", "--force-transcode"])
+    recs = [p for p in rd.rglob("*.jp*g")]
+    check("transcoder: hostile JPEG -> JXL -> JPEG is bit-exact",
+          rc == 0 and rc2 == 0 and len(recs) == 1 and md5(recs[0]) == jmd5,
+          f"rc={rc}/{rc2} recs={len(recs)}")
+
+    # Past MAX_PATH: the file's full path is over 260 characters.
+    deep = B / "h_long"
+    while len(str(deep / "sub" / f"{name}.tif")) <= 270:
+        deep = deep / "長いフォルダ名 [long] folder"
+    cp(A1, deep / f"{name}.tif")
+    rc, _ = run("h_long_enc", [ENC, deep, "--mode", "1"] + FAST)
+    lj = deep / "converted_jxl" / f"{name}.jxl"
+    check(f"encoder: a source path of {len(str(deep / (name + '.tif')))} characters",
+          rc == 0 and lj.exists(), f"rc={rc}")
+    if lj.exists():
+        ld = deep / "dec"
+        cp(lj, ld / f"{name}.jxl")
+        rc, _ = run("h_long_dec", [DEC, ld, "--mode", "1"])
+        check("decoder: the same long path decodes",
+              rc == 0 and (ld / "converted_tiff" / f"{name}.tif").exists(), f"rc={rc}")
+        lr = deep / "rec"
+        cp(lj, lr / f"{name}.jxl")
+        before = md5(lr / f"{name}.jxl")
+        rc, _ = run("h_long_rec", [REC, lr, "--mode", "8", "--distance", "2", "--effort", "3",
+                                   "--on-unknown", "convert", "--on-regeneration", "convert",
+                                   "--on-downgrade", "convert", "--no-preflight",
+                                   "--delete-confirm-off"])
+        check("recompressor: in place under the same long path",
+              rc == 0 and md5(lr / f"{name}.jxl") != before, f"rc={rc}")
+        lt = deep / "tr"
+        _via_ascii(lambda s, o: ["magick", f"{A1}[0]", "-depth", "8", "-quality", "92",
+                                 str(o)], None, lt / f"{name}.jpg").check_returncode()
+        jm = md5(lt / f"{name}.jpg")
+        rc, _ = run("h_long_tr", [TR, lt, "--mode", "1", "--force-convert", "--distance", "0"])
+        ltj = lt / "converted_jxl" / f"{name}.jxl"
+        ltr = deep / "trr"
+        if ltj.exists():
+            cp(ltj, ltr / f"{name}.jxl")
+        rc2, _ = run("h_long_tr_rec", [TR, ltr, "--mode", "1", "--decode", "--force-transcode"])
+        recs = list(ltr.rglob("*.jp*g"))
+        check("transcoder: JPEG -> JXL -> JPEG bit-exact under the same long path",
+              rc == 0 and rc2 == 0 and len(recs) == 1 and md5(recs[0]) == jm,
+              f"rc={rc}/{rc2}")
+
+
 def main():
     global B, LOGS
+    # The scratch folder's name is Japanese; a redirected console is cp1252.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--fixtures", type=Path,
                     default=(Path(os.environ["JXLPHOTO_FIXTURES"])
@@ -738,6 +1193,8 @@ def main():
     ap.add_argument("--work", type=Path, default=None,
                     help="scratch folder (default: <fixtures drive>\\jxlphoto_battery_<date>)")
     ap.add_argument("--keep", action="store_true", help="keep the scratch folder")
+    ap.add_argument("--ascii-paths", action="store_true",
+                    help="run in a plain ASCII folder instead of the hostile one")
     args = ap.parse_args()
     if args.fixtures is None or not args.fixtures.is_dir():
         ap.error("pass --fixtures <folder> or set JXLPHOTO_FIXTURES "
@@ -747,9 +1204,10 @@ def main():
         if shutil.which(tool) is None:
             sys.exit(f"{tool} is not on PATH")
     (A1, A2, A3), scan = pick_fixtures(args.fixtures)
-    B = args.work or Path(args.fixtures.anchor) / f"jxlphoto_battery_{time.strftime('%y%m%d')}"
-    if B.exists():
-        shutil.rmtree(B)
+    root = args.work or Path(args.fixtures.anchor) / f"jxlphoto_battery_{time.strftime('%y%m%d')}"
+    B = root / ("work" if args.ascii_paths else HOSTILE_DIR)
+    if root.exists():
+        rmtree(root)
     LOGS = B / "logs"
     LOGS.mkdir(parents=True)
     logs_before = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
@@ -776,6 +1234,20 @@ def main():
         memory_cap_checks(A1, pool_jxl)
         derivative_rederive_checks(A1, pool_jxl)
         transcoder_checks(A1, A2)
+        hostile_name_checks(A1)
+        interaction_checks(A1, A2)
+        if (args.fixtures / "TIFF16_varied").is_dir():
+            varied_checks(args.fixtures / "TIFF16_varied")
+        else:
+            print("\n(no TIFF16_varied/: varied-export checks skipped)")
+        if (args.fixtures / "TIFF_scans_varied").is_dir():
+            scan_checks(args.fixtures / "TIFF_scans_varied")
+        else:
+            print("\n(no TIFF_scans_varied/: varied-scan checks skipped)")
+        if (args.fixtures / "JPEG_varied").is_dir():
+            jpeg_checks(args.fixtures / "JPEG_varied")
+        else:
+            print("\n(no JPEG_varied/: varied-JPEG checks skipped)")
     finally:
         logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
                       if (REPO / "Logs").is_dir() else 0)
@@ -799,7 +1271,7 @@ def main():
         report.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"\n{n_ok}/{len(results)} passed — report: {report}")
         if not args.keep and n_ok == len(results):
-            shutil.rmtree(B, ignore_errors=True)
+            rmtree(root)
         elif not args.keep:
             print(f"Scratch folder KEPT for inspection (a check failed): {B}")
     sys.exit(0 if results and all(ok for *_, ok, _ in results) else 1)
