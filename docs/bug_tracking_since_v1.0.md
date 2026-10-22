@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #544.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #546.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-61 — the wizard in a real console](#round-61--the-wizard-in-a-real-console-2026-10-22) | 2026-10-22 | not released yet | #544–#545 (2) |
 | [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.2 | #543 (1) |
 | [Round-59 — hostile paths, long paths and the deleting auto mode](#round-59--hostile-paths-long-paths-and-the-deleting-auto-mode-2026-10-22) | 2026-10-22 | v2.15.2 | #541–#542 (2) |
 | [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
@@ -69,6 +70,21 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-61 — the wizard in a real console (2026-10-22)
+
+While testing the Windows program (jxl-photo-exe) the wizard was driven
+through a real pseudo-console (ConPTY), key by key, as a person at the
+keyboard: the suite scripts it with a mocked `input()` and the battery runs
+presets unattended, so neither had seen what the menu actually prints. Both
+bugs are in `jxl_photo.py` and affect the Python version the same way.
+Regression test: `tests/test_rich_markup_paths.py` (fails against
+`7999617`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 544 | **Bracketed words in a path vanished from the wizard's screens.** rich reads a bracketed word that starts with a lowercase letter as a style tag and drops it, so `E:\吾妻山 wizard [test] 100%\src` was shown as `E:\吾妻山 wizard  100%\src` in the Step 7 summary and in the `Executing:` line (also the Auto Mode preview, manifest tables, preset lists, error messages). Display only: the command line and the run used the right path. `[FINAL]` and `(2)` were never affected. | wrapper | ✅ FIXED (`_rich_safe()` escapes user text — paths, folder and preset names, messages that carry them — wherever it goes into rich markup; `_print_error`/`_print_success` escape their message) |
+| 545 | **End of input at a wizard prompt ended in a traceback.** `main()` turned Ctrl+C into "Cancelled", but an `EOFError` from a prompt escaped: Ctrl+Z then Enter, a closed console, or Ctrl+C itself on Windows, where `input()` can return end-of-line before the KeyboardInterrupt arrives. In a window opened by a double-click the traceback closes with it. | wrapper | ✅ FIXED (`EOFError` is handled like Ctrl+C: "Cancelled (end of input)", exit 130) |
 
 ## Round-60 — the wrapper's presets end to end, runs killed mid-write (2026-10-22)
 

@@ -66,6 +66,7 @@ try:
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE
     from rich.prompt import Prompt, IntPrompt, Confirm
+    from rich.markup import escape as _markup_escape
     RICH_AVAILABLE = True
     # No force_terminal: when stdout is redirected to a file/pipe, rich must
     # not emit ANSI escape sequences.
@@ -73,6 +74,17 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
     console = None
+
+    def _markup_escape(text):
+        return text
+
+
+def _rich_safe(value) -> str:
+    """User text (a path, a folder or preset name, a message that carries one)
+    made safe inside a rich markup string. rich reads a bracketed word starting
+    with a lowercase letter as a style tag and drops it: 'E:\\Fotos [final]'
+    was shown as 'E:\\Fotos ' in the summary and the 'Executing:' line."""
+    return _markup_escape(str(value))
 
 
 # Backport of Path.is_relative_to for Python < 3.9
@@ -2625,14 +2637,14 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print("[bold]Current Settings:[/bold]")
-            console.print(f"Staging: {current.staging_dir or 'system default'}")
+            console.print(f"Staging: {_rich_safe(current.staging_dir or 'system default')}")
             console.print(f"Workers: {_effective(current.default_workers, current.last_workers)}")
             console.print(f"Quality: {_effective(current.default_quality, current.last_quality)}")
             console.print(f"Effort: {_effective(current.default_effort, current.last_effort)}")
             console.print("Distance (TIFF->JXL): "
                           f"{_effective(_sane_distance(current.default_distance), current.last_distance)}")
             console.print(f"Confirm deletes: {current.confirm_delete}")
-            console.print(f"Export marker: {current.export_marker}")
+            console.print(f"Export marker: {_rich_safe(current.export_marker)}")
 
             new_staging = Prompt.ask("Staging dir (empty=keep current, 'none'=system default)", default=current.staging_dir or "")
             new_workers = IntPrompt.ask("Workers", default=current.default_workers)
@@ -3076,8 +3088,8 @@ class InteractiveMenu:
                     rel_dst = Path(dst).relative_to(input_dir) if _is_relative_to(Path(dst), input_dir) else Path(dst)
                     src_display = self._truncate_path(str(rel_src))
                     dst_display = self._truncate_path(str(rel_dst))
-                    console.print(f"  [dim]{src_display}[/dim]")
-                    console.print(f"    → [green]{dst_display}[/green] ({count} file(s))")
+                    console.print(f"  [dim]{_rich_safe(src_display)}[/dim]")
+                    console.print(f"    → [green]{_rich_safe(dst_display)}[/green] ({count} file(s))")
                     console.print()
                 if len(mappings) > 10:
                     console.print(f"  [dim]... and {len(mappings) - 10} more folder(s)[/dim]")
@@ -3141,7 +3153,7 @@ class InteractiveMenu:
             manifest_path = self._generate_manifest(analyzer, analysis, rec_mode)
             if manifest_path:
                 if RICH_AVAILABLE and console:
-                    console.print(f"[green]✓ Manifest saved to:[/green] {manifest_path}")
+                    console.print(f"[green]✓ Manifest saved to:[/green] {_rich_safe(manifest_path)}")
                     console.print("[dim]Edit in Excel, then run with [M] Run from manifest[/dim]")
                 else:
                     print(f"✓ Manifest saved to: {manifest_path}")
@@ -3344,7 +3356,7 @@ class InteractiveMenu:
         if RICH_AVAILABLE and console:
             console.print("[bold]Available manifests (newest first):[/bold]")
             for i, m in enumerate(shown, 1):
-                console.print(f"  [{i}] {m.name}")
+                console.print(f"  [{i}] {_rich_safe(m.name)}")
             choice = Prompt.ask("Which manifest?",
                                 choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
             return str(shown[int(choice) - 1])
@@ -3407,9 +3419,9 @@ class InteractiveMenu:
             for i, (src, dst, mode) in enumerate(entries, 1):
                 src_display = self._truncate_path(src)
                 dst_display = self._truncate_path(dst)
-                table.add_row(str(i), src_display, dst_display, mode)
+                table.add_row(str(i), _rich_safe(src_display), _rich_safe(dst_display), mode)
 
-            console.print(Panel(table, title=f"[bold]Manifest[/bold] — {manifest_path}", border_style="blue"))
+            console.print(Panel(table, title=f"[bold]Manifest[/bold] — {_rich_safe(manifest_path)}", border_style="blue"))
             console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
         else:
             print(f"\n=== Manifest: {manifest_path} ===")
@@ -3610,7 +3622,7 @@ class InteractiveMenu:
             note = (f"{len(anchored)} relative path(s) in the manifest resolved "
                     f"against the manifest's own folder: {csv_dir}")
             if RICH_AVAILABLE and console:
-                console.print(f"[dim]{note}[/dim]")
+                console.print(f"[dim]{_rich_safe(note)}[/dim]")
             else:
                 print(note)
 
@@ -3639,7 +3651,7 @@ class InteractiveMenu:
             warn = (f"Manifest has no Direction column (pre-v1.8.1 format). "
                     f"Assuming it matches the current workflow ({current_direction}).")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{warn}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(warn)}[/yellow]")
             else:
                 print(f"WARNING: {warn}")
 
@@ -3666,7 +3678,7 @@ class InteractiveMenu:
                 note += "; ExcludeFolders '-' means no exclusion on that row"
             note += ")"
             if RICH_AVAILABLE and console:
-                console.print(f"[dim]{note}[/dim]")
+                console.print(f"[dim]{_rich_safe(note)}[/dim]")
             else:
                 print(note)
 
@@ -3692,7 +3704,7 @@ class InteractiveMenu:
                       if row_options else None)
         _show_opts = bool(_summaries) and any(_summaries)
         if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Manifest:[/bold cyan] {manifest_path}")
+            console.print(f"\n[bold cyan]Manifest:[/bold cyan] {_rich_safe(manifest_path)}")
             console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
             table = Table(show_header=True, header_style="bold cyan")
             table.add_column("#", justify="right", style="dim")
@@ -3702,7 +3714,7 @@ class InteractiveMenu:
             if _show_opts:
                 table.add_column("Options", style="cyan")
             for i, (src, dst, mode) in enumerate(entries[:15], 1):
-                row = [str(i), self._truncate_path(src), self._truncate_path(dst),
+                row = [str(i), _rich_safe(self._truncate_path(src)), _rich_safe(self._truncate_path(dst)),
                        str(mode)]
                 if _show_opts:
                     row.append(_summaries[i - 1])
@@ -4046,7 +4058,7 @@ class InteractiveMenu:
                "of its bytes) and a structural check — nothing compares the pixels.")
         if RICH_AVAILABLE and console:
             console.print()
-            console.print(Panel(f"[bold red]{msg}[/bold red]", border_style="red"))
+            console.print(Panel(f"[bold red]{_rich_safe(msg)}[/bold red]", border_style="red"))
             go = Confirm.ask("[bold red]Delete already-converted originals anyway?[/bold red]",
                              default=False)
         else:
@@ -4061,7 +4073,7 @@ class InteractiveMenu:
             adv['delete_skipped'] = False
             note = "Already-converted originals will be KEPT."
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{note}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(note)}[/yellow]")
             else:
                 print(note)
         workflow['_lossy_skip_confirmed'] = True
@@ -4198,7 +4210,7 @@ class InteractiveMenu:
                 f"This cannot be undone.")
         if RICH_AVAILABLE and console:
             console.print()
-            console.print(Panel(f"[bold red]{warn}[/bold red]", border_style="red"))
+            console.print(Panel(f"[bold red]{_rich_safe(warn)}[/bold red]", border_style="red"))
             go = Confirm.ask("[bold]Continue?[/bold]", default=False)
         else:
             print(f"\n{warn}")
@@ -4292,7 +4304,7 @@ class InteractiveMenu:
         msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
                f"time (HHMM) once more before anything runs — a dry run never asks.")
         if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{msg}[/yellow]")
+            console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
         else:
             print(msg)
         return True
@@ -4458,7 +4470,7 @@ class InteractiveMenu:
                 _n = ("Content matching reads every source file — expect the run to take "
                       "noticeably longer.")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_n}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(_n)}[/yellow]")
                 else:
                     print(_n)
             elif provenance == 'adopt':
@@ -4484,7 +4496,7 @@ class InteractiveMenu:
                     _w = ("Adopting WITHOUT verification. Every existing output will be "
                           "trusted as belonging to the source that shares its name.")
                     if RICH_AVAILABLE and console:
-                        console.print(f"[yellow]{_w}[/yellow]")
+                        console.print(f"[yellow]{_rich_safe(_w)}[/yellow]")
                     else:
                         print(_w)
         if del_skipped and not verify and not _provable:
@@ -4493,7 +4505,7 @@ class InteractiveMenu:
                   "marker (it names the source FILE, not its pixels) and a structural "
                   "check.")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_w}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(_w)}[/yellow]")
             else:
                 print(_w)
 
@@ -4721,7 +4733,7 @@ class InteractiveMenu:
             current = self.config.config.export_marker
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Step 5: Marker Configuration[/bold cyan]")
-                console.print(f"Current: [green]{current}[/green]")
+                console.print(f"Current: [green]{_rich_safe(current)}[/green]")
                 new_marker = Prompt.ask("EXPORT marker", default=current)
             else:
                 print(f"\n--- Step 5: Marker Configuration ---")
@@ -4796,7 +4808,7 @@ class InteractiveMenu:
             folder_name = _dest_folder_names(origin, dest)[0]
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
-                console.print(f"Will create: [green]'{folder_name}'[/green] in each source folder")
+                console.print(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder")
             else:
                 print(f"\n--- Step 5: Subfolder Name ---")
                 print(f"Will create: '{folder_name}' in each source folder")
@@ -4805,7 +4817,7 @@ class InteractiveMenu:
             folder_name = _dest_folder_names(origin, dest)[1]
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
-                console.print(f"Will create: [green]'{folder_name}'[/green] in each source folder")
+                console.print(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder")
             else:
                 print(f"\n--- Step 5: Subfolder Name ---")
                 print(f"Will create: '{folder_name}' in each source folder")
@@ -5893,14 +5905,14 @@ class InteractiveMenu:
                 table.add_column(style="bold")
                 table.add_column()
                 table.add_row("Mode:", "Manifest (auto-detect per entry)")
-                table.add_row("Manifest:", manifest_path)
+                table.add_row("Manifest:", _rich_safe(manifest_path))
                 table.add_row("Entries:", str(len(manifest_entries)))
                 table.add_row("Workers:", str(workflow['workers']))
                 if _mp:
                     table.add_row("Multi-page TIFF:",
                                   f"[yellow]{_mp[0]}[/yellow]" if _mp[1] else _mp[0])
                 if extra_info:
-                    table.add_row("Config:", ", ".join(extra_info))
+                    table.add_row("Config:", _rich_safe(", ".join(extra_info)))
                 console.print(Panel(table, border_style="green"))
                 console.print("\n[yellow]Type YES to confirm[/yellow]")
                 confirm = Prompt.ask("Confirm")
@@ -5937,7 +5949,7 @@ class InteractiveMenu:
             table.add_row("Source:", origin.upper())
             table.add_row("Destination:", dest.upper() if dest else "?")
             table.add_row("Mode:", f"{workflow['mode']} - {mode_names.get(workflow['mode'])}")
-            table.add_row("Directory:", workflow['input_dir'])
+            table.add_row("Directory:", _rich_safe(workflow['input_dir']))
             adv = workflow.get('advanced_options', {})
             if adv.get('overwrite'):
                 ow_label = "overwrite all"
@@ -5951,13 +5963,13 @@ class InteractiveMenu:
             # Mode-specific config so the user doesn't confirm blind
             _mc = workflow.get('mode_config', {})
             if workflow['mode'] in (6, 7):
-                table.add_row("Export marker:", _mc.get('export_marker') or self.config.config.export_marker)
+                table.add_row("Export marker:", _rich_safe(_mc.get('export_marker') or self.config.config.export_marker))
                 if workflow['mode'] == 7:
-                    table.add_row("Export subfolder:", _mc.get('export_subfolder') or "(all)")
+                    table.add_row("Export subfolder:", _rich_safe(_mc.get('export_subfolder') or "(all)"))
                 if _mc.get('export_jxl_folder'):
-                    table.add_row("Output folder:", _mc['export_jxl_folder'])
+                    table.add_row("Output folder:", _rich_safe(_mc['export_jxl_folder']))
             elif workflow['mode'] == 2 and _mc.get('output_dir'):
-                table.add_row("Output dir:", _mc['output_dir'])
+                table.add_row("Output dir:", _rich_safe(_mc['output_dir']))
 
             if origin == 'tiff' and dest == 'jxl':
                 table.add_row("Distance:", str(workflow['distance']))
@@ -5987,7 +5999,7 @@ class InteractiveMenu:
                 _rg = workflow.get('advanced_options', {}).get('on_regeneration')
                 table.add_row("If already re-encoded:", _rg or "copy (child default: ask)")
                 _adv = workflow.get('advanced_options', {})
-                table.add_row("Output colour space:", _adv.get('output_icc') or "keep source")
+                table.add_row("Output colour space:", _rich_safe(_adv.get('output_icc') or "keep source"))
                 if (_adv.get('rederive_on_encode_change') is not None
                         and _has_derivative_options(_adv)):
                     table.add_row("Re-derive on distance/effort change:",
@@ -5998,7 +6010,7 @@ class InteractiveMenu:
                                   "Yes" if _adv['rederive_on_lower_effort'] else "No")
                 if _adv.get('rename_from'):
                     table.add_row("Rename:",
-                                  f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
+                                  _rich_safe(f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'"))
             # Resize/sharpening are a derivative recipe the user must see before
             # typing YES (JXL -> JXL and the transcoder's decode direction).
             _shape_adv = workflow.get('advanced_options', {})
@@ -6010,7 +6022,7 @@ class InteractiveMenu:
                 table.add_row("Effort:", str(workflow['effort']))
 
             if extra_info:
-                table.add_row("Config:", ", ".join(extra_info))
+                table.add_row("Config:", _rich_safe(", ".join(extra_info)))
             console.print(Panel(table, border_style="green"))
 
             console.print("\n[yellow]Type YES to confirm[/yellow]")
@@ -6125,7 +6137,7 @@ class InteractiveMenu:
             warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
                     f"Destination column (only modes 0/2 honor it) — outputs follow the mode rules.")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{warn}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(warn)}[/yellow]")
             else:
                 print(f"WARNING: {warn}")
             for s, d, m in ignored_dests[:5]:
@@ -6288,7 +6300,7 @@ class InteractiveMenu:
                         f"(row(s): {', '.join(map(str, _icc))}) — the recovered "
                         "JPEG keeps the original bytes, colour included.")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_msg}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(_msg)}[/yellow]")
                 else:
                     print(f"WARNING: {_msg}")
 
@@ -6335,7 +6347,7 @@ class InteractiveMenu:
                     "the export marker: they will run as mode 6. Filling the "
                     "ExportSubfolder column on those rows resolves this.")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_sub_warn}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(_sub_warn)}[/yellow]")
                 else:
                     print(f"WARNING: {_sub_warn}")
                 for _s in underivable[:5]:
@@ -6360,7 +6372,7 @@ class InteractiveMenu:
                 _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
                             f"(derived from the manifest's Source paths).")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[dim]{_sub_msg}[/dim]")
+                    console.print(f"[dim]{_rich_safe(_sub_msg)}[/dim]")
                 else:
                     print(_sub_msg)
 
@@ -6413,7 +6425,7 @@ class InteractiveMenu:
             head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
                     f"Source folders — the same files would be processed twice:")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{head}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(head)}[/yellow]")
             else:
                 print(f"WARNING: {head}")
             for a, b in overlaps[:10]:
@@ -6454,7 +6466,7 @@ class InteractiveMenu:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
             if RICH_AVAILABLE and console:
-                console.print(f"[dim]{_skip_msg}[/dim]")
+                console.print(f"[dim]{_rich_safe(_skip_msg)}[/dim]")
             else:
                 print(_skip_msg)
             collisions = []
@@ -6483,7 +6495,7 @@ class InteractiveMenu:
             for a, b, d in collisions[:10]:
                 msg = f"  {a} + {b}  ->  same name in {d}"
                 if RICH_AVAILABLE and console:
-                    console.print(f"[red]{msg}[/red]")
+                    console.print(f"[red]{_rich_safe(msg)}[/red]")
                 else:
                     print(msg)
             if len(collisions) > 10:
@@ -6509,7 +6521,7 @@ class InteractiveMenu:
             head = (f"{len(cross_collisions)} manifest entry pair(s) chain outputs into "
                     f"inputs — one entry's OUTPUT folder is another entry's SOURCE:")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{head}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(head)}[/yellow]")
             else:
                 print(f"WARNING: {head}")
             for src_a, src_b, out in cross_collisions[:10]:
@@ -6517,7 +6529,7 @@ class InteractiveMenu:
                        f"{self._truncate_path(out, 30)}  ==  Source of "
                        f"[{self._truncate_path(src_b, 30)}]")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{msg}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
                 else:
                     print(msg)
             if len(cross_collisions) > 10:
@@ -6596,7 +6608,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing manifest: {total_entries} entry(ies)[/bold cyan]")
-            console.print(f"[dim]Script: {script} | Workers: {workers}[/dim]")
+            console.print(f"[dim]Script: {_rich_safe(script)} | Workers: {workers}[/dim]")
             if dry_run:
                 console.print("[yellow]DRY RUN MODE[/yellow]")
             console.print()
@@ -6613,7 +6625,7 @@ class InteractiveMenu:
         # disagree about what mode an entry is.
         for i, (source, dest_path, detected_mode) in enumerate(resolved_entries, 1):
             if RICH_AVAILABLE and console:
-                console.print(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {self._truncate_path(source, 40)} → {self._truncate_path(dest_path, 40)}")
+                console.print(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {_rich_safe(self._truncate_path(source, 40))} → {_rich_safe(self._truncate_path(dest_path, 40))}")
             else:
                 print(f"[{i}/{total_entries}] Mode {detected_mode} | {source} → {dest_path}")
 
@@ -7570,7 +7582,7 @@ class InteractiveMenu:
                         # This walk is the slow part on large trees (recursive glob
                         # + per-file stat + resolver per source file) — say so.
                         if RICH_AVAILABLE and console:
-                            console.print(f"[dim]Collision check: scanning {src_root} ...[/dim]")
+                            console.print(f"[dim]Collision check: scanning {_rich_safe(src_root)} ...[/dim]")
                         else:
                             print(f"Collision check: scanning {src_root} ...")
                         try:
@@ -7807,7 +7819,7 @@ class InteractiveMenu:
                    f"check instead: outputs with no record are REFUSED, not adopted, and "
                    f"nothing is deleted for them.")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{msg}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
             else:
                 print(f"WARNING: {msg}")
             pv = 'path'
@@ -7844,7 +7856,7 @@ class InteractiveMenu:
                 f"{origin.upper()} -> {dest.upper()} runs; the "
                 f"ExcludeFolders setting ({value}) is IGNORED here.")
         if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{_msg}[/yellow]")
+            console.print(f"[yellow]{_rich_safe(_msg)}[/yellow]")
         else:
             print(f"WARNING: {_msg}")
 
@@ -8131,7 +8143,7 @@ class InteractiveMenu:
                 _note = ("Colour conversion (--icc-profile) writes a DERIVATIVE: the "
                          "originals are NOT deleted on this run.")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_note}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
                 else:
                     print(_note)
             if (advanced.get('delete_source') and not _has_derivative_options(advanced)
@@ -8456,7 +8468,7 @@ class InteractiveMenu:
                          "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
                          "whose real profile lives in XMP.")
                 if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_note}[/yellow]")
+                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
                 else:
                     print(_note)
         if (origin == 'jxl' and dest in ('jpeg', 'png')
@@ -8496,7 +8508,7 @@ class InteractiveMenu:
                         "— the recovered JPEG keeps the original bytes, "
                         "colour included.")
             if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_icc_msg}[/yellow]")
+                console.print(f"[yellow]{_rich_safe(_icc_msg)}[/yellow]")
             else:
                 print(f"WARNING: {_icc_msg}")
 
@@ -8929,7 +8941,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing:[/bold cyan]")
-            console.print(f"[dim]{' '.join(_display_cmd(cmd))}[/dim]\n")
+            console.print(f"[dim]{_rich_safe(' '.join(_display_cmd(cmd)))}[/dim]\n")
         else:
             print(f"\nExecuting: {' '.join(_display_cmd(cmd))}\n")
 
@@ -9030,7 +9042,7 @@ class InteractiveMenu:
                     table.add_column("Workflow")
                     table.add_column("Saved", style="dim")
                     for i, name in enumerate(names, 1):
-                        table.add_row(str(i), name, self._describe_session(presets[name]),
+                        table.add_row(str(i), _rich_safe(name), _rich_safe(self._describe_session(presets[name])),
                                       presets[name].get('saved_at', ''))
                     console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
                 else:
@@ -9060,7 +9072,7 @@ class InteractiveMenu:
                     self._print_error("No workflow has been run yet — run one first, then save it here.")
                     continue
                 if RICH_AVAILABLE and console:
-                    console.print(f"[dim]{self._describe_session(snapshot)}[/dim]")
+                    console.print(f"[dim]{_rich_safe(self._describe_session(snapshot))}[/dim]")
                     raw_name = Prompt.ask("Preset name")
                 else:
                     print(f"  {self._describe_session(snapshot)}")
@@ -9071,7 +9083,7 @@ class InteractiveMenu:
                     continue
                 if name in presets:
                     if RICH_AVAILABLE and console:
-                        overwrite = Confirm.ask(f"Preset '{name}' already exists. Overwrite?", default=False)
+                        overwrite = Confirm.ask(f"Preset '{_rich_safe(name)}' already exists. Overwrite?", default=False)
                     else:
                         overwrite = input(f"Preset '{name}' exists. Overwrite? [y/N]: ").strip().lower().startswith('y')
                     if not overwrite:
@@ -9092,7 +9104,7 @@ class InteractiveMenu:
                     continue
                 name = names[int(target) - 1]
                 if RICH_AVAILABLE and console:
-                    sure = Confirm.ask(f"Delete preset '{name}'?", default=False)
+                    sure = Confirm.ask(f"Delete preset '{_rich_safe(name)}'?", default=False)
                 else:
                     sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith('y')
                 if sure and self.config.delete_preset(name):
@@ -9222,7 +9234,7 @@ class InteractiveMenu:
             t.add_column("", style="cyan")
             t.add_column("")
             for row in settings:
-                t.add_row(*row)
+                t.add_row(*(_rich_safe(c) for c in row))
             console.print(Panel(t, title="[bold]Last Workflow Settings[/bold]", border_style="green"))
         else:
             print("\n=== Last Workflow Settings ===")
@@ -9278,7 +9290,7 @@ class InteractiveMenu:
             input_path = Path(new_folder)
             if not input_path.exists():
                 if RICH_AVAILABLE and console:
-                    console.print(f"[red]Folder not found: {new_folder}[/red]")
+                    console.print(f"[red]Folder not found: {_rich_safe(new_folder)}[/red]")
                 else:
                     print(f"Folder not found: {new_folder}")
                 return False
@@ -9524,13 +9536,13 @@ class InteractiveMenu:
 
     def _print_success(self, message: str) -> None:
         if RICH_AVAILABLE and console:
-            console.print(f"[green]✓[/green] {message}")
+            console.print(f"[green]✓[/green] {_rich_safe(message)}")
         else:
             print(f"✓ {message}")
 
     def _print_error(self, message: str) -> None:
         if RICH_AVAILABLE and console:
-            console.print(f"[red]✗[/red] {message}")
+            console.print(f"[red]✗[/red] {_rich_safe(message)}")
         else:
             print(f"✗ {message}")
 
@@ -9581,6 +9593,13 @@ def main():
         # has already killed, and a manifest run has already summarized). Say so
         # instead of dumping a traceback; 130 is the conventional 128+SIGINT.
         print("\nCancelled (Ctrl+C).")
+        sys.exit(130)
+    except EOFError:
+        # A prompt that read end-of-input: Ctrl+Z/Enter, a closed console, or
+        # Ctrl+C on Windows, where input() can see the end of the line before
+        # the KeyboardInterrupt arrives (a CPython race). Same as cancelling,
+        # instead of a traceback in a window that closes with it.
+        print("\nCancelled (end of input).")
         sys.exit(130)
 
 
@@ -9867,7 +9886,7 @@ def _main():
                     if target.exists():
                         if RICH_AVAILABLE and console:
                             ow = Confirm.ask(
-                                f"[red]A settings file already exists at {target.parent}. Overwrite it?[/red]",
+                                f"[red]A settings file already exists at {_rich_safe(target.parent)}. Overwrite it?[/red]",
                                 default=False
                             )
                         else:
@@ -9878,7 +9897,7 @@ def _main():
                     shutil.move(str(source), str(target))
                     config.config_path = target
                     if RICH_AVAILABLE and console:
-                        console.print(f"[green]✓ Settings moved to {target.parent}[/green]")
+                        console.print(f"[green]✓ Settings moved to {_rich_safe(target.parent)}[/green]")
                     else:
                         print(f"✓ Settings moved to {target.parent}")
                 except Exception as e:
