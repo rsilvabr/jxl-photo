@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.15.2"
+TOOLKIT_VERSION = "2.16.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2525,6 +2525,7 @@ class InteractiveMenu:
             ("6", "Move settings file", True),
             ("7", preset_label, True),
             ("8", "Repair JPEG recovery in JXLs (jbrd audit/repair)", True),
+            ("9", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
             ("0", "Exit", True),
         ])
 
@@ -2612,6 +2613,60 @@ class InteractiveMenu:
         rc = self._stream_child(cmd)
         if rc != 0:
             self._print_error("Repair reported files still broken — see the log above.")
+
+    def explorer_thumbnail_flow(self, status) -> None:
+        """Menu option 9: Explorer thumbnails for JXLs that already exist.
+
+        Thin wrapper over `jxl_recompressor.py <folder> --refresh-explorer-thumbnails`
+        (mode 0 = this folder, mode 8 = with subfolders). Nothing is
+        re-encoded; each file is edited through a verified copy and keeps its
+        modified date, so a later sync still sees a re-exported TIFF as newer.
+        """
+        script = SCRIPT_DIR / 'jxl_recompressor.py'
+        if not script.exists():
+            self._print_error(f"Script not found: {script}")
+            return
+        if not (status.get('djxl') and status.get('exiftool') and status.get('magick')):
+            self._print_error("djxl, exiftool and ImageMagick (magick) are required.")
+            return
+        policies = {"1": "auto", "2": "on", "3": "off"}
+        default_dir = self.config.config.last_input_dir or str(Path.home())
+        if RICH_AVAILABLE and console:
+            console.print("\n[bold cyan]Explorer thumbnails for existing JXLs[/bold cyan]")
+            console.print(
+                "[dim]A small sRGB JPEG stored inside each file, which jxl-thumb shows "
+                "in Windows Explorer without decoding the photo (most useful for "
+                "lossless files). Nothing is re-encoded; each file keeps its "
+                "modified date. JPEG->JXL lossless files (jbrd) are never touched.[/dim]")
+            folder = _strip_surrounding_quotes(Prompt.ask("Folder", default=default_dir))
+            recursive = Confirm.ask("Include subfolders?", default=True)
+            console.print("[1] automatic (recommended)   [2] every file   "
+                          "[3] remove them")
+            policy = policies[Prompt.ask("Which files", choices=["1", "2", "3"], default="1")]
+            dry = Confirm.ask("Dry run (only list what would change)?", default=False)
+        else:
+            print("\n--- Explorer thumbnails for existing JXLs ---")
+            print("A small sRGB JPEG stored inside each file, which jxl-thumb shows in")
+            print("Windows Explorer without decoding the photo. Nothing is re-encoded;")
+            print("each file keeps its modified date. jbrd files are never touched.")
+            folder = _strip_surrounding_quotes(
+                input(f"Folder [{default_dir}]: ").strip() or default_dir)
+            recursive = not input("Include subfolders? [Y/n]: ").strip().lower().startswith('n')
+            print("[1] automatic (recommended)  [2] every file  "
+                  "[3] remove them")
+            policy = policies.get(input("Which files [1]: ").strip() or "1", "auto")
+            dry = input("Dry run (only list what would change)? [y/N]: ").strip().lower().startswith('y')
+
+        if not Path(folder).is_dir():
+            self._print_error(f"Folder not found: {folder}")
+            return
+        cmd = [sys.executable, str(script), folder, '--mode', '8' if recursive else '0',
+               '--refresh-explorer-thumbnails', '--explorer-thumbnail', policy]
+        if dry:
+            cmd.append('--dry-run')
+        rc = self._stream_child(cmd)
+        if rc != 0:
+            self._print_error("Some files could not be updated — see the log above.")
 
     def edit_settings(self) -> None:
         current = self.config.config
@@ -9812,6 +9867,9 @@ def _main():
 
         elif choice == "8":
             menu.repair_jbrd_flow(status)
+
+        elif choice == "9":
+            menu.explorer_thumbnail_flow(status)
 
         elif choice == "3":
             status = checker.check_dependencies(force=True)

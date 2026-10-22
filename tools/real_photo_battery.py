@@ -1304,6 +1304,108 @@ def jpeg_checks(jpegs):
           left2 == left and {p.stem for p in d.glob("*.jxl")} == jx, f"rc={rc}")
 
 
+def _thumb_box(path):
+    """The battery's own reading of the thumbnail box the scripts store
+    (EXPLORER_THUMBNAIL), written independently of theirs: (recorded
+    fingerprint, actual fingerprint of the codestream, JPEG bytes), or None
+    when the file has none. Fingerprint = codestream length + FNV-1a 64 of
+    its first 64 KiB."""
+    import struct
+    data = Path(path).read_bytes()
+    pos, cs, rec = 0, [], None
+    while pos + 8 <= len(data):
+        size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+        hdr = 8
+        if size == 1:
+            size, hdr = struct.unpack(">Q", data[pos + 8:pos + 16])[0], 16
+        elif size == 0:
+            size = len(data) - pos
+        body = data[pos + hdr:pos + size]
+        if typ == b"jxlc":
+            cs.append(body)
+        elif typ == b"jxlp":
+            cs.append(body[4:])
+        elif typ == b"uuid" and body[:16] == bytes.fromhex("4e0b4016f51c473d9669bc35aebe3c16"):
+            line, jpeg = body[16:].split(b"\n", 1)
+            rec = (line.decode().removeprefix("jxlphoto-thumbnail:v1:"), jpeg)
+        pos += size
+    if rec is None:
+        return None
+    stream = b"".join(cs)
+    h = 0xcbf29ce484222325
+    for b in stream[:65536]:
+        h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return rec[0], f"{len(stream)}:{h:016x}", rec[1]
+
+
+def explorer_thumbnail_checks(A1, pool_jxl):
+    """Explorer thumbnails on a real photo: stored in a lossless master, its
+    own box keeps djxl's JPEG output working (an EXIF one would not fit a
+    JPEG's 64 KB segment), renewed in place on an existing lossy master with
+    its modified date kept, and never carried into a JPEG or TIFF."""
+    section("Explorer thumbnails")
+    import io
+    from PIL import Image
+    t = B / "t_enc"
+    cp(A1, t / A1.name)
+    rc, _ = run("t_enc_lossless", [ENC, t, "--mode", "1", "--distance", "0",
+                                   "--effort", "1", "--no-preflight"])
+    jxl = t / "converted_jxl" / A1.with_suffix(".jxl").name
+    tb = _thumb_box(jxl) if jxl.exists() else None
+    size = Image.open(io.BytesIO(tb[2])).size if tb else None
+    check("encoder: a lossless master carries a 768 px thumbnail whose fingerprint "
+          "names its codestream",
+          rc == 0 and tb is not None and tb[0] == tb[1] and max(size) == 768,
+          f"rc={rc} box={tb[:2] if tb else None} size={size}")
+    if jxl.exists():
+        r = djxl(jxl, B / "t_djxl.jpg")
+        err = r.stderr.decode("utf-8", "replace") if isinstance(r.stderr, bytes) else (r.stderr or "")
+        check("djxl writes a JPEG from it (the thumbnail is not in the EXIF)",
+              r.returncode == 0, err.strip()[-200:])
+
+    a2 = B / "t_auto"
+    cp(A1, a2 / A1.name)
+    os.environ["JXLPHOTO_JXL_THUMB"] = "1"
+    try:
+        rc, out = run("t_enc_auto_installed", [ENC, a2, "--mode", "1", "--distance", "1",
+                                               "--effort", "3", "--no-preflight"])
+    finally:
+        os.environ["JXLPHOTO_JXL_THUMB"] = "0"
+    lj = a2 / "converted_jxl" / A1.with_suffix(".jxl").name
+    tb = _thumb_box(lj) if lj.exists() else None
+    check("encoder: with jxl-thumb installed, auto gives a lossy master one too",
+          rc == 0 and tb is not None and tb[0] == tb[1] and "jxl-thumb is installed" in out,
+          f"rc={rc}")
+
+    r = B / "t_refresh"
+    lossy = next(iter(sorted(pool_jxl.glob("*.jxl"))), None)
+    if lossy is not None:
+        cp(lossy, r / lossy.name)
+        target = r / lossy.name
+        old = 1_600_000_000
+        os.utime(target, (old, old))
+        rc, out = run("t_refresh", [REC, r, "--mode", "0", "--refresh-explorer-thumbnails",
+                                    "--explorer-thumbnail", "on"])
+        tb = _thumb_box(target)
+        check("recompressor --refresh-explorer-thumbnails: a lossy master gains a valid "
+              "thumbnail and keeps its modified date",
+              rc == 0 and tb is not None and tb[0] == tb[1]
+              and int(target.stat().st_mtime) == old, f"rc={rc}")
+        rc, out = run("t_refresh_again", [REC, r, "--mode", "0",
+                                          "--refresh-explorer-thumbnails",
+                                          "--explorer-thumbnail", "on"])
+        check("a second refresh finds it current and writes nothing",
+              rc == 0 and "1 already current" in out, f"rc={rc}")
+
+    if jxl.exists():
+        rc, out = run("t_to_jpeg", [TR, jxl.parent, "--mode", "1", "--from-jxl",
+                                    "--format", "jpeg"])
+        jpgs = list(jxl.parent.rglob(A1.with_suffix(".jpg").name))
+        check("transcoder: the master decodes to JPEG, which carries no thumbnail box",
+              rc == 0 and jpgs and b"jxlphoto-thumbnail" not in jpgs[0].read_bytes(),
+              f"rc={rc}")
+
+
 def hostile_name_checks(A1):
     """The four scripts on a FILE name as hostile as the folder (the folder of
     every other check already is): Japanese, [ ], parentheses, a space and %,
@@ -1418,6 +1520,10 @@ def main():
     global B, LOGS
     # The scratch folder's name is Japanese; a redirected console is cp1252.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # EXPLORER_THUMBNAIL = auto covers lossy outputs when jxl-thumb is
+    # installed: pinned to "not installed" so every check sees the same
+    # outputs on every PC; the Explorer-thumbnail section sets 1 itself.
+    os.environ["JXLPHOTO_JXL_THUMB"] = "0"
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--fixtures", type=Path,
                     default=(Path(os.environ["JXLPHOTO_FIXTURES"])
@@ -1469,6 +1575,7 @@ def main():
         transcoder_checks(A1, A2)
         hostile_name_checks(A1)
         interaction_checks(A1, A2)
+        explorer_thumbnail_checks(A1, pool_jxl)
         wrapper_checks(A1, A2)
         interrupt_checks(A1, A2, A3)
         if (args.fixtures / "TIFF16_varied").is_dir():

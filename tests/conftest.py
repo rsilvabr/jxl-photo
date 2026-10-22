@@ -56,6 +56,12 @@ os.environ.setdefault("COLUMNS", "240")
 # every machine. tests/test_thumbnail_tip.py turns it back on per test.
 os.environ["JXLPHOTO_THUMBNAIL_TIP"] = ""
 
+# EXPLORER_THUMBNAIL = "auto" covers lossy outputs too when jxl-thumb is
+# installed for the user running the tests: pinned to "not installed" so the
+# encodes are the same on every machine (test_explorer_thumbnail.py sets 1
+# where it means to).
+os.environ["JXLPHOTO_JXL_THUMB"] = "0"
+
 
 def pytest_sessionfinish(session, exitstatus):
     # The scripts' FileHandlers keep their last log open, and Windows cannot

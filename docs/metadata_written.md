@@ -27,6 +27,7 @@ cannot give away.
 | `XMP-dc:Relation` | `jxlphoto-*` tokens — see [the next table](#markers-in-xmp-dcrelation). Your own Relation values are kept | all four scripts |
 | `XMP-xmpMM:History` | one entry per output: `Action` (`converted`, or `derived` for a derivative), `When`, `SoftwareAgent` = `jxl-photo <version> (<github link>)`, `Parameters` = `<script>: from <type> to <type>`. Earlier entries (Capture One, previous runs) are kept | all four scripts |
 | `ExifImageWidth/Height`, `XMP-exif:PixelX/YDimension` | corrected to the new size | derivatives that were resized |
+| A thumbnail box (ISO BMFF `uuid` box, not a metadata field) | `jxlphoto-thumbnail:v1:<image data bytes>:<hash>` and a 768 px sRGB JPEG of the image, for [jxl-thumb](https://github.com/rsilvabr/jxl-thumb); the hash names the image data it was made from, so it is shown only while current ([details](README_jxl_tiff_encoder.md#explorer-thumbnails-explorer_thumbnail---explorer-thumbnail)). Reveals nothing the image does not | encoder and recompressor (`EXPLORER_THUMBNAIL = "auto"`: every output when jxl-thumb is installed, lossless outputs otherwise); the recompressor's `--refresh-explorer-thumbnails` on existing files. Never in a `jbrd` container; never copied to another file |
 
 ### The ICC copy in `CreatorTool`
 

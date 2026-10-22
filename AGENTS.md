@@ -133,6 +133,23 @@
   gate. The encoder's `--restamp-moved` and the adopt stamp rewrite a
   master only through `_rewrite_master_relation` (temp + reorder +
   integrity + read-back + mtime kept + os.replace) and write no History.
+- **Explorer thumbnail box (v2.16.0, `EXPLORER_THUMBNAIL`)**: a 768 px sRGB
+  JPEG in an ISO BMFF `uuid` box (UUID `4e0b4016-f51c-473d-9669-bc35aebe3c16`,
+  payload `jxlphoto-thumbnail:v1:<bytes>:<fnv>\n` + JPEG) placed before the
+  codestream, for jxl-thumb 0.2.0+. `auto` = every output when jxl-thumb is
+  the registered `.jxl` handler (`_jxl_thumb_installed`, overridable with
+  `JXLPHOTO_JXL_THUMB=1/0`; the suite and the battery pin it to 0), lossless
+  only otherwise. NEVER in the EXIF: a 768 px JPEG does not
+  fit a JPEG's 64 KB EXIF segment and `djxl x.jxl y.jpg`, which copies the
+  EXIF, then fails ("Bogus marker length") — the battery caught it. The
+  fingerprint (codestream length + FNV-1a 64 of its first 64 KiB; jxlc, or
+  jxlp payloads without their 4-byte index) must stay byte-identical to
+  jxl-thumb's `ReadThumbnailBox`. djxl is called WITHOUT `--color_space` for
+  the thumbnail (with it, a lossless file is converted while `--icc_out`
+  still names the original profile). The refresh
+  (`--refresh-explorer-thumbnails`) restores each file's mtime: the
+  encoder's sync compares it with the TIFF's. Helpers parity-pinned
+  (encoder + recompressor).
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
@@ -391,3 +408,11 @@ must-fix / should-fix items and a commit verdict.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
   `Claude-Session` trailers** (AI assistance is credited in the README's
   Acknowledgments instead, and more than one assistant is used).
+- **Every jxl-photo release updates jxl-photo-exe too** (owner's rule,
+  2026-10-22), in the sibling repo `../jxl-photo-exe`: `JXLPHOTO_TAG` in its
+  `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its README
+  "Current version" line and `docs/version_history.md`, `python build.py`,
+  then `python tests/battery_on_exe.py` (runs the program from a hostile
+  folder; must pass) and a pre-release `vX.Y.Z-exe1` with the zip. A change
+  to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
+  goes in the same way.

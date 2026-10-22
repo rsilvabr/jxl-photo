@@ -81,6 +81,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 │  6  Move settings file                                                                                             │
 │  7  Presets (2 saved)                                                                                              │
 │  8  Repair JPEG recovery (jbrd audit/repair)                                                                       │
+│  9  Explorer thumbnails for existing JXLs (jxl-thumb)                                                              │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -121,6 +122,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `6` | Move settings file | Toggle between script folder and User Profile |
 | `7` | Presets | Save the last workflow under a name and re-run it later. See below |
 | `8` | Repair JPEG recovery (jbrd) | Audit/repair JXLs whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers). Audit (dry run) is the default; the repair works on a copy and only replaces a file when the copy provably reconstructs |
+| `9` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
 | `0` | Exit | Quit |
 
 The stored workflow is validated before a repeat or a preset replays it: the

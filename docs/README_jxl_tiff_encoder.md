@@ -163,6 +163,13 @@ ENCODE_TAG_MODE = "xmp"
 # NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP:CreatorTool
 # and encoding params are concatenated to dc:Description.
 
+EXPLORER_THUMBNAIL = "auto"
+# A 768 px sRGB JPEG of the image stored inside the output (its own box, not
+# the EXIF), shown by jxl-thumb in Windows Explorer: "auto" (default) = every
+# output when jxl-thumb is installed, lossless outputs only otherwise; "on" =
+# every output; "off" = none. Also --explorer-thumbnail. See "Explorer
+# thumbnails" below.
+
 CJXL_MODULAR = False
 # False (default) — lossy uses VarDCT encoder + XYB colorspace.
 # True  — forces Modular encoder for lossy (--modular=1).
@@ -272,6 +279,63 @@ exits `0` without a prompt.
 
 
 ---
+
+## Explorer thumbnails (`EXPLORER_THUMBNAIL`, `--explorer-thumbnail`)
+
+Windows Explorer has to decode a JXL to show its thumbnail. A **lossy** JXL
+carries a 1:8 preview of itself that [jxl-thumb](https://github.com/rsilvabr/jxl-thumb)
+reads in ~75 ms; a **lossless** one has none, so its thumbnail means decoding
+the whole file: about **1.8 s per 45 MP photo on a hard disk**.
+
+So the encoder stores a small JPEG of the image inside its outputs — every
+output when jxl-thumb is installed, lossless ones otherwise:
+**768 px** on the long side (the largest size Explorer asks for its icon
+views), **converted to sRGB** from the photo's own profile. jxl-thumb 0.2.0+
+shows it in **~2 ms** instead of decoding the photo.
+
+**Where it is.** In a box of the JXL container of its own — an ISO BMFF
+`uuid` box, the format's way to carry a program's private data — right
+before the image data. Other programs skip a box they do not know: viewers,
+djxl, exiftool edits (which keep it), Lightroom-style metadata writers.
+It is not in the EXIF on purpose: a 768 px JPEG does not fit the 64 KB EXIF
+segment of a JPEG, and djxl, which copies a JXL's EXIF into the JPEG it
+writes, fails on such a file ("Bogus marker length").
+
+**It cannot go stale unnoticed.** The box also records a fingerprint of the
+image data it was made from (`jxlphoto-thumbnail:v1:<bytes>:<hash>`: the
+codestream's length and a hash of its first 64 KiB). jxl-thumb shows the
+thumbnail only while that still matches the file; a program that re-encodes
+the pixels and somehow keeps the box leaves a stale one, which is ignored.
+Metadata edits never touch the image data, so they keep it valid.
+
+| `EXPLORER_THUMBNAIL` / `--explorer-thumbnail` | Stores one in |
+|---|---|
+| `auto` (default) | **every** output when jxl-thumb is installed for your Windows user (lossy thumbnails get ~25x faster too: ~50 → 2 ms); **lossless** outputs (`--distance 0`) only when it is not — they gain the most, and are ready if you install it later |
+| `on` | every output, whatever is installed |
+| `off` | none |
+
+`auto` reads the registry once per run: is jxl-thumb Explorer's thumbnail
+handler for `.jxl`? The log says so when it covers lossy outputs. The
+environment variable `JXLPHOTO_JXL_THUMB=1` or `0` overrides the check (the
+test suite pins it to `0`; a run making files for another PC can use it).
+
+Measured on 100 photos of 45 MP on a hard disk, cold (first opening of the
+folder): a lossless folder 176 s → under 2 s; on an SSD, warm, per file:
+lossless 1100 → 1.7 ms, lossy 52–76 → 1.7 ms. Cost: about 90 KB per file
+(0.05% of a lossless 45 MP JXL, 1% of a d=1 one) and about 2 s per 45 MP
+lossless encode, about 1.2 s per 45 MP lossy one (djxl + ImageMagick). Needs `djxl` and ImageMagick; without
+them the run says so once and stores none. `--strip` never stores one.
+`EXPLORER_THUMBNAIL_SIZE` (default 768) sets the size.
+
+**Small files get none**, even with `on`: an image no larger than the
+thumbnail, or a file where the thumbnail would be more than
+`EXPLORER_THUMBNAIL_MAX_SHARE` (default 10%) of its size — an 800 px d=3 JXL
+of a few dozen KB, a 2048 px derivative. Those decode fast anyway.
+
+Files that already exist get theirs from the recompressor's
+`--refresh-explorer-thumbnails` (or menu option 9 of `jxl_photo.py`), which
+changes nothing but the thumbnail and keeps each file's modified date — see
+[README_jxl_recompressor.md](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails).
 
 ## Modes 6 and 7 — ONLY files inside `_EXPORT`
 
@@ -508,7 +572,12 @@ Options:
                     multi-page reconstruction and grayscale markers, so split
                     pages decode as standalone files and faithful multipage/
                     grayscale reconstruction is not possible)
-  --embed-thumbnail Deprecated since v2.12.0 and ignored (no viewer tested reads an EXIF thumbnail in a JXL)
+  --explorer-thumbnail auto|on|off
+                    Thumbnail stored for jxl-thumb (EXPLORER_THUMBNAIL): auto =
+                    every output when jxl-thumb is installed, lossless only
+                    otherwise (default); on = every output; off = none. See
+                    "Explorer thumbnails"
+  --embed-thumbnail Deprecated since v2.12.0 and ignored; --explorer-thumbnail replaces it
   --dry-run         Preview operations without converting
   --summary-json  Emit ONE machine-readable line per run:
                   `##JXLSUM## {"ok": N, "errors": N, "failures": [...], ...}`

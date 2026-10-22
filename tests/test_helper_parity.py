@@ -82,6 +82,18 @@ SHARED_HELPERS = [
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
     "_long_codec_paths",
+    # Explorer thumbnail box (encoder + recompressor). jxl-thumb trusts a
+    # thumbnail only while the recorded fingerprint names the file's
+    # codestream: a copy computing or storing it differently would write
+    # thumbnails it then never shows.
+    "_jxl_boxes",
+    "_codestream_fingerprint",
+    "_thumbnail_box_fingerprint",
+    "_write_thumbnail_box",
+    "_explorer_thumbnail_wanted",
+    "_jxl_thumb_installed",
+    "_make_explorer_thumbnail",
+    "_add_explorer_thumbnail",
     "_stderr_tail",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not

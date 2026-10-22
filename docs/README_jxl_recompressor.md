@@ -224,6 +224,47 @@ re-encode at the same settings) and are never collapsed. Only when both
 fields hold the same chain (or one extends the other) is it treated as one
 history; otherwise both are kept, `dc:Description` first.
 
+### Explorer thumbnails
+
+A re-encoded output never inherits the source's thumbnail box (the metadata
+copy does not carry it, and it would show the source's pixels). With
+`EXPLORER_THUMBNAIL` / `--explorer-thumbnail` a fresh one is made from the
+output — by default (`auto`) for every output when jxl-thumb is installed,
+lossless outputs (`--distance 0`) only otherwise; `on` = every output, `off` =
+none. It is added after the keep-smaller decision, so its ~90 KB never
+decides whether a re-encode is kept. Verbatim copies keep the source's, which
+is still valid (same image data). What it is and why lossless files need it:
+[Explorer thumbnails in the encoder README](README_jxl_tiff_encoder.md#explorer-thumbnails-explorer_thumbnail---explorer-thumbnail).
+
+### Explorer thumbnails for existing files (`--refresh-explorer-thumbnails`)
+
+```
+py jxl_recompressor.py "F:\Photos" --mode 8 --refresh-explorer-thumbnails
+py jxl_recompressor.py "F:\Photos" --mode 8 --refresh-explorer-thumbnails --explorer-thumbnail on
+py jxl_recompressor.py "F:\Photos" --mode 8 --refresh-explorer-thumbnails --explorer-thumbnail off
+```
+
+Re-encodes nothing. Takes the JXLs the given `--mode` would take as sources
+(mode 0 = the folder, 8 = with subfolders, 6/7 = inside the export marker)
+and, per `EXPLORER_THUMBNAIL`, stores the thumbnail of each one that has
+none, renews a stale one (its fingerprint names other image data), leaves a
+current one alone — or, with `off`, removes them. `auto` covers every file
+when jxl-thumb is installed, and otherwise asks `jxlinfo` which files are
+lossless. Small files are skipped (see the encoder's
+*Explorer thumbnails*: an image no larger than the thumbnail, or a thumbnail
+over 10% of the file).
+
+Each file is edited through a copy beside it: the thumbnail box rewritten,
+the integrity check, and the **whole image data compared byte for byte**
+(SHA-256) before the copy replaces the file. The file then gets its **own
+modified date back**: the encoder's sync compares that date with the TIFF's,
+so a TIFF re-exported since still reads as newer and is reconverted on the
+next sync. JPEG → JXL lossless files (`jbrd`) are never edited. A bare
+codestream file (no container) is wrapped in one first; the image data is
+unchanged. `--dry-run` lists what would change. It cannot be combined with
+an output folder, `--delete-source` or the derivative options. Menu option 9
+of `jxl_photo.py` runs it.
+
 ## Output modes
 
 Same semantics as the other scripts in the toolkit:
@@ -756,6 +797,17 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       subfolder. The configured folder is skipped as a source
                       by later recursive scans
 --dry-run             Simulate: nothing written, copied, replaced or deleted
+--explorer-thumbnail auto|on|off
+                      Thumbnail stored in the outputs for jxl-thumb
+                      (EXPLORER_THUMBNAIL): auto = every output when
+                      jxl-thumb is installed, lossless only otherwise
+                      (default); on = every output; off = none
+--refresh-explorer-thumbnails
+                      Re-encode nothing: store, renew or (with
+                      --explorer-thumbnail off) remove the thumbnails of the
+                      JXLs this --mode takes as sources, in place, each file
+                      keeping its modified date. See "Explorer thumbnails for
+                      existing files"
 --summary-json        Machine-readable ##JXLSUM## line consumed by jxl_photo.py
                       (hidden from the help text; not a user-facing flag)
 ```
@@ -793,6 +845,14 @@ REDERIVE_ON_LOWER_EFFORT = False
                              # --rederive-on-lower-effort /
                              # --no-rederive-on-lower-effort)
 ENCODE_TAG_MODE = "xmp"      # xmp/software/off
+EXPLORER_THUMBNAIL = "auto"  # auto (every output with jxl-thumb installed,
+                             # else lossless outputs) / on / off; also
+                             # --explorer-thumbnail and
+                             # --refresh-explorer-thumbnails
+EXPLORER_THUMBNAIL_SIZE = 768  # long side in pixels
+EXPLORER_THUMBNAIL_MAX_SHARE = 0.10
+                             # none when the thumbnail would be more than this
+                             # share of the file (small files decode fast)
 CJXL_TIMEOUT = 900           # Per-file cjxl/djxl/magick timeout (seconds)
 EXIFTOOL_TIMEOUT = CJXL_TIMEOUT
                              # Per-file exiftool calls (metadata copy, source

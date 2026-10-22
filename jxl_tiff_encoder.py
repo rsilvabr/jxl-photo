@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.15.2"
+TOOLKIT_VERSION = "2.16.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1385,6 +1385,33 @@ STRIP_METADATA = False
 # Useful for creating clean JXL files without embedded metadata.
 # Can also be set via --strip CLI flag.
 
+EXPLORER_THUMBNAIL = "auto"
+# A small sRGB JPEG of the image stored inside the JXL, which jxl-thumb
+# (https://github.com/rsilvabr/jxl-thumb, 0.2.0+) shows in Windows Explorer
+# instead of decoding the photo. Also --explorer-thumbnail.
+# "auto" (default) -> every output when jxl-thumb is installed for this
+#          Windows user (it is what shows them), lossless outputs only
+#          otherwise: a lossless JXL has no small preview inside, so its
+#          thumbnail means decoding the whole file (1.8 s per 45 MP photo on
+#          a hard disk, against ~2 ms); a lossy one keeps a 1:8 preview of its
+#          own (~50-75 ms).
+# "on"   -> every output. "off" -> none.
+# Stored in a box of the JXL container that other programs skip (not in the
+# EXIF, where it would break djxl's JPEG output). ~90 KB per file; ~2 s per
+# 45 MP lossless encode, ~1.2 s per lossy one (djxl + magick). Needs djxl and
+# ImageMagick; without them the output is written without it. Never written
+# with --strip, never into a small file (EXPLORER_THUMBNAIL_MAX_SHARE).
+
+EXPLORER_THUMBNAIL_SIZE = 768
+# Long side in pixels. 768 is the largest thumbnail Explorer asks for its icon
+# views (extra large icons); bigger requests (preview pane) use the JXL itself.
+
+EXPLORER_THUMBNAIL_MAX_SHARE = 0.10
+# Small files get none: an image no larger than EXPLORER_THUMBNAIL_SIZE, or a
+# thumbnail that would be more than this share of the file (an 800 px d=3 JXL
+# of 50 KB, a 2048 px derivative). Those decode fast anyway. A 45 MP master's
+# thumbnail is 0.05-1% of it.
+
 SCRIPT_DIR = Path(__file__).parent
 # JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
 # the test suite and the real-photo battery set it so their runs never
@@ -1468,6 +1495,7 @@ _RUN_DEFAULTS = {
     "EXPORT_JXL_FOLDER": EXPORT_JXL_FOLDER,
     "EXPORT_MARKER": EXPORT_MARKER,
     "STRIP_METADATA": STRIP_METADATA,
+    "EXPLORER_THUMBNAIL": EXPLORER_THUMBNAIL,
 }
 
 def _capped_discard_warning(msg: str):
@@ -2285,6 +2313,264 @@ def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
     except OSError:
         return None
     return a == b
+
+
+# ─── Explorer thumbnail (EXPLORER_THUMBNAIL) ─────────────────────────────
+# A small sRGB JPEG of the image in a box of the JXL container, for jxl-thumb
+# (0.2.0+), which shows it in Windows Explorer instead of decoding the photo.
+# The box is an ISO BMFF `uuid` box — the format's own way to carry a
+# program's private data: decoders and editors that do not know it skip it
+# (djxl, exiftool and this toolkit's box reorder keep it in place; exiftool's
+# -tagsfromfile does not copy it, so a re-encode never inherits the source's).
+# Not EXIF: a 768 px JPEG does not fit a JPEG's 64 KB EXIF segment, and
+# djxl, which copies a JXL's EXIF into the JPEG it writes, then fails.
+# Payload: the UUID, then b"jxlphoto-thumbnail:v1:<codestream bytes>:<FNV-1a
+# 64 of its first 64 KiB>\n", then the JPEG. jxl-thumb shows it only while
+# that fingerprint still names the file's codestream: a program that
+# re-encodes the pixels and keeps the box would leave a stale one, ignored.
+# Parity-pinned with the recompressor.
+THUMB_BOX_UUID = bytes.fromhex("4e0b4016f51c473d9669bc35aebe3c16")
+THUMB_BOX_MARKER = b"jxlphoto-thumbnail:v1:"
+_THUMB_HEAD = 65536
+
+
+def _jxl_boxes(f, end):
+    """(type, box start, header size, box size) of each top-level box, read
+    with seeks from an open file. Stops at the first malformed header."""
+    out, pos = [], 0
+    while pos + 8 <= end:
+        f.seek(pos)
+        size, typ = struct.unpack(">I4s", f.read(8))
+        hdr = 8
+        if size == 1:
+            size = struct.unpack(">Q", f.read(8))[0]
+            hdr = 16
+        elif size == 0:
+            size = end - pos
+        if size < hdr or pos + size > end:
+            break
+        out.append((typ, pos, hdr, size))
+        pos += size
+    return out
+
+
+def _codestream_fingerprint(jxl_path):
+    """'<codestream bytes>:<FNV-1a 64 of its first 64 KiB, 16 hex digits>', or
+    None when the file is not a JPEG XL. The codestream is the whole file for
+    a bare one, else the jxlc box or the jxlp boxes joined without their
+    4-byte index — never the metadata boxes around it."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            f.seek(0)
+            if f.read(2) == b"\xff\x0a":
+                f.seek(0)
+                length, head = end, f.read(_THUMB_HEAD)
+            else:
+                length, head, found = 0, b"", False
+                for typ, pos, hdr, size in _jxl_boxes(f, end):
+                    skip = {b"jxlc": 0, b"jxlp": 4}.get(typ)
+                    if skip is None or size - hdr < skip:
+                        continue
+                    found = True
+                    payload = size - hdr - skip
+                    length += payload
+                    if len(head) < _THUMB_HEAD:
+                        f.seek(pos + hdr + skip)
+                        head += f.read(min(payload, _THUMB_HEAD - len(head)))
+                if not found:
+                    return None
+    except (OSError, struct.error):
+        return None
+    h = 0xcbf29ce484222325
+    for b in head:
+        h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{length}:{h:016x}"
+
+
+def _thumbnail_box_fingerprint(jxl_path):
+    """The fingerprint recorded in the file's thumbnail box, '' when it has
+    none, None when the file cannot be read."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            for typ, pos, hdr, size in _jxl_boxes(f, end):
+                if typ == b"uuid" and size - hdr >= 16 + len(THUMB_BOX_MARKER):
+                    f.seek(pos + hdr)
+                    head = f.read(min(size - hdr, 16 + len(THUMB_BOX_MARKER) + 64))
+                    if (head[:16] == THUMB_BOX_UUID
+                            and head[16:16 + len(THUMB_BOX_MARKER)] == THUMB_BOX_MARKER):
+                        rest = head[16 + len(THUMB_BOX_MARKER):]
+                        return rest.split(b"\n", 1)[0].decode("ascii", "replace")
+    except (OSError, struct.error):
+        return None
+    return ""
+
+
+def _write_thumbnail_box(jxl_path, jpeg, fingerprint) -> None:
+    """Rewrite `jxl_path` with its thumbnail box replaced: `jpeg` (bytes)
+    goes in a fresh box right before the codestream, where a reader finds it
+    without crossing the image data; None removes it. Every other box keeps
+    its bytes and order. Through a temp file beside it and os.replace."""
+    jxl_path = Path(jxl_path)
+    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_{jxl_path.name}.tmp"
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            if end >= 2:
+                f.seek(0)
+                if f.read(2) == b"\xff\x0a":
+                    raise ValueError("a bare codestream has no container for the box")
+            boxes = _jxl_boxes(f, end)
+            if not boxes or boxes[-1][1] + boxes[-1][3] != end:
+                raise ValueError("unreadable container")
+            new_box = b""
+            if jpeg is not None:
+                payload = (THUMB_BOX_UUID + THUMB_BOX_MARKER
+                           + fingerprint.encode("ascii") + b"\n" + jpeg)
+                new_box = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
+            with open(tmp, "wb") as out:
+                placed = False
+                for typ, pos, hdr, size in boxes:
+                    if typ == b"uuid":
+                        f.seek(pos + hdr)
+                        if f.read(16) == THUMB_BOX_UUID:
+                            continue              # the old thumbnail
+                    if not placed and typ in (b"jxlc", b"jxlp"):
+                        out.write(new_box)
+                        placed = True
+                    f.seek(pos)
+                    left = size
+                    while left:
+                        chunk = f.read(min(left, 1 << 22))
+                        if not chunk:
+                            raise OSError("short read")
+                        out.write(chunk)
+                        left -= len(chunk)
+                if not placed:
+                    out.write(new_box)
+        os.replace(str(tmp), str(jxl_path))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+_JXL_THUMB_CLSID = "{EF830030-FBD6-4B62-BFD4-0DBD590D6135}"
+_JXL_THUMB_HANDLER_KEYS = (
+    r".jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
+    r"SystemFileAssociations\.jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
+)
+_jxl_thumb_seen = []
+
+
+def _jxl_thumb_installed() -> bool:
+    """True when jxl-thumb is Explorer's thumbnail handler for .jxl for this
+    Windows user (one registry read per run). JXLPHOTO_JXL_THUMB=1/0
+    overrides the check — for the test suite, and for a run whose thumbnails
+    are meant for another user or PC."""
+    env = os.environ.get("JXLPHOTO_JXL_THUMB")
+    if env in ("0", "1"):
+        return env == "1"
+    if not _jxl_thumb_seen:
+        found = False
+        if os.name == "nt":
+            try:
+                import winreg
+                for sub in _JXL_THUMB_HANDLER_KEYS:
+                    try:
+                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, sub) as key:
+                            value = str(winreg.QueryValue(key, None) or "").strip()
+                    except OSError:
+                        continue
+                    if value:
+                        found = value.upper() == _JXL_THUMB_CLSID
+                        break
+            except Exception:
+                found = False
+        _jxl_thumb_seen.append(found)
+    return _jxl_thumb_seen[0]
+
+
+def _explorer_thumbnail_wanted(lossless: bool) -> bool:
+    """auto: every output when jxl-thumb is installed (it shows them), else
+    lossless outputs only (they have no preview of their own)."""
+    if EXPLORER_THUMBNAIL == "on":
+        return True
+    return EXPLORER_THUMBNAIL == "auto" and (lossless or _jxl_thumb_installed())
+
+
+def _make_explorer_thumbnail(jxl_path, tmp_dir):
+    """An EXPLORER_THUMBNAIL_SIZE px sRGB JPEG of the file (bytes), or None
+    with a warning: a thumbnail is never worth failing an archive file.
+    djxl decodes WITHOUT a target colour space — asked for one it converts a
+    lossless file too while --icc_out still names the original profile (a
+    double conversion). Left alone, --icc_out names exactly what the pixels
+    are in (the file's own profile, or linear sRGB for a lossy ICC blob) and
+    ImageMagick converts from it to sRGB, after the resize."""
+    tmp_dir = Path(tmp_dir)
+    pam, icc, jpg = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc", tmp_dir / "thumb.jpg"
+    srgb = tmp_dir / "thumb_srgb.icc"
+    try:
+        if shutil.which("djxl") is None or shutil.which("magick") is None:
+            raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
+        from PIL import ImageCms
+        srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+        r = _run_captured(["djxl", str(jxl_path), str(pam), f"--icc_out={icc}"],
+                          CJXL_TIMEOUT)
+        if r.returncode != 0 or not pam.exists():
+            raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+        size = int(EXPLORER_THUMBNAIL_SIZE)
+        cmd = ["magick", str(pam), "-resize", f"{size}x{size}>"]
+        if icc.exists() and icc.stat().st_size:
+            cmd += ["-profile", str(icc)]
+        cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
+                "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
+                "jpeg:" + str(jpg)]
+        r = _run_captured(cmd, CJXL_TIMEOUT)
+        if r.returncode != 0 or not jpg.exists():
+            raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
+        return jpg.read_bytes()
+    except Exception as e:
+        logger.warning(f"  >Explorer thumbnail skipped ({e}) | {Path(jxl_path).name}")
+        return None
+    finally:
+        for p in (pam, jpg):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _add_explorer_thumbnail(jxl_path, tmp_dir) -> str:
+    """Make the thumbnail of a finished output and put it in its box.
+    Returns "written", "small" (not worth it: the image is no larger than the
+    thumbnail, or the thumbnail would be more than EXPLORER_THUMBNAIL_MAX_SHARE
+    of the file — such a file decodes fast anyway) or "failed" (warned).
+    The fingerprint is re-read afterwards: the box rewrite copies the
+    codestream byte for byte, and a thumbnail must never name the wrong
+    pixels."""
+    fp = _codestream_fingerprint(jxl_path)
+    if fp is None:
+        logger.warning(f"  >Explorer thumbnail skipped (not a JPEG XL container) "
+                       f"| {Path(jxl_path).name}")
+        return "failed"
+    jpeg = _make_explorer_thumbnail(jxl_path, tmp_dir)
+    if jpeg is None:
+        return "failed"
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(jpeg)) as im:
+        long_side = max(im.size)
+    if (long_side < int(EXPLORER_THUMBNAIL_SIZE)
+            or len(jpeg) > float(EXPLORER_THUMBNAIL_MAX_SHARE) * Path(jxl_path).stat().st_size):
+        return "small"
+    _write_thumbnail_box(jxl_path, jpeg, fp)
+    if _codestream_fingerprint(jxl_path) != fp or _thumbnail_box_fingerprint(jxl_path) != fp:
+        raise RuntimeError("the codestream changed while the Explorer thumbnail was written")
+    return "written"
 
 
 def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
@@ -4645,6 +4931,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # because each exiftool edit can re-append boxes after the codestream.
             reorder_jxl_boxes(write_path)
 
+            # Explorer thumbnail (EXPLORER_THUMBNAIL), made from the finished
+            # file and put in its own box. Only the files that get one pay for
+            # it (lossless by default); a failure only warns.
+            if not STRIP_METADATA and _explorer_thumbnail_wanted(CJXL_DISTANCE == 0):
+                _add_explorer_thumbnail(write_path, tmp_dir)
+
             # Validate EVERY successful output, not just mode-8 delete gates:
             # cjxl returning 0 does not guarantee a well-formed file (disk
             # full, AV truncation, killed mid-write). A corrupt output marked
@@ -5830,8 +6122,13 @@ def main():
     parser.add_argument("--strip",           action="store_true",
                         help="Strip all metadata from output (no EXIF/XMP preservation)")
     parser.add_argument("--embed-thumbnail", action="store_true",
-                        help="Deprecated since v2.12.0 and ignored: no viewer "
-                             "tested reads an EXIF thumbnail in a JXL.")
+                        help="Deprecated since v2.12.0 and ignored; see "
+                             "--explorer-thumbnail.")
+    parser.add_argument("--explorer-thumbnail", choices=["auto", "on", "off"], default=None,
+                        help="A small sRGB JPEG of the image stored in the JXL, shown "
+                             "by jxl-thumb in Windows Explorer: auto = lossless "
+                             "outputs only (default), on = every output, off = none "
+                             "(EXPLORER_THUMBNAIL)")
     args = parser.parse_args()
 
     global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
@@ -6021,9 +6318,11 @@ def main():
         WARN_DISCARDED_THUMBNAILS = True
 
     # Handle --strip flag - store in global for use in convert_one
-    global STRIP_METADATA
+    global STRIP_METADATA, EXPLORER_THUMBNAIL
     if args.strip:
         STRIP_METADATA = True
+    if args.explorer_thumbnail is not None:
+        EXPLORER_THUMBNAIL = args.explorer_thumbnail
     log_file = setup_logger()
 
     # A second run in the SAME process (the test suite, or anything importing
@@ -6100,9 +6399,21 @@ def main():
         _warn_if_libjxl_too_old(_get_cjxl_cmd() or "cjxl")
 
     if args.embed_thumbnail:
-        logger.warning("--embed-thumbnail is ignored since v2.12.0: no viewer "
-                       "tested (Windows Explorer, XnView MP, IrfanView) reads "
-                       "an EXIF thumbnail in a JXL. No thumbnail is written.")
+        logger.warning("--embed-thumbnail is ignored since v2.12.0; "
+                       "--explorer-thumbnail (default auto: lossless outputs) "
+                       "replaces it.")
+    if EXPLORER_THUMBNAIL not in ("auto", "on", "off"):
+        logger.error(f"EXPLORER_THUMBNAIL = {EXPLORER_THUMBNAIL!r}: use 'auto', 'on' or 'off'")
+        sys.exit(2)
+    if (not STRIP_METADATA and _explorer_thumbnail_wanted(CJXL_DISTANCE == 0)
+            and (shutil.which("djxl") is None or shutil.which("magick") is None)):
+        logger.warning("Explorer thumbnails need djxl and ImageMagick (magick) on PATH; "
+                       "this run writes none (EXPLORER_THUMBNAIL / --explorer-thumbnail)")
+        EXPLORER_THUMBNAIL = "off"
+    if (EXPLORER_THUMBNAIL == "auto" and not STRIP_METADATA and CJXL_DISTANCE > 0
+            and _jxl_thumb_installed()):
+        logger.info("Explorer thumbnails: jxl-thumb is installed, so lossy outputs get "
+                    "one too (EXPLORER_THUMBNAIL = auto; --explorer-thumbnail off: none)")
 
     if args.restamp_moved and args.provenance is not None:
         logger.warning("--provenance has no effect with --restamp-moved: the restamp "
