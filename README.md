@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.16.0** (2026-10-22) · [What's new](#whats-new-in-v2160) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.16.1** (2026-10-23) · [What's new](#whats-new-in-v2161) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -389,21 +389,28 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.16.0
+## What's new in v2.16.1
 
-Released 2026-10-22.
+Released 2026-10-23. Closes an edge case; nothing to do when upgrading.
+
+- **Interrupted runs:** a run killed at an unlucky moment could leave a `.tmp` file beside an output; the next run now removes it (#546).
+
+Full notes: [version history](docs/version_history.md#v2161). **2629 tests**, and the real-photo battery passes (116 checks, run inside a hostile folder).
+
+### In v2.16.0
 
 - **Explorer thumbnails in milliseconds:** new JXLs carry a small sRGB thumbnail inside the file, which [jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) 0.2.0 shows instead of decoding the photo — every file when jxl-thumb is installed, lossless files otherwise (they gain the most: a folder of 100 photos of 45 MP on a hard disk, 3 minutes → under 2 seconds). Menu option 9 adds it to files you already have, keeping their dates. `EXPLORER_THUMBNAIL = "off"` turns it off ([Upgrading](docs/upgrading.md#v2160-lossless-outputs-carry-a-small-explorer-thumbnail)).
 - **A tip in the menu** when Windows has no JXL thumbnail handler at all, until one is installed (or you hide it in option 4).
 - **Wizard screens:** a folder name with a lowercase word in brackets (`[final]`) is shown in full, and Ctrl+Z at a prompt cancels instead of printing an error (#544, #545).
 
-Full notes: [version history](docs/version_history.md#v2160). **2615 tests**, and the real-photo battery passes (116 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2160).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.16.0** | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |
+| **v2.16.1** | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output |
+| [v2.16.0](docs/version_history.md#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |
 | [v2.15.2](docs/version_history.md#v2152) | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode; a derivative run says when it wrote nothing |
 | [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
 | [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |

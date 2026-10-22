@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.16.0](#v2160)** | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
+| **[v2.16.1](#v2161)** | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
+| [v2.16.0](#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
 | [v2.15.2](#v2152) | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode; a derivative run says how many files got no derivative (rounds 59–60, 3 fixes) |
 | [v2.15.1](#v2151) | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
 | [v2.15.0](#v2150) | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
@@ -69,9 +70,27 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.16.1
+
+**Released 2026-10-23.** Supersedes v2.16.0. One hardening fix (round 62);
+nothing to do when upgrading.
+
+- **Temps of an interrupted run are cleaned up (#546).** Each output is
+  written to a `<uuid>_<name>.tmp` beside it and renamed into place. A run
+  killed in between (an idle-timeout kill, Ctrl+C, a power cut) left that
+  temp behind; nothing ever adopted it as a photo, but nothing removed it
+  either, and it can be as large as the master. Every script now removes,
+  right after planning, the leftover temps of the outputs it is about to
+  write, and says so in the log. Only those: another output's temp,
+  a file without the 32-hex-digit prefix and anything in a dry run stay.
+  Found by the real-photo battery's kill test, when the kill landed in the
+  milliseconds between a finished master and its rename.
+- **2629 tests** (14 new, real codecs in a hostile folder); the real-photo
+  battery passes.
+
 ## v2.16.0
 
-**Released 2026-10-22.** Supersedes v2.15.2. Fast Explorer thumbnails for
+**Released 2026-10-22, superseded by v2.16.1.** Supersedes v2.15.2. Fast Explorer thumbnails for
 lossless JXLs, a menu tip about thumbnails, and two display fixes found by
 driving the wizard in a real console (round 61). One default changes (see
 [Upgrading](upgrading.md#v2160-lossless-outputs-carry-a-small-explorer-thumbnail));

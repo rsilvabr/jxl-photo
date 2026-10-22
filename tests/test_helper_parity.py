@@ -125,6 +125,7 @@ SHARED_HELPERS = [
     # Staging sweep. These DELETE files, so a copy drifting is the worst kind:
     # one backend could start sweeping what another still needs.
     "_fmt_size",
+    "_sweep_orphan_temps",
     "_staging_leftovers",
     "_report_staging_leftovers",
     "_clean_staging",

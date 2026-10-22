@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.0"
+TOOLKIT_VERSION = "2.16.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -962,6 +962,50 @@ def _warn_distance_clamp(distance, floor: float = _MIN_EFFECTIVE_DISTANCE) -> No
             f"--distance {d} behaves exactly like {floor}: this cjxl "
             f"clamps every lossy distance below that to the same output. "
             f"Use --distance 0 for true lossless.")
+
+
+# Leftover temps of an interrupted run (#546). Every output is written to a
+# '<uuid>_<name>.tmp' beside it (or rewritten through one) and renamed into
+# place; a run killed in between (an idle-timeout kill, Ctrl+C, a power cut)
+# leaves that temp behind. Its .tmp suffix keeps every scan from adopting it,
+# but nothing removed it either, and it can be a complete master's size. Each
+# run removes, right after planning, the leftover temps of the outputs it is
+# about to write: those cannot belong to a live run (two writers on one output
+# is what the duplicate-output abort exists to stop). The temps of any other
+# output, and files without the 32-hex-digit prefix, are never touched.
+_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+
+
+def _sweep_orphan_temps(finals):
+    """Remove the leftover temps of these output paths (name or stem form:
+    '<uuid>_photo.jxl.tmp', '<uuid>_photo.tmp', a temp of a temp). Returns how
+    many were removed; a folder or file that cannot be read is skipped."""
+    names = {}
+    for f in finals:
+        if f is None:
+            continue
+        f = Path(f)
+        names.setdefault(f.parent, set()).update((f.name, f.stem))
+    removed = 0
+    for folder, wanted in names.items():
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for e in entries:
+            m = _ORPHAN_TEMP_RE.match(e.name)
+            if not m or m.group(1) not in wanted:
+                continue
+            try:
+                if not e.is_file(follow_symlinks=False):
+                    continue
+                os.unlink(e.path)
+            except OSError as exc:
+                logger.warning(f"Could not remove a leftover temp: {e.path} ({exc})")
+                continue
+            removed += 1
+            logger.info(f"Removed a leftover temp from an interrupted run: {e.path}")
+    return removed
 
 
 def _abort_on_duplicate_outputs(pairs):
@@ -3147,6 +3191,8 @@ def cmd_repair_jbrd(args) -> int:
     files = [f for f in files if f.is_file()]
     logger.info(f"Repair: auditing {len(files)} JXL file(s) under {root}"
                 + (" (dry run: nothing is written)" if args.dry_run else ""))
+    if not args.dry_run:
+        _sweep_orphan_temps(files)
     ok = repaired = still_broken = no_jbrd = 0
     for f in files:
         if not has_jbrd_box(f):
@@ -3929,6 +3975,8 @@ def cmd_transcode(args, auto_decode: bool = False):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
+    if not args.dry_run:
+        _sweep_orphan_temps(dst for _, dst in pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode, decode_lossless=decode,
         output_arg=args.output, source_root=_prov_src_root(args),
@@ -5492,6 +5540,8 @@ def cmd_convert(args, from_jxl: bool = True):
         logger.info(f"Planned: {len(pairs)} (filtered by mode)")
 
     _abort_on_duplicate_outputs(pairs)
+    if not args.dry_run:
+        _sweep_orphan_temps(dst for _, dst in pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         output_arg=args.output, source_root=_prov_src_root(args),
@@ -5889,6 +5939,8 @@ def cmd_auto(args):
         if not lst and files:
             _counter["total"] = max(0, _counter.get("total", 0) - len(files))
     _abort_on_duplicate_outputs(all_pairs)
+    if not args.dry_run:
+        _sweep_orphan_temps(dst for _, dst in all_pairs)
 
     # Output-vs-input collision: e.g. photo.jpg (encode) + photo.jxl (decode) in
     # the same folder. Encoding first would overwrite the decode source before
@@ -6072,6 +6124,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))
 
     _abort_on_duplicate_outputs(pairs)
+    if not args.dry_run:
+        _sweep_orphan_temps(dst for _, dst in pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         decode_lossless=(use_transcode and all(

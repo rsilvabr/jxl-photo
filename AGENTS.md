@@ -411,9 +411,11 @@ must-fix / should-fix items and a commit verdict.
 - **Every jxl-photo release updates jxl-photo-exe too** (owner's rule,
   2026-10-22), in the sibling repo `../jxl-photo-exe`: `JXLPHOTO_TAG` in its
   `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its README
-  "Current version" line and `docs/version_history.md`, `python build.py`,
-  then `python tests/battery_on_exe.py` (runs the program from a hostile
-  folder; must pass) and a release `vX.Y.Z-exe1` with the zip (regular releases
-  since v2.16.0-exe2; the earlier packages were pre-releases). A change
+  "Current version" line and `docs/version_history.md`, then a tag
+  `vX.Y.Z-exe1`: GitHub Actions builds the zip with a build attestation and
+  creates a DRAFT release; `python tests/battery_on_exe.py --app <that zip,
+  extracted>` (runs the program from a hostile folder; must pass) before it is
+  published (regular releases since v2.16.0-exe2, built by GitHub since
+  v2.16.1-exe1; jxl-thumb's releases are built the same way). A change
   to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
   goes in the same way.

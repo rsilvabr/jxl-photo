@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #546.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #547.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,7 +23,8 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-61 — the wizard in a real console](#round-61--the-wizard-in-a-real-console-2026-10-22) | 2026-10-22 | not released yet | #544–#545 (2) |
+| [Round-62 — a temp left by a killed run](#round-62--a-temp-left-by-a-killed-run-2026-10-23) | 2026-10-23 | v2.16.1 | #546 (1) |
+| [Round-61 — the wizard in a real console](#round-61--the-wizard-in-a-real-console-2026-10-22) | 2026-10-22 | v2.16.0 | #544–#545 (2) |
 | [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.2 | #543 (1) |
 | [Round-59 — hostile paths, long paths and the deleting auto mode](#round-59--hostile-paths-long-paths-and-the-deleting-auto-mode-2026-10-22) | 2026-10-22 | v2.15.2 | #541–#542 (2) |
 | [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
@@ -70,6 +71,21 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-62 — a temp left by a killed run (2026-10-23)
+
+The real-photo battery, run against the Windows program (jxl-photo-exe),
+failed one check: after the encoder was killed mid-run, the run that
+followed archived all six TIFFs but left a 16 MB `<uuid>_p1 (1).jxl.tmp`
+beside them. The kill had landed 92 ms after the first master appeared,
+while the second one sat finished and verified, waiting for its rename.
+Earlier runs of the same check passed because the kill fell elsewhere. The
+bug is in the scripts and affects the Python version the same way.
+Regression test: `tests/test_orphan_temps.py` (fails against `a20735f`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 546 | **A run killed at the wrong moment left its temp file beside the output.** Every output is written to a `<uuid>_<name>.tmp` beside it (or rewritten through one, for a metadata or thumbnail change) and renamed into place. A run killed in between (an idle-timeout kill, Ctrl+C, a power cut) left that temp: never adopted as input (its `.tmp` suffix), but never removed either, and it can be a complete master's size. The battery's kill test hit it when the kill landed in the few milliseconds between a finished master and its rename. Each backend now removes, right after planning, the leftover temps of the outputs it is about to write, and logs each one; temps of other outputs, files without the 32-hex-digit prefix and anything in a dry run stay (`_sweep_orphan_temps`, parity-pinned in the four backends; also run by `--refresh-explorer-thumbnails` and `--repair-jbrd`). | all four backends | Fixed |
 
 ## Round-61 — the wizard in a real console (2026-10-22)
 

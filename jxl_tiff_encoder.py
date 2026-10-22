@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.0"
+TOOLKIT_VERSION = "2.16.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1568,6 +1568,50 @@ def _log_discard_summary():
     if _discard_warned["suppressed"]:
         logger.info(f"({_discard_warned['suppressed']} per-file discard warning(s) suppressed; "
                     f"see the totals above)")
+
+
+# Leftover temps of an interrupted run (#546). Every output is written to a
+# '<uuid>_<name>.tmp' beside it (or rewritten through one) and renamed into
+# place; a run killed in between (an idle-timeout kill, Ctrl+C, a power cut)
+# leaves that temp behind. Its .tmp suffix keeps every scan from adopting it,
+# but nothing removed it either, and it can be a complete master's size. Each
+# run removes, right after planning, the leftover temps of the outputs it is
+# about to write: those cannot belong to a live run (two writers on one output
+# is what the duplicate-output abort exists to stop). The temps of any other
+# output, and files without the 32-hex-digit prefix, are never touched.
+_ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
+
+
+def _sweep_orphan_temps(finals):
+    """Remove the leftover temps of these output paths (name or stem form:
+    '<uuid>_photo.jxl.tmp', '<uuid>_photo.tmp', a temp of a temp). Returns how
+    many were removed; a folder or file that cannot be read is skipped."""
+    names = {}
+    for f in finals:
+        if f is None:
+            continue
+        f = Path(f)
+        names.setdefault(f.parent, set()).update((f.name, f.stem))
+    removed = 0
+    for folder, wanted in names.items():
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for e in entries:
+            m = _ORPHAN_TEMP_RE.match(e.name)
+            if not m or m.group(1) not in wanted:
+                continue
+            try:
+                if not e.is_file(follow_symlinks=False):
+                    continue
+                os.unlink(e.path)
+            except OSError as exc:
+                logger.warning(f"Could not remove a leftover temp: {e.path} ({exc})")
+                continue
+            removed += 1
+            logger.info(f"Removed a leftover temp from an interrupted run: {e.path}")
+    return removed
 
 
 def _abort_on_duplicate_outputs(pairs):
@@ -6696,6 +6740,8 @@ def main():
     logger.info(planned_msg)
 
     _abort_on_duplicate_outputs([(item[0], item[1]) for item in all_items])
+    if not args.dry_run:
+        _sweep_orphan_temps(item[1] for item in all_items)
 
     # --restamp-moved stops here: no preflight, no conversion, no delete.
     if args.restamp_moved:
