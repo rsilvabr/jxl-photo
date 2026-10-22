@@ -51,6 +51,11 @@ os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
 # wrapper, which builds its Console at import time.
 os.environ.setdefault("COLUMNS", "240")
 
+# The menu's Explorer-thumbnail tip depends on this PC's registry: off, so a
+# test that scripts the menu or the settings screen sees the same prompts on
+# every machine. tests/test_thumbnail_tip.py turns it back on per test.
+os.environ["JXLPHOTO_THUMBNAIL_TIP"] = ""
+
 
 def pytest_sessionfinish(session, exitstatus):
     # The scripts' FileHandlers keep their last log open, and Windows cannot

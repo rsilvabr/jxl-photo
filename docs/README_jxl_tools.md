@@ -728,6 +728,9 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
   **lossless** encoder, exactly like entry `[1]`.
 - **Confirm deletes** — safety confirmation before destructive operations
 - **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`)
+- **Explorer thumbnail tip** — whether the menu shows the
+  [thumbnail tip](#explorer-thumbnail-tip-windows). Asked only while the tip
+  applies (no JXL thumbnail handler on this PC) or after you turned it off.
 
 Alongside these defaults the config keeps the **last-run answers** the wizard
 offers back as defaults — among them `last_exclude_folders`, the raw
@@ -799,6 +802,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Default distance (TIFF→JXL) | Drives entry `[2]` of Step 2. Default: `0.1` |
 | Confirm deletes | Safety toggle |
 | Export marker | Default: `_EXPORT` |
+| Explorer thumbnail tip | On by default; asked only when it applies |
 
 ### 🔧 Must be edited directly in the scripts
 
@@ -942,6 +946,26 @@ The top bar shows which tools and libraries are available:
 | `rich` | Fancy UI with colors/panels |
 
 If `rich` is missing, the tool runs in plain-text mode with the same functionality.
+
+### Explorer thumbnail tip (Windows)
+
+Windows Explorer shows no thumbnail for a JXL file unless a thumbnail handler
+for `.jxl` is installed ([jxl-thumb](https://github.com/rsilvabr/jxl-thumb),
+or Microsoft's JPEG XL extension). When there is none, the menu prints one
+line under the status bar:
+
+```
+Tip: Windows Explorer shows no thumbnails for JXL files on this PC. jxl-thumb adds them: https://github.com/rsilvabr/jxl-thumb
+     (Hide this tip: 4 - Edit default settings.)
+```
+
+It is shown on every start, not once: someone new to JXL usually meets the
+problem only later, in Explorer. It is never a question, it goes away by
+itself once any handler is installed, and option 4 turns it off. It is never
+printed in `--run-preset` or `--list-presets` runs. The check is one registry
+read; nothing is installed or written. The environment variable
+`JXLPHOTO_THUMBNAIL_TIP` replaces the text (a packaged build names its own
+install command) and an empty value turns the tip off.
 
 * * *
 

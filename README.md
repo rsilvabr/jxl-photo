@@ -358,7 +358,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **Film scans:** the IR page is kept, but scanner software may not recognize it for dust removal after the round trip — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
-- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both), IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed), IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
 ---

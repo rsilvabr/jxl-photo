@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 TOOLKIT_NAME = "jxl-photo"
 TOOLKIT_VERSION = "2.15.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+# Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
+JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
 
 # Initialize wrapper logger early so manifest/path validation code can log safely.
 # Without a handler these messages would hit Python's lastResort (raw stderr,
@@ -846,6 +848,10 @@ class ToolConfig:
     default_distance: float = 0.1
     confirm_delete: bool = True
     export_marker: str = "_EXPORT"
+    # The menu's line about JXL thumbnails in Explorer (_jxl_thumbnail_tip).
+    # Shown on every start, not once: someone new to JXL only meets the
+    # problem later, in Explorer. Turned off in "Edit default settings".
+    show_thumbnail_tip: bool = True
 
     last_input_dir: Optional[str] = None
     last_output_mode: Optional[str] = None
@@ -2603,6 +2609,9 @@ class InteractiveMenu:
         was_workers, was_quality = current.default_workers, current.default_quality
         was_effort = current.default_effort
         was_distance = _sane_distance(current.default_distance)
+        # Asked only where the tip means something: no thumbnail handler on
+        # this PC, or the tip already hidden (so it can be turned back on).
+        ask_tip = (not current.show_thumbnail_tip) or _jxl_thumbnail_tip() is not None
 
         def _effective(default_value, last_value) -> str:
             """Flag a default that the saved session is currently overriding —
@@ -2634,6 +2643,9 @@ class InteractiveMenu:
                 default=f"{_sane_distance(current.default_distance):g}")
             new_confirm = Confirm.ask("Confirm before delete?", default=current.confirm_delete)
             new_marker = Prompt.ask("Export marker", default=current.export_marker)
+            new_tip = (Confirm.ask("Show the Explorer thumbnail tip at start?",
+                                   default=current.show_thumbnail_tip)
+                       if ask_tip else current.show_thumbnail_tip)
         else:
             print("\n--- Edit Settings ---")
             print(f"Current staging: {current.staging_dir or 'system default'}")
@@ -2661,6 +2673,12 @@ class InteractiveMenu:
             print(f"Current marker: {current.export_marker}")
             new_marker = input("New export marker: ").strip() or current.export_marker
 
+            new_tip = current.show_thumbnail_tip
+            if ask_tip:
+                tip_input = input("Show the Explorer thumbnail tip at start? (y/n): ").strip().lower()
+                if tip_input:
+                    new_tip = tip_input.startswith('y')
+
         if new_staging.lower() == 'none':
             self.config.config.staging_dir = None
         elif new_staging:
@@ -2684,6 +2702,7 @@ class InteractiveMenu:
                 self._print_error(f"Invalid distance {typed_distance!r} — keeping {current_distance:g}")
                 self.config.config.default_distance = current_distance
         self.config.config.confirm_delete = new_confirm
+        self.config.config.show_thumbnail_tip = bool(new_tip)
 
         # Changing a default here is a statement about the NEXT run, so it also
         # adopts the saved session's value. Without this the wizard and 'Repeat
@@ -9516,6 +9535,44 @@ class InteractiveMenu:
             print(f"✗ {message}")
 
 
+# Where Explorer looks up a .jxl thumbnail handler (the IThumbnailProvider
+# shell-extension GUID), per extension or under SystemFileAssociations.
+_THUMBNAIL_HANDLER_KEYS = (
+    r".jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
+    r"SystemFileAssociations\.jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
+)
+
+
+def _jxl_thumbnail_tip() -> Optional[str]:
+    """The menu's one-line tip when Windows Explorer has no thumbnail handler
+    for .jxl (neither jxl-thumb nor Microsoft's JPEG XL extension), else None.
+
+    One registry read, nothing written; any error means no tip, never a
+    blocked menu. JXLPHOTO_THUMBNAIL_TIP replaces the text (a packaged build
+    names its own install command); an empty value turns the tip off.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        for sub in _THUMBNAIL_HANDLER_KEYS:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, sub) as key:
+                    # Stock Windows 11 has the SystemFileAssociations key with
+                    # an empty value: that registers nothing.
+                    if str(winreg.QueryValue(key, None) or "").strip():
+                        return None
+            except OSError:
+                continue
+    except Exception:
+        return None
+    override = os.environ.get("JXLPHOTO_THUMBNAIL_TIP")
+    if override is not None:
+        return override.strip() or None
+    return (f"Tip: Windows Explorer shows no thumbnails for JXL files on this PC. "
+            f"jxl-thumb adds them: {JXL_THUMB_URL}")
+
+
 def main():
     try:
         _main()
@@ -9599,6 +9656,12 @@ def _main():
             presets[args.run_preset], status,
             answers={'overwrite': args.overwrite, 'dry_run': args.dry_run})
         sys.exit(0 if ok else 1)
+
+    # Menu runs only: a scheduled --run-preset log is no place for it.
+    _tip = _jxl_thumbnail_tip() if config.config.show_thumbnail_tip else None
+    if _tip:
+        print(_tip)
+        print("     (Hide this tip: 4 - Edit default settings.)")
 
     # Main loop
     while True:
