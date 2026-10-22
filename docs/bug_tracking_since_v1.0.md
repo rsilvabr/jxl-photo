@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.3 | #543 (1) |
+| [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.2 | #543 (1) |
 | [Round-59 — hostile paths, long paths and the deleting auto mode](#round-59--hostile-paths-long-paths-and-the-deleting-auto-mode-2026-10-22) | 2026-10-22 | v2.15.2 | #541–#542 (2) |
 | [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
 | [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |

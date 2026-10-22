@@ -445,7 +445,7 @@ Costs and notes:
   "downgrade" and the default policy would skip it — pass
   `--on-downgrade convert` for that.
   The run ends with a warning saying how many files got no derivative this
-  way (since v2.15.3), so a folder left empty does not read as up to date.
+  way (since v2.15.2), so a folder left empty does not read as up to date.
 - To decode only the masters to TIFF later, use the decoder in mode 7 with
   `--export-subfolder 16B_JXL` (mode 6 would also pick the derivative folder).
 
