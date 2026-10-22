@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.15.2"
+TOOLKIT_VERSION = "2.15.3"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -6073,6 +6073,14 @@ def main():
     if n_aborted:
         done_line += f" ({n_aborted} not attempted — the run had already aborted)"
     logger.info(done_line)
+    # In a derivative run a policy skip means NO derivative at all, not "up to
+    # date"; folded into "skipped" above it read like a finished folder.
+    if DERIVATIVE and n_policy_skip:
+        logger.warning(f"{n_policy_skip} file(s) got NO derivative (SKIP (policy) above): "
+                       f"the master is already at this distance or a finer one, at its "
+                       f"regeneration limit, or carries no encode record. Pass "
+                       f"--on-downgrade convert (or --on-regeneration / --on-unknown "
+                       f"convert) to write them.")
 
     _n_mem = sum(1 for _src, _detail in failures
                  if any(s in str(_detail).lower() for s in _MEMORY_ERROR_SIGNATURES))
