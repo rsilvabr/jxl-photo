@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.15.2** (2026-10-22) · [What's new](#whats-new-in-v2152) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.16.0** (2026-10-22) · [What's new](#whats-new-in-v2160) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.15.2](#whats-new-in-v2152)
+- [What's new in v2.16.0](#whats-new-in-v2160)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program (experimental)](#related-project-jxl-photo-as-a-windows-program-experimental)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -389,25 +389,25 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.15.2
+## What's new in v2.16.0
 
-Released 2026-10-22. Three fixes from audits that ran real photos through every script inside folders named the way real libraries are (Japanese, brackets, spaces, `%`), then the presets end to end and runs interrupted mid-write.
+Released 2026-10-22.
 
-- **Long paths:** a file whose output path reaches 260 characters now converts instead of failing with "Could not write jxl file" (#541).
-- **Transcoder:** a folder run with `--delete-source` now leaves JXLs alone unless you add `--from-jxl` (or `--decode`). It used to decode them, lossy masters included, and delete them. If you call the transcoder yourself with `--delete-source`, see [Upgrading](docs/upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode); the `jxl_photo.py` workflows were not affected (#542).
-- **Derivatives:** a run that writes no sRGB/resized copy for some files (their master is already at the requested distance) now says how many and how to write them, instead of counting them as up to date (#543).
+- **Explorer thumbnails in milliseconds:** new JXLs carry a small sRGB thumbnail inside the file, which [jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) 0.2.0 shows instead of decoding the photo — every file when jxl-thumb is installed, lossless files otherwise (they gain the most: a folder of 100 photos of 45 MP on a hard disk, 3 minutes → under 2 seconds). Menu option 9 adds it to files you already have, keeping their dates. `EXPLORER_THUMBNAIL = "off"` turns it off ([Upgrading](docs/upgrading.md#v2160-lossless-outputs-carry-a-small-explorer-thumbnail)).
+- **A tip in the menu** when Windows has no JXL thumbnail handler at all, until one is installed (or you hide it in option 4).
+- **Wizard screens:** a folder name with a lowercase word in brackets (`[final]`) is shown in full, and Ctrl+Z at a prompt cancels instead of printing an error (#544, #545).
 
-Full notes: [version history](docs/version_history.md#v2152). **2571 tests**, and the real-photo battery passes (110 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2160). **2615 tests**, and the real-photo battery passes (116 checks, run inside a hostile folder).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.15.2** | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode; a derivative run says when it wrote nothing |
+| **v2.16.0** | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |
+| [v2.15.2](docs/version_history.md#v2152) | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode; a derivative run says when it wrote nothing |
 | [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
 | [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
 | [v2.14.0](docs/version_history.md#v2140) | 2026-10-13 | The overwrite guard can be turned off for renamed folders; `--restamp-moved`; faster resized derivatives |
-| [v2.13.0](docs/version_history.md#v2130) | 2026-10-13 | Each output records the toolkit version that wrote it (`xmpMM:History`); `--version` |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 

@@ -11,6 +11,20 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.16.0: lossless outputs carry a small Explorer thumbnail
+
+- The encoder and the recompressor now store a 768 px sRGB JPEG inside their
+  outputs (`EXPLORER_THUMBNAIL = "auto"`), in a box of the JXL container that
+  other programs skip, for [jxl-thumb](https://github.com/rsilvabr/jxl-thumb)
+  0.2.0+: **every** output when jxl-thumb is installed for your Windows user,
+  **lossless** outputs only when it is not. About 90 KB per file; ~2 s more
+  per 45 MP lossless encode, ~1.2 s per lossy one. To keep the old
+  behaviour, set `EXPLORER_THUMBNAIL = "off"` at the top of both scripts or
+  pass `--explorer-thumbnail off`.
+- Nothing to check in existing archives. To give existing files a
+  thumbnail: menu option 9, or
+  `jxl_recompressor.py <folder> --mode 8 --refresh-explorer-thumbnails`.
+
 ## v2.15.2: a deleting transcoder run leaves JXLs alone unless told to decode
 
 One command line changes, and only when you call the transcoder yourself (the

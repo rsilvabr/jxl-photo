@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.15.2](#v2152)** | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode; a derivative run says how many files got no derivative (rounds 59–60, 3 fixes) |
+| **[v2.16.0](#v2160)** | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
+| [v2.15.2](#v2152) | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode; a derivative run says how many files got no derivative (rounds 59–60, 3 fixes) |
 | [v2.15.1](#v2151) | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
 | [v2.15.0](#v2150) | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
 | [v2.14.0](#v2140) | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
@@ -68,9 +69,89 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.16.0
+
+**Released 2026-10-22.** Supersedes v2.15.2. Fast Explorer thumbnails for
+lossless JXLs, a menu tip about thumbnails, and two display fixes found by
+driving the wizard in a real console (round 61). One default changes (see
+[Upgrading](upgrading.md#v2160-lossless-outputs-carry-a-small-explorer-thumbnail));
+otherwise nothing to do.
+
+### Explorer thumbnails (`EXPLORER_THUMBNAIL`, `--explorer-thumbnail`, menu option 9)
+
+Windows Explorer has to decode a JXL to show its thumbnail. A lossy JXL keeps
+a 1:8 preview of itself near the start of the file, which
+[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) reads in about 50–75 ms. A
+lossless one has none: its thumbnail means decoding the whole file, about
+1.8 s per 45 MP photo on a hard disk — three minutes for a folder of 100.
+
+The encoder now stores a small JPEG of the image inside its outputs — every
+output when jxl-thumb is installed for the user, **lossless** ones otherwise:
+768 px on the long side (the largest size Explorer asks for its icon views),
+converted to sRGB from the photo's own profile. jxl-thumb 0.2.0 shows it in
+about 2 ms.
+
+- **Where:** in a box of the JXL container of its own (an ISO BMFF `uuid`
+  box, the format's way to carry a program's private data), right before the
+  image data. Other programs skip it; exiftool edits keep it. Not in the
+  EXIF: a 768 px JPEG does not fit a JPEG's 64 KB EXIF segment, and djxl,
+  which copies a JXL's EXIF into the JPEG it writes, failed on such files
+  ("Bogus marker length") — found by the real-photo battery while this
+  release was being prepared.
+- **Never stale:** the box records a fingerprint of the image data it was
+  made from (`jxlphoto-thumbnail:v1:<bytes>:<hash>`); jxl-thumb shows the
+  thumbnail only while it still matches the file.
+- **Measured:** 100 photos of 45 MP on a hard disk, cold: a lossless folder
+  176 s → under 2 s. On an SSD, warm, per file: lossless 1100 → 1.7 ms,
+  lossy 52–76 → 1.7 ms. Cost: ~90 KB per file, ~2 s per 45 MP lossless
+  encode and ~1.2 s per lossy one (djxl + ImageMagick). Small files get none: an image no
+  larger than the thumbnail, or a thumbnail over 10% of the file
+  (`EXPLORER_THUMBNAIL_MAX_SHARE`) — they decode fast anyway.
+- `EXPLORER_THUMBNAIL = "auto"` (default): every output when jxl-thumb is
+  Explorer's handler for `.jxl` (one registry read per run; the log says
+  so), lossless outputs otherwise; `"on"`: every output; `"off"`: none.
+  `JXLPHOTO_JXL_THUMB=1/0` overrides the check. In the recompressor it is
+  added after the keep-smaller decision, so it never decides it. Same setting and `--explorer-thumbnail` in the
+  encoder and the recompressor; `EXPLORER_THUMBNAIL_SIZE = 768`.
+- **Existing files:** `jxl_recompressor.py --refresh-explorer-thumbnails`
+  (menu option 9) stores, renews or removes them in place without
+  re-encoding. Each file is edited through a verified copy (the whole image
+  data compared byte for byte) and **keeps its modified date**, so the
+  encoder's sync still sees a TIFF re-exported since as newer.
+- A re-encode never inherits the source's thumbnail; the decoder's TIFFs and
+  the transcoder's JPEG/PNG outputs never carry one. `jbrd` files are never
+  touched.
+- The thumbnail's colour conversion follows the decoder's rule: djxl is not
+  asked for a colour space (asked, it converts a lossless file too while
+  `--icc_out` still names the original profile); ImageMagick converts from
+  what `--icc_out` reports.
+
+### Menu tip about Explorer thumbnails
+
+On Windows, when no thumbnail handler for `.jxl` is installed (neither
+jxl-thumb nor Microsoft's JPEG XL extension), the menu shows one line pointing
+at jxl-thumb, on every start — someone new to JXL meets the problem only
+later, in Explorer. It disappears once a handler is installed, option 4 turns
+it off, and it never shows in `--run-preset` runs. `JXLPHOTO_THUMBNAIL_TIP`
+replaces or (empty) silences it.
+
+### Round 61 — the wizard in a real console (#544, #545)
+
+- A bracketed word starting with a lowercase letter (`[test]`, `[final]`)
+  disappeared from paths on the wizard's screens — rich read it as a style
+  tag. Display only; the runs used the right paths. `[FINAL]` was never
+  affected (#544).
+- End of input at a wizard prompt (Ctrl+Z then Enter, or Ctrl+C on Windows at
+  an unlucky moment) ended in a traceback; it now cancels like Ctrl+C (#545).
+
+2615 tests; the real-photo battery passes (116 checks, with a new
+section for the Explorer thumbnails on a real photo).
+
+---
+
 ## v2.15.2
 
-**Released 2026-10-22.** Supersedes v2.15.1. Rounds 59–60, 3 fixes, from two
+**Released 2026-10-22, superseded by v2.16.0.** Supersedes v2.15.1. Rounds 59–60, 3 fixes, from two
 audits that ran the real files through every script inside a hostile folder,
 then the presets end to end and runs killed mid-write. One command line changes
 (see [Upgrading](upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode));
