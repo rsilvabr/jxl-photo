@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [Documentation](#documentation)
 - [What's new in v2.16.0](#whats-new-in-v2160)
 - [More about this project](#more-about-this-project)
-- [Related project: jxl-photo as a Windows program (experimental)](#related-project-jxl-photo-as-a-windows-program-experimental)
+- [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
@@ -86,8 +86,8 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 
 ## Requirements & Installation
 
-> Rather not install Python and the tools? An **experimental** Windows program
-> packages everything: see [jxl-photo-exe](#related-project-jxl-photo-as-a-windows-program-experimental).
+> Rather not install Python and the tools? A Windows program packages
+> everything: see [jxl-photo-exe](#related-project-jxl-photo-as-a-windows-program).
 
 ### 1. Python 3.9+ and packages
 
@@ -428,11 +428,11 @@ Getting there required finding and fixing several bugs that appears because of t
 
 ---
 
-## Related project: jxl-photo as a Windows program (experimental)
+## Related project: jxl-photo as a Windows program
 
 [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe) packages this toolkit as `jxl-photo.exe`: no Python to install, and cjxl/djxl, ExifTool, ImageMagick and jxl-thumb come in the same folder. Unzip and double-click for the wizard, or use the same command lines as here (`jxl-photo.exe encode ...`). The five scripts inside are byte-for-byte those of a jxl-photo release, and it passes the same real-photo battery.
 
-It is **experimental**: its releases are pre-releases, and this Python version, the one the author runs on their own archive every day, remains by far the more tested. Use the program if you would rather not install Python; otherwise use the scripts here.
+This Python version, the one the author runs on their own archive every day, remains by far the more tested. Use the program if you would rather not install Python; otherwise use the scripts here.
 
 ---
 

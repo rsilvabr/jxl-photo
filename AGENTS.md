@@ -413,6 +413,7 @@ must-fix / should-fix items and a commit verdict.
   `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its README
   "Current version" line and `docs/version_history.md`, `python build.py`,
   then `python tests/battery_on_exe.py` (runs the program from a hostile
-  folder; must pass) and a pre-release `vX.Y.Z-exe1` with the zip. A change
+  folder; must pass) and a release `vX.Y.Z-exe1` with the zip (regular releases
+  since v2.16.0-exe2; the earlier packages were pre-releases). A change
   to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
   goes in the same way.
