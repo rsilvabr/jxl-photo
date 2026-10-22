@@ -784,6 +784,239 @@ def transcoder_checks(A1, A2):
           and "before this toolkit" in out, f"rc={rc}")
 
 
+WRAP = str(REPO / "jxl_photo.py")
+
+
+def wrapper_checks(A1, A2):
+    """The owner's real path: jxl_photo.py --run-preset over manifests, with
+    copies of the four presets they run (SYNC PHOTOS, SRGB, MOBILE, OUTTAKES
+    JPEG), on a library laid out like theirs inside the hostile folder. The
+    config lives in a temporary USERPROFILE, never the owner's. Every preset
+    runs twice (the second run must change nothing), then a re-export and a
+    renamed event folder go through the chain again."""
+    section("Wrapper presets over manifests (the owner's chain)")
+    lib = B / "lib"
+    ev = lib / "250118_吾妻山公園_菜の花 [FINAL]"
+    tif = ev / "01_Z7" / "_EXPORT" / "TIFF16"
+    a = cp(A1, tif / "DSC_0001 (2)_ProPhoto-g22_v1.tif")
+    cp(A2, tif / "DSC_0002_ProPhoto-g22_v1.tif")
+    cp(A2, ev / "01_Z7" / "_EXPORT" / "OLD_TIFFs" / "old_ProPhoto-g22_v1.tif")
+    _via_ascii(lambda s, o: ["magick", f"{A1}[0]", "-resize", "25%", "-depth", "8",
+                             "-quality", "90", str(o)],
+               None, ev / "01_Z7" / "_OUTTAKES" / "DSC_0009 (1).jpg").check_returncode()
+
+    home = B / "home [h] 1%"
+    home.mkdir(parents=True, exist_ok=True)
+    man = B / "manifests 設定"
+    man.mkdir(parents=True, exist_ok=True)
+
+    def _csv(name, header, row):
+        p = man / name
+        p.write_text("﻿" + header + "\n" + row + "\n", encoding="utf-8")
+        return str(p)
+
+    L = str(lib)
+    base = {"last_input_dir": L, "last_output_mode": "99", "last_workers": 8,
+            "last_staging": str(B / "staging [s]"), "last_effort": 3, "last_quality": 95,
+            "last_use_ram": True, "last_overwrite_guard": False}
+    presets = {
+        "SYNC PHOTOS": {**base, "last_distance": 0.05, "last_origin_format": "tiff",
+                        "last_dest_format": "jxl", "last_conversion_type": "jxl_tiff_encoder",
+                        "last_d50_patch": "auto", "last_encode_tag": "xmp",
+                        "last_multipage_mode": "split", "last_thumbnail_mode": "exclude",
+                        "last_advanced_options": {"overwrite": False, "sync": True},
+                        "last_expert_flags": "--restamp-then-sync",
+                        "last_manifest_path": _csv(
+                            "sync.csv",
+                            "Source,Destination,Mode,Direction,ExcludeFolders,ExportMarker,"
+                            "ExportSubfolder,ExportJxlFolder",
+                            f"{L},{L},6,tiff2jxl,OLD_TIFFs;OLD_PADDED,,,")},
+        "SRGB": {**base, "last_distance": 0.5, "last_origin_format": "jxl",
+                 "last_dest_format": "jxl", "last_conversion_type": "jxl_recompress",
+                 "last_advanced_options": {"overwrite": False, "sync": True,
+                                           "on_downgrade": "copy", "on_regeneration": "convert"},
+                 "last_manifest_path": _csv(
+                     "srgb.csv",
+                     "Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,"
+                     "RenameTo,ExportMarker,ExportSubfolder,ExportJxlFolder",
+                     f"{L},{L},7,jxl2jxl,sRGB,,,ProPhoto-g22,sRGB,,16B_JXL,sRGB")},
+        "MOBILE": {**base, "last_distance": 1.0, "last_origin_format": "jxl",
+                   "last_dest_format": "jxl", "last_conversion_type": "jxl_recompress",
+                   "last_advanced_options": {"overwrite": False, "sync": True,
+                                             "on_downgrade": "copy", "on_regeneration": "convert"},
+                   "last_manifest_path": _csv(
+                       "mobile.csv",
+                       "Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,"
+                       "RenameTo,ExportMarker,ExportSubfolder,ExportJxlFolder",
+                       f"{L},{L},7,jxl2jxl,sRGB,long:2048,screen,ProPhoto-g22,sRGB,,16B_JXL,"
+                       f"JXL_mobile")},
+        "OUTTAKES JPEG": {**base, "last_distance": 0.05, "last_origin_format": "jpeg",
+                          "last_dest_format": "jxl", "last_conversion_type": "transcode_lossless",
+                          "last_advanced_options": {"overwrite": False, "sync": True},
+                          "last_manifest_path": _csv(
+                              "outtakes.csv",
+                              "Source,Destination,Mode,Direction,ExportMarker,ExportSubfolder",
+                              f"{L},{L},6,jpeg2jxl,_OUTTAKES,")},
+    }
+    (home / ".jxl_tools_config.json").write_text(
+        json.dumps({"presets": presets, "dependencies_checked": False}, ensure_ascii=False,
+                   indent=1), encoding="utf-8")
+    env = {"USERPROFILE": str(home), "HOME": str(home)}
+
+    def preset(tag, name):
+        t = time.time()
+        r = subprocess.run([PY, WRAP, "--run-preset", name], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=7200, cwd=str(B),
+                           env={**os.environ, **env,
+                                "JXLPHOTO_LOG_DIR": str(B / "_script_logs")})
+        out = (r.stdout or "") + (r.stderr or "")
+        (LOGS / f"{tag}.log").write_text(f"$ --run-preset {name}\nrc={r.returncode}\n\n{out}",
+                                         encoding="utf-8")
+        print(f"   [{tag}] rc={r.returncode} {time.time() - t:.0f}s", flush=True)
+        if "Traceback (most recent call last)" in out:
+            check(f"{tag}: no Python traceback", False, f"see {LOGS / (tag + '.log')}")
+        return r.returncode, out
+
+    def snapshot():
+        return {str(p.relative_to(lib)): p.stat().st_mtime_ns
+                for p in lib.rglob("*") if p.is_file() and p.suffix.lower() == ".jxl"}
+
+    names = ["SYNC PHOTOS", "SRGB", "MOBILE", "OUTTAKES JPEG"]
+    rcs = {n: preset(f"wr1_{n.split()[0].lower()}", n)[0] for n in names}
+    first = snapshot()
+    want = {"16B_JXL": 2, "sRGB": 2, "JXL_mobile": 2, "JXL_jpeg": 1}
+    got = {k: sum(1 for p in first if f"\\{k}\\" in "\\" + p) for k in want}
+    check("presets: masters, sRGB, mobile and the outtake JPEG written (OLD_TIFFs excluded)",
+          all(v == 0 for v in rcs.values()) and got == want
+          and not any("OLD_TIFFs" in p and p.endswith(".jxl") and "old" in p for p in first),
+          f"rc={rcs} got={got}")
+    mob = [lib / p for p in first if "\\JXL_mobile\\" in "\\" + p]
+    srgb_named = [p for p in first if "\\sRGB\\" in "\\" + p]
+    check("derivatives renamed ProPhoto-g22 -> sRGB, mobile at 2048 px",
+          srgb_named and all("_sRGB_" in p for p in srgb_named) and mob
+          and all(max(int(x) for x in exif(["-s3", "-ImageWidth", "-ImageHeight", m]).split())
+                  == 2048 for m in mob), str(srgb_named[:1]))
+
+    rcs = {n: preset(f"wr2_{n.split()[0].lower()}", n)[0] for n in names}
+    check("presets run again: nothing rewritten, every run exits 0",
+          snapshot() == first and all(v == 0 for v in rcs.values()), f"rc={rcs}")
+
+    # A re-export of one photo: its master and both derivatives follow, the
+    # other photo's files stay as they are.
+    cp(A2, a)
+    touch(a, 0)          # now: newer than its master, never in the future
+    for n in names[:3]:
+        preset(f"wr3_{n.split()[0].lower()}", n)
+    after = snapshot()
+    changed = sorted(p for p in first if after.get(p) != first[p])
+    check("a re-exported TIFF: its master, sRGB and mobile files are redone, nothing else",
+          len(changed) == 3 and all("DSC_0001 (2)" in p for p in changed), str(changed))
+
+    # The event folder renamed (the owner renames in Capture One): with the
+    # presets' guard off and --restamp-then-sync, nothing is re-encoded.
+    renamed = lib / "250118_吾妻山公園_菜の花 Canola [FINAL]"
+    ev.rename(renamed)
+    base_snap = snapshot()
+    rcs = {n: preset(f"wr4_{n.split()[0].lower()}", n)[0] for n in names}
+    after = snapshot()
+    check("renamed event folder: no master or derivative re-encoded, every run exits 0",
+          after == base_snap and all(v == 0 for v in rcs.values()), f"rc={rcs}")
+
+
+def _kill_when(tag, args, ready, timeout=600):
+    """Start a script, kill its whole process tree (cjxl/djxl/exiftool too,
+    as a power cut or the wrapper's watchdog would) once `ready()` is true."""
+    t = time.time()
+    p = subprocess.Popen([PY] + [str(a) for a in args], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(B),
+                         env={**os.environ, "JXLPHOTO_LOG_DIR": str(B / "_script_logs")})
+    while p.poll() is None and time.time() - t < timeout and not ready():
+        time.sleep(0.2)
+    killed = p.poll() is None
+    if killed:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+    p.wait()
+    print(f"   [{tag}] killed={killed} after {time.time() - t:.1f}s", flush=True)
+    return killed
+
+
+def _decodes(p):
+    return djxl(p, B / "_probe.png").returncode == 0
+
+
+def interrupt_checks(A1, A2, A3):
+    """Runs killed mid-write (whole process tree), then run again: no final
+    file is ever truncated, no source is deleted without a verified output,
+    and the next run finishes the job."""
+    section("Interrupted runs (process tree killed mid-write)")
+    srcs = [A1, A2, A3]
+
+    # Encoder, mode 8 + --delete-source: killed once the first master landed.
+    e = B / "k_enc 中断 [k]"
+    tifs = [cp(srcs[i % 3], e / f"p{i} ({i}).tif") for i in range(6)]
+    md5s = {t.name: md5(t) for t in tifs}
+    ARGS = [ENC, e, "--mode", "8", "--distance", "0.05", "--effort", "7", "--workers", "2",
+            "--no-preflight", "--delete-source", "--delete-confirm-off"]
+    killed = _kill_when("k_enc", ARGS, lambda: len(list(e.glob("*.jxl"))) >= 1)
+    finals = list(e.glob("*.jxl"))
+    lost = [t.name for t in tifs if not t.exists() and not t.with_suffix(".jxl").exists()]
+    bad = [j.name for j in finals if not _decodes(j)]
+    check("encoder killed mid-run: every final .jxl decodes, no TIFF gone without its JXL",
+          killed and not bad and not lost, f"finals={len(finals)} bad={bad} lost={lost}")
+    # Masters finished before the kill are skipped by the sync; their TIFFs go
+    # only with --delete-skipped, on the strength of their provenance.
+    rc, _ = run("k_enc_again", ARGS + ["--delete-skipped"])
+    left_tif = [t.name for t in tifs if t.exists()]
+    tmps = [p.name for p in e.iterdir() if p.suffix == ".tmp"]
+    check("encoder re-run (--delete-skipped): all six archived, sources deleted, no .tmp",
+          rc == 0 and len(list(e.glob("*.jxl"))) == 6 and not left_tif and not tmps,
+          f"rc={rc} tifs_left={left_tif} tmps={tmps}")
+
+    # Recompressor in place (mode 8): killed after the first replacement.
+    r = B / "k_rec 中断 [r]"
+    for j in sorted(e.glob("*.jxl")):
+        cp(j, r / j.name)
+    before = {p.name: md5(p) for p in r.glob("*.jxl")}
+    RARGS = [REC, r, "--mode", "8", "--distance", "1", "--effort", "7", "--workers", "2",
+             "--on-unknown", "convert", "--on-regeneration", "convert", "--on-downgrade",
+             "convert", "--no-preflight", "--delete-confirm-off", "--no-keep-smaller"]
+    killed = _kill_when("k_rec", RARGS,
+                        lambda: any(md5(r / n) != h for n, h in before.items()
+                                    if (r / n).exists()))
+    present = {p.name for p in r.glob("*.jxl")}
+    bad = [n for n in present if not _decodes(r / n)]
+    check("recompressor killed in place: every file still there and decodable",
+          killed and present == set(before) and not bad, f"bad={bad} missing="
+          f"{sorted(set(before) - present)}")
+    rc, out = run("k_rec_again", RARGS)
+    tmps = [p.name for p in r.iterdir() if p.suffix == ".tmp"]
+    check("recompressor re-run: finishes, no .tmp left behind",
+          rc == 0 and not tmps and all(_decodes(p) for p in r.glob("*.jxl")),
+          f"rc={rc} tmps={tmps}")
+
+    # Transcoder mode 8 + --delete-source on JPEGs: killed after the first JXL.
+    t = B / "k_tr 中断 [t]"
+    for i, s in enumerate(srcs * 3):
+        _via_ascii(lambda _s, o, s=s: ["magick", f"{s}[0]", "-depth", "8", "-quality", "95",
+                                       str(o)], None, t / f"j{i} ({i}).jpg").check_returncode()
+    jmd5 = {p.stem: md5(p) for p in t.glob("*.jpg")}
+    TARGS = [TR, t, "--mode", "8", "--delete-source", "--delete-confirm-off", "--workers", "2"]
+    killed = _kill_when("k_tr", TARGS, lambda: len(list(t.glob("*.jxl"))) >= 1)
+    lost = [s for s in jmd5 if not (t / f"{s}.jpg").exists() and not (t / f"{s}.jxl").exists()]
+    check("transcoder killed mid-run: no JPEG gone without its JXL",
+          not lost, f"killed={killed} lost={lost}")
+    rc, _ = run("k_tr_again", TARGS + ["--delete-skipped"])
+    rd = B / "k_tr_rec"
+    for p in t.glob("*.jxl"):
+        cp(p, rd / p.name)
+    run("k_tr_reconstruct", [TR, rd, "--mode", "1", "--decode", "--force-transcode"])
+    recs = {p.stem: md5(p) for p in rd.rglob("*.jpg")}
+    check("transcoder re-run (--delete-skipped): every JPEG archived, bit-exact, deleted",
+          rc == 0 and recs == jmd5 and not list(t.glob("*.jpg")),
+          f"rc={rc} {len(recs)}/{len(jmd5)}")
+
+
 def interaction_checks(A1, A2):
     """Features added after the 2026-10-08 audit, combined, each run fed its
     own output: the restamp with an edited photo, the guard switched off
@@ -1236,6 +1469,8 @@ def main():
         transcoder_checks(A1, A2)
         hostile_name_checks(A1)
         interaction_checks(A1, A2)
+        wrapper_checks(A1, A2)
+        interrupt_checks(A1, A2, A3)
         if (args.fixtures / "TIFF16_varied").is_dir():
             varied_checks(args.fixtures / "TIFF16_varied")
         else:
