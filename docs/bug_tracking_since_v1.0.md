@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #543.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #544.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.3 | #543 (1) |
 | [Round-59 — hostile paths, long paths and the deleting auto mode](#round-59--hostile-paths-long-paths-and-the-deleting-auto-mode-2026-10-22) | 2026-10-22 | v2.15.2 | #541–#542 (2) |
 | [Round-58 — stale archives and in-place races](#round-58--stale-archives-and-in-place-races-2026-10-17) | 2026-10-17 | v2.15.1 | #539–#540 (2) |
 | [Round-57 — the wrapper's last literal fallbacks](#round-57--the-wrappers-last-literal-fallbacks-2026-10-16) | 2026-10-16 | v2.15.0 | #538 (1) |
@@ -68,6 +69,23 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-60 — the wrapper's presets end to end, runs killed mid-write (2026-10-22)
+
+The battery gained two sections run inside the hostile folder: copies of the
+owner's four presets (SYNC PHOTOS, SRGB, MOBILE, OUTTAKES JPEG) through
+`jxl_photo.py --run-preset` over manifests, on a library laid out like theirs,
+each run twice, then a re-export and a renamed event folder; and the encoder,
+the in-place recompressor and the transcoder killed (whole process tree) in
+the middle of a write, then run again. Both held: no truncated file, no source
+deleted without a verified output, and the presets do exactly the expected
+work. One reporting gap came out. Regression test:
+`tests/test_derivative_policy_skip_warning.py` (real codecs; fails against
+`2d41f40`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 543 | **A derivative run reported the files it wrote no derivative for as ordinary skips.** A derivative (`--output-icc`, `--resize`, `--sharpen`) of a master already at the requested distance (or a finer one, or at its regeneration limit, or without an encode record) follows the usual classification, as documented; a policy answer `copy` becomes a skip there, since a verbatim copy is not the derivative. The run then ended with "Done: 0 recompressed \| … \| 2 skipped" and exit 0, the wrapper said "1 ok", and the derivative folder stayed empty — it read like a folder already up to date. Found with the SRGB preset over masters encoded at d=0.5. | recompressor | ✅ FIXED (after the Done line, a derivative run with policy skips warns how many files got NO derivative and which `--on-*` option writes them. The classification itself is unchanged) |
 
 ## Round-59 — hostile paths, long paths and the deleting auto mode (2026-10-22)
 

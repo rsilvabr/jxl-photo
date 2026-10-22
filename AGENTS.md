@@ -263,7 +263,11 @@
   Python traceback. Every check runs inside a HOSTILE folder (Japanese, `[ ]`,
   a space, `%`, another drive than `%TEMP%`; `--ascii-paths` for a plain one
   when telling a path bug from another), plus hostile file names and a path
-  past 260 characters. Optional fixture folders add the owner's variety:
+  past 260 characters. It also runs copies of the owner's four presets
+  through `jxl_photo.py --run-preset` (config in a temporary USERPROFILE,
+  never theirs) twice, then after a re-export and a renamed event folder, and
+  kills the encoder, the in-place recompressor and the transcoder mid-write
+  before running them again. Optional fixture folders add the owner's variety:
   `TIFF16_varied` (37 exports, 18 cameras/phones/a film scanner),
   `TIFF_scans_varied` (23 film scans: 8/16-bit gray, no ICC, scanner profiles,
   RGB+IR/alpha 4th sample, 84 MP) and `JPEG_varied` (25 JPEG structures, an

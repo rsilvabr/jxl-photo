@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.15.2](#v2152)** | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode (round 59, 2 fixes) |
+| **[v2.15.3](#v2153)** | 2026-10-22 | A derivative run says how many files got no derivative; the battery runs the owner's presets end to end and kills runs mid-write (round 60, 1 fix) |
+| [v2.15.2](#v2152) | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode (round 59, 2 fixes) |
 | [v2.15.1](#v2151) | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
 | [v2.15.0](#v2150) | 2026-10-16 | `--restamp-then-sync`: a scheduled sync fixes renamed folders' records first; the D50 patch's `auto` decides from the profile, no exiftool call; the space preflight counts only what the run writes; planning-time exiftool batches no longer time out on a slow disk (rounds 56–57, 2 fixes) |
 | [v2.14.0](#v2140) | 2026-10-13 | The overwrite guard can be turned off (`--no-overwrite-guard`) for libraries with renamed folders; clearer refusal messages; `--restamp-moved`; resized derivatives use many more workers (round 55, 4 fixes) |
@@ -68,9 +69,41 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.15.3
+
+**Released 2026-10-22.** Supersedes v2.15.2. Round 60, 1 fix. Nothing to do
+when you upgrade.
+
+### A derivative run names the files it wrote nothing for (#543)
+
+A derivative (`--output-icc`, `--resize`, `--sharpen`) of a master already at
+the requested distance, or a finer one, is classified like any recompression
+("downgrade"), and its policy answer `copy` becomes a skip, because a
+verbatim copy is not the derivative. That is documented, but the run reported
+those files among the ordinary skips: "Done: 0 recompressed | … | 2 skipped",
+exit 0, and the wrapper's "1 ok", with the derivative folder empty. After the
+Done line such a run now warns how many files got no derivative and which
+`--on-*` option writes them. Found by running the SRGB preset over masters
+encoded at d=0.5; with the usual masters (d=0.05) it never happens.
+
+### Tests and the real-photo battery
+
+- `tests/test_derivative_policy_skip_warning.py` (real codecs) fails against
+  v2.15.2.
+- The battery runs copies of the owner's four presets (SYNC PHOTOS, SRGB,
+  MOBILE, OUTTAKES JPEG) through `jxl_photo.py --run-preset` over manifests,
+  on a library laid out like theirs inside the hostile folder: each twice
+  (the second run changes nothing), then after a re-export (exactly its
+  master, sRGB and mobile file are redone) and a renamed event folder
+  (nothing re-encoded, thanks to `--restamp-then-sync`).
+- It kills the encoder (`--delete-source`), the in-place recompressor and the
+  transcoder (`--delete-source`) with their whole process tree in the middle
+  of a write: no truncated file, no source gone without its output, and the
+  next run (with `--delete-skipped`) finishes the job.
+
 ## v2.15.2
 
-**Released 2026-10-22.** Supersedes v2.15.1. Round 59, 2 fixes, from an audit that ran the real
+**Released 2026-10-22, superseded by v2.15.3.** Supersedes v2.15.1. Round 59, 2 fixes, from an audit that ran the real
 files through every script inside a hostile folder. One command line changes
 (see [Upgrading](upgrading.md#v2152-a-deleting-transcoder-run-leaves-jxls-alone-unless-told-to-decode));
 otherwise nothing to do when you upgrade.
