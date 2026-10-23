@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.1"
+TOOLKIT_VERSION = "2.16.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1940,12 +1940,19 @@ def _append_checksum_line(db_path: Path, entry: str):
     """
     lock_path = db_path.parent / (db_path.name + ".lock")
     deadline = time.monotonic() + _MD5_LOCK_TIMEOUT_S
+    last_err = None
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as e:
+            # Windows answers a create on a lock file another writer is still
+            # deleting ("delete pending") with ACCESS DENIED, not "exists": the
+            # lock is simply held, so wait for it like any other (#547). Two
+            # workers finishing in the same folder hit it; the line was then
+            # dropped and the source kept although its JXL was fine.
+            last_err = e
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
@@ -1957,9 +1964,13 @@ def _append_checksum_line(db_path: Path, entry: str):
                 except OSError:
                     pass  # someone else reclaimed it first
             if time.monotonic() >= deadline:
-                logger.warning(f"checksums.md5 stayed locked for "
-                               f"{_MD5_LOCK_TIMEOUT_S:.0f}s — provenance line for "
-                               f"{db_path.parent.name} NOT recorded (fail closed)")
+                if isinstance(last_err, PermissionError):
+                    logger.warning(f"Could not lock {lock_path} ({last_err}) — provenance "
+                                   f"line NOT recorded (fail closed)")
+                else:
+                    logger.warning(f"checksums.md5 stayed locked for "
+                                   f"{_MD5_LOCK_TIMEOUT_S:.0f}s — provenance line for "
+                                   f"{db_path.parent.name} NOT recorded (fail closed)")
                 return
             time.sleep(0.05)
         except OSError as e:

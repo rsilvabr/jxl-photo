@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #547.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #548.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |
 | [Round-62 — a temp left by a killed run](#round-62--a-temp-left-by-a-killed-run-2026-10-23) | 2026-10-23 | v2.16.1 | #546 (1) |
 | [Round-61 — the wizard in a real console](#round-61--the-wizard-in-a-real-console-2026-10-22) | 2026-10-22 | v2.16.0 | #544–#545 (2) |
 | [Round-60 — the wrapper's presets end to end, runs killed mid-write](#round-60--the-wrappers-presets-end-to-end-runs-killed-mid-write-2026-10-22) | 2026-10-22 | v2.15.2 | #543 (1) |
@@ -71,6 +72,19 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-63 — the checksum lock under contention (2026-10-23)
+
+The next battery run against the Windows program (built by GitHub this
+time) failed another check: a deleting transcoder run kept two JPEGs whose
+JXLs it had written. Its log said why: the lock on `checksums.md5` was
+refused with ACCESS DENIED. A 16-thread stress test reproduced it on the
+Python version. Regression test: `tests/test_md5_lock_access_denied.py`
+(two of its three tests fail against `6e1ede3`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 547 | **A deleting JPEG → JXL run could keep a JPEG whose JXL was fine.** The transcoder records each JXL's checksum in `checksums.md5`, the proof its delete gate reads, under a lock file created O_EXCL. On Windows a create on a lock file another writer is still deleting ("delete pending") fails with ACCESS DENIED, not "exists"; that was treated as a hard failure, so the line was dropped (fail closed) and the JPEG kept: `KEEP (MD5 not confirmed)`, 2 of 25 files in one battery run, and 1–5 lines in 960 in a 16-thread stress test. ACCESS DENIED is now waited for like a held lock, within the same 10 s; a lock that never comes still drops the line. Nothing was ever deleted wrongly. | jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-62 — a temp left by a killed run (2026-10-23)
 

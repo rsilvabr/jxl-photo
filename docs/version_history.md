@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.16.1](#v2161)** | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
+| **[v2.16.2](#v2162)** | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
+| [v2.16.1](#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
 | [v2.16.0](#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
 | [v2.15.2](#v2152) | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode; a derivative run says how many files got no derivative (rounds 59–60, 3 fixes) |
 | [v2.15.1](#v2151) | 2026-10-17 | `--delete-skipped` keeps a source replaced since its output was written; in-place recompression never overwrites a version written during the run (round 58, 2 fixes) |
@@ -70,9 +71,29 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.16.2
+
+**Released 2026-10-23.** Supersedes v2.16.1. One hardening fix (round 63);
+nothing to do when upgrading.
+
+- **The transcoder's checksum lock waits instead of giving up (#547).** A
+  JPEG → JXL run records each JXL's checksum in `checksums.md5`, which its
+  delete gate reads, under a lock file. On Windows, creating that lock file
+  while another worker is still deleting its own copy fails with ACCESS
+  DENIED rather than "already exists". The transcoder took that as a hard
+  failure: the line was dropped and, with `--delete-source`, the JPEG was
+  kept (`KEEP (MD5 not confirmed)`). It now waits for the lock as it always
+  did for a held one, within the same 10 seconds. Nothing was ever deleted
+  wrongly; a JPEG that should have gone stayed. Found by the real-photo
+  battery run against the Windows program (2 of 25 JPEGs kept), reproduced
+  by a 16-thread stress test.
+- The README's table of contents links to the current "What's new" again
+  (v2.16.1 left it pointing at the v2.16.0 heading).
+- **2632 tests**; the real-photo battery passes.
+
 ## v2.16.1
 
-**Released 2026-10-23.** Supersedes v2.16.0. One hardening fix (round 62);
+**Released 2026-10-23, superseded by v2.16.2.** Supersedes v2.16.0. One hardening fix (round 62);
 nothing to do when upgrading.
 
 - **Temps of an interrupted run are cleaned up (#546).** Each output is
