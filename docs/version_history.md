@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.16.2](#v2162)** | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
+| **[v2.17.0_beta1](#v2170_beta1)** | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
+| [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
 | [v2.16.1](#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
 | [v2.16.0](#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
 | [v2.15.2](#v2152) | 2026-10-22 | Paths of 260+ characters convert instead of failing; a deleting auto-mode transcoder run leaves JXLs alone unless told to decode; a derivative run says how many files got no derivative (rounds 59–60, 3 fixes) |
@@ -71,9 +72,47 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.17.0_beta1
+
+**Released 2026-10-23 as a pre-release**; the stable v2.17.0 will add more
+for film scans. Film scans come back the way their scanner software
+expects them (round 64). One default changes: see
+[Upgrading](upgrading.md#v2170-thumbnail-pages-are-kept-by-default).
+
+- **The XMP is copied as one block (#548).** The encoder, the decoder and the
+  recompressor copied the XMP field by field, which keeps only what exiftool
+  can write. SilverFast stores its IR and dust-removal (iSRD) settings in a
+  namespace of its own that exiftool can read but not write, so a scan
+  archived and decoded back lost them, and SilverFast no longer saw an IR
+  channel. The source's XMP now goes across whole, before the toolkit's own
+  edits (encode record, markers, history), which still apply. The
+  transcoder's JPEG/PNG outputs keep the field copy.
+- **Private TIFF tags are kept (#549).** Tags with a code of 32768 and up that
+  exiftool cannot copy — SilverFast writes an id and the film name — are
+  recorded as `jxlphoto-tifftag` markers and written back on the same page
+  by the decoder. Byte-sized types up to 4 KB each; a page with a larger one
+  keeps none, and the log says so.
+- **Thumbnail pages are kept by default** (`--thumbnail-mode auto`). A
+  multi-page TIFF's embedded preview is archived as `_page1_thumbnail.jxl`
+  and comes back in the decoded TIFF: SilverFast shows "Loading..." instead
+  of the picture for a scan without it. Capture One's export previews are
+  still left out (`THUMBNAIL_DROP_SOFTWARE`, editable). New mode `scans`
+  keeps them only for scanner software (`SCANNER_SOFTWARE`, editable) or an
+  IR page; `exclude` is the old default. An archive written without the
+  thumbnail keeps that layout on a sync run (adding a lone page would split
+  its group); `--overwrite` adds it. A thumbnail page the encoder cannot
+  encode (the decoder's own JPEG preview) is left out instead of failing.
+- Checked on the two real scans: three pages back with the right roles,
+  identical pixels (lossless), every SilverFast XMP field identical, both
+  private tags, the ICC profile — also after recompressing the masters — and
+  SilverFast recognises the IR channel, iSRD and the icon.
+- **2731 tests** (17 new, most with real codecs in a hostile folder); the real-photo
+  battery passes.
+
 ## v2.16.2
 
-**Released 2026-10-23.** Supersedes v2.16.1. One hardening fix (round 63);
+**Released 2026-10-23.** Supersedes v2.16.1. The latest stable release
+while v2.17.0_beta1 is a pre-release. One hardening fix (round 63);
 nothing to do when upgrading.
 
 - **The transcoder's checksum lock waits instead of giving up (#547).** A

@@ -466,7 +466,8 @@ def test_convert_one_reorders_boxes_after_restamp(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "reorder_jxl_boxes", _reorder)
     status = rec.convert_one(src, out, out, "convert", False, "", "", 1.0)
     assert status[1] == "ok"
-    assert calls == ["exiftool", "reorder"], calls
+    # The XMP block copy, then the metadata restamp — both before the reorder.
+    assert calls == ["exiftool", "exiftool", "reorder"], calls
 
 
 # ---------------------------------------------------------------------------

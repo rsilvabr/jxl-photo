@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.2"
+TOOLKIT_VERSION = "2.17.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1127,15 +1127,49 @@ MULTIPAGE_TIFF_MODE = "split"
 # A "real" page is one where is_reduced=False and is_subifd=False.
 # Thumbnails/pyramids are detected via the standard TIFF SubfileType flags.
 
-THUMBNAIL_MODE = "exclude"
+THUMBNAIL_MODE = "auto"
 # Only used when MULTIPAGE_TIFF_MODE is "split".
-# "exclude" -> Do not encode thumbnail pages (default).
+# "auto"    -> [DEFAULT] Encode thumbnail pages, except for TIFFs whose Software
+#              tag names a program in THUMBNAIL_DROP_SOFTWARE (Capture One puts
+#              a tiny preview in every export).
+# "scans"   -> Encode thumbnail pages only for scans: the Software tag names a
+#              program in SCANNER_SOFTWARE, or a page is an IR/mask page
+#              (SubfileType 4).
+# "exclude" -> Do not encode thumbnail pages (the default before v2.17.0).
 # "include" -> Encode thumbnail pages too, with a _thumbnail suffix.
 #
 # A thumbnail is a REDUCED-resolution copy of another page (TIFF SubfileType
 # is_reduced / is_subifd), i.e. derived data — which is why excluding it does not
-# block source deletion in mode 8, while dropping a real page does. Use "include"
-# if you want the decoded TIFF to reproduce the original page structure exactly.
+# block source deletion in mode 8, while dropping a real page does. Scanner
+# software can still depend on it: SilverFast shows "Loading..." instead of the
+# picture in its browser for a scan that lost its thumbnail page.
+#
+# "auto"/"scans" never add a thumbnail to an archive this run does not rewrite:
+# a TIFF whose main JXL is skipped (sync: up to date, or no --overwrite) keeps
+# its archived pages, so a split never gets a lone new page beside an older
+# group. Run once with --overwrite on those folders to add the thumbnails.
+
+THUMBNAIL_DROP_SOFTWARE = (
+    "Capture One",
+)
+# "auto" leaves out the thumbnail page of a TIFF whose Software tag CONTAINS
+# one of these (case-insensitive). Add the programs whose embedded previews you
+# do not want as _thumbnail.jxl files.
+
+SCANNER_SOFTWARE = (
+    "SilverFast",
+    "VueScan",
+    "Epson Scan",
+    "Nikon Scan",
+    "FlexColor",
+    "Frontier",
+    "EZ Controller",
+    "ScanGear",
+    "Plustek",
+)
+# "scans" keeps the thumbnail page of a TIFF whose Software tag CONTAINS one of
+# these (case-insensitive) — or that has an IR/mask page, whatever wrote it.
+# Add your scanner's program here if its TIFFs carry a thumbnail page.
 
 THUMBNAIL_SUFFIX = "_thumbnail"
 # Suffix appended to the output name when THUMBNAIL_MODE="include".
@@ -1180,6 +1214,30 @@ EXTRASAMPLES_XMP_PREFIX = "jxlphoto-extrasamples:"
 # alpha and keeps no TIFF role for it, so without this the decoder wrote every
 # such channel back as unassociated alpha — an IR channel came back as a
 # transparency mask (D3 of the 2026-10-08 audit).
+
+TIFFTAG_XMP_PREFIX = "jxlphoto-tifftag:"
+# A PRIVATE TIFF tag of the page (code >= 32768) that exiftool cannot copy:
+# "jxlphoto-tifftag:<code>:<type>:<hex bytes>", one per tag. SilverFast writes
+# two (35243, 35244: an id and the film name); the decoder writes them back on
+# the same page. Only byte-sized types (BYTE, ASCII, SBYTE, UNDEFINED) — a
+# LONG can be a file offset, meaningless in a new file — and only when every
+# such tag of the page fits PRIVATE_TAG_MAX_BYTES: Affinity Photo stores a
+# 110-byte header beside its 230 MB document, and one without the other is
+# worse than neither.
+PRIVATE_TAG_MAX_BYTES = 4096
+# Private tags exiftool or this pipeline already carries, or that hold offsets.
+_PRIVATE_TAG_SKIP = frozenset({
+    33432,                          # Copyright (exiftool copies it)
+    33723,                          # IPTC
+    34377,                          # Photoshop image resources
+    34665, 34853, 40965,            # Exif / GPS / Interop IFD pointers
+    34675,                          # ICC profile
+    37724,                          # Photoshop ImageSourceData (layers)
+    40091, 40092, 40093, 40094, 40095,  # Windows XP* tags (exiftool copies them)
+    50341,                          # PrintIM
+    50740,                          # DNGPrivateData (holds offsets)
+})
+_PRIVATE_TAG_TYPES = frozenset({1, 2, 6, 7})   # BYTE, ASCII, SBYTE, UNDEFINED
 
 DEPTH_XMP_PREFIX = "jxlphoto-depth:"
 # Prefix for the original BitsPerSample value stored in dc:Relation. The decoder
@@ -1437,7 +1495,10 @@ _multipage_ignored_lock = threading.Lock()
 # preview behind. Tracked SEPARATELY from _multipage_ignored: mixing them made
 # the summary blame "--multipage-mode ignore" for a drop that happened
 # elsewhere.
-_thumbnails_dropped = {"files": 0, "pages": 0}
+# "archived": of those files, how many kept their archived layout under
+# --thumbnail-mode auto/scans because this run does not rewrite their main JXL
+# (see _thumbnail_sync_guard).
+_thumbnails_dropped = {"files": 0, "pages": 0, "archived": 0}
 # Source TIFFs that lost REAL image pages at planning time (--multipage-mode
 # ignore). Mode 8 consults this before deleting: encoding page 0 and then
 # unlinking a 3-page scan destroys the other two pages permanently, and no
@@ -1482,6 +1543,8 @@ _RUN_DEFAULTS = {
     "D50_PATCH_MODE": D50_PATCH_MODE,
     "MULTIPAGE_TIFF_MODE": MULTIPAGE_TIFF_MODE,
     "THUMBNAIL_MODE": THUMBNAIL_MODE,
+    "THUMBNAIL_DROP_SOFTWARE": THUMBNAIL_DROP_SOFTWARE,
+    "SCANNER_SOFTWARE": SCANNER_SOFTWARE,
     "THUMBNAIL_SUFFIX": THUMBNAIL_SUFFIX,
     "WARN_DISCARDED_THUMBNAILS": WARN_DISCARDED_THUMBNAILS,
     "ICC_PNG_STRATEGY": ICC_PNG_STRATEGY,
@@ -1514,7 +1577,7 @@ def _capped_discard_warning(msg: str):
         _discard_warned["suppressed"] += 1
 
 
-def _record_dropped_thumbnails(tiff_path, pages: int):
+def _record_dropped_thumbnails(tiff_path, pages: int, archived: bool = False):
     """Book one TIFF whose thumbnail page(s) this run chose not to encode.
 
     Shared by the `split` and `skip` planners so the two can never drift again:
@@ -1522,12 +1585,17 @@ def _record_dropped_thumbnails(tiff_path, pages: int):
     without touching a counter, so nothing said so — not the run summary, not
     the wrapper's `extras`, and not the mode-8 delete line, which is the one
     place that warns the decoded TIFF will come back without that page.
+
+    archived: the thumbnail was left out only to keep an existing archive's
+    layout (_thumbnail_sync_guard), not because the mode drops it.
     """
     if pages <= 0:
         return
     with _multipage_ignored_lock:
         _thumbnails_dropped["files"] += 1
         _thumbnails_dropped["pages"] += pages
+        if archived:
+            _thumbnails_dropped["archived"] = _thumbnails_dropped.get("archived", 0) + 1
         _discarded_thumb_sources.add(os.path.normcase(str(tiff_path)))
         if WARN_DISCARDED_THUMBNAILS:
             _capped_discard_warning(
@@ -1555,12 +1623,28 @@ def _log_discard_summary():
         # Name the setting that actually caused it. --thumbnail-mode is only
         # consulted in split, so pointing a `skip` run at it would advertise a
         # fix that changes nothing.
+        _tm = THUMBNAIL_MODE.lower()
         if MULTIPAGE_TIFF_MODE.lower() == "skip":
             hint = ("--multipage-mode skip encodes the single real page only). "
                     "Use --multipage-mode split_all to encode them too.")
+        elif _tm == "auto":
+            hint = ("--thumbnail-mode auto: their Software is in "
+                    "THUMBNAIL_DROP_SOFTWARE). Use --thumbnail-mode include to "
+                    "encode them too.")
+        elif _tm == "scans":
+            hint = ("--thumbnail-mode scans: not recognised as scans — no "
+                    "SCANNER_SOFTWARE name, no IR page). Use --thumbnail-mode "
+                    "include to encode them too.")
         else:
             hint = ("--thumbnail-mode exclude, as requested). "
                     "Use --thumbnail-mode include to encode them too.")
+        _archived = _thumbnails_dropped.get("archived", 0)
+        if _archived and _archived == _thumbnails_dropped["files"]:
+            hint = ("their archives were written without them and this run did "
+                    "not rewrite those). Run once with --overwrite to add them.")
+        elif _archived:
+            hint += (f" {_archived} of these TIFF(s) only kept the layout of an "
+                     f"archive this run did not rewrite; --overwrite adds theirs.")
         logger.info(
             f"Thumbnails: excluded {_thumbnails_dropped['pages']} thumbnail page(s) from "
             f"{_thumbnails_dropped['files']} TIFF(s) ({hint}")
@@ -2807,6 +2891,88 @@ def get_page_icc(tif, page_idx: int):
 # NEW FUNCTIONS FOR XMP PRESERVATION (XMP OVERWRITE BUG FIX)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _private_tiff_tags(tif, page):
+    """The page's private tags to carry (TIFFTAG_XMP_PREFIX), as
+    ([(code, type, raw bytes)], why_none_or_None).
+
+    The bytes are read from the file as stored, not from tifffile's decoded
+    value (an ASCII value comes back without its NUL and decoded). All or
+    nothing: when one candidate exceeds PRIVATE_TAG_MAX_BYTES the list is
+    empty and `why` says which tag, so the caller can log it.
+    """
+    found = []
+    for tag in page.tags.values():
+        code = int(tag.code)
+        if code < 32768 or code in _PRIVATE_TAG_SKIP:
+            continue
+        try:
+            dtype = int(tag.dtype)
+        except (TypeError, ValueError):
+            continue
+        if dtype not in _PRIVATE_TAG_TYPES:
+            continue
+        size = int(tag.valuebytecount)
+        if size > PRIVATE_TAG_MAX_BYTES:
+            return [], f"tag {code} is {size:,} bytes (limit {PRIVATE_TAG_MAX_BYTES:,})"
+        tif.filehandle.seek(tag.valueoffset)
+        found.append((code, dtype, tif.filehandle.read(size)))
+    return sorted(found), None
+
+
+def _collapse_list_reset(lines, tag="-XMP-dc:Relation"):
+    """exiftool lines with `tag=` + `tag+=v...` turned into `tag=v...`.
+
+    In ONE exiftool call, any `+=` on a list tag puts every assignment to it in
+    add mode: `-X=` then `-X+=v` keeps the values the FILE already holds and
+    appends v. Only all-`=` assignments replace the list. While the XMP came
+    in through -tagsfromfile in that same call, the reset worked (a later
+    assignment overrides a copied tag); now that the source's XMP is written
+    into the file as a block first, the old list would survive — stale
+    jxlphoto-src/srcsum on a derivative, doubled markers. Lines without the
+    bare reset are returned unchanged (add mode is what they ask for).
+    Parity-pinned (encoder + recompressor).
+    """
+    reset, add = tag + "=", tag + "+="
+    if reset not in lines:
+        return list(lines)
+    out, values, slot = [], [], None
+    for ln in lines:
+        if ln == reset or ln.startswith(add):
+            if slot is None:
+                slot = len(out)
+                out.append(None)
+            if ln.startswith(add):
+                values.append(ln[len(add):])
+            continue
+        out.append(ln)
+    return out[:slot] + ([reset + v for v in values] or [reset]) + out[slot + 1:]
+
+
+def _preload_xmp_block(xmp_file, write_path) -> bool:
+    """Write the source's XMP into write_path as one BLOCK, before the
+    metadata call edits it. True when it was written.
+
+    A field-by-field copy (-tagsfromfile -xmp:all) carries only what exiftool
+    can WRITE, and drops a namespace it can merely read: SilverFast keeps its
+    IR/iSRD settings in one (`LSI/`), and a scan decoded without it is no
+    longer recognised as having an IR channel. The block keeps every byte.
+    It must be a call of its own: in the same call as the encode record and
+    marker edits, exiftool writes the block and IGNORES those edits; and the
+    edit call that follows must not copy -xmp:all again, or every list it
+    appends to (+=) is written twice (#531). The recompressor and the decoder
+    copy the block the same way (-tagsfromfile <jxl> -XMP).
+    """
+    if not xmp_file:
+        return False
+    r = _run_exiftool_argfile(
+        ["-overwrite_original", "-api", "Compress=0", f"-XMP<={xmp_file}", str(write_path)],
+        timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"exiftool XMP copy failed: {(r.stderr or r.stdout or 'no output')[:200].strip()}")
+    return True
+
+
 def extract_xmp_original(tiff_path, tmp_dir):
     """Extract original XMP from TIFF as separate file for preservation.
     Returns path to XMP file or None if no XMP exists."""
@@ -3058,6 +3224,8 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-grayscale",
     "jxlphoto-thumb",
     EXTRASAMPLES_XMP_PREFIX,
+    # Re-read from the TIFF itself on every encode (_private_tiff_tags).
+    TIFFTAG_XMP_PREFIX,
     # The decoder's record of the pixels it wrote into a TIFF (its
     # PIXSUM_PREFIX): it describes THAT TIFF, never a master encoded from it.
     "jxlphoto-pixsum:",
@@ -3111,17 +3279,20 @@ def read_existing_creator_tool(xmp_path):
         logger.debug(f"Failed to read CreatorTool: {e}")
     return ""
 
-def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None):
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None, xmp_preloaded=False):
     """Build exiftool arguments for metadata injection with proper XMP preservation.
-    
+
     Strategy:
     1. Inject EXIF binary if available
     2. Copy all metadata from source TIFF (preserving original XMP)
     3. Add/modify specific XMP tags without overwriting the whole package
-    
+
     Args:
         strip_metadata: If True, strip all metadata (no EXIF/XMP preservation)
-    
+        xmp_preloaded: the source's XMP was already written into write_path
+            as a BLOCK (_preload_xmp_block), so this call must not copy
+            -xmp:all again — see _preload_xmp_block.
+
     Returns path to arg file.
     """
     args_lines = ["-overwrite_original"]
@@ -3160,7 +3331,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     args_lines.append("-tagsfromfile")
     args_lines.append(str(tiff_path))
     args_lines.append("-exif:all")
-    args_lines.append("-xmp:all")
+    if not xmp_preloaded:
+        args_lines.append("-xmp:all")
 
     # 2b. The copied XMP may carry STALE internal round-trip markers
     # (jxlphoto-mpg/depth/grayscale/...) from a previous encode. Clear
@@ -3390,6 +3562,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     
     # 7. Target file
     args_lines.append(str(write_path))
+    # The XMP is in the file already when it was preloaded as a block:
+    # replace dc:Relation with all-`=` lines (see _collapse_list_reset).
+    if xmp_preloaded:
+        args_lines = _collapse_list_reset(args_lines)
 
     # Write args file (UTF-8 charset first so non-ASCII paths work)
     arg_file = tmp_dir / "inject.args"
@@ -3608,7 +3784,9 @@ def _analyze_tiff_pages(tiff_path: Path):
     """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
 
     Returns (real_pages, thumb_pages, page_info) where page_info is a dict
-    mapping page index to {'subfiletype': int, 'samples': int}.
+    mapping page index to {'subfiletype': int, 'samples': int, 'photometric':
+    int}; page 0 also carries 'software' (its Software tag, '' when absent) for
+    _thumbnails_kept.
     """
     page_info = {}
     with tifffile.TiffFile(str(tiff_path)) as tif:
@@ -3620,6 +3798,16 @@ def _analyze_tiff_pages(tiff_path: Path):
                 'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
                 'samples': int(page.samplesperpixel) if page.samplesperpixel else 1,
             }
+            try:
+                page_info[i]['photometric'] = int(page.photometric)
+            except (TypeError, ValueError):
+                pass
+            if i == 0:
+                try:
+                    _sw = page.tags.get(305)
+                    page_info[0]['software'] = str(_sw.value) if _sw is not None else ""
+                except Exception:
+                    page_info[0]['software'] = ""
             try:
                 _px = int(page.imagewidth or 0) * int(page.imagelength or 0)
             except (TypeError, ValueError):
@@ -3643,9 +3831,57 @@ def _page_output_name(stem: str, page_idx: int, is_thumbnail: bool) -> str:
     return base + ".jxl"
 
 
+def _thumbnails_kept(thumbnail_mode: str, page_info: dict = None) -> bool:
+    """Whether --thumbnail-mode keeps this TIFF's thumbnail pages — pure.
+
+    page_info is _analyze_tiff_pages' dict; without it (or without a
+    'software' entry) the Software tag reads as empty: "auto" then keeps the
+    thumbnail and "scans" keeps it only for an IR/mask page.
+    """
+    tm = (thumbnail_mode or THUMBNAIL_MODE).lower()
+    if tm == "include":
+        return True
+    if tm not in ("auto", "scans"):
+        return False
+    info = page_info or {}
+    software = str((info.get(0) or {}).get('software') or "").casefold()
+    if tm == "auto":
+        return not any(str(name).casefold() in software
+                       for name in THUMBNAIL_DROP_SOFTWARE if str(name).strip())
+    if any(str(name).casefold() in software
+           for name in SCANNER_SOFTWARE if str(name).strip()):
+        return True
+    # SubfileType bit 2 = transparency mask: the IR page of a film scan.
+    return any(int((v or {}).get('subfiletype') or 0) & 4 for v in info.values())
+
+
+# Photometrics convert_one encodes (MINISBLACK, RGB); everything else it
+# rejects with a per-file error.
+_ENCODABLE_PHOTOMETRICS = frozenset({1, 2})
+
+
+def _kept_thumbnail_pages(thumb_pages: list, thumbnail_mode: str,
+                          page_info: dict = None) -> list:
+    """The thumbnail pages --thumbnail-mode encodes — pure.
+
+    "auto"/"scans" leave out a thumbnail they could only fail on: the decoder
+    itself appends a YCbCr JPEG preview to every single-page TIFF it writes,
+    and re-archiving such a TIFF must neither error on it nor turn it into a
+    _thumbnail.jxl. "include" keeps every page, as before.
+    """
+    tm = (thumbnail_mode or THUMBNAIL_MODE).lower()
+    if not _thumbnails_kept(tm, page_info):
+        return []
+    if tm == "include":
+        return list(thumb_pages)
+    info = page_info or {}
+    return [i for i in thumb_pages
+            if (info.get(i) or {}).get('photometric', 2) in _ENCODABLE_PHOTOMETRICS]
+
+
 def _planned_page_names(stem: str, real_pages: list, thumb_pages: list,
                         mp_mode: str = None, thumbnail_mode: str = None,
-                        thumbnail_suffix: str = None) -> list:
+                        thumbnail_suffix: str = None, page_info: dict = None) -> list:
     """The JXL file names convert_multipage writes for one TIFF, given its
     page classification (_analyze_tiff_pages) — pure: no logging, no
     counters, no file access.
@@ -3654,7 +3890,10 @@ def _planned_page_names(stem: str, real_pages: list, thumb_pages: list,
     (tests/test_audit_261008_leftovers.py pins the two together). The
     wrapper's manifest collision scan calls it to see a split page
     (photo_page1.jxl) landing on another entry's photo_page1.tif output (W9
-    of the 2026-10-08 audit). Unset arguments read this module's settings."""
+    of the 2026-10-08 audit). Unset arguments read this module's settings.
+    page_info (from _analyze_tiff_pages) lets "auto"/"scans" decide; the
+    planner's sync guard, which reads the disk, is not mirrored — naming one
+    thumbnail too many only makes the collision scan more careful."""
     mp = (mp_mode or MULTIPAGE_TIFF_MODE).lower()
     tm = (thumbnail_mode or THUMBNAIL_MODE).lower()
     suffix = THUMBNAIL_SUFFIX if thumbnail_suffix is None else thumbnail_suffix
@@ -3670,8 +3909,7 @@ def _planned_page_names(stem: str, real_pages: list, thumb_pages: list,
             pages.append((0, 0 in thumb_pages))
     elif mp == "split":
         pages += [(i, False) for i in real_pages]
-        if tm == "include":
-            pages += [(i, True) for i in thumb_pages]
+        pages += [(i, True) for i in _kept_thumbnail_pages(thumb_pages, tm, page_info)]
     elif mp == "split_all":
         pages += [(i, False) for i in real_pages]
         pages += [(i, True) for i in thumb_pages]
@@ -4732,6 +4970,12 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     _extrasamples = tuple(int(v) for v in (page.extrasamples or ()))
                 except (TypeError, ValueError):
                     _extrasamples = ()
+                # Private tags exiftool cannot copy (TIFFTAG_XMP_PREFIX).
+                _private_tags, _private_why = _private_tiff_tags(tif, page)
+                if _private_why and not STRIP_METADATA:
+                    logger.warning(
+                        f"  >{tiff_path.name} (page {page_idx}): its private TIFF "
+                        f"tags are not kept — {_private_why}")
                 img = page.asarray()
                 # Reject float/double and other unsupported integer dtypes before casting.
                 if img.dtype.kind == 'f':
@@ -4855,11 +5099,14 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # 6. Build and execute unified metadata injection (CORRECTED - replaces old steps 5+7)
             # This preserves original XMP, adds encoding tags, and embeds ICC if configured
             # Uses icc_original (unmodified) for round-trip preservation
+            _xmp_preloaded = (not STRIP_METADATA
+                              and _preload_xmp_block(xmp_original, write_path))
             inject_args = build_metadata_injection_args(
                 tiff_path, write_path, tmp_dir, exif_bin, icc_original, xmp_original,
                 original_depth=original_depth,
                 strip_metadata=STRIP_METADATA,
-                src_path_id=_src_path_id, src_content_id=_src_content_id
+                src_path_id=_src_path_id, src_content_id=_src_content_id,
+                xmp_preloaded=_xmp_preloaded
             )
             
             r2 = _run_captured([_get_exiftool_cmd(), "-@", str(inject_args)],
@@ -4956,6 +5203,9 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if _channels in (2, 4) and _extrasamples:
                 page_flags.append("-XMP-dc:Relation+=" + EXTRASAMPLES_XMP_PREFIX
                                   + ",".join(str(v) for v in _extrasamples))
+            for _code, _dtype, _raw in _private_tags:
+                page_flags.append(f"-XMP-dc:Relation+={TIFFTAG_XMP_PREFIX}"
+                                  f"{_code}:{_dtype}:{_raw.hex()}")
             if page_flags and not STRIP_METADATA:
                 try:
                     r_gray = _run_exiftool_argfile(
@@ -5056,6 +5306,41 @@ class UnreadableTiff(Exception):
     asked for it. Kept out of the error count so exit codes (and the automation
     reading them) keep their current meaning.
     """
+
+
+def _thumbnail_sync_guard(tiff_path: Path, output_dir: Path, real_pages: list,
+                          thumb_pages: list, page_info: dict):
+    """None when this run (re)writes the TIFF's main JXL — "auto"/"scans" then
+    decide freely — else whether the ARCHIVED layout has the thumbnail pages.
+
+    The group id hashes the page set (bug #303), so adding a thumbnail to an
+    archive whose other pages sync skips would write that one page under a
+    NEW id beside the old group: the decoder then sees a complete group plus
+    a truncated one. Following what is on disk keeps a sync run from ever
+    splitting a group, whichever mode wrote the archive.
+    """
+    if OVERWRITE is True:
+        return None
+    with_t = _planned_page_names(tiff_path.stem, real_pages, thumb_pages,
+                                 "split", "include")
+    without = _planned_page_names(tiff_path.stem, real_pages, thumb_pages,
+                                  "split", "exclude")
+    # The main output's NAME can differ between the two layouts (a TIFF whose
+    # only real page sits after its thumbnail is photo.jxl alone, photo_page1.jxl
+    # beside photo_thumbnail.jxl), so either one marks an existing archive.
+    mains = {n[0] for n in (with_t, without) if n}
+    try:
+        existing = [output_dir / m for m in mains if (output_dir / m).exists()]
+        if not existing:
+            return None
+        if OVERWRITE == "smart":
+            src_mtime = tiff_path.stat().st_mtime
+            if any(src_mtime > m.stat().st_mtime for m in existing):
+                return None
+    except OSError:
+        return None
+    thumb_names = [n for n in with_t if n not in without]
+    return bool(thumb_names) and all((output_dir / n).exists() for n in thumb_names)
 
 
 def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
@@ -5170,17 +5455,24 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         for idx in real_pages:
             info = page_info.get(idx, {'subfiletype': 0, 'samples': 3})
             pages_to_encode.append((idx, False, info['subfiletype'], info['samples']))
-        if THUMBNAIL_MODE.lower() == "include":
-            for idx in thumb_pages:
-                info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
-                pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
-        elif thumb_pages:
-            # Dropping thumbnails here is what --thumbnail-mode exclude ASKED
-            # for, so it is reported once in the summary rather than once per
-            # file (--warn-thumbnail-discard brings the per-file lines back).
+        kept = _kept_thumbnail_pages(thumb_pages, THUMBNAIL_MODE, page_info)
+        archived = None
+        if kept and THUMBNAIL_MODE.lower() in ("auto", "scans"):
+            archived = _thumbnail_sync_guard(tiff_path, output_dir, real_pages,
+                                             kept, page_info)
+            if archived is False:
+                kept = []
+        for idx in kept:
+            info = page_info.get(idx, {'subfiletype': 1, 'samples': 3})
+            pages_to_encode.append((idx, True, info['subfiletype'], info['samples']))
+        if len(kept) < len(thumb_pages):
+            # Dropping thumbnails here is what --thumbnail-mode ASKED for, so
+            # it is reported once in the summary rather than once per file
+            # (--warn-thumbnail-discard brings the per-file lines back).
             # Counted apart from _multipage_ignored so the summary can name the
             # right setting.
-            _record_dropped_thumbnails(tiff_path, len(thumb_pages))
+            _record_dropped_thumbnails(tiff_path, len(thumb_pages) - len(kept),
+                                       archived=archived is False)
         if not pages_to_encode:
             if not real_pages and not thumb_pages:
                 raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
@@ -6113,8 +6405,10 @@ def main():
                         choices=["ignore", "skip", "split", "split_all"],
                         help="How to handle multi-page TIFFs: split (default), ignore, skip, split_all")
     parser.add_argument("--thumbnail-mode",  type=str, default=None,
-                        choices=["exclude", "include"],
-                        help="When splitting: exclude thumbnails (default) or include them")
+                        choices=["auto", "scans", "exclude", "include"],
+                        help="When splitting: auto (default: keep thumbnail pages except "
+                             "THUMBNAIL_DROP_SOFTWARE's, e.g. Capture One), scans (keep "
+                             "them for SCANNER_SOFTWARE or an IR page only), exclude or include")
     parser.add_argument("--thumbnail-suffix", type=str, default=None,
                         help="Suffix for thumbnail outputs when --thumbnail-mode=include (default: _thumbnail)")
     parser.add_argument("--warn-thumbnail-discard", action="store_true",
@@ -6385,6 +6679,7 @@ def main():
         _multipage_ignored["pages"] = 0
         _thumbnails_dropped["files"] = 0
         _thumbnails_dropped["pages"] = 0
+        _thumbnails_dropped["archived"] = 0
         _discarded_real_page_sources.clear()
         _discarded_thumb_sources.clear()
         _discard_warned["count"] = 0

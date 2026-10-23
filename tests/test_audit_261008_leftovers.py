@@ -535,7 +535,7 @@ def test_w9_a_single_page_base_is_not_a_collision(menu, tmp_path):
 
 
 @pytest.mark.parametrize("mp", ["ignore", "skip", "split", "split_all", "bogus"])
-@pytest.mark.parametrize("tm", ["exclude", "include"])
+@pytest.mark.parametrize("tm", ["exclude", "include", "auto", "scans"])
 @pytest.mark.parametrize("real,thumbs", [
     ([0], []), ([0, 1], []), ([0], [1]), ([], [0]), ([0, 2], [1]),
     ([1], [0]), ([], []), ([0, 1, 2], [3]),

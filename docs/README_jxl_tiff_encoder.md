@@ -1129,7 +1129,8 @@ Multi-page TIFFs are handled explicitly instead of silently discarding extra pag
 - `--multipage-mode split` — **default**. Encode each real page to a separate JXL
   (`photo.jxl`, `photo_page1.jxl`, ...). A TIFF with one real page yields exactly
   `photo.jxl`, identical to the old `ignore` default. Thumbnail pages follow
-  `--thumbnail-mode` (`exclude` default, or `include`).
+  `--thumbnail-mode` (`auto` default, `scans`, `exclude` or `include` — see
+  [Thumbnail pages](#thumbnail-pages---thumbnail-mode-v2170) below).
 - `--multipage-mode ignore` — encode only page 0, drop the rest (the pre-v1.8.2
   default). Not silent: files whose extra pages are dropped are logged as warnings
   (capped at 20 lines per run) and the run summary repeats the total
@@ -1155,13 +1156,42 @@ cost only). The
 channel's ExtraSamples type is still written back by the decoder as unassociated
 alpha.
 
-Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, thumbnails can be excluded or included with a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`). The suffix must be a plain filename suffix — an empty value, a path separator, or `..` is rejected at startup (a thumbnail name must never point outside the destination).
+Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, a kept thumbnail gets a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`). The suffix must be a plain filename suffix — an empty value, a path separator, or `..` is rejected at startup (a thumbnail name must never point outside the destination).
 
-**Thumbnail exclusion is not warned per file.** `--thumbnail-mode exclude` is an
-explicit request, so it produces a single summary line
-(`Thumbnails: excluded N thumbnail page(s) from M TIFF(s)`) instead of one WARNING
-per file — a library where every export carries a preview page would otherwise
-bury the real errors. Pass `--warn-thumbnail-discard` when you want the file names.
+### Thumbnail pages (`--thumbnail-mode`, v2.17.0)
+
+| Mode | Keeps the thumbnail page of |
+|---|---|
+| `auto` (default) | every TIFF, except those whose Software tag contains a name in `THUMBNAIL_DROP_SOFTWARE` (default: `Capture One`, which adds a tiny preview to every export) |
+| `scans` | scans only: the Software tag contains a name in `SCANNER_SOFTWARE` (SilverFast, VueScan, Epson Scan, Nikon Scan, FlexColor, Frontier, EZ Controller, ScanGear, Plustek), or the TIFF has an IR/mask page (`SubfileType` 4), whatever wrote it |
+| `exclude` | none (the default before v2.17.0) |
+| `include` | every TIFF |
+
+Both lists sit at the top of the script; the match is a case-insensitive
+"contains". Why keep a reduced copy at all: scanner software can depend on it.
+SilverFast shows "Loading..." in its browser instead of the picture for a scan
+that lost its thumbnail page.
+
+Two things `auto`/`scans` never do:
+
+- **Add a thumbnail to an archive this run does not rewrite.** The group id
+  covers the set of pages a split writes, so a sync run that skipped a scan's
+  existing pages and wrote only its new thumbnail would leave a lone page in a
+  second group. A TIFF whose main JXL is skipped (sync: up to date, or no
+  `--overwrite`) keeps the layout it was archived with — with or without the
+  thumbnail. To add the thumbnails to scans archived before v2.17.0, run once
+  with `--overwrite` on those folders.
+- **Fail on a thumbnail they cannot encode.** The decoder appends a JPEG (YCbCr)
+  preview to every single-page TIFF it writes; re-archiving such a TIFF leaves
+  that preview out instead of reporting an error. `include` keeps the old
+  behaviour (every thumbnail page, an error for one that cannot be encoded).
+
+**Dropped thumbnails are not warned per file.** A mode that leaves a thumbnail
+out does what was asked, so it produces a single summary line
+(`Thumbnails: excluded N thumbnail page(s) from M TIFF(s)`, naming the reason)
+instead of one WARNING per file — a library where every export carries a preview
+page would otherwise bury the real errors. Pass `--warn-thumbnail-discard` when
+you want the file names.
 
 Split pages carry a group marker in `XMP-dc:Relation` (`jxlphoto-mpg:<id>`), so `jxl_tiff_decoder.py` can reconstruct the original multi-page TIFF only from genuinely split files. Independently-named files such as `scan.jxl` + `scan_page2.jxl` are never merged.
 
@@ -1240,7 +1270,29 @@ Single-channel pages are encoded as grayscale and flagged with `jxlphoto-graysca
 
 A page with a 2nd or 4th **channel** (grey + extra, RGB + extra — e.g. VueScan's RGBI layout) reaches cjxl as alpha. Its TIFF `ExtraSamples` value is recorded as `jxlphoto-extrasamples:<v>` (`0` unspecified, e.g. IR; `1` associated alpha; `2` unassociated alpha) so the decoder gives the channel back its role (v2.8.1); lossy encodes keep the colour under it with cjxl's `keep_invisible` option (v2.8.0).
 
-> **⚠️ IR channel / Digital ICE warning:** If your scanner software (e.g. SilverFast, VueScan) uses the IR page as a hidden channel for Digital ICE / dust & scratch removal, converting the TIFF to JXL and back may break that feature. Those programs often rely on vendor-specific tags and exact page ordering beyond the standard TIFF `SubfileType`. This tool preserves the page as a standard grayscale `PAGE`, but the original scanner software may no longer recognize it as an IR mask. Test with one file before batch-processing important film scans.
+### Film scans and their scanner software (v2.17.0)
+
+A SilverFast scan (image, 1:8 thumbnail, IR page) archived with the defaults
+and decoded back opens in SilverFast with its IR channel and dust removal
+(iSRD) recognised and its browser icon, as the original did — checked on a
+Provia slide and a Fuji Pro 160 negative, also after the master was
+recompressed. What that takes:
+
+- the IR page keeps its role (`SubfileType` 4, `jxlphoto-subfiletype`);
+- the thumbnail page is kept (`--thumbnail-mode auto`, above);
+- **the XMP travels as one block.** SilverFast keeps its IR/iSRD settings in
+  an XMP namespace of its own, which exiftool can read but not write; the
+  field-by-field copy used before v2.17.0 dropped it, and SilverFast then no
+  longer saw an IR channel. The encoder, the decoder and the recompressor now
+  copy the source's XMP whole;
+- **private TIFF tags** (code 32768 and up) that exiftool cannot copy ride in
+  a `jxlphoto-tifftag` marker and are written back on the same page —
+  SilverFast's 35243/35244, for instance. Only byte-sized types, up to 4 KB
+  each; a page with a larger one (Affinity Photo stores a 230 MB document in
+  one) keeps none of them, and the log says so.
+
+Other scanner programs were not tested. If yours relies on something else,
+test one file before converting a whole archive.
 
 ### Examples
 
@@ -1254,6 +1306,9 @@ python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode
 
 # Split pages and exclude thumbnails
 python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --multipage-mode split --thumbnail-mode exclude
+
+# Keep thumbnail pages for scans only
+python jxl_tiff_encoder.py "E:\photos" "E:\photos_jxl" --mode 2 --thumbnail-mode scans
 
 # Split every page, including thumbnails, with a custom suffix
 # (split_all already includes thumbnails; --thumbnail-mode has no effect here)

@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #548.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #550.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
 | [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |
 | [Round-62 — a temp left by a killed run](#round-62--a-temp-left-by-a-killed-run-2026-10-23) | 2026-10-23 | v2.16.1 | #546 (1) |
 | [Round-61 — the wizard in a real console](#round-61--the-wizard-in-a-real-console-2026-10-22) | 2026-10-22 | v2.16.0 | #544–#545 (2) |
@@ -72,6 +73,22 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-64 — film scans and their scanner software (2026-10-23)
+
+The owner opened decoded SilverFast scans (a Provia slide and a Fuji Pro 160
+negative, RGB + thumbnail + IR) in SilverFast: no IR channel, no dust
+removal, and "Loading..." instead of the browser icon. Variants built by hand
+narrowed it down: SilverFast needs its own XMP and the thumbnail page;
+compression and its two private tags do not matter (they are kept anyway).
+The thumbnail page was dropped by the old `--thumbnail-mode exclude` default
+— a behaviour change in v2.17.0, see the version history. Regression tests:
+`tests/test_scan_preservation.py` (all 17 fail against `dae22b9`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 548 | **A scanner's own XMP settings were lost on the way to the JXL and back.** The metadata copy was field by field (`-tagsfromfile -xmp:all`), which carries only what exiftool can WRITE; SilverFast keeps its IR/iSRD settings in a namespace exiftool reads but cannot write, so they never reached the JXL, and the decoded scan was not recognised as having an IR channel. The encoder, the decoder and the recompressor now copy the XMP as one block, in a call of its own before the edits (a block in the same call makes exiftool ignore them); the edit call no longer copies `-xmp:all` (#531), and its `dc:Relation` reset is written as all-`=` lines, which replace the preloaded list where `=` + `+=` would only append. The transcoder's JPEG/PNG outputs keep the field copy (a block cannot be split across JPEG segments). | jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py | Fixed |
+| 549 | **Private TIFF tags exiftool cannot copy were lost.** SilverFast writes two (35243, an id; 35244, the film name). The encoder now records each private tag (code 32768 and up, byte-sized types, up to 4 KB) as `jxlphoto-tifftag:<code>:<type>:<hex>`, and the decoder writes it back on the same page, through the JPEG-preview rewrite too. All or nothing per page: a page with a larger one (Affinity Photo keeps a 230 MB document beside a 110-byte header) keeps none, and the log says so. | jxl_tiff_encoder.py, jxl_tiff_decoder.py | Fixed |
 
 ## Round-63 — the checksum lock under contention (2026-10-23)
 

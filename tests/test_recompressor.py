@@ -348,10 +348,14 @@ class TestConvertOne:
                                            "cjxl d=0.1 e=7", "", 0.1)
         assert status == "ok"
         assert rec._verify_jxl_integrity(final)
-        lines = exif_calls[0]
-        # Metadata copied from the source JXL...
+        # The XMP first, as one block, in a call of its own...
+        block = exif_calls[0]
+        assert "-tagsfromfile" in block and str(src) in block and "-XMP" in block
+        lines = exif_calls[1]
+        # ...then the rest of the metadata copied from the source JXL, with no
+        # field-by-field XMP copy on top of the block (#531 doubling)...
         assert "-tagsfromfile" in lines and str(src) in lines
-        assert "-xmp:all" in lines and "-exif:all" in lines
+        assert "-exif:all" in lines and "-xmp:all" not in lines
         # ...and the new parameters APPENDED to the chain, gen reconciled
         assert "-XMP-dc:Description=gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7" in lines
 

@@ -104,6 +104,9 @@ SHARED_HELPERS = [
     "_struct_escape",
     "_history_mime",
     "_history_args",
+    # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
+    # leaves stale jxlphoto-src/srcsum on one script's derivatives.
+    "_collapse_list_reset",
     "_get_exiftool_cmd",
     "_tool_version",
     "_tool_at_least",

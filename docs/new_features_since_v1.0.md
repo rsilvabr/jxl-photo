@@ -1,5 +1,15 @@
 # New Features Since v1.0
 
+## v2.17.0_beta1 (2026-10-23, pre-release)
+
+### `--thumbnail-mode auto` (new default) and `scans` (encoder)
+
+Thumbnail pages of multi-page TIFFs are archived by default, except those of
+the programs in `THUMBNAIL_DROP_SOFTWARE` (Capture One). `scans` keeps them
+only for the programs in `SCANNER_SOFTWARE` or a TIFF with an IR page. Both
+lists are settings at the top of the encoder. See the
+[encoder README](README_jxl_tiff_encoder.md#thumbnail-pages---thumbnail-mode-v2170).
+
 ## v2.15.0 (unreleased)
 
 ### The D50 patch's `auto` reads the profile, not the Software tag (encoder)

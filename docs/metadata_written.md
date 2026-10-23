@@ -5,11 +5,13 @@ Lightroom, the camera — is **copied** to the output. On top of that, the
 toolkit adds the few fields below, almost all of them in XMP. This page lists
 every one: what it is, which script writes it, and when it is removed again.
 
-The copy is made by exiftool, so it holds what exiftool can write: an XMP field
-in a namespace exiftool does not know (rare; some third-party apps write their
-own) is not carried over. That has always been true of the encoder, the decoder
-and the transcoder's re-encodes; since v2.13.0 it is true of the recompressor's
-re-encodes too. Verbatim copies and the `jbrd` container keep every byte.
+Since v2.17.0 the encoder, the decoder and the recompressor copy the XMP as
+**one block**, so it keeps namespaces exiftool can read but not write
+(SilverFast keeps its IR and dust-removal settings in one; a scan decoded
+without it is no longer recognised as having an IR channel). Before, the copy
+was field by field and dropped them. The transcoder's JPEG/PNG outputs still
+copy field by field: a block cannot be split across the 64 KB segments of a
+JPEG. Verbatim copies and the `jbrd` container keep every byte.
 
 No field the toolkit writes contains a readable file name, folder, user name
 or computer name. Two of them are hashes of the source's path, so they cover
@@ -69,6 +71,7 @@ carries.
 | `jxlphoto-page:<n>` / `jxlphoto-pages:<n>` | page index / number of pages in the group | encoder | decoder |
 | `jxlphoto-subfiletype:<n>` | the page's TIFF role (e.g. `4` = a scanner's IR/mask page) | encoder | decoder |
 | `jxlphoto-extrasamples:<n>` | what the extra channel is (`0` = e.g. IR, `1`/`2` = alpha) | encoder | decoder |
+| `jxlphoto-tifftag:<code>:<type>:<hex>` | a **private TIFF tag** of the page that exiftool cannot copy (code 32768 and up, byte-sized types, up to 4 KB each; none of a page's when one is larger), e.g. SilverFast's `35243`/`35244`. Its bytes as stored, in hex | encoder | decoder (written back as the tag itself) |
 | `jxlphoto-grayscale` | the page was single-channel grey | encoder | decoder |
 | `jxlphoto-thumb` | the page was the TIFF's embedded thumbnail | encoder | decoder |
 | `jxlphoto-icc:inherited` | the page had no ICC of its own and used page 0's | encoder | decoder, recompressor derivatives |
@@ -76,8 +79,9 @@ carries.
 | `jxlphoto-derived:<recipe>` | this file is a **derivative**, and how it was made: target profile (or `keep`), `@long<px>`/`@short<px>`/`@pct<n>` (`+up` when upscaling was allowed), `+<sharpen>`, and in the recompressor `/d<d>e<e>` (`s` when cjxl streamed). Example: `sRGB@long2048+screen/d3e9` | recompressor, transcoder (derivatives only) | decoder |
 
 The decoder removes the tokens that describe the JXL (page structure, depth,
-the derivative recipe), so a TIFF it writes reads like an ordinary TIFF, plus
-its own `src`/`srcsum`/`pixsum` and the carried `origin`.
+the derivative recipe, the private tags it writes back), so a TIFF it writes
+reads like an ordinary TIFF, plus its own `src`/`srcsum`/`pixsum` and the
+carried `origin`.
 
 ## Processing history (xmpMM:History)
 

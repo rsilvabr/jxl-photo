@@ -11,6 +11,28 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.17.0: thumbnail pages are kept by default
+
+First in the pre-release v2.17.0_beta1.
+
+
+- The encoder's `--thumbnail-mode` default is now **`auto`**: the embedded
+  thumbnail page of a multi-page TIFF is archived as
+  `<name>_page1_thumbnail.jxl` (a few % of the master's size) and comes back
+  in the decoded TIFF. Capture One's tiny export previews are still left out
+  (`THUMBNAIL_DROP_SOFTWARE`). `--thumbnail-mode exclude` keeps the old
+  behaviour; `scans` keeps them for scans only (`SCANNER_SOFTWARE`, or an IR
+  page).
+- **Archives you already have do not change on a sync run**: a TIFF whose
+  JXLs are up to date keeps the pages it was archived with. To add the
+  thumbnail (and, for film scans, the scanner's XMP settings and private tags
+  that v2.17.0 now keeps), re-archive those folders from their TIFFs once with
+  `--overwrite`.
+- **A wizard answer or preset that chose `exclude`** keeps passing
+  `--thumbnail-mode exclude`. Change it in the preset's advanced options if
+  you want the new default there.
+- Nothing else changes for files without a thumbnail page.
+
 ## v2.16.0: lossless outputs carry a small Explorer thumbnail
 
 - The encoder and the recompressor now store a 768 px sRGB JPEG inside their

@@ -330,6 +330,7 @@ def test_encoder_module_state_resets_between_runs(monkeypatch, tmp_path):
     enc._multipage_ignored["pages"] += 5
     enc._thumbnails_dropped["files"] += 2
     enc._thumbnails_dropped["pages"] += 2
+    enc._thumbnails_dropped["archived"] += 1
     enc._discarded_real_page_sources.add("C:\\gone.tif")
     enc._discarded_thumb_sources.add("C:\\gine.tif")
     enc._discard_warned["count"] += 20
@@ -352,7 +353,7 @@ def test_encoder_module_state_resets_between_runs(monkeypatch, tmp_path):
     assert rc in (0, None), (rc, out.getvalue(), err.getvalue())
     assert enc._counter["done"] == 0, enc._counter
     assert enc._multipage_ignored == {"files": 0, "pages": 0}
-    assert enc._thumbnails_dropped == {"files": 0, "pages": 0}
+    assert enc._thumbnails_dropped == {"files": 0, "pages": 0, "archived": 0}
     assert enc._discarded_real_page_sources == set()
     assert enc._discarded_thumb_sources == set()
     assert enc._discard_warned == {"count": 0, "suppressed": 0}

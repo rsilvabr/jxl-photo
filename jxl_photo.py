@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.2"
+TOOLKIT_VERSION = "2.17.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2365,7 +2365,7 @@ def _mixed_version_messages(script_dir: Path) -> list:
 _CHILD_OPTION_DEFAULTS = {
     'jxl_tiff_encoder': {
         'multipage_mode': ('MULTIPAGE_TIFF_MODE', 'split'),
-        'thumbnail_mode': ('THUMBNAIL_MODE', 'exclude'),
+        'thumbnail_mode': ('THUMBNAIL_MODE', 'auto'),
         'thumbnail_suffix': ('THUMBNAIL_SUFFIX', '_thumbnail'),
         'd50_patch': ('D50_PATCH_MODE', 'auto'),
         'encode_tag': ('ENCODE_TAG_MODE', 'xmp'),
@@ -2412,6 +2412,12 @@ def _child_number_setting(module: str, name: str, fallback):
         return fallback
     value = getattr(mod, name, None)
     return fallback if value is None else value
+
+
+# The encoder's --thumbnail-mode choices, and the ones that can write a
+# thumbnail page (and so need its suffix).
+_THUMBNAIL_MODES = ["auto", "scans", "exclude", "include"]
+_THUMBNAIL_KEEPING_MODES = ("auto", "scans", "include")
 
 
 def _child_default(module: str, option: str):
@@ -5472,12 +5478,15 @@ class InteractiveMenu:
                 # includes thumbnails, so asking there implied a choice that the
                 # encoder ignores.
                 if multipage_mode == "split":
+                    console.print("  [dim]auto = keep them except Capture One previews "
+                                  "(THUMBNAIL_DROP_SOFTWARE); scans = only for scanner "
+                                  "software or an IR page[/dim]")
                     thumbnail_mode = Prompt.ask(
                         "Embedded thumbnail/preview pages",
-                        choices=["exclude", "include"],
-                        default=tm_default
+                        choices=_THUMBNAIL_MODES,
+                        default=tm_default if tm_default in _THUMBNAIL_MODES else "auto"
                     )
-                if multipage_mode == "split_all" or thumbnail_mode == "include":
+                if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
@@ -5512,11 +5521,13 @@ class InteractiveMenu:
                 thumbnail_suffix = ts_default
                 # split_all always includes thumbnails; only "split" has a choice.
                 if multipage_mode == "split":
-                    tm_input = input(f"Embedded thumbnail/preview pages (exclude/include) [{tm_default}]: ").strip().lower() or tm_default
+                    print("  auto  = keep them except Capture One previews (THUMBNAIL_DROP_SOFTWARE)")
+                    print("  scans = keep them only for scanner software or an IR page")
+                    tm_input = input(f"Embedded thumbnail/preview pages ({'/'.join(_THUMBNAIL_MODES)}) [{tm_default}]: ").strip().lower() or tm_default
                     # Fall back to the DEFAULT on a typo, not to a fixed value
                     # (same rule as multipage_mode above).
-                    thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else tm_default
-                if multipage_mode == "split_all" or thumbnail_mode == "include":
+                    thumbnail_mode = tm_input if tm_input in _THUMBNAIL_MODES else tm_default
+                if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                     thumbnail_suffix = ts_input if ts_input else ts_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
@@ -5868,7 +5879,11 @@ class InteractiveMenu:
             # a choice the encoder ignores.
             return "split_all — one JXL per page, thumbnail pages included", False
         tm = adv.get('thumbnail_mode') or _child_default('jxl_tiff_encoder', 'thumbnail_mode')
-        tm_note = "thumbnail pages included" if tm == 'include' else "thumbnail pages excluded"
+        tm_note = {
+            'include': "thumbnail pages included",
+            'auto': "thumbnail pages kept, except Capture One previews",
+            'scans': "thumbnail pages kept for scans only",
+        }.get(tm, "thumbnail pages excluded")
         return f"split — one JXL per page ({tm_note})", False
 
     def _wizard_confirm(self, workflow: Dict) -> bool:
@@ -7738,7 +7753,8 @@ class InteractiveMenu:
                     try:
                         real, thumbs, _info = enc._analyze_tiff_pages(Path(owner))
                         names = enc._planned_page_names(
-                            Path(owner).stem, real, thumbs, mp, tm, suffix)
+                            Path(owner).stem, real, thumbs, mp, tm, suffix,
+                            page_info=_info)
                     except Exception:
                         names = []     # unreadable: the child reports it
                     planned[base] = {os.path.normcase(os.path.splitext(n)[0])

@@ -39,7 +39,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.2"
+TOOLKIT_VERSION = "2.17.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1091,6 +1091,11 @@ EXTRASAMPLES_PREFIX = "jxlphoto-extrasamples:"
 # scanner's IR channel; 1 = associated alpha; 2 = unassociated alpha). JXLs
 # without it (older encodes, third-party files) keep the old default,
 # unassociated alpha.
+
+TIFFTAG_PREFIX = "jxlphoto-tifftag:"
+# Must match the encoder's TIFFTAG_XMP_PREFIX: one private TIFF tag of the
+# page that exiftool cannot copy, "<code>:<type>:<hex bytes>" (SilverFast's
+# 35243/35244). Written back as a raw tag on the same page.
 
 PIXSUM_PREFIX = "jxlphoto-pixsum:"
 # "<pages>:<md5>" of the pixel pages THIS decoder wrote into a TIFF. A TIFF
@@ -2374,9 +2379,15 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
              "-exif:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
+        # The XMP as a BLOCK (-XMP), not field by field (-xmp:all): the field
+        # copy carries only what exiftool can WRITE and dropped a namespace it
+        # can merely read — SilverFast's IR/iSRD settings, without which the
+        # decoded scan is not recognised as having an IR channel. Nothing in
+        # this call edits an XMP field (a block plus edits in one call ignores
+        # the edits); the marker clean-up below runs in calls of its own.
         r_xmp = _run_exiftool_argfile(
             ["-overwrite_original", "-tagsfromfile", str(jxl_path),
-             "-xmp:all", "-iptc:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
+             "-XMP", "-iptc:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         copied = True
         for r in (r_exif, r_xmp):
@@ -2464,6 +2475,8 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             # NEW TIFF (the pixel sum is re-written fresh).
                             or t.startswith(EXTRASAMPLES_PREFIX)
                             or t.startswith(PIXSUM_PREFIX)
+                            # Written back as real tags on the page.
+                            or t.startswith(TIFFTAG_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -2566,8 +2579,11 @@ def cleanup_xmp_icc(tiff_path):
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
-def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
+def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
     """Add JPEG preview as second page of TIFF with proper thumbnail structure.
+
+    extratags: page 0's private tags (TIFFTAG_PREFIX) — the rewrite below
+    builds a new file from the pixels, so they would be lost otherwise.
 
     v2 changes:
     - ICC is embedded in the main 16-bit image (page 0) for color-managed viewers
@@ -2759,6 +2775,8 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data):
             }
             if main_subfiletype:
                 kwargs_main.update(_page_subfiletype_kwargs(main_subfiletype))
+            if extratags:
+                kwargs_main['extratags'] = list(kwargs_main.get('extratags', ())) + list(extratags)
             if main_data.ndim == 3 and main_data.shape[2] in (2, 4):
                 kwargs_main['extrasamples'] = main_extrasamples or 'UNASSALPHA'
             if icc_data:
@@ -3398,6 +3416,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # (page_idx, is_thumb) -> extrasamples for a 2nd/4th channel; a
             # page's (index, role) pair is unique within a group.
             _page_es = {}
+            # (page_idx, is_thumb) -> the page's private tags (TIFFTAG_PREFIX).
+            _page_tt = {}
             page_icc = None
             strategy = "unknown"
 
@@ -3426,6 +3446,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 )
                 page_arrays.append((pixels, page_idx, is_thumb, icc_data, icc_inherited, subfiletype, grayscale, target_depth))
                 _page_es[(page_idx, is_thumb)] = _extrasamples_kwarg(jxl_path)
+                _page_tt[(page_idx, is_thumb)] = _tifftag_extratags(jxl_path)
                 # Use ICC/strategy from the first (main/anchor) page for the whole TIFF
                 if not is_thumb and page_icc is None:
                     page_icc = icc_data
@@ -3508,6 +3529,11 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                         kwargs['subfiletype'] = 1
                     elif entry_subfiletype:
                         kwargs.update(_page_subfiletype_kwargs(entry_subfiletype))
+                    # Private tags exiftool cannot copy (TIFFTAG_PREFIX), beside
+                    # a raw SubfileType tag when there is one.
+                    if _page_tt.get((page_idx, is_thumb)):
+                        kwargs['extratags'] = (list(kwargs.get('extratags', ()))
+                                               + _page_tt[(page_idx, is_thumb)])
 
                     write_method(pixels, **kwargs)
                     _written_pages.append(pixels)
@@ -3524,7 +3550,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # page never had (the main writer deliberately omits it).
             if ADD_JPEG_PREVIEW and not is_multipage and strategy != 'none':
                 _anchor_inherited = page_arrays[0][4] if page_arrays else False
-                add_jpeg_preview(write_path, tmp_dir, None if _anchor_inherited else page_icc)
+                add_jpeg_preview(write_path, tmp_dir, None if _anchor_inherited else page_icc,
+                                 extratags=_page_tt.get((page_arrays[0][1], page_arrays[0][2])))
             elif ADD_JPEG_PREVIEW and is_multipage:
                 logger.info(f" >Skipping JPEG preview for multi-page TIFF ({len(page_arrays)} pages)")
 
@@ -4191,7 +4218,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None} for j in jxls}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(j)): str(j) for j in jxls}
     if not jxls:
@@ -4269,10 +4296,14 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 # and _read_source_markers_batch, which reads the same tag, has
                 # always used the whole string. The two must agree.
                 values = rel if isinstance(rel, list) else [str(rel)]
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None}
                 for token in values:
                     token = str(token).strip()
-                    if token.startswith(EXTRASAMPLES_PREFIX):
+                    if token.startswith(TIFFTAG_PREFIX):
+                        _tt = _parse_tifftag(token)
+                        if _tt:
+                            info['tifftags'] = (info['tifftags'] or []) + [_tt]
+                    elif token.startswith(EXTRASAMPLES_PREFIX):
                         try:
                             info['extrasamples'] = tuple(
                                 int(v) for v in token[len(EXTRASAMPLES_PREFIX):].split(","))
@@ -4381,6 +4412,29 @@ _degraded_decodes: dict = {}
 # srcsum_by_path, so the entry tuple does not widen at every unpack site.
 # Cleared with the sets above.
 _extrasamples_by_jxl: dict = {}
+
+# JXL (normcased) -> [(code, type, bytes)] from its jxlphoto-tifftag markers
+# (TIFFTAG_PREFIX). Same bookkeeping as _extrasamples_by_jxl.
+_tifftags_by_jxl: dict = {}
+
+
+def _parse_tifftag(token: str):
+    """(code, type, bytes) from one TIFFTAG_PREFIX token, or None when it is
+    malformed (skipped: a bad marker must not fail the decode)."""
+    try:
+        code, dtype, hexdata = token[len(TIFFTAG_PREFIX):].split(":", 2)
+        code, dtype = int(code), int(dtype)
+        if code < 32768 or dtype not in (1, 2, 6, 7):
+            return None
+        return code, dtype, bytes.fromhex(hexdata)
+    except ValueError:
+        return None
+
+
+def _tifftag_extratags(jxl_path) -> list:
+    """tifffile `extratags` restoring the page's private tags."""
+    return [(code, dtype, len(raw), raw, True)
+            for code, dtype, raw in _tifftags_by_jxl.get(os.path.normcase(str(jxl_path)), ())]
 
 
 def _extrasamples_kwarg(jxl_path):
@@ -4541,6 +4595,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     _unfaithful_decodes.clear()
     _degraded_decodes.clear()
     _extrasamples_by_jxl.clear()
+    _tifftags_by_jxl.clear()
     _pending_incomplete: list = []
 
     # Read markers first; they are needed even when reconstruction is disabled
@@ -4550,11 +4605,14 @@ def collect_multipage_groups(jxls: list) -> dict:
         _es = (marker_map.get(str(j)) or {}).get('extrasamples')
         if _es:
             _extrasamples_by_jxl[os.path.normcase(str(j))] = _es
+        _tt = (marker_map.get(str(j)) or {}).get('tifftags')
+        if _tt:
+            _tifftags_by_jxl[os.path.normcase(str(j))] = _tt
 
     # Must carry every key _read_multipage_markers_batch produces: the callers
     # read the others by index, and a missing one here is a KeyError waiting for
     # whoever follows that pattern.
-    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None}
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None}
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:

@@ -335,7 +335,7 @@ def test_249_plain_text_fallbacks_use_the_default_not_ignore():
     """A typo must not select the one mode that discards image data."""
     src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
     assert 'multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else mp_default' in src
-    assert 'thumbnail_mode = tm_input if tm_input in ["exclude", "include"] else tm_default' in src
+    assert 'thumbnail_mode = tm_input if tm_input in _THUMBNAIL_MODES else tm_default' in src
     assert 'else "ignore"' not in src
 
 

@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.16.2"
+TOOLKIT_VERSION = "2.17.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -3864,7 +3864,7 @@ def _recompress_encode(jxl_path: Path, write_path: Path) -> tuple:
                 # refused by the exiftool restamp ("Will wrap JXL codestream").
                 "--container=1",
                 # strip=xmp: the restamp copies the source's XMP itself
-                # (-tagsfromfile -xmp:all), so cjxl's carried copy is
+                # (-tagsfromfile -XMP, as a block), so cjxl's carried copy is
                 # redundant — and harmful: with it in place, exiftool ADDS
                 # the copied list to the carried one wherever that same
                 # call appends an entry (the xmpMM:History+= line), writing
@@ -4393,6 +4393,35 @@ _A2B_ONLY_TARGET_MSG = (
     "with --output-icc to a working space such as sRGB")
 
 
+def _collapse_list_reset(lines, tag="-XMP-dc:Relation"):
+    """exiftool lines with `tag=` + `tag+=v...` turned into `tag=v...`.
+
+    In ONE exiftool call, any `+=` on a list tag puts every assignment to it in
+    add mode: `-X=` then `-X+=v` keeps the values the FILE already holds and
+    appends v. Only all-`=` assignments replace the list. While the XMP came
+    in through -tagsfromfile in that same call, the reset worked (a later
+    assignment overrides a copied tag); now that the source's XMP is written
+    into the file as a block first, the old list would survive — stale
+    jxlphoto-src/srcsum on a derivative, doubled markers. Lines without the
+    bare reset are returned unchanged (add mode is what they ask for).
+    Parity-pinned (encoder + recompressor).
+    """
+    reset, add = tag + "=", tag + "+="
+    if reset not in lines:
+        return list(lines)
+    out, values, slot = [], [], None
+    for ln in lines:
+        if ln == reset or ln.startswith(add):
+            if slot is None:
+                slot = len(out)
+                out.append(None)
+            if ln.startswith(add):
+                values.append(ln[len(add):])
+            continue
+        out.append(ln)
+    return out[:slot] + ([reset + v for v in values] or [reset]) + out[slot + 1:]
+
+
 def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
                               size=None) -> list:
     """exiftool lines that turn the copied master metadata into a derivative's:
@@ -4440,7 +4469,7 @@ def _origin_marker_lines(jxl_path: Path, has_record: bool) -> list:
     the source has none and is clean: 'jpeg' for a jbrd source (the JPEG it
     reconstructs is the first master), 'jxl-lossy'/'jxl-lossless' for a JXL no
     toolkit script wrote (as jxlinfo reads its header; 'jxl' when it cannot
-    tell). An inherited origin is already carried by -tagsfromfile -xmp:all
+    tell). An inherited origin is already carried by the XMP block copy
     (and kept by _derivative_metadata_args), so nothing is added then."""
     try:
         if has_jbrd_box(jxl_path):
@@ -4570,13 +4599,28 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # (no extension left to name the type); only the MIME type is read.
         _extra = _extra + _history_args("derived" if DERIVATIVE else "converted",
                                         jxl_path, final_path)
-        r2 = _run_exiftool_argfile(
+        # The XMP goes across as one BLOCK first, in a call of its own: a
+        # field copy (-xmp:all) carries only what exiftool can WRITE and
+        # dropped a namespace it can merely read (SilverFast's IR/iSRD
+        # settings). In the SAME call as the edits below, exiftool would
+        # write the block and ignore them; and the edit call must not copy
+        # -xmp:all on top, or every list it appends to is written twice (#531).
+        r_xmp = _run_exiftool_argfile(
             ["-overwrite_original", "-api", "Compress=0",
-             "-tagsfromfile", str(jxl_path),
-             "-exif:all", "-xmp:all", "-iptc:all"]
-            + _restamp_args(desc, software, label=jxl_path.name)
-            + _extra
-            + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
+             "-tagsfromfile", str(jxl_path), "-XMP", str(write_path)],
+            timeout=EXIFTOOL_TIMEOUT)
+        if r_xmp.returncode != 0:
+            raise RuntimeError(f"exiftool XMP copy: {_stderr_tail(r_xmp.stderr)}")
+        # The block is in the file now, so a derivative's dc:Relation reset
+        # must be all-`=` lines to replace it (_collapse_list_reset).
+        r2 = _run_exiftool_argfile(
+            _collapse_list_reset(
+                ["-overwrite_original", "-api", "Compress=0",
+                 "-tagsfromfile", str(jxl_path),
+                 "-exif:all", "-iptc:all"]
+                + _restamp_args(desc, software, label=jxl_path.name)
+                + _extra
+                + [str(write_path)]), timeout=EXIFTOOL_TIMEOUT)
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
             # would silently miss the ICC/EXIF this whole tool exists to keep.
