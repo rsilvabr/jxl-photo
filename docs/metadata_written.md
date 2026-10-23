@@ -71,6 +71,7 @@ carries.
 | `jxlphoto-page:<n>` / `jxlphoto-pages:<n>` | page index / number of pages in the group | encoder | decoder |
 | `jxlphoto-subfiletype:<n>` | the page's TIFF role (e.g. `4` = a scanner's IR/mask page) | encoder | decoder |
 | `jxlphoto-extrasamples:<n>` | what the extra channel is (`0` = e.g. IR, `1`/`2` = alpha) | encoder | decoder |
+| `jxlphoto-scan:raw` / `jxlphoto-scan:final` / `jxlphoto-scan:no` | the TIFF was a **film scan** (scanner software, an IR channel, or no Software tag and no camera EXIF), raw or final (see the encoder's `SCAN_SCOPE`); `no`: a TIFF with neither tag that the encoder took for a camera TIFF by its 160×120 thumbnail page. Read by the recompressor's `--on-scan` guard | encoder | decoder |
 | `jxlphoto-tifftag:<code>:<type>:<hex>` | a **private TIFF tag** of the page that exiftool cannot copy (code 32768 and up, byte-sized types, up to 4 KB each; none of a page's when one is larger), e.g. SilverFast's `35243`/`35244`. Its bytes as stored, in hex | encoder | decoder (written back as the tag itself) |
 | `jxlphoto-grayscale` | the page was single-channel grey | encoder | decoder |
 | `jxlphoto-thumb` | the page was the TIFF's embedded thumbnail | encoder | decoder |

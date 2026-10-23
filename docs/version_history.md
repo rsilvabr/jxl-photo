@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.17.0_beta1](#v2170_beta1)** | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
+| **[v2.17.0](#v2170)** | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
+| [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
 | [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
 | [v2.16.1](#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
 | [v2.16.0](#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb (`EXPLORER_THUMBNAIL`, menu option 9 for existing files); a menu tip about JXL thumbnails; two wizard display fixes (round 61) |
@@ -72,12 +73,64 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.17.0
+
+**Released 2026-10-24.** Supersedes v2.16.2 and the v2.17.0_beta1
+pre-release, and ships all of it (below). Film scans are archived lossless and
+come back the way their scanner software expects them. Two defaults change:
+see [Upgrading](upgrading.md#v2170-thumbnail-pages-are-kept-by-default-film-scans-are-lossless).
+
+- **Film scans are archived lossless by default.** A film scan (its Software
+  tag names a program in `SCANNER_SOFTWARE`, it has an IR channel, or it has
+  neither a Software tag nor camera EXIF, like lab and Epson Scan output) gets its
+  own distance, `SCAN_DISTANCE = 0`, in the same run as every other TIFF;
+  `--scan-distance` sets it per run (`same` = the run's `--distance`), and
+  `--scan-scope raw` keeps only raw scans lossless (the scanner's own ICC
+  profile, no profile at 16 bits, or IR), letting final ones follow
+  `--distance`. Why: the owner's raw negative recompressed to `d=0.3` showed
+  clearly visible loss after his usual processing (inversion and curves
+  magnify it), a scan can only be redone by scanning again, and many final
+  scans are the only copy left. The encode, its record, `--verify-roundtrip`,
+  the delete gate and the adopt scan all use each file's own distance; the
+  memory cap budgets for the hungrier one and the space preflight counts the
+  scans at full size. Every page of a scan carries `jxlphoto-scan:raw|final`.
+- **The recompressor never re-encodes a film scan lossy unless asked**
+  (`--on-scan`, default `copy` = verbatim). It reads the marker, or for
+  masters archived earlier the IR page marker, the Software tag, or a TIFF
+  origin with neither a Software tag nor camera EXIF; a lossless
+  request and derivatives are never affected. `--scan-scope raw` protects raw
+  scans only.
+- **A guessed scan is announced.** A TIFF with neither a Software tag nor
+  camera EXIF is only probably a scan, so the run counts the scans it encodes
+  at the scan distance by reason (scanner software, IR page, guessed) before
+  the first encode — only the TIFFs it will write — and again in the summary
+  and the wizard's recap, listing the guessed ones' folders with how to opt
+  out. A TIFF without either tag that carries a 160×120 page, the thumbnail
+  cameras write, is a camera TIFF: the owner's library had 455 (Fuji S5 Pro,
+  Nikon E990) rewritten without any tag, and none of its ~2 300 scans had
+  such a page. It is marked `jxlphoto-scan:no`, which the recompressor reads.
+  The wizard mentions the scan distance where the distance is chosen, and the
+  summary counts the thumbnail pages a run kept.
+- **A '%' in a file name no longer loses the metadata (#550).** exiftool
+  read a name like `photo 5%.tif` or `trip 50%off.jxl` as a pattern and
+  opened a different, missing file without failing, so the encoder's JXL had
+  none of the TIFF's EXIF and a TIFF decoded from such a JXL had no metadata
+  at all. Present since at least v2.16.2; found by the real-photo battery,
+  whose hostile file name ends in `5%`. Such sources are now copied through a
+  container with a plain name.
+- The wizard asks the distance for film scans in the encoder's advanced
+  options and the `--on-scan` policy with the recompressor's other policies;
+  presets keep both.
+- **2794 tests** (57 new in `tests/test_scan_lossless.py`, 55 of them failing
+  against v2.17.0_beta1, the other 2 guarding what must not change; 3 in
+  `tests/test_percent_in_names.py`, 2 failing against it); the real-photo battery passes.
+
 ## v2.17.0_beta1
 
-**Released 2026-10-23 as a pre-release**; the stable v2.17.0 will add more
-for film scans. Film scans come back the way their scanner software
+**Released 2026-10-23 as a pre-release, superseded by v2.17.0** (which ships
+all of it). Film scans come back the way their scanner software
 expects them (round 64). One default changes: see
-[Upgrading](upgrading.md#v2170-thumbnail-pages-are-kept-by-default).
+[Upgrading](upgrading.md#v2170-thumbnail-pages-are-kept-by-default-film-scans-are-lossless).
 
 - **The XMP is copied as one block (#548).** The encoder, the decoder and the
   recompressor copied the XMP field by field, which keeps only what exiftool
@@ -111,8 +164,7 @@ expects them (round 64). One default changes: see
 
 ## v2.16.2
 
-**Released 2026-10-23.** Supersedes v2.16.1. The latest stable release
-while v2.17.0_beta1 is a pre-release. One hardening fix (round 63);
+**Released 2026-10-23, superseded by v2.17.0.** Supersedes v2.16.1. One hardening fix (round 63);
 nothing to do when upgrading.
 
 - **The transcoder's checksum lock waits instead of giving up (#547).** A

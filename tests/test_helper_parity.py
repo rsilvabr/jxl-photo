@@ -107,6 +107,10 @@ SHARED_HELPERS = [
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
     # leaves stale jxlphoto-src/srcsum on one script's derivatives.
     "_collapse_list_reset",
+    # A '%' in a source name (#550): a copy drifting is one script writing an
+    # output with none of its source's metadata.
+    "_exiftool_source",
+    "_xmp_block_args",
     "_get_exiftool_cmd",
     "_tool_version",
     "_tool_at_least",

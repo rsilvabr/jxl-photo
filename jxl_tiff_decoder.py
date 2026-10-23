@@ -39,7 +39,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0_beta1"
+TOOLKIT_VERSION = "2.17.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -674,6 +674,59 @@ def _stderr_tail(stderr, limit=200):
     return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
 
 
+def _exiftool_source(path, tmp_dir) -> str:
+    """The path to give exiftool as a -tagsFromFile source.
+
+    exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
+    'photo 5%.tif' opened a different, missing file — a warning, exit 0 — and
+    the output silently got none of the source's metadata (#550). Doubling the
+    '%' does not escape it. A path with a '%' is dumped to a MIE container in
+    tmp_dir (the SOURCE operand is not expanded) and that is copied from
+    instead; any other path is returned unchanged, at no cost. Raises when the
+    dump fails: an output must not go out without the metadata it should
+    carry. Parity-pinned (four backends).
+    """
+    p = str(path)
+    if "%" not in p:
+        return p
+    mie = os.path.join(str(tmp_dir), "metadata_source.mie")
+    try:
+        os.unlink(mie)
+    except OSError:
+        pass
+    r = _run_exiftool_argfile(["-o", mie, "-all:all", p], timeout=EXIFTOOL_TIMEOUT)
+    if os.path.exists(mie):
+        return mie
+    if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
+        return p        # no metadata at all: there is nothing to lose
+    raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
+                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+
+
+def _xmp_block_args(path, tmp_dir) -> list:
+    """exiftool lines copying `path`'s XMP into the target as one BLOCK.
+
+    ["-tagsfromfile", path, "-XMP"] — unless the path has a '%', which
+    exiftool would expand (#550, _exiftool_source). A MIE container does not
+    carry the XMP as a block, so the raw packet is read (the source operand is
+    not expanded) into tmp_dir and written back with -XMP<=. [] when the file
+    has no XMP. Parity-pinned (decoder + recompressor).
+    """
+    p = str(path)
+    if "%" not in p:
+        return ["-tagsfromfile", p, "-XMP"]
+    r = _run_exiftool_argfile(["-b", "-XMP", p], timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError(f"exiftool could not read the XMP of {os.path.basename(p)} "
+                           f"(a '%' in its path): {(r.stderr or '')[:200].strip()}")
+    if not (r.stdout or "").strip():
+        return []
+    xmp = os.path.join(str(tmp_dir), "metadata_source.xmp")
+    with open(xmp, "w", encoding="utf-8", newline="") as f:
+        f.write(r.stdout)
+    return [f"-XMP<={xmp}"]
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
@@ -1091,6 +1144,11 @@ EXTRASAMPLES_PREFIX = "jxlphoto-extrasamples:"
 # scanner's IR channel; 1 = associated alpha; 2 = unassociated alpha). JXLs
 # without it (older encodes, third-party files) keep the old default,
 # unassociated alpha.
+
+SCAN_PREFIX = "jxlphoto-scan:"
+# Must match the encoder's SCAN_XMP_PREFIX: the JXL came from a film scan
+# (raw/final). A fact about the source the encoder re-derives from the TIFF,
+# so it is not carried into the TIFF.
 
 TIFFTAG_PREFIX = "jxlphoto-tifftag:"
 # Must match the encoder's TIFFTAG_XMP_PREFIX: one private TIFF tag of the
@@ -2375,8 +2433,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # Copy all metadata from JXL. Writes on large TIFFs can take a while
         # on slow disks — use generous timeouts (was 10s, which silently
         # dropped metadata on big files).
+        # A '%' in the JXL's name would be expanded by -tagsfromfile and
+        # the TIFF would get no metadata at all (#550).
+        _src = _exiftool_source(jxl_path, tmp_dir)
         r_exif = _run_exiftool_argfile(
-            ["-overwrite_original", "-tagsfromfile", str(jxl_path),
+            ["-overwrite_original", "-tagsfromfile", _src,
              "-exif:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
         )
         # The XMP as a BLOCK (-XMP), not field by field (-xmp:all): the field
@@ -2386,8 +2447,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # this call edits an XMP field (a block plus edits in one call ignores
         # the edits); the marker clean-up below runs in calls of its own.
         r_xmp = _run_exiftool_argfile(
-            ["-overwrite_original", "-tagsfromfile", str(jxl_path),
-             "-XMP", "-iptc:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
+            ["-overwrite_original"] + _xmp_block_args(jxl_path, tmp_dir)
+            + ["-tagsfromfile", _src, "-iptc:all", str(tiff_path)],
+            timeout=EXIFTOOL_TIMEOUT
         )
         copied = True
         for r in (r_exif, r_xmp):
@@ -2477,6 +2539,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             or t.startswith(PIXSUM_PREFIX)
                             # Written back as real tags on the page.
                             or t.startswith(TIFFTAG_PREFIX)
+                            or t.startswith(SCAN_PREFIX)
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -3569,7 +3632,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 # they still hold tifffile defaults — a legitimate value copied
                 # from the source JXL must survive.
                 r_exif = _run_exiftool_argfile(
-                    ["-overwrite_original", "-tagsfromfile", str(main_jxl),
+                    ["-overwrite_original", "-tagsfromfile",
+                     _exiftool_source(main_jxl, tmp_dir),         # '%' names: #550
                      "-exif:all", str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
                 if r_exif.returncode != 0:

@@ -1,5 +1,15 @@
 # New Features Since v1.0
 
+## v2.17.0 (2026-10-24)
+
+### Film scans are archived lossless (encoder, recompressor)
+
+`SCAN_DISTANCE = 0` / `--scan-distance` gives film scans their own distance in
+the same run, `--scan-scope raw` narrows it to raw scans, and the
+recompressor's `--on-scan` (default `copy`) never re-encodes a scan lossy
+unless asked. Scans are marked `jxlphoto-scan:raw|final`. See the
+[encoder README](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170).
+
 ## v2.17.0_beta1 (2026-10-23, pre-release)
 
 ### `--thumbnail-mode auto` (new default) and `scans` (encoder)

@@ -223,7 +223,11 @@
   expands `%`; a hard link cannot cross drives (a fallback copy must be released
   per file); the 260-character limit (cjxl/djxl cannot open such a path:
   `_long_codec_paths` inside `_run_captured` gives them the `\\?\` prefix,
-  #541 — never pass that prefix to ImageMagick, `?` is a wildcard there). The sibling tiff-workflow shipped three such
+  #541 — never pass that prefix to ImageMagick, `?` is a wildcard there); exiftool
+  format-expands a `%` in the file name given to `-tagsFromFile` and `<=`
+  (`5%.tif`, `50%off`: a warning, exit 0, NO metadata copied — #550): pass
+  such sources through `_exiftool_source` / `_xmp_block_args`, and never put a
+  source's name in a temp file read back with `<=`. The sibling tiff-workflow shipped three such
   bugs on 2026-10-17 because its tests used ASCII paths only.
 - After editing any script, run `python -m py_compile` on the changed files.
 - Tests: `python -m pytest tests/ -n 8 -q` (pytest-xdist; ~2.5 min on the

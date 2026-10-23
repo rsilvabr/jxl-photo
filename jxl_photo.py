@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0_beta1"
+TOOLKIT_VERSION = "2.17.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2414,6 +2414,30 @@ def _child_number_setting(module: str, name: str, fallback):
     return fallback if value is None else value
 
 
+def _child_scan_distance() -> str:
+    """The encoder's SCAN_DISTANCE as the wizard offers it: a number, or
+    'same' when it is None (scans follow the run's distance). "0" only when
+    the encoder cannot be imported."""
+    try:
+        mod = importlib.import_module('jxl_tiff_encoder')
+    except Exception:
+        return "0"
+    value = getattr(mod, 'SCAN_DISTANCE', 0.0)
+    return "same" if value is None else f"{float(value):g}"
+
+
+def _valid_scan_distance(text: str):
+    """A --scan-distance value the encoder accepts, normalised, or None."""
+    t = str(text or "").strip().lower()
+    if t == "same":
+        return "same"
+    try:
+        d = float(t)
+    except ValueError:
+        return None
+    return f"{d:g}" if 0 <= d <= 15 else None
+
+
 # The encoder's --thumbnail-mode choices, and the ones that can write a
 # thumbnail page (and so need its suffix).
 _THUMBNAIL_MODES = ["auto", "scans", "exclude", "include"]
@@ -3013,6 +3037,22 @@ class InteractiveMenu:
                 effort_input = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
                 if effort_input.isdigit():
                     workflow['effort'] = max(1, min(int(effort_input), 10))
+            # Film scans run at the encoder's own distance: say so here, where
+            # the distance is chosen, not only in the advanced options.
+            _sd = _child_scan_distance()
+            try:
+                _sd_differs = _sd != "same" and float(_sd) != float(workflow.get('distance'))
+            except (TypeError, ValueError):
+                _sd_differs = False
+            if _sd_differs:
+                _note = (f"Film scans use distance {_sd}"
+                         f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, "
+                         f"an IR page, or a TIFF with no Software tag and no camera EXIF "
+                         f"(the run lists those folders). Advanced options change it.")
+                if RICH_AVAILABLE and console:
+                    console.print(f"  [dim]{_note}[/dim]")
+                else:
+                    print(f"  {_note}")
         elif origin == "jpeg":
             workflow['dest_format'] = 'jxl'
         elif origin == "jxl":
@@ -4996,6 +5036,14 @@ class InteractiveMenu:
                 rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
                                 choices=["copy", "skip", "convert"], default="convert")
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
+                # Film scans are never re-encoded lossy unless asked
+                # (--on-scan); the child's own default is a safe "copy".
+                if workflow.get('distance', 0) and float(workflow['distance']) > 0:
+                    console.print("[dim]If a file is a film scan (a lossy re-encode loses what "
+                                  "only a new scan brings back):[/dim]")
+                    sc = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
+                                    choices=["copy", "skip", "convert"], default="copy")
+                    workflow.setdefault('advanced_options', {})['on_scan'] = sc
                 if workflow['mode'] in (0, 8):
                     console.print("[dim]Colour conversion needs a separate output folder — "
                                   "not offered in modes 0/8 (in place).[/dim]")
@@ -5201,6 +5249,10 @@ class InteractiveMenu:
                 rg_input = input("would add another generation (each adds ~0.2-0.6 dB of loss on top of the byte savings): copy/skip/convert [convert]: ").strip().lower()
                 workflow.setdefault('advanced_options', {})['on_regeneration'] = (
                     rg_input if rg_input in ("copy", "skip", "convert") else "convert")
+                if workflow.get('distance', 0) and float(workflow['distance']) > 0:
+                    sc_input = input("If a file is a film scan (a lossy re-encode loses what only a new scan brings back): copy/skip/convert [copy]: ").strip().lower()
+                    workflow.setdefault('advanced_options', {})['on_scan'] = (
+                        sc_input if sc_input in ("copy", "skip", "convert") else "copy")
                 if workflow['mode'] in (0, 8):
                     print("Colour conversion needs a separate output folder — not offered "
                           "in modes 0/8 (in place).")
@@ -5369,7 +5421,7 @@ class InteractiveMenu:
         _prev_adv = workflow.get('advanced_options') or {}
 
         def _carry_recompress_policies(target: Dict) -> None:
-            for _k in ('on_downgrade', 'on_regeneration', 'on_unknown',
+            for _k in ('on_downgrade', 'on_regeneration', 'on_unknown', 'on_scan',
                        'jbrd_policy', 'no_keep_smaller',
                        'rederive_on_encode_change', 'rederive_on_lower_effort',
                        'output_icc', 'rename_from', 'rename_to',
@@ -5480,7 +5532,7 @@ class InteractiveMenu:
                 if multipage_mode == "split":
                     console.print("  [dim]auto = keep them except Capture One previews "
                                   "(THUMBNAIL_DROP_SOFTWARE); scans = only for scanner "
-                                  "software or an IR page[/dim]")
+                                  "software, an IR page, or no Software tag and no camera EXIF[/dim]")
                     thumbnail_mode = Prompt.ask(
                         "Embedded thumbnail/preview pages",
                         choices=_THUMBNAIL_MODES,
@@ -5488,6 +5540,14 @@ class InteractiveMenu:
                     )
                 if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
                     thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
+                # Film scans (scanner software, an IR page, or no camera EXIF): their own
+                # distance, lossless by default (SCAN_DISTANCE).
+                sd_default = (workflow.get('advanced_options', {}).get('scan_distance')
+                              or _child_scan_distance())
+                console.print("  [dim]Film scans (scanner software, an IR page, or no Software tag and no camera EXIF) can use their "
+                              "own distance: 0 = lossless, 'same' = the distance above[/dim]")
+                scan_distance = _valid_scan_distance(
+                    Prompt.ask("Distance for film scans", default=sd_default)) or sd_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
             else:
@@ -5522,7 +5582,7 @@ class InteractiveMenu:
                 # split_all always includes thumbnails; only "split" has a choice.
                 if multipage_mode == "split":
                     print("  auto  = keep them except Capture One previews (THUMBNAIL_DROP_SOFTWARE)")
-                    print("  scans = keep them only for scanner software or an IR page")
+                    print("  scans = keep them only for scans (scanner software, an IR page, or no Software tag and no camera EXIF)")
                     tm_input = input(f"Embedded thumbnail/preview pages ({'/'.join(_THUMBNAIL_MODES)}) [{tm_default}]: ").strip().lower() or tm_default
                     # Fall back to the DEFAULT on a typo, not to a fixed value
                     # (same rule as multipage_mode above).
@@ -5530,6 +5590,12 @@ class InteractiveMenu:
                 if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
                     ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
                     thumbnail_suffix = ts_input if ts_input else ts_default
+                sd_default = (workflow.get('advanced_options', {}).get('scan_distance')
+                              or _child_scan_distance())
+                print("  Film scans (scanner software, an IR page, or no Software tag and no camera EXIF) can use their own distance:")
+                sd_input = input(f"  Distance for film scans (0 = lossless, 'same' = the distance above) [{sd_default}]: ").strip()
+                scan_distance = _valid_scan_distance(sd_input) if sd_input else sd_default
+                scan_distance = scan_distance or sd_default
                 overwrite_mode = workflow.get('overwrite_mode', '2')
                 delete_src = workflow.get('delete_source', False)
 
@@ -5562,6 +5628,7 @@ class InteractiveMenu:
             advanced_options['multipage_mode'] = multipage_mode
             advanced_options['thumbnail_mode'] = thumbnail_mode
             advanced_options['thumbnail_suffix'] = thumbnail_suffix
+            advanced_options['scan_distance'] = scan_distance
 
         elif origin == 'jxl' and dest == 'tiff':
             _prev = workflow.get('advanced_options', {})
@@ -8033,6 +8100,8 @@ class InteractiveMenu:
                 cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
             if advanced.get('thumbnail_suffix'):
                 cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
+            if advanced.get('scan_distance'):
+                cmd.extend(['--scan-distance', str(advanced['scan_distance'])])
 
         elif origin == 'jxl' and dest == 'tiff':
             cmd.extend(['--compression', workflow.get('compression')
@@ -8093,6 +8162,8 @@ class InteractiveMenu:
                 cmd.extend(['--on-regeneration', advanced['on_regeneration']])
             if advanced.get('on_unknown'):
                 cmd.extend(['--on-unknown', advanced['on_unknown']])
+            if advanced.get('on_scan'):
+                cmd.extend(['--on-scan', advanced['on_scan']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):
@@ -8705,6 +8776,8 @@ class InteractiveMenu:
                 cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
             if advanced.get('thumbnail_suffix'):
                 cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
+            if advanced.get('scan_distance'):
+                cmd.extend(['--scan-distance', str(advanced['scan_distance'])])
 
         elif origin == 'jxl' and dest == 'tiff':
             cmd = [
@@ -8832,6 +8905,8 @@ class InteractiveMenu:
                 cmd.extend(['--on-regeneration', advanced['on_regeneration']])
             if advanced.get('on_unknown'):
                 cmd.extend(['--on-unknown', advanced['on_unknown']])
+            if advanced.get('on_scan'):
+                cmd.extend(['--on-scan', advanced['on_scan']])
             if advanced.get('jbrd_policy'):
                 cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
             if advanced.get('no_keep_smaller'):

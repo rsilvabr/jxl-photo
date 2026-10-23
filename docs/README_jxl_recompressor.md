@@ -58,6 +58,7 @@ recompressor reads that record and compares it against the request:
 | Lossless → lossless with effort ≤ recorded | **downgrade** — same pixels, no gain | `ask` |
 | No `cjxl d=/e=` record found | **unknown** | `convert` |
 | **`gen >= 2` and the request is lossy** | **regeneration** — a REPEATED lossy re-encode, on top of generations the file already carries | `ask` |
+| **A film scan and the request is lossy** (v2.17.0) | **film scan** — see [Film scans are not re-encoded lossy](#film-scans-are-not-re-encoded-lossy---on-scan) | `copy` |
 
 The **regeneration** row is independent of the others and fires *in addition*
 to them. The threshold is `gen >= 2`, not `>= 1`: every lossy JXL this
@@ -88,9 +89,33 @@ unattended run resolves the `ask` as *skip*. The stored `gen=` never changes —
 the hidden generation exists only for this decision. `tiff8`/`tiff16`,
 `png8`/`png16`/`png` and `jxl-lossless` sources are unaffected.
 
+### Film scans are not re-encoded lossy (`--on-scan`)
+
+A film scan is never re-encoded **lossy** unless you ask: by default it is
+copied verbatim (`ON_SCAN = "copy"`), whatever its current distance. A scan
+can only be redone by scanning again, a "final" scan is often the only copy
+left, and the heavy processing a raw negative gets later (inversion, curves)
+magnifies a loss that is invisible in the file — a raw negative recompressed
+to `d=0.3` showed it clearly. A lossless request is never affected, and
+neither are derivatives (colour conversion, resizing, sharpening): they
+never replace the master.
+
+A JXL counts as a film scan when the encoder marked it
+(`jxlphoto-scan:raw` / `jxlphoto-scan:final`, since v2.17.0), when it is the
+IR page of a split scan (`jxlphoto-subfiletype:4`), when its Software tag
+names a program in `SCANNER_SOFTWARE` (the same list as the encoder's), or
+when it was made from a TIFF (`jxlphoto-origin:tiff8`/`tiff16`) that had
+neither a Software tag nor camera EXIF (lab scans, Epson Scan) — the last
+three cover masters archived before the marker existed. A master marked
+`jxlphoto-scan:no` (the encoder took its tagless TIFF for a camera's, by its
+160×120 thumbnail page) is never a scan.
+`--scan-scope raw` (`SCAN_SCOPE`) protects raw scans only and lets final
+ones be recompressed; a scan without the marker then counts as raw. The guard
+is independent of the other policies: the more conservative action wins.
+
 The policies are configurable (`--on-downgrade`, `--on-regeneration`,
-`--on-unknown`, and the matching settings in the script header). Each
-accepts:
+`--on-unknown`, `--on-scan`, and the matching settings in the script header).
+Each accepts:
 
 - **ask** — one batch prompt before the run (interactive only; unattended
   runs treat it as *skip* — fail closed)
@@ -730,6 +755,10 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --on-regeneration POL ask/copy/skip/convert on a REPEATED lossy re-encode
                       (gen >= 2) and the request adds another (default: ask)
 --on-unknown POL      ask/copy/skip/convert for files with no d=/e= record (default: convert)
+--on-scan POL         ask/copy/skip/convert when a film scan would be re-encoded
+                      lossy (default: copy; derivatives and lossless requests
+                      are never affected)
+--scan-scope all|raw  Which film scans --on-scan protects (default: all)
 --jbrd-policy POL     copy/skip/convert for JPEG-recoverable JXLs (default: copy)
 --no-keep-smaller     Keep the re-encoded file even when it is not smaller
 --rederive-on-encode-change
@@ -832,6 +861,10 @@ OVERWRITE = "smart"          # False | "smart" (source newer) | True
 ON_DOWNGRADE = "ask"         # ask/copy/skip/convert
 ON_REGENERATION = "ask"      # ask/copy/skip/convert (gen >= 2 + lossy request)
 ON_UNKNOWN = "convert"       # ask/copy/skip/convert
+ON_SCAN = "copy"             # ask/copy/skip/convert (film scan + lossy request)
+SCAN_SCOPE = "all"           # all / raw: which film scans ON_SCAN protects
+SCANNER_SOFTWARE = (...)     # Software names that mark a film scan (same
+                             # list as the encoder's)
 JBRD_POLICY = "copy"         # copy/skip/convert
 KEEP_SMALLER = True          # Verbatim copy when the re-encode is not smaller
 REDERIVE_ON_ENCODE_CHANGE = True

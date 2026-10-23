@@ -141,6 +141,8 @@ def test_scan_round_trip_keeps_xmp_private_tags_and_thumbnail(tmp_path):
 
 @needs_tools
 def test_recompressed_master_still_carries_them(tmp_path):
+    """--on-scan convert: a film scan is otherwise copied verbatim, never
+    re-encoded lossy (test_scan_lossless.py)."""
     d = tmp_path / HOSTILE
     (d / "jxl").mkdir(parents=True)
     src = d / "neg [1] 100%.tif"
@@ -150,7 +152,7 @@ def test_recompressed_master_still_carries_them(tmp_path):
     _run(tmp_path, "jxl_recompressor.py", d / "jxl", "--mode", "8", "--distance", "0.5",
          "--effort", "3", "--no-keep-smaller", "--on-downgrade", "convert",
          "--on-regeneration", "convert", "--on-unknown", "convert", "--no-preflight",
-         "--delete-confirm-off")
+         "--delete-confirm-off", "--on-scan", "convert")
     master = d / "jxl" / "neg [1] 100%.jxl"
     rel, hist = _relation(master)
     assert any("cjxl d=0.5" in t for t in [_exif("-s3", "-XMP-dc:Description", master).decode()])

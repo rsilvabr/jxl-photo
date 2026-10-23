@@ -11,9 +11,24 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.17.0: thumbnail pages are kept by default
+## v2.17.0: thumbnail pages are kept by default; film scans are lossless
 
-First in the pre-release v2.17.0_beta1.
+- **Film scans are encoded lossless** (`SCAN_DISTANCE = 0`), whatever
+  `--distance` the run uses: a scan's JXL is several times larger than at the
+  photo distance (a 91 MP negative: ~440 MB lossless, 107 MB at `d=0.05`).
+  A scan is a TIFF whose Software tag names a program in `SCANNER_SOFTWARE`,
+  or that has an IR channel, or neither a Software tag nor camera EXIF (lab
+  scans, Epson Scan; the run lists the folders of these guessed scans before
+  it starts, and a camera's 160×120 thumbnail page rules one out). To keep the old behaviour, pass
+  `--scan-distance same` or set `SCAN_DISTANCE = None`; `--scan-scope raw`
+  keeps only raw scans lossless. Existing archives are not touched by a sync
+  run.
+- **The recompressor copies film scans verbatim** instead of re-encoding them
+  lossy (`--on-scan copy`), including masters archived before v2.17.0 that it
+  recognises by their Software tag or IR page. Pass `--on-scan convert` to
+  recompress them anyway; derivatives are not affected.
+
+The rest of this section came with the pre-release v2.17.0_beta1:
 
 
 - The encoder's `--thumbnail-mode` default is now **`auto`**: the embedded

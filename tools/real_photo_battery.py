@@ -435,9 +435,23 @@ def multipage_and_recompressor_checks(A1, pool_jxl, scan):
             detail = f"full-size pages {len(p0)} -> {len(p1)}"
     check("reconstructed TIFF: every full-size page (RGB + IR) bit-identical", ok, detail)
 
+    # v2.17.0: a film scan is never re-encoded lossy unless asked — the
+    # default copies every page verbatim.
+    g = B / "r_scan_guard"
+    for p in pages:
+        cp(p, g / p.name)
+    before_g = {p.name: md5(p) for p in g.glob("*.jxl")}
+    rc, out = run("rec_scan_guard", [REC, g, "--mode", "8", "--distance", "2", "--effort", "3",
+                                     "--no-preflight", "--workers", "8", "--delete-confirm-off"])
+    check("film scan: the recompressor copies every page verbatim (--on-scan copy)",
+          rc == 0 and all(md5(g / n) == h for n, h in before_g.items())
+          and "scan=copy" in out and not list(g.glob("*.tmp")), f"rc={rc}")
+
+    # The rest re-encodes the scan on purpose (--on-scan convert): it is what
+    # exercises in-place group replacement, the colours and the veto.
     ARGS = ["--mode", "8", "--distance", "2", "--effort", "3", "--on-unknown", "convert",
             "--on-regeneration", "convert", "--on-downgrade", "convert", "--no-preflight",
-            "--workers", "8", "--delete-confirm-off"]
+            "--workers", "8", "--delete-confirm-off", "--on-scan", "convert"]
     r = B / "r_inplace"
     for p in pages:
         cp(p, r / p.name)
@@ -1185,8 +1199,11 @@ def scan_checks(scans):
         e = B / f"scan_d{tag}"
         for s in srcs:
             cp(s, e / s.name)
+        # --scan-distance same: these checks are about the CODEC path at this
+        # distance; since v2.17.0 a scan defaults to lossless (checked below).
         rc, out = run(f"scan_enc_d{tag}", [ENC, e, "--mode", "1", "--distance", dist,
-                                          "--effort", "2", "--no-preflight"])
+                                          "--effort", "2", "--no-preflight",
+                                          "--scan-distance", "same"])
         jx = {p.stem: p for p in (e / "converted_jxl").glob("*.jxl")}
         missing = [s.name for s in srcs if s.stem not in jx]
         check(f"scans {label}: every scan encoded", rc == 0 and not missing,
@@ -1250,6 +1267,31 @@ def scan_checks(scans):
             check("scans lossy d=1: no colour shift (channel means within 0.5% of full scale)",
                   bool(shifts) and shifts[0][0] <= 0.005,
                   "largest " + ", ".join(f"{v:.3%} ({n})" for v, n in shifts[:2]))
+
+    # v2.17.0: with the defaults a film scan is archived LOSSLESS even in a
+    # lossy run (SCAN_DISTANCE = 0), and marked as a scan. The three smallest
+    # scans whose Software names a scanner program, at --distance 1.
+    def _software(p):
+        with tifffile.TiffFile(p) as t:
+            tag = t.pages[0].tags.get(305)
+            return str(tag.value) if tag is not None else ""
+    scanner = sorted((s for s in srcs
+                      if any(n in _software(s) for n in ("SilverFast", "VueScan"))),
+                     key=lambda p: p.stat().st_size)[:3]
+    e = B / "scan_default"
+    for s in scanner:
+        cp(s, e / s.name)
+    rc, out = run("scan_default", [ENC, e, "--mode", "1", "--distance", "1",
+                                    "--effort", "2", "--no-preflight"])
+    wrong = []
+    for s in scanner:
+        j = e / "converted_jxl" / (s.stem + ".jxl")
+        desc = exif(["-s3", "-XMP-dc:Description", j]) if j.exists() else ""
+        rel = exif(["-s3", "-XMP-dc:Relation", j]) if j.exists() else ""
+        if not desc.strip().endswith("cjxl d=0.0 e=2") or "jxlphoto-scan:" not in rel:
+            wrong.append(s.name)
+    check("scans at --distance 1 with the defaults: archived lossless and marked",
+          rc == 0 and bool(scanner) and not wrong, f"rc={rc} {len(scanner)} scans, wrong={wrong}")
 
 
 def jpeg_checks(jpegs):
@@ -1426,6 +1468,12 @@ def hostile_name_checks(A1):
           and djxl(jxl, B / "h_enc.png").returncode == 0, f"rc={rc}")
     if not jxl.exists():
         return
+    # #550: the name ends in '5%', which exiftool expanded in -tagsFromFile:
+    # the JXL carried none of the TIFF's EXIF (only the XMP), silently.
+    exp_src = exif(["-s3", "-EXIF:ExposureTime", h / f"{name}.tif"]).strip()
+    exp_jxl = exif(["-s3", "-EXIF:ExposureTime", jxl]).strip()
+    check("encoder: the hostile file name keeps its EXIF (a '%' in the name, #550)",
+          bool(exp_src) and exp_jxl == exp_src, f"source {exp_src!r} -> JXL {exp_jxl!r}")
     mtime = jxl.stat().st_mtime_ns
     rc, out = run("h_enc_again", [ENC, h, "--mode", "1"] + FAST)
     check("encoder: a second run over its own output skips it (smart sync)",

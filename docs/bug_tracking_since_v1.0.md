@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #550.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #551.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
 | [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
 | [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |
 | [Round-62 — a temp left by a killed run](#round-62--a-temp-left-by-a-killed-run-2026-10-23) | 2026-10-23 | v2.16.1 | #546 (1) |
@@ -73,6 +74,18 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-65 — a '%' in a file name (2026-10-24)
+
+Found while checking the v2.17.0 film-scan rule against the real-photo
+battery: the JXL of its hostile file name (`DSC_0001 (2) 菜の花 [v2] 5%`)
+carried no EXIF, so it read as a scan. Present since at least v2.16.2.
+Regression tests: `tests/test_percent_in_names.py` (two of its three tests
+fail against v2.17.0_beta1; the third guards a path that never broke).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 550 | **A '%' in a file name could lose all of its metadata.** exiftool format-expands the file name given to `-tagsFromFile` and to `<=` (`%d`, `%f`, `%e`, `%o`, with modifiers such as `%.t`), so `photo 5%.tif` or `trip 50%off.jxl` opened a different, missing file: a warning, exit 0, and the output carried none of the source's EXIF — the encoder's JXL, and the TIFF the decoder wrote from such a JXL (no metadata at all). Doubling the `%` does not escape it. The encoder's temp files no longer carry the source's name, and every script copies a source whose path has a `%` through a MIE container (EXIF/IPTC) or the raw XMP packet (the XMP block), whose names are plain: `_exiftool_source`, `_xmp_block_args`, parity-pinned. Names like `100% done` or `5%.jxl` were never affected. | jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-64 — film scans and their scanner software (2026-10-23)
 

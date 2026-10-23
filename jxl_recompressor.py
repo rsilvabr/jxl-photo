@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0_beta1"
+TOOLKIT_VERSION = "2.17.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -794,6 +794,38 @@ ON_UNKNOWN = "convert"
 # Same values as ON_DOWNGRADE. Default converts: with nothing to compare
 # against, the request is taken literally.
 
+ON_SCAN = "copy"
+# What to do when a FILM SCAN (below) would be re-encoded LOSSY — whatever its
+# source distance. Same values as ON_DOWNGRADE. Default copies the file
+# verbatim: a scan can only be redone by scanning again, and the heavy
+# processing a raw negative gets later (inversion, curves) magnifies a loss
+# that is invisible in the file. A lossless request, and derivatives
+# (--output-icc, --resize-*, --sharpen), are never affected. Independent of
+# the other policies: the more conservative action wins.
+
+SCAN_SCOPE = "all"
+# Which scans ON_SCAN protects: "all" (default) or "raw" — raw scans only
+# (the encoder's jxlphoto-scan:raw; a scan with no such marker counts as raw).
+
+SCANNER_SOFTWARE = (
+    "SilverFast",
+    "VueScan",
+    "Epson Scan",
+    "Nikon Scan",
+    "FlexColor",
+    "Frontier",
+    "EZ Controller",
+    "ScanGear",
+    "Plustek",
+)
+# A JXL is a film scan when the encoder marked it (jxlphoto-scan:raw/final),
+# when it is the IR page of a split scan (jxlphoto-subfiletype:4), when its
+# Software tag CONTAINS one of these (case-insensitive), or when it was made
+# from a TIFF (jxlphoto-origin:tiff8/tiff16) that had neither a Software tag
+# nor camera EXIF (lab scans, Epson Scan) — the last three cover masters
+# archived before the marker existed. Same list as the encoder's. Never one
+# the encoder marked jxlphoto-scan:no (a camera TIFF that had lost its tags).
+
 JBRD_POLICY = "copy"
 # JXLs transcoded from JPEG carry a jbrd box — the ORIGINAL JPEG is bit-exact
 # recoverable from them (djxl --reconstruct_jpeg), and checksums.md5 binds
@@ -1025,6 +1057,9 @@ _RUN_DEFAULTS = {
     "ON_DOWNGRADE": ON_DOWNGRADE,
     "ON_REGENERATION": ON_REGENERATION,
     "ON_UNKNOWN": ON_UNKNOWN,
+    "ON_SCAN": ON_SCAN,
+    "SCAN_SCOPE": SCAN_SCOPE,
+    "SCANNER_SOFTWARE": SCANNER_SOFTWARE,
     "JBRD_POLICY": JBRD_POLICY,
     "ENCODE_TAG_MODE": ENCODE_TAG_MODE,
     "CJXL_DISTANCE": CJXL_DISTANCE,
@@ -1046,6 +1081,9 @@ _RUN_DEFAULTS = {
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 ORIGIN_PREFIX = "jxlphoto-origin:"
+# Film scan marker written by the encoder: jxlphoto-scan:raw / :final.
+SCAN_PREFIX = "jxlphoto-scan:"
+SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
 # re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
@@ -2216,6 +2254,59 @@ def _timeout_detail(exc) -> str:
     return f"{tool} timed out after {exc.timeout:g}s"
 
 
+def _exiftool_source(path, tmp_dir) -> str:
+    """The path to give exiftool as a -tagsFromFile source.
+
+    exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
+    'photo 5%.tif' opened a different, missing file — a warning, exit 0 — and
+    the output silently got none of the source's metadata (#550). Doubling the
+    '%' does not escape it. A path with a '%' is dumped to a MIE container in
+    tmp_dir (the SOURCE operand is not expanded) and that is copied from
+    instead; any other path is returned unchanged, at no cost. Raises when the
+    dump fails: an output must not go out without the metadata it should
+    carry. Parity-pinned (four backends).
+    """
+    p = str(path)
+    if "%" not in p:
+        return p
+    mie = os.path.join(str(tmp_dir), "metadata_source.mie")
+    try:
+        os.unlink(mie)
+    except OSError:
+        pass
+    r = _run_exiftool_argfile(["-o", mie, "-all:all", p], timeout=EXIFTOOL_TIMEOUT)
+    if os.path.exists(mie):
+        return mie
+    if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
+        return p        # no metadata at all: there is nothing to lose
+    raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
+                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+
+
+def _xmp_block_args(path, tmp_dir) -> list:
+    """exiftool lines copying `path`'s XMP into the target as one BLOCK.
+
+    ["-tagsfromfile", path, "-XMP"] — unless the path has a '%', which
+    exiftool would expand (#550, _exiftool_source). A MIE container does not
+    carry the XMP as a block, so the raw packet is read (the source operand is
+    not expanded) into tmp_dir and written back with -XMP<=. [] when the file
+    has no XMP. Parity-pinned (decoder + recompressor).
+    """
+    p = str(path)
+    if "%" not in p:
+        return ["-tagsfromfile", p, "-XMP"]
+    r = _run_exiftool_argfile(["-b", "-XMP", p], timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError(f"exiftool could not read the XMP of {os.path.basename(p)} "
+                           f"(a '%' in its path): {(r.stderr or '')[:200].strip()}")
+    if not (r.stdout or "").strip():
+        return []
+    xmp = os.path.join(str(tmp_dir), "metadata_source.xmp")
+    with open(xmp, "w", encoding="utf-8", newline="") as f:
+        f.write(r.stdout)
+    return [f"-XMP<={xmp}"]
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
@@ -2404,13 +2495,14 @@ def _read_encode_params_batch(paths: list) -> dict:
     'pixels' is width*height (0 = unknown), read in the same exiftool call for the worker memory cap.
     """
     info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0,
-                     "pixels": 0, "width": 0, "height": 0, "origin": None}
+                     "pixels": 0, "width": 0, "height": 0, "origin": None,
+                     "scan": None}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return info
     batch_lines = ["-j", "-s", "-s", "-s", "-XMP-dc:Description", "-Software",
-                   "-XMP-dc:Relation",
+                   "-XMP-dc:Relation", "-ExposureTime", "-FNumber", "-FocalLength",
                    "-ImageWidth", "-ImageHeight",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = _ENCODE_RECORD_BATCH
@@ -2491,7 +2583,12 @@ def _read_encode_params_batch(paths: list) -> dict:
                 info[index[key]] = {"desc": desc, "software": software,
                                     "params": params, "gen": gen,
                                     "pixels": pixels, "width": width,
-                                    "height": height, "origin": origin}
+                                    "height": height, "origin": origin,
+                                    "scan": _scan_kind_of(
+                                        rel_values, software,
+                                        camera=any(entry.get(k) is not None for k in
+                                                   ("ExposureTime", "FNumber",
+                                                    "FocalLength")))}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -2641,6 +2738,50 @@ def _regeneration_action(gen: int, new_d: float, origin=None):
     if gen + _hidden_generations(origin) >= 2 and new_d > 0:
         return ON_REGENERATION
     return None
+
+
+def _scan_kind_of(relation_values, software: str, camera: bool = True):
+    """"raw"/"final" for a JXL of a film scan, "unknown" for one recognised
+    only by its IR page, its Software tag, or as a TIFF master with neither a
+    Software tag nor camera EXIF (archived before the encoder wrote
+    jxlphoto-scan), None otherwise — pure. `camera`: the file carries an
+    exposure, aperture or focal length. "jxlphoto-scan:no" is the encoder's
+    verdict on a TIFF without either tag that it took for a camera TIFF (its
+    160x120 thumbnail page): not a scan."""
+    tokens = [str(t).strip() for t in relation_values or ()]
+    for t in tokens:
+        if t.startswith(SCAN_PREFIX) and len(t) > len(SCAN_PREFIX):
+            _v = t[len(SCAN_PREFIX):]
+            return None if _v == "no" else _v
+    for t in tokens:
+        if t.startswith(SUBFILETYPE_PREFIX):
+            try:
+                if int(t[len(SUBFILETYPE_PREFIX):]) & 4:
+                    return "unknown"
+            except ValueError:
+                pass
+    sw = str(software or "").casefold()
+    if any(str(n).casefold() in sw for n in SCANNER_SOFTWARE if str(n).strip()):
+        return "unknown"
+    # The encode record can sit in Software (--encode-tag software): only
+    # the text around it says what wrote the TIFF.
+    _plain = re.sub(r"(?:^|\|)\s*(?:gen=\d+|cjxl\s+d=[0-9.]+\s+e=\d+)\s*(?=\||$)", "", sw)
+    from_tiff = any(t.startswith(ORIGIN_PREFIX + "tiff") for t in tokens)
+    if from_tiff and not _plain.strip(" |") and not camera:
+        return "unknown"
+    return None
+
+
+def _scan_action(scan_kind, new_d: float):
+    """ON_SCAN when this request would re-encode a film scan LOSSY; None when
+    the guard does not apply (not a scan, a lossless request, a derivative,
+    or a final scan under SCAN_SCOPE "raw"). An unmarked scan counts as raw:
+    the side that keeps the file."""
+    if scan_kind is None or new_d <= 0 or DERIVATIVE:
+        return None
+    if str(SCAN_SCOPE).lower() == "raw" and scan_kind == "final":
+        return None
+    return ON_SCAN
 
 
 _gen_divergence_logged = False
@@ -4605,22 +4746,28 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         # settings). In the SAME call as the edits below, exiftool would
         # write the block and ignore them; and the edit call must not copy
         # -xmp:all on top, or every list it appends to is written twice (#531).
-        r_xmp = _run_exiftool_argfile(
-            ["-overwrite_original", "-api", "Compress=0",
-             "-tagsfromfile", str(jxl_path), "-XMP", str(write_path)],
-            timeout=EXIFTOOL_TIMEOUT)
-        if r_xmp.returncode != 0:
+        # A '%' in the source's name is expanded by -tagsfromfile: the output
+        # would replace the master with none of its metadata (#550).
+        _meta_tmp = tempfile.TemporaryDirectory(prefix="jxlrec_meta_", dir=TEMP_DIR)
+        _src = _exiftool_source(jxl_path, _meta_tmp.name)
+        _xmp_args = _xmp_block_args(jxl_path, _meta_tmp.name)
+        r_xmp = (_run_exiftool_argfile(
+            ["-overwrite_original", "-api", "Compress=0"] + _xmp_args + [str(write_path)],
+            timeout=EXIFTOOL_TIMEOUT) if _xmp_args else None)
+        if r_xmp is not None and r_xmp.returncode != 0:
+            _meta_tmp.cleanup()
             raise RuntimeError(f"exiftool XMP copy: {_stderr_tail(r_xmp.stderr)}")
         # The block is in the file now, so a derivative's dc:Relation reset
         # must be all-`=` lines to replace it (_collapse_list_reset).
         r2 = _run_exiftool_argfile(
             _collapse_list_reset(
                 ["-overwrite_original", "-api", "Compress=0",
-                 "-tagsfromfile", str(jxl_path),
+                 "-tagsfromfile", _src,
                  "-exif:all", "-iptc:all"]
                 + _restamp_args(desc, software, label=jxl_path.name)
                 + _extra
                 + [str(write_path)]), timeout=EXIFTOOL_TIMEOUT)
+        _meta_tmp.cleanup()
         if r2.returncode != 0:
             # A failed metadata copy is an ERROR, not a warning: the output
             # would silently miss the ICC/EXIF this whole tool exists to keep.
@@ -5368,7 +5515,7 @@ def _ask_batch_resolution(asks):
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         logger.warning(f"{len(asks)} file(s) need a decision (policy 'ask') but this "
                        f"run is non-interactive — skipping them. Pass "
-                       f"--on-downgrade/--on-regeneration/--on-unknown to decide "
+                       f"--on-downgrade/--on-regeneration/--on-unknown/--on-scan to decide "
                        f"unattended.")
         for it in asks:
             it["action"] = "skip"
@@ -5565,7 +5712,7 @@ def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
 def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
-    global ON_DOWNGRADE, ON_UNKNOWN, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
+    global ON_DOWNGRADE, ON_UNKNOWN, ON_SCAN, SCAN_SCOPE, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
     global OVERWRITE_GUARD
     global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
     global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
@@ -5645,6 +5792,14 @@ def main():
                         choices=["ask", "copy", "skip", "convert"],
                         help="File carries no cjxl d=/e= record: ask/copy/skip/convert "
                              "(default: ON_UNKNOWN setting, 'convert')")
+    parser.add_argument("--on-scan", dest="on_scan", default=None,
+                        choices=["ask", "copy", "skip", "convert"],
+                        help="A film scan would be re-encoded lossy: ask/copy/skip/convert "
+                             "(default: ON_SCAN setting, 'copy'). Derivatives and "
+                             "lossless requests are never affected")
+    parser.add_argument("--scan-scope", dest="scan_scope", default=None,
+                        choices=["all", "raw"],
+                        help="Which film scans --on-scan protects: all (default) or raw")
     parser.add_argument("--jbrd-policy", dest="jbrd_policy", default=None,
                         choices=["copy", "skip", "convert"],
                         help="JXLs with a jbrd box (JPEG bit-exact recoverable): "
@@ -5786,6 +5941,10 @@ def main():
         ON_REGENERATION = args.on_regeneration
     if args.on_unknown is not None:
         ON_UNKNOWN = args.on_unknown
+    if args.on_scan is not None:
+        ON_SCAN = args.on_scan
+    if args.scan_scope is not None:
+        SCAN_SCOPE = args.scan_scope
     if args.jbrd_policy is not None:
         JBRD_POLICY = args.jbrd_policy
     if args.no_keep_smaller:
@@ -6064,6 +6223,7 @@ def main():
                     f" | re-derive on distance/effort change: {REDERIVE_ON_ENCODE_CHANGE}"
                     f" (also on a lower effort: {REDERIVE_ON_LOWER_EFFORT})")
     logger.info(f"Policies: downgrade={ON_DOWNGRADE} | regeneration={ON_REGENERATION} | "
+                f"scan={ON_SCAN}{' (raw only)' if str(SCAN_SCOPE).lower() == 'raw' else ''} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
     if (OUTPUT_ICC and args.mode == 7 and EXPORT_JXL_FOLDER == "16B_JXL_small"
@@ -6260,6 +6420,7 @@ def main():
         it["pixels"] = info.get("pixels", 0)
         it["dims"] = (info.get("width", 0), info.get("height", 0))
         it["origin"] = info.get("origin")
+        it["scan"] = info.get("scan")
         it["category"], it["reason"] = _classify(info["params"],
                                                  CJXL_DISTANCE, CJXL_EFFORT,
                                                  gen=it["gen"], floor=_floor)
@@ -6296,6 +6457,17 @@ def main():
             combined = _more_conservative(it["action"], regen)
             if combined == "ask" and regen == "ask":
                 it["category"] = "regeneration"   # prompt group of its own
+            it["action"] = combined
+        # Scan guard: a film scan is never re-encoded lossy unless asked
+        # (--on-scan). Independent of the others: the more conservative wins.
+        scan_act = _scan_action(it["scan"], CJXL_DISTANCE)
+        if scan_act is not None:
+            it["reason"] += (f" | film scan ({it['scan']}): a lossy re-encode "
+                             f"loses what only a new scan could bring back "
+                             f"(--on-scan)")
+            combined = _more_conservative(it["action"], scan_act)
+            if combined == "ask" and scan_act == "ask":
+                it["category"] = "film scan"
             it["action"] = combined
 
     asks = [it for it in items if it["action"] == "ask"]

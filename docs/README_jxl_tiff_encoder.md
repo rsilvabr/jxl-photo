@@ -572,6 +572,13 @@ Options:
                     multi-page reconstruction and grayscale markers, so split
                     pages decode as standalone files and faithful multipage/
                     grayscale reconstruction is not possible)
+  --scan-distance D Distance for film scans (SCANNER_SOFTWARE, an IR page, or no
+                    Software tag and no camera EXIF):
+                    0 = lossless (default, SCAN_DISTANCE), 'same' = the run's
+                    --distance. See "Film scans are archived lossless"
+  --scan-scope all|raw
+                    Which film scans --scan-distance covers: all (default) or
+                    raw ones only (SCAN_SCOPE)
   --explorer-thumbnail auto|on|off
                     Thumbnail stored for jxl-thumb (EXPLORER_THUMBNAIL): auto =
                     every output when jxl-thumb is installed, lossless only
@@ -1163,7 +1170,7 @@ Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced`
 | Mode | Keeps the thumbnail page of |
 |---|---|
 | `auto` (default) | every TIFF, except those whose Software tag contains a name in `THUMBNAIL_DROP_SOFTWARE` (default: `Capture One`, which adds a tiny preview to every export) |
-| `scans` | scans only: the Software tag contains a name in `SCANNER_SOFTWARE` (SilverFast, VueScan, Epson Scan, Nikon Scan, FlexColor, Frontier, EZ Controller, ScanGear, Plustek), or the TIFF has an IR/mask page (`SubfileType` 4), whatever wrote it |
+| `scans` | scans only: the Software tag contains a name in `SCANNER_SOFTWARE` (SilverFast, VueScan, Epson Scan, Nikon Scan, FlexColor, Frontier, EZ Controller, ScanGear, Plustek), or the TIFF has an IR channel, or neither a Software tag nor camera EXIF — the film-scan rule of [`SCAN_DISTANCE`](#film-scans-are-archived-lossless-scan_distance-v2170) |
 | `exclude` | none (the default before v2.17.0) |
 | `include` | every TIFF |
 
@@ -1293,6 +1300,55 @@ recompressed. What that takes:
 
 Other scanner programs were not tested. If yours relies on something else,
 test one file before converting a whole archive.
+
+### Film scans are archived lossless (`SCAN_DISTANCE`, v2.17.0)
+
+A film scan gets its own distance, in the same run as every other TIFF:
+`SCAN_DISTANCE = 0` (lossless) by default, `--scan-distance` per run. A scan
+is a TIFF whose Software tag names a program in `SCANNER_SOFTWARE`, or that
+has an IR channel (an IR/mask page, or a 2nd/4th channel that is not alpha),
+or that has **neither a Software tag nor camera EXIF** (an exposure, an
+aperture or a focal length). The last one is what lab scans (Noritsu,
+Frontier) and Epson Scan look like: on a library of 15 000 TIFFs, the ~4 000
+without a Software tag were scans and scanned documents, save ~90 that carry
+a camera's EXIF and 455 camera TIFFs rewritten without any tag (Fuji S5 Pro,
+Nikon E990). Those still carry the 160×120 thumbnail page cameras write, which
+none of the ~2 300 scans had: a TIFF without either tag that has such a page
+is taken for a camera TIFF, not a scan, and is marked `jxlphoto-scan:no` so
+the recompressor does not take its master for an old lab scan.
+
+Any other TIFF without either tag is still a guess, and the run says so.
+Before the first encode (counting only the TIFFs it will write, so a sync run
+over an archived library stays quiet) and again in the summary, it counts the
+scans at the scan distance by reason — scanner software, an IR page, guessed
+— and lists the folders of the guessed ones with how to opt out
+(`--scan-distance same`); the wizard's end-of-run recap shows the counts too.
+A wrong guess costs space, not quality.
+
+Why lossless: a scan can only be redone by scanning again, a "final" scan is
+often the only copy left (its raw is gone, like a TIFF whose RAW is), and many
+are 48-bit scans meant to be corrected later. A raw negative also gets heavy
+processing after the archive (inversion, curves), which magnifies a loss
+that is invisible in the file: the same negative recompressed to `d=0.3`
+showed it clearly after that processing, while `d=0.05` and `d=0.1` encoded
+directly looked fine to the owner. Sizes for that 91 MP negative (image +
+thumbnail + IR): TIFF 739 MB, lossless JXL ~440 MB, `d=0.05` 107 MB,
+`d=0.1` 72 MB.
+
+- `--scan-distance same` (or `SCAN_DISTANCE = None`): scans follow
+  `--distance` like any TIFF.
+- `--scan-scope raw` (`SCAN_SCOPE = "raw"`): only **raw** scans keep the scan
+  distance — the scanner's own ICC profile (class `scnr`), no profile at 16
+  bits, or an IR channel; a **final** scan (converted to an output profile
+  such as sRGB or Adobe RGB, or 8-bit) follows `--distance`. Measured on a
+  library of 2 970 scanner TIFFs, doubtful cases fall on the raw side, where
+  a mistake costs space, not quality.
+
+Every page of a scan carries `jxlphoto-scan:raw` or `jxlphoto-scan:final`,
+which the recompressor reads: it never re-encodes a scan lossy unless asked
+(`--on-scan`, see its README). The delete gate and `--verify-roundtrip` check each output
+at the distance it was encoded at (bit-exact for a lossless scan), and the
+space preflight counts the scans at their full size.
 
 ### Examples
 

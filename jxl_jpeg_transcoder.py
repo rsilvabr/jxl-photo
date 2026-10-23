@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0_beta1"
+TOOLKIT_VERSION = "2.17.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1230,6 +1230,35 @@ def _stderr_tail(stderr, limit=200):
     return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
 
 
+def _exiftool_source(path, tmp_dir) -> str:
+    """The path to give exiftool as a -tagsFromFile source.
+
+    exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
+    'photo 5%.tif' opened a different, missing file — a warning, exit 0 — and
+    the output silently got none of the source's metadata (#550). Doubling the
+    '%' does not escape it. A path with a '%' is dumped to a MIE container in
+    tmp_dir (the SOURCE operand is not expanded) and that is copied from
+    instead; any other path is returned unchanged, at no cost. Raises when the
+    dump fails: an output must not go out without the metadata it should
+    carry. Parity-pinned (four backends).
+    """
+    p = str(path)
+    if "%" not in p:
+        return p
+    mie = os.path.join(str(tmp_dir), "metadata_source.mie")
+    try:
+        os.unlink(mie)
+    except OSError:
+        pass
+    r = _run_exiftool_argfile(["-o", mie, "-all:all", p], timeout=EXIFTOOL_TIMEOUT)
+    if os.path.exists(mie):
+        return mie
+    if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
+        return p        # no metadata at all: there is nothing to lose
+    raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
+                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
@@ -1665,11 +1694,14 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     if shutil.which(_get_exiftool_cmd()) is None:
         return
     try:
-        _run_exiftool_argfile(
-            ["-overwrite_original", "-tagsfromfile", str(src_path),
-             "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
-            timeout=EXIFTOOL_TIMEOUT
-        )
+        # A '%' in the source's name is expanded by -tagsfromfile and the
+        # output got no metadata (#550): copy from a container instead.
+        with tempfile.TemporaryDirectory(prefix="jxltr_meta_", dir=TEMP_DIR) as _mt:
+            _run_exiftool_argfile(
+                ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
+                 "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
+                timeout=EXIFTOOL_TIMEOUT
+            )
         # Strip ICC:<base64> segments from CreatorTool (same logic as the
         # TIFF decoder's cleanup_xmp_icc).
         try:

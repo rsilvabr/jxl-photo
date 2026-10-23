@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.17.0_beta1** (2026-10-23, pre-release; last stable: [v2.16.2](docs/version_history.md#v2162)) · [What's new](#whats-new-in-v2170_beta1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.17.0** (2026-10-24) · [What's new](#whats-new-in-v2170) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.17.0_beta1](#whats-new-in-v2170_beta1)
+- [What's new in v2.17.0](#whats-new-in-v2170)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -361,7 +361,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
-- **Film scans:** SilverFast recognises the IR channel and dust removal after the round trip (v2.17.0); other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
+- **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
 - **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed), IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
@@ -389,14 +389,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.17.0_beta1
+## What's new in v2.17.0
 
-Released 2026-10-23 as a **pre-release**: the stable v2.17.0 will add more for film scans. Film scans come back the way their scanner software expects them.
+Released 2026-10-24. Film scans are archived lossless and come back the way their scanner software expects them.
 
+- **Film scans are archived lossless by default**, in the same run as everything else (`SCAN_DISTANCE = 0`, `--scan-distance`), and the recompressor never re-encodes them lossy unless asked (`--on-scan`). A scan can only be redone by scanning again, and a raw negative's later processing magnifies even a small loss ([details](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
 - **Film scans:** a SilverFast scan archived and decoded back now opens in SilverFast with its IR channel, dust removal (iSRD) and browser icon, like the original — checked on a slide and a negative, also after recompressing the master. The XMP is copied whole (SilverFast's own settings used to be dropped) and private TIFF tags are kept ([details](docs/README_jxl_tiff_encoder.md#film-scans-and-their-scanner-software-v2170)).
-- **Thumbnail pages are kept by default** (`--thumbnail-mode auto`): a TIFF's embedded preview is archived as `_page1_thumbnail.jxl`, except Capture One's. `scans` keeps them for scans only; `exclude` is the old behaviour. Archives you already have keep their layout until a run with `--overwrite` ([Upgrading](docs/upgrading.md#v2170-thumbnail-pages-are-kept-by-default)).
+- **Thumbnail pages are kept by default** (`--thumbnail-mode auto`): a TIFF's embedded preview is archived as `_page1_thumbnail.jxl`, except Capture One's. `scans` keeps them for scans only; `exclude` is the old behaviour. Archives you already have keep their layout until a run with `--overwrite` ([Upgrading](docs/upgrading.md#v2170-thumbnail-pages-are-kept-by-default-film-scans-are-lossless)).
+- **File names with a `%`** (`photo 5%.tif`, `trip 50%off.jxl`) keep their metadata: some lost all of it (#550).
 
-Full notes: [version history](docs/version_history.md#v2170_beta1). **2731 tests**, and the real-photo battery passes (116 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2170). **2794 tests**, and the real-photo battery passes (119 checks, run inside a hostile folder).
 
 ### In v2.16.1 and v2.16.2
 
@@ -415,7 +417,7 @@ Full notes: [version history](docs/version_history.md#v2160).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.17.0_beta1** | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
+| **v2.17.0** | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 | [v2.16.2](docs/version_history.md#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once |
 | [v2.16.1](docs/version_history.md#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output |
 | [v2.16.0](docs/version_history.md#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |

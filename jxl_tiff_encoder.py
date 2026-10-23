@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0_beta1"
+TOOLKIT_VERSION = "2.17.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1167,9 +1167,29 @@ SCANNER_SOFTWARE = (
     "ScanGear",
     "Plustek",
 )
-# "scans" keeps the thumbnail page of a TIFF whose Software tag CONTAINS one of
-# these (case-insensitive) — or that has an IR/mask page, whatever wrote it.
-# Add your scanner's program here if its TIFFs carry a thumbnail page.
+# A TIFF whose Software tag CONTAINS one of these (case-insensitive) — or that
+# has an IR page (a mask page, or a 2nd/4th channel that is not alpha), or
+# that has NEITHER a Software tag NOR camera EXIF (exposure, aperture, focal
+# length: lab scans and Epson Scan write no Software at all) — is a FILM SCAN:
+# SCAN_DISTANCE applies to it, and --thumbnail-mode scans keeps its thumbnail
+# page. Add your scanner's program. That last case is a guess, and the run says
+# so (its folders, before the first encode); a TIFF without either that carries
+# a 160x120 thumbnail page — the one cameras write — is taken for a camera TIFF
+# that lost its tags, not a scan.
+
+SCAN_DISTANCE = 0.0
+# Distance for film scans (also --scan-distance). 0 = lossless (default): a
+# scan is an original that can only be redone by scanning again, a "final"
+# scan is often the only copy left, and the heavy processing a raw negative
+# gets later (inversion, curves) magnifies a loss that was invisible in the
+# file. None = scans use CJXL_DISTANCE like every other TIFF.
+
+SCAN_SCOPE = "all"
+# Which scans SCAN_DISTANCE covers (also --scan-scope):
+# "all" -> every scan (default).
+# "raw" -> raw scans only: the scanner's own ICC profile (class 'scnr'), no
+#          profile at 16 bits, or an IR page. A "final" scan (converted to an
+#          output profile such as sRGB or Adobe RGB) then uses CJXL_DISTANCE.
 
 THUMBNAIL_SUFFIX = "_thumbnail"
 # Suffix appended to the output name when THUMBNAIL_MODE="include".
@@ -1214,6 +1234,15 @@ EXTRASAMPLES_XMP_PREFIX = "jxlphoto-extrasamples:"
 # alpha and keeps no TIFF role for it, so without this the decoder wrote every
 # such channel back as unassociated alpha — an IR channel came back as a
 # transparency mask (D3 of the 2026-10-08 audit).
+
+SCAN_XMP_PREFIX = "jxlphoto-scan:"
+# "jxlphoto-scan:raw" / "jxlphoto-scan:final" on every page of a film scan
+# (_scan_kind): what the recompressor's --on-scan guard reads, since the facts
+# behind it (the TIFF's Software tag, ICC class, IR page) are not all visible
+# in one JXL later. Re-derived from the TIFF on every encode.
+# "jxlphoto-scan:no" on a TIFF with neither a Software tag nor camera EXIF that
+# _scan_reason took for a camera TIFF (its 160x120 thumbnail page): without
+# it the recompressor would take the master for an old lab scan.
 
 TIFFTAG_XMP_PREFIX = "jxlphoto-tifftag:"
 # A PRIVATE TIFF tag of the page (code >= 32768) that exiftool cannot copy:
@@ -1545,6 +1574,8 @@ _RUN_DEFAULTS = {
     "THUMBNAIL_MODE": THUMBNAIL_MODE,
     "THUMBNAIL_DROP_SOFTWARE": THUMBNAIL_DROP_SOFTWARE,
     "SCANNER_SOFTWARE": SCANNER_SOFTWARE,
+    "SCAN_DISTANCE": SCAN_DISTANCE,
+    "SCAN_SCOPE": SCAN_SCOPE,
     "THUMBNAIL_SUFFIX": THUMBNAIL_SUFFIX,
     "WARN_DISCARDED_THUMBNAILS": WARN_DISCARDED_THUMBNAILS,
     "ICC_PNG_STRATEGY": ICC_PNG_STRATEGY,
@@ -2185,6 +2216,35 @@ def _stderr_tail(stderr, limit=200):
     return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
 
 
+def _exiftool_source(path, tmp_dir) -> str:
+    """The path to give exiftool as a -tagsFromFile source.
+
+    exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
+    'photo 5%.tif' opened a different, missing file — a warning, exit 0 — and
+    the output silently got none of the source's metadata (#550). Doubling the
+    '%' does not escape it. A path with a '%' is dumped to a MIE container in
+    tmp_dir (the SOURCE operand is not expanded) and that is copied from
+    instead; any other path is returned unchanged, at no cost. Raises when the
+    dump fails: an output must not go out without the metadata it should
+    carry. Parity-pinned (four backends).
+    """
+    p = str(path)
+    if "%" not in p:
+        return p
+    mie = os.path.join(str(tmp_dir), "metadata_source.mie")
+    try:
+        os.unlink(mie)
+    except OSError:
+        pass
+    r = _run_exiftool_argfile(["-o", mie, "-all:all", p], timeout=EXIFTOOL_TIMEOUT)
+    if os.path.exists(mie):
+        return mie
+    if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
+        return p        # no metadata at all: there is nothing to lose
+    raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
+                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+
+
 def _run_exiftool_argfile(args_lines, timeout=60):
     """Run exiftool with an argfile (UTF-8 + FileName charset).
 
@@ -2217,7 +2277,9 @@ def extract_exif_raw(tiff_path, tmp_dir):
     arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
     r = _run_captured([_get_exiftool_cmd(), "-@", str(arg_file)], EXIFTOOL_TIMEOUT)
     if r.returncode == 0 and r.stdout and len(r.stdout) > 8:
-        p = tmp_dir / f"{tiff_path.stem}.exif.bin"
+        # Never the source's name: a '%' in it would be expanded by the
+        # -Exif<= argument that reads this file back (#550).
+        p = tmp_dir / "src.exif.bin"
         p.write_bytes(r.stdout)
         return p
     return None
@@ -2976,7 +3038,8 @@ def _preload_xmp_block(xmp_file, write_path) -> bool:
 def extract_xmp_original(tiff_path, tmp_dir):
     """Extract original XMP from TIFF as separate file for preservation.
     Returns path to XMP file or None if no XMP exists."""
-    xmp_path = tmp_dir / f"{tiff_path.stem}_original.xmp"
+    # Never the source's name: -XMP<= expands a '%' in it (#550).
+    xmp_path = tmp_dir / "src_original.xmp"
     # Use an argfile (like the other exiftool calls here): paths containing
     # [ ] would be treated as wildcards on the command line, and non-ASCII
     # paths need the UTF-8 charset directive.
@@ -3224,8 +3287,10 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-grayscale",
     "jxlphoto-thumb",
     EXTRASAMPLES_XMP_PREFIX,
-    # Re-read from the TIFF itself on every encode (_private_tiff_tags).
+    # Re-read from the TIFF itself on every encode (_private_tiff_tags,
+    # _scan_kind).
     TIFFTAG_XMP_PREFIX,
+    SCAN_XMP_PREFIX,
     # The decoder's record of the pixels it wrote into a TIFF (its
     # PIXSUM_PREFIX): it describes THAT TIFF, never a master encoded from it.
     "jxlphoto-pixsum:",
@@ -3279,7 +3344,7 @@ def read_existing_creator_tool(xmp_path):
         logger.debug(f"Failed to read CreatorTool: {e}")
     return ""
 
-def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None, xmp_preloaded=False):
+def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_bytes, xmp_original, original_depth=16, strip_metadata=False, src_path_id=None, src_content_id=None, xmp_preloaded=False, distance=None):
     """Build exiftool arguments for metadata injection with proper XMP preservation.
 
     Strategy:
@@ -3292,10 +3357,13 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         xmp_preloaded: the source's XMP was already written into write_path
             as a BLOCK (_preload_xmp_block), so this call must not copy
             -xmp:all again — see _preload_xmp_block.
+        distance: the distance this file was encoded at, for the encode record
+            (None = CJXL_DISTANCE; a film scan can differ, see SCAN_DISTANCE).
 
     Returns path to arg file.
     """
     args_lines = ["-overwrite_original"]
+    _rec_d = CJXL_DISTANCE if distance is None else distance
 
     # If stripping metadata, only add minimal encoding info and exit
     if strip_metadata:
@@ -3309,7 +3377,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         # (1 lossy, 0 lossless).
         if ENCODE_TAG_MODE != "off":
             encoding_desc, _s, _c, _o = _append_encode_entry(
-                "", CJXL_DISTANCE, CJXL_EFFORT)
+                "", _rec_d, CJXL_EFFORT)
             args_lines.append(f"-xmp-dc:Description={encoding_desc}")
         # Target file
         args_lines.append(str(write_path))
@@ -3329,7 +3397,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     # (An earlier version stripped it to "prevent double-rotation", which
     # could not happen here and silently de-rotated scans/camera TIFFs.)
     args_lines.append("-tagsfromfile")
-    args_lines.append(str(tiff_path))
+    args_lines.append(_exiftool_source(tiff_path, tmp_dir))      # '%' names: #550
     args_lines.append("-exif:all")
     if not xmp_preloaded:
         args_lines.append("-xmp:all")
@@ -3395,7 +3463,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         else:
             seed = user_text or merged_chain
         final_description, stored, counted, orphans = _append_encode_entry(
-            seed, CJXL_DISTANCE, CJXL_EFFORT)
+            seed, _rec_d, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
         if orphans or _d_orphans:
             logger.warning(f"Stripped {orphans + _d_orphans} orphaned gen= token(s) from "
@@ -3444,7 +3512,7 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         else:
             seed_sw = clean_sw or merged_chain
         new_sw, stored, counted, orphans = _append_encode_entry(
-            seed_sw, CJXL_DISTANCE, CJXL_EFFORT)
+            seed_sw, _rec_d, CJXL_EFFORT)
         _log_gen_notes_once(stored, counted)
         if orphans:
             logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
@@ -3749,6 +3817,229 @@ def _is_thumbnail_page(page) -> bool:
     """
     return bool(page.is_reduced or page.is_subifd)
 
+def _page_facts(i: int, page) -> dict:
+    """One page's entry in _analyze_tiff_pages' page_info. Header fields only
+    (no pixel decode). Page 0 also gets 'software' (its Software tag, '' when
+    absent), 'icc_class' (the ICC profile's device class, e.g. 'scnr' for a
+    scanner profile, 'mntr' for sRGB/Adobe RGB; None without a profile),
+    'bits' and 'camera' (the Exif IFD records an exposure, an aperture or a
+    focal length: a camera wrote it, a scanner never does) — what _scan_kind
+    reads. Every page gets 'size' (width, height)."""
+    facts = {
+        'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
+        'samples': int(page.samplesperpixel) if page.samplesperpixel else 1,
+    }
+    try:
+        facts['size'] = (int(page.imagewidth or 0), int(page.imagelength or 0))
+    except (TypeError, ValueError):
+        facts['size'] = (0, 0)
+    try:
+        facts['photometric'] = int(page.photometric)
+    except (TypeError, ValueError):
+        pass
+    try:
+        facts['extrasamples'] = tuple(int(v) for v in (page.extrasamples or ()))
+    except (TypeError, ValueError):
+        facts['extrasamples'] = ()
+    if i == 0:
+        try:
+            _sw = page.tags.get(305)
+            facts['software'] = str(_sw.value) if _sw is not None else ""
+        except Exception:
+            facts['software'] = ""
+        try:
+            _icc = page.tags.get(34675)
+            _icc = bytes(_icc.value) if _icc is not None else b""
+            facts['icc_class'] = (_icc[12:16].decode("latin-1").strip()
+                                  if len(_icc) >= 16 else None)
+        except Exception:
+            facts['icc_class'] = None
+        try:
+            _bits = page.bitspersample
+            facts['bits'] = int(max(_bits) if isinstance(_bits, (tuple, list)) else _bits)
+        except (TypeError, ValueError):
+            facts['bits'] = 0
+        try:
+            _exif = page.tags.get(34665)
+            _exif = _exif.value if _exif is not None else {}
+            facts['camera'] = isinstance(_exif, dict) and any(
+                k in _exif for k in _CAMERA_EXIF_KEYS)
+        except Exception:
+            facts['camera'] = False
+    return facts
+
+
+# Exif IFD fields only a camera writes; their absence (with no Software tag)
+# is what marks a lab scan or an Epson Scan TIFF.
+_CAMERA_EXIF_KEYS = ("ExposureTime", "FNumber", "FocalLength", "ISOSpeedRatings",
+                     "PhotographicSensitivity")
+
+
+def _has_ir(page_info: dict) -> bool:
+    """An IR page (SubfileType bit 2, mask) or a 2nd/4th channel that is not
+    alpha (ExtraSamples unspecified or absent) on any page — pure."""
+    for v in (page_info or {}).values():
+        v = v or {}
+        if int(v.get('subfiletype') or 0) & 4:
+            return True
+        if int(v.get('samples') or 0) in (2, 4) and not (
+                set(v.get('extrasamples') or ()) & {1, 2}):
+            return True
+    return False
+
+
+# The thumbnail size of the camera file standard (DCF), landscape or portrait.
+_DCF_THUMBNAIL_SIZES = frozenset({(160, 120), (120, 160)})
+
+
+def _scan_reason(page_info: dict):
+    """Why this TIFF is (or is not) a film scan — pure.
+
+    "software": its Software tag names a program in SCANNER_SOFTWARE.
+    "ir":       an IR channel (_has_ir).
+    "guessed":  neither a Software tag nor camera EXIF. Measured on a library
+                of 15 000 TIFFs, the ~4 000 without a Software tag were lab
+                scans, Epson Scan output and scanned documents — and 455
+                camera TIFFs (Fuji S5 Pro, Nikon E990) rewritten without any
+                tag, which the next case catches.
+    "camera":   the same, but a later page is 160x120: the thumbnail a camera
+                writes into its own TIFF. None of the ~2 300 scans had one.
+                Not a scan; the encoder marks it so (jxlphoto-scan:no) for the
+                recompressor, which cannot see the pages again.
+    None:       any other TIFF.
+    """
+    info = page_info or {}
+    p0 = info.get(0) or {}
+    software = str(p0.get('software') or "").casefold()
+    if any(str(n).casefold() in software for n in SCANNER_SOFTWARE if str(n).strip()):
+        return "software"
+    if _has_ir(info):
+        return "ir"
+    if software.strip() or p0.get('camera'):
+        return None
+    if any(tuple((v or {}).get('size') or ()) in _DCF_THUMBNAIL_SIZES
+           for i, v in info.items() if i != 0):
+        return "camera"
+    return "guessed"
+
+
+def _scan_kind(page_info: dict):
+    """None for a TIFF that is not a film scan, else "raw" or "final" — pure.
+
+    A scan: _scan_reason says "software", "ir" or "guessed". Raw: the
+    scanner's own ICC profile (class 'scnr'), no profile at 16 bits, or an IR
+    channel; otherwise final (converted to an output profile). The doubtful
+    cases fall on the scan/raw side, where a mistake costs space, not quality.
+    """
+    info = page_info or {}
+    p0 = info.get(0) or {}
+    reason = _scan_reason(info)
+    if reason not in ("software", "ir", "guessed"):
+        return None
+    icc_class = p0.get('icc_class')
+    if reason == "ir" or _has_ir(info) or icc_class == 'scnr' or (
+            not icc_class and int(p0.get('bits') or 0) >= 16):
+        return "raw"
+    return "final"
+
+
+# normcase(tiff path) -> (scan kind or None, distance) decided at planning
+# (_record_scan); read by convert_one and the delete gates through
+# _distance_for, so the encode and its verification always agree.
+_SCAN_PLAN = {}
+# normcase(tiff path) -> _scan_reason, for the run's notices and the
+# jxlphoto-scan:no marker.
+_SCAN_REASON = {}
+_SCAN_PLAN_LOCK = threading.Lock()
+
+
+def _scan_distance_applies(kind) -> bool:
+    return (SCAN_DISTANCE is not None and kind is not None
+            and (str(SCAN_SCOPE).lower() == "all" or kind == "raw"))
+
+
+def _record_scan(tiff_path, kind, reason=None) -> None:
+    d = SCAN_DISTANCE if _scan_distance_applies(kind) else CJXL_DISTANCE
+    with _SCAN_PLAN_LOCK:
+        _SCAN_PLAN[os.path.normcase(str(tiff_path))] = (kind, float(d))
+        _SCAN_REASON[os.path.normcase(str(tiff_path))] = reason
+
+
+def _distance_for(tiff_path) -> float:
+    """The distance this run encodes `tiff_path` at: SCAN_DISTANCE for a film
+    scan it covers, CJXL_DISTANCE otherwise (and for anything not planned)."""
+    with _SCAN_PLAN_LOCK:
+        plan = _SCAN_PLAN.get(os.path.normcase(str(tiff_path)))
+    return plan[1] if plan else CJXL_DISTANCE
+
+
+def _scan_kind_for(tiff_path):
+    with _SCAN_PLAN_LOCK:
+        plan = _SCAN_PLAN.get(os.path.normcase(str(tiff_path)))
+    return plan[0] if plan else None
+
+
+def _scan_reason_for(tiff_path):
+    with _SCAN_PLAN_LOCK:
+        return _SCAN_REASON.get(os.path.normcase(str(tiff_path)))
+
+
+_SCAN_REASON_LABELS = (("software", "by scanner software (SCANNER_SOFTWARE)"),
+                       ("ir", "with an IR page"),
+                       ("guessed", "GUESSED (no Software tag, no camera EXIF)"))
+
+
+def _scans_at_scan_distance(tiff_paths) -> dict:
+    """reason -> [tiff paths] for the TIFFs among `tiff_paths` this run encodes
+    at SCAN_DISTANCE instead of CJXL_DISTANCE (empty when the two agree)."""
+    out = {}
+    if SCAN_DISTANCE is None or SCAN_DISTANCE == CJXL_DISTANCE:
+        return out
+    with _SCAN_PLAN_LOCK:
+        for t in tiff_paths:
+            key = os.path.normcase(str(t))
+            plan = _SCAN_PLAN.get(key)
+            if plan and _scan_distance_applies(plan[0]):
+                out.setdefault(_SCAN_REASON.get(key) or "guessed", []).append(Path(t))
+    return out
+
+
+def _log_scans_at_scan_distance(by_reason: dict, done: bool) -> None:
+    """The film-scan notice: before the first encode (done=False, the TIFFs
+    this run will write — an up-to-date scan in a sync run is not news) and in
+    the summary (done=True, the TIFFs it wrote). A guessed scan is a WARNING
+    naming its folders: a TIFF whose tags were lost lands there too, and it
+    is encoded at another distance than the user asked for."""
+    total = sum(len(v) for v in by_reason.values())
+    if not total:
+        return
+    _d = f"{SCAN_DISTANCE:g}{' (lossless)' if SCAN_DISTANCE == 0 else ''}"
+    _why = ", ".join(f"{len(by_reason[k])} {label}"
+                     for k, label in _SCAN_REASON_LABELS if by_reason.get(k))
+    logger.info(f"Film scans: {total} TIFF(s) {'encoded' if done else 'to encode'} at "
+                f"distance {_d} instead of {CJXL_DISTANCE:g} (SCAN_DISTANCE) — {_why}")
+    guessed = by_reason.get("guessed") or []
+    if not guessed:
+        return
+    folders = {}
+    for t in guessed:
+        folders[str(t.parent)] = folders.get(str(t.parent), 0) + 1
+    folders = sorted(folders.items(), key=lambda kv: (-kv[1], kv[0]))
+    logger.warning(f"Film scans: {len(guessed)} of them are only a guess — no Software tag "
+                   f"and no camera EXIF, like a lab or Epson scan, but also like a photo "
+                   f"whose tags were lost:")
+    for folder, n in folders[:5]:
+        logger.warning(f"  {n:>5} | {folder}")
+    if len(folders) > 5:
+        logger.warning(f"  ... and {len(folders) - 5} more folder(s)")
+    if done:
+        logger.warning("  Not film scans? Re-run those folders with --scan-distance same "
+                       "--overwrite.")
+    else:
+        logger.warning("  Not film scans? Stop now (Ctrl+C) and run those folders with "
+                       "--scan-distance same.")
+
+
 # (normcase(tiff path), page index) -> width*height, filled by
 # _analyze_tiff_pages for the worker memory cap (process_group).
 _PAGE_PIXELS = {}
@@ -3784,9 +4075,9 @@ def _analyze_tiff_pages(tiff_path: Path):
     """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
 
     Returns (real_pages, thumb_pages, page_info) where page_info is a dict
-    mapping page index to {'subfiletype': int, 'samples': int, 'photometric':
-    int}; page 0 also carries 'software' (its Software tag, '' when absent) for
-    _thumbnails_kept.
+    mapping page index to _page_facts (subfiletype, samples, photometric,
+    extrasamples; page 0 also software, ICC class and bit depth) for
+    _thumbnails_kept and _scan_kind.
     """
     page_info = {}
     with tifffile.TiffFile(str(tiff_path)) as tif:
@@ -3794,20 +4085,7 @@ def _analyze_tiff_pages(tiff_path: Path):
         thumb_pages = []
         _note_subifd_images(tif, tiff_path)
         for i, page in enumerate(tif.pages):
-            page_info[i] = {
-                'subfiletype': int(page.subfiletype) if page.subfiletype else 0,
-                'samples': int(page.samplesperpixel) if page.samplesperpixel else 1,
-            }
-            try:
-                page_info[i]['photometric'] = int(page.photometric)
-            except (TypeError, ValueError):
-                pass
-            if i == 0:
-                try:
-                    _sw = page.tags.get(305)
-                    page_info[0]['software'] = str(_sw.value) if _sw is not None else ""
-                except Exception:
-                    page_info[0]['software'] = ""
+            page_info[i] = _page_facts(i, page)
             try:
                 _px = int(page.imagewidth or 0) * int(page.imagelength or 0)
             except (TypeError, ValueError):
@@ -3848,11 +4126,8 @@ def _thumbnails_kept(thumbnail_mode: str, page_info: dict = None) -> bool:
     if tm == "auto":
         return not any(str(name).casefold() in software
                        for name in THUMBNAIL_DROP_SOFTWARE if str(name).strip())
-    if any(str(name).casefold() in software
-           for name in SCANNER_SOFTWARE if str(name).strip()):
-        return True
-    # SubfileType bit 2 = transparency mask: the IR page of a film scan.
-    return any(int((v or {}).get('subfiletype') or 0) & 4 for v in info.values())
+    # "scans": the same film-scan rule SCAN_DISTANCE uses.
+    return _scan_kind(info) is not None
 
 
 # Photometrics convert_one encodes (MINISBLACK, RGB); everything else it
@@ -4093,6 +4368,11 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
     on a volume that is really full.
     """
     per_group = {}
+    # Sources encoded at ANOTHER distance than the run's (film scans under
+    # SCAN_DISTANCE, lossless by default) are counted at their full size —
+    # a lossless JXL stays under its TIFF — and kept out of the sample crops,
+    # which measure the run's distance.
+    other_d = {}
     for dest, items in groups.items():
         # Unique sources: a split multi-page TIFF appears once per page, but
         # its bytes only exist once.
@@ -4103,6 +4383,7 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
             except OSError:
                 pass
         per_group[dest] = sum(srcs.values())
+        other_d[dest] = sum(n for t, n in srcs.items() if _distance_for(t) != distance)
     total_in = sum(per_group.values())
     if total_in < _PREFLIGHT_MIN_BYTES:
         return
@@ -4110,11 +4391,18 @@ def _preflight_space(groups: Dict[Path, list], distance: float, effort: int,
     floor = _min_effective_distance(_get_cjxl_cmd() or "cjxl")
     effective = max(distance, floor) if distance > 0 else 0.0
     logger.info(f"Preflight: measuring compression on {_SAMPLE_COUNT} sample crop(s)...")
+    _sampled = [t for items in groups.values() for t, *_ in items
+                if _distance_for(t) == distance]
     ratio, samples = _measure_batch_ratio(
-        [t for items in groups.values() for t, *_ in items], effective, effort)
+        _sampled or [t for items in groups.values() for t, *_ in items], effective, effort)
     if ratio is None:
         logger.info("Preflight: could not measure a ratio; skipping the space estimate.")
         return
+    if ratio > 0:
+        # Turn the full-size sources into "input bytes" the ratio maps back
+        # to their own size (ratio x bytes/ratio = bytes).
+        for dest in per_group:
+            per_group[dest] += other_d[dest] * (1.0 / ratio - 1.0)
     detail = ", ".join(f"{n}: {r*100:.0f}%" for n, r in samples)
     logger.info(f"Preflight: worst measured ratio {ratio*100:.0f}% of source ({detail})")
 
@@ -5049,15 +5337,18 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # (controlled by ICC_PNG_STRATEGY) we skip the iCCP chunk and rely on
             # exiftool to inject the ICC into the JXL container. The original pixels are
             # preserved, and the ICC is restored into the output TIFF by the decoder.
-            container_flag = ["--container=1"] if CJXL_DISTANCE > 0 else []
+            # This file's distance: SCAN_DISTANCE for a film scan it covers,
+            # CJXL_DISTANCE otherwise (_distance_for, decided at planning).
+            _dist = _distance_for(tiff_path)
+            container_flag = ["--container=1"] if _dist > 0 else []
 
             # --modular=1 forces the Modular encoder for lossy output.
             # Only applied when CJXL_MODULAR=True and d>0 (lossless always uses Modular).
             # Modular lossy produces 2-3x larger files than VarDCT for photos.
-            modular_flag = ["--modular=1"] if (CJXL_MODULAR and CJXL_DISTANCE > 0) else []
+            modular_flag = ["--modular=1"] if (CJXL_MODULAR and _dist > 0) else []
 
             # Decide whether to put the ICC into the PNG iCCP chunk.
-            lossy = CJXL_DISTANCE > 0
+            lossy = _dist > 0
             if not lossy:
                 png_icc_bytes = icc_bytes  # lossless: always embed ICC natively
             else:
@@ -5078,7 +5369,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if USE_RAM_FOR_PNG:
                 png_input = make_png_bytes(img, png_icc_bytes)
                 del img
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", "-", str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT, input=png_input)
                 del png_input
@@ -5088,7 +5379,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 del img
                 png_path.write_bytes(png_bytes)
                 del png_bytes
-                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(CJXL_DISTANCE), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
+                cjxl_cmd = [_get_cjxl_cmd() or "cjxl", str(png_path), str(write_path), "-d", str(_dist), "--effort", str(CJXL_EFFORT)] + container_flag + modular_flag + invisible_flag + _cjxl_buffering_flag()
                 output_dirty = True
                 r = _run_captured(cjxl_cmd, CJXL_TIMEOUT)
 
@@ -5106,7 +5397,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 original_depth=original_depth,
                 strip_metadata=STRIP_METADATA,
                 src_path_id=_src_path_id, src_content_id=_src_content_id,
-                xmp_preloaded=_xmp_preloaded
+                xmp_preloaded=_xmp_preloaded, distance=_dist
             )
             
             r2 = _run_captured([_get_exiftool_cmd(), "-@", str(inject_args)],
@@ -5203,6 +5494,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if _channels in (2, 4) and _extrasamples:
                 page_flags.append("-XMP-dc:Relation+=" + EXTRASAMPLES_XMP_PREFIX
                                   + ",".join(str(v) for v in _extrasamples))
+            _kind = _scan_kind_for(tiff_path)
+            if _kind:
+                page_flags.append(f"-XMP-dc:Relation+={SCAN_XMP_PREFIX}{_kind}")
+            elif _scan_reason_for(tiff_path) == "camera":
+                page_flags.append(f"-XMP-dc:Relation+={SCAN_XMP_PREFIX}no")
             for _code, _dtype, _raw in _private_tags:
                 page_flags.append(f"-XMP-dc:Relation+={TIFFTAG_XMP_PREFIX}"
                                   f"{_code}:{_dtype}:{_raw.hex()}")
@@ -5228,7 +5524,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             # Explorer thumbnail (EXPLORER_THUMBNAIL), made from the finished
             # file and put in its own box. Only the files that get one pay for
             # it (lossless by default); a failure only warns.
-            if not STRIP_METADATA and _explorer_thumbnail_wanted(CJXL_DISTANCE == 0):
+            if not STRIP_METADATA and _explorer_thumbnail_wanted(_dist == 0):
                 _add_explorer_thumbnail(write_path, tmp_dir)
 
             # Validate EVERY successful output, not just mode-8 delete gates:
@@ -5399,6 +5695,9 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                 # being dropped: "ignore" encodes page 0 and discards the rest,
                 # which used to happen without a single line of output.
                 extra_pages = max(0, len(tif.pages) - 1)
+                # Film scan or not (SCAN_DISTANCE): header fields only.
+                _facts = {i: _page_facts(i, pg) for i, pg in enumerate(tif.pages)}
+                _record_scan(tiff_path, _scan_kind(_facts), _scan_reason(_facts))
         except UnreadableTiff:
             raise
         except Exception:
@@ -5421,6 +5720,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         return [(tiff_path, final_jxl, 0, False, subfiletype, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
+    _record_scan(tiff_path, _scan_kind(page_info), _scan_reason(page_info))
 
     pages_to_encode = []
 
@@ -5862,11 +6162,16 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     results = []
     status_map: Dict = {}
     if tasks:
+        # Film scans can run at another distance (SCAN_DISTANCE): budget for
+        # the hungrier of the distances this run encodes at.
+        _budget_d = max({_distance_for(t[0]) for t in tasks},
+                        key=lambda _d: _cjxl_bytes_per_pixel(
+                            _d, CJXL_EFFORT, CJXL_BUFFERING, modular=bool(CJXL_MODULAR)))
         workers = _memory_capped_workers(
             workers,
             max(_PAGE_PIXELS.get((os.path.normcase(str(t[0])), t[3]), 0)
                 for t in tasks),
-            CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING,
+            _budget_d, CJXL_EFFORT, CJXL_BUFFERING,
             modular=bool(CJXL_MODULAR))
     for _t in tasks:
         _record_source_identity(_t[0])      # X2: before anything reads it
@@ -6063,7 +6368,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 for r in tiff_results:
                     _page = r[0][1]
                     ok_v, detail = _verify_roundtrip_page(
-                        Path(tiff_key), _page, Path(r[2]), CJXL_DISTANCE)
+                        Path(tiff_key), _page, Path(r[2]), _distance_for(tiff_key))
                     if not ok_v:
                         verify_failed = (_page, detail)
                         break
@@ -6409,6 +6714,13 @@ def main():
                         help="When splitting: auto (default: keep thumbnail pages except "
                              "THUMBNAIL_DROP_SOFTWARE's, e.g. Capture One), scans (keep "
                              "them for SCANNER_SOFTWARE or an IR page only), exclude or include")
+    parser.add_argument("--scan-distance", type=str, default=None, metavar="D",
+                        help="Distance for film scans (SCANNER_SOFTWARE or an IR page): "
+                             "0 = lossless (default, SCAN_DISTANCE), 'same' = the run's "
+                             "--distance")
+    parser.add_argument("--scan-scope", type=str, default=None, choices=["all", "raw"],
+                        help="Which film scans --scan-distance covers: all (default) or "
+                             "raw only (scanner profile, no profile at 16 bits, or IR)")
     parser.add_argument("--thumbnail-suffix", type=str, default=None,
                         help="Suffix for thumbnail outputs when --thumbnail-mode=include (default: _thumbnail)")
     parser.add_argument("--warn-thumbnail-discard", action="store_true",
@@ -6469,7 +6781,7 @@ def main():
                              "(EXPLORER_THUMBNAIL)")
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
@@ -6637,6 +6949,18 @@ def main():
 
     if args.multipage_mode is not None:
         MULTIPAGE_TIFF_MODE = args.multipage_mode
+    if args.scan_distance is not None:
+        if args.scan_distance.strip().lower() == "same":
+            SCAN_DISTANCE = None
+        else:
+            try:
+                SCAN_DISTANCE = float(args.scan_distance)
+            except ValueError:
+                parser.error("--scan-distance takes a number (0 = lossless) or 'same'")
+            if not 0 <= SCAN_DISTANCE <= 15:
+                parser.error("--scan-distance must be between 0 and 15")
+    if args.scan_scope is not None:
+        SCAN_SCOPE = args.scan_scope
     if args.thumbnail_mode is not None:
         THUMBNAIL_MODE = args.thumbnail_mode
     if args.thumbnail_suffix is not None:
@@ -6684,6 +7008,9 @@ def main():
         _discarded_thumb_sources.clear()
         _discard_warned["count"] = 0
         _discard_warned["suppressed"] = 0
+    with _SCAN_PLAN_LOCK:
+        _SCAN_PLAN.clear()
+        _SCAN_REASON.clear()
     for _k in _delete_stats:
         _delete_stats[_k] = 0
 
@@ -6708,6 +7035,11 @@ def main():
             f"--distance {args.distance} behaves exactly like "
             f"{_floor}: this cjxl clamps every lossy distance below "
             f"that to the same output. Use --distance 0 for true lossless.")
+    if SCAN_DISTANCE is not None and 0 < SCAN_DISTANCE < _floor:
+        logger.warning(
+            f"SCAN_DISTANCE {SCAN_DISTANCE} behaves exactly like {_floor}: this "
+            f"cjxl clamps every lossy distance below that to the same output. "
+            f"Use 0 for true lossless.")
 
     # Sweep the EFFECTIVE staging dir — requiring --staging alongside made the
     # flag silently inert whenever staging came from the script setting (the
@@ -6857,6 +7189,10 @@ def main():
         f"Multi-page: {MULTIPAGE_TIFF_MODE} | Thumbnail: {_thumb_label} | Workers: {args.workers}"
     )
     logger.info(f"Input: {args.input}")
+    if SCAN_DISTANCE is not None and SCAN_DISTANCE != CJXL_DISTANCE:
+        logger.info(f"Film scans ({'raw ones' if str(SCAN_SCOPE).lower() == 'raw' else 'all'}): "
+                    f"distance {SCAN_DISTANCE}"
+                    f"{' (lossless)' if SCAN_DISTANCE == 0 else ''} — SCAN_DISTANCE")
     if not OVERWRITE_GUARD:
         logger.warning("Overwrite guard OFF: an existing output made from another "
                        "source path is overwritten (and logged) instead of refused.")
@@ -7116,7 +7452,7 @@ def main():
                 if not ADOPT_SCAN:
                     _adopted_blind.append((t, j))
                     continue
-                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, CJXL_DISTANCE)
+                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, _distance_for(t))
                 if _ok_v:
                     _adopted.append((t, j))
                     continue
@@ -7129,7 +7465,7 @@ def main():
                     str(t), (j, f"the adopt scan says this output is not this "
                                 f"source ({_detail}) — if the archive was written "
                                 f"at a different --distance than this run "
-                                f"(d={CJXL_DISTANCE}), re-run with the archive's "
+                                f"(d={_distance_for(t)}), re-run with the archive's "
                                 f"distance, or pass --no-adopt-scan to adopt "
                                 f"without the scan"))
                 continue
@@ -7211,6 +7547,12 @@ def main():
             failed_files.extend(provenance_failures)
 
     _counter["total"] = len(all_items)
+
+    # Film scans at their own distance, by reason — before the first encode,
+    # so a wrong guess can be stopped (dry runs included).
+    _log_scans_at_scan_distance(_scans_at_scan_distance(
+        {os.path.normcase(str(t)): t for t, j, *_ in all_items
+         if not _would_skip(t, j)}.values()), done=False)
 
     # Dry run
     if args.dry_run:
@@ -7340,7 +7682,11 @@ def main():
         # --delete-skipped cases (whose real gates, E-1 included, still run in
         # the delete gate itself). A dry run never reaches this block at all.
         if DELETE_CONFIRM and _plan_would_delete_source(all_items):
-            is_lossy = CJXL_DISTANCE > 0
+            # Lossy when ANY file of the run is: film scans can be lossless
+            # (SCAN_DISTANCE) in a lossy run, or the other way round.
+            with _SCAN_PLAN_LOCK:
+                _planned_d = [d for _k, d in _SCAN_PLAN.values()]
+            is_lossy = CJXL_DISTANCE > 0 or any(d > 0 for d in _planned_d)
             if not confirm_deletion_tiff(is_lossy):
                 logger.info("Deletion not confirmed -- exiting.")
                 sys.exit(3)
@@ -7400,6 +7746,16 @@ def main():
     # last file lands (see process_group).
     results = process_group(all_items, args.workers, args.mode)
 
+    # What this run wrote, for the film-scan and thumbnail lines of the summary.
+    _written = [r for r in results if r[1] in ("ok", "overwrite")]
+    _scans_written = _scans_at_scan_distance(
+        {os.path.normcase(str(r[0][0])): r[0][0] for r in _written}.values())
+    _thumbs_written = {}
+    for r in _written:
+        if Path(str(r[2])).stem.endswith(THUMBNAIL_SUFFIX):
+            _thumbs_written[os.path.normcase(str(r[0][0]))] = (
+                _thumbs_written.get(os.path.normcase(str(r[0][0])), 0) + 1)
+
     for result in results:
         status = result[1]
         if   status == "ok":
@@ -7451,6 +7807,14 @@ def main():
             logger.warning(f"  -> ... and {len(unreadable_files) - 10} more (see the list above in this log)")
 
     _log_discard_summary()
+    _log_scans_at_scan_distance(_scans_written, done=True)
+    if _thumbs_written and MULTIPAGE_TIFF_MODE.lower() == "split":
+        # Kept by the mode (auto keeps every thumbnail page but Capture One's),
+        # so no surprise extra *_thumbnail.jxl files.
+        logger.info(
+            f"Thumbnails: kept {sum(_thumbs_written.values())} thumbnail page(s) of "
+            f"{len(_thumbs_written)} TIFF(s) as *{THUMBNAIL_SUFFIX}.jxl (--thumbnail-mode "
+            f"{THUMBNAIL_MODE}; exclude leaves them out).")
 
     # D50 patch summary
     applied = _d50_patch_count["applied"]
@@ -7502,6 +7866,10 @@ def main():
         log_file=log_file,
         extras={
             "Thumbnails excluded": _thumbnails_dropped["pages"],
+            "Thumbnails kept": sum(_thumbs_written.values()),
+            "Film scans at their own distance": sum(len(v) for v in _scans_written.values()),
+            "Film scans guessed (no Software, no camera EXIF)":
+                len(_scans_written.get("guessed") or ()),
             "Multipage pages ignored": _multipage_ignored["pages"],
             "D50 patched": (applied - applied_already_correct) if D50_PATCH_MODE != "off" else 0,
             "Not attempted (run aborted)": aborted,
