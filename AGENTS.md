@@ -291,8 +291,10 @@
   before running them again. Optional fixture folders add the owner's variety:
   `TIFF16_varied` (37 exports, 18 cameras/phones/a film scanner),
   `TIFF_scans_varied` (23 film scans: 8/16-bit gray, no ICC, scanner profiles,
-  RGB+IR/alpha 4th sample, 84 MP) and `JPEG_varied` (25 JPEG structures, an
-  empty and a non-JPEG file). ~12 minutes; the scratch folder is deleted on success and
+  RGB+IR/alpha 4th sample, 84 MP), `JPEG_varied` (25 JPEG structures, an
+  empty and a non-JPEG file), `silverfast_xmp` (ORIGINAL SilverFast scans:
+  its `LSI/` XMP and private tags must round-trip) and `TIFF_tagless` (camera
+  TIFFs that lost every tag: never a film scan). ~12 minutes; the scratch folder is deleted on success and
   the report lands in `AI_tools/<YYMMDD>_battery_report.md`. **Run it before
   every release** and after any change to what the codecs/exiftool read or
   write, to a delete gate, to the in-place paths, or to a function's

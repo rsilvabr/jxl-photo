@@ -29,6 +29,12 @@ Fixtures (never modified — everything is copied to a scratch folder first):
                                 4:4:0, gray, MPF, odd ICCs, broken MakerNotes,
                                 an empty and a non-JPEG file) through the
                                 transcoder, bit-exact, and its deleting mode
+    <fixtures>/silverfast_xmp/*.tif  optional: ORIGINAL SilverFast scans (image,
+                                thumbnail, IR, SilverFast's LSI/ XMP and private
+                                tags); the smallest one round-trips with all of it
+    <fixtures>/TIFF_tagless/<camera>/*.tif  optional: camera TIFFs that lost every
+                                tag (image + 160x120 thumbnail page) and one as the
+                                camera wrote it: none may count as a film scan
 
 The scratch folder (default <fixtures drive>\\jxlphoto_battery_<date>) is
 deleted at the end unless --keep. Every check runs inside a HOSTILE folder
@@ -40,6 +46,7 @@ every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
 """
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -1294,6 +1301,116 @@ def scan_checks(scans):
           rc == 0 and bool(scanner) and not wrong, f"rc={rc} {len(scanner)} scans, wrong={wrong}")
 
 
+def _lsi_xmp(path):
+    """SilverFast's own XMP fields (namespace .../LSI/...) of a file, as a set
+    of (name, value): attributes and simple elements of every LSI prefix (a TIFF)."""
+    with tifffile.TiffFile(path) as t:
+        tag = t.pages[0].tags.get(700)
+        raw = bytes(tag.value).decode("utf-8", "replace") if tag is not None else ""
+    # Attributes in SilverFast's packet, elements (and ' quotes) once exiftool
+    # has rewritten it: compare names and unescaped values, not the layout.
+    prefixes = set(re.findall(r'xmlns:(\w+)=["\'][^"\']*LSI/[^"\']*["\']', raw))
+    out = set()
+    for pfx in prefixes:
+        out |= {(n, html.unescape(v)) for n, v in re.findall(rf'\b({pfx}:\w+)="([^"]*)"', raw)}
+        out |= {(n, html.unescape(v))
+                for n, v in re.findall(rf'<({pfx}:\w+)>([^<]*)</{pfx}:\w+>', raw)}
+    return out
+
+
+def silverfast_checks(folder):
+    """<fixtures>/silverfast_xmp: original SilverFast scans (image, thumbnail,
+    IR; SilverFast's own XMP namespace LSI/ and its private TIFF tags), the
+    smallest one through the encoder with the defaults at --distance 1 and back
+    through the decoder. SilverFast recognises the IR channel and shows the
+    icon only with all of it (v2.17.0): archived lossless, every page and
+    SubfileType back bit for bit, the LSI fields and the private tags (up to
+    the encoder's 4 KB) unchanged."""
+    section("SilverFast originals (silverfast_xmp)")
+    srcs = sorted((p for p in folder.iterdir() if p.suffix.lower() in (".tif", ".tiff")),
+                  key=lambda p: p.stat().st_size)
+    if not srcs:
+        print("(silverfast_xmp/ is empty)")
+        return
+    src = srcs[0]
+    e = B / "sf"
+    cp(src, e / src.name)
+    rc, _ = run("sf_enc", [ENC, e, "--mode", "1", "--distance", "1", "--effort", "2",
+                           "--no-preflight"])
+    jxls = sorted((e / "converted_jxl").glob("*.jxl"))
+    main_jxl = e / "converted_jxl" / (src.stem + ".jxl")
+    desc = exif(["-s3", "-XMP-dc:Description", main_jxl]) if main_jxl.exists() else ""
+    check("SilverFast scan: archived lossless at --distance 1, every page",
+          rc == 0 and desc.strip().endswith("cjxl d=0.0 e=2") and len(jxls) == 3,
+          f"rc={rc} {[p.name for p in jxls]} {desc.strip()[-20:]!r}")
+    d = B / "sf_dec"
+    for p in jxls:
+        cp(p, d / p.name)
+    rc, _ = run("sf_dec", [DEC, d, "--mode", "1", "--depth-policy", "preserve_original"])
+    out = d / "converted_tiff" / (src.stem + ".tif")
+    if not out.exists():
+        check("SilverFast scan: decoded back", False, f"rc={rc} no {out.name}")
+        return
+    bad = []
+    with tifffile.TiffFile(src) as ta, tifffile.TiffFile(out) as tb:
+        if len(ta.pages) != len(tb.pages):
+            bad.append(f"{len(ta.pages)} -> {len(tb.pages)} pages")
+        for i, (pa, pb) in enumerate(zip(ta.pages, tb.pages)):
+            if int(pa.subfiletype or 0) != int(pb.subfiletype or 0):
+                bad.append(f"page {i}: SubfileType {pa.subfiletype} -> {pb.subfiletype}")
+            if not np.array_equal(pa.asarray(), pb.asarray()):
+                bad.append(f"page {i}: pixels differ")
+        priv_a = {c: bytes(v.value) if isinstance(v.value, (bytes, bytearray)) else v.value
+                  for c, v in ta.pages[0].tags.items() if c in (35243, 35244)}
+        priv_b = {c: bytes(v.value) if isinstance(v.value, (bytes, bytearray)) else v.value
+                  for c, v in tb.pages[0].tags.items() if c in (35243, 35244)}
+        small = {c for c, v in priv_a.items() if len(v if isinstance(v, bytes) else str(v)) <= 4096}
+    check("SilverFast scan: every page, SubfileType and pixel back", rc == 0 and not bad,
+          f"rc={rc} {bad[:4]}")
+    lost = [c for c in sorted(small) if priv_b.get(c) != priv_a[c]]
+    check("SilverFast scan: its private TIFF tags come back byte for byte",
+          bool(small) and not lost, f"tags {sorted(small)} lost/changed={lost}")
+    lsi_a, lsi_b = _lsi_xmp(src), _lsi_xmp(out)
+    check("SilverFast scan: SilverFast's own XMP (LSI/) comes back unchanged",
+          bool(lsi_a) and lsi_a == lsi_b,
+          f"{len(lsi_a)} fields, missing={sorted(lsi_a - lsi_b)[:3]}")
+
+
+def tagless_checks(folder):
+    """<fixtures>/TIFF_tagless/<camera>/*.tif: camera TIFFs that lost every
+    tag (a Fuji S5 Pro and a Nikon E990 TIFF rewritten without Software, Make
+    or EXIF: the image plus the 160x120 thumbnail page cameras write) and an
+    E990 TIFF as the camera wrote it. None is a film scan: at --distance 1
+    each is encoded at 1, the tagless ones marked jxlphoto-scan:no, and the
+    run does not announce a guessed scan (v2.17.0)."""
+    section("Camera TIFFs without tags (TIFF_tagless)")
+    srcs = sorted(p for p in folder.rglob("*") if p.suffix.lower() in (".tif", ".tiff"))
+    e = B / "tagless"
+    for s in srcs:
+        cp(s, e / s.parent.name / s.name)
+    rc, out = run("tagless_enc", [ENC, e, "--mode", "8", "--distance", "1", "--effort", "2",
+                                  "--no-preflight"])
+    wrong = []
+    for s in srcs:
+        j = e / s.parent.name / (s.stem + ".jxl")
+        if not j.exists():
+            wrong.append(f"{s.name}: no JXL")
+            continue
+        desc = exif(["-s3", "-XMP-dc:Description", j]).strip()
+        rel = relation(j)
+        with tifffile.TiffFile(s) as t:
+            tagless = 305 not in t.pages[0].tags and 34665 not in t.pages[0].tags
+        want = ["jxlphoto-scan:no"] if tagless else []
+        got = [r for r in rel if r.startswith("jxlphoto-scan:")]
+        if not desc.endswith("cjxl d=1.0 e=2") or got != want:
+            wrong.append(f"{s.name}: {desc[-16:]!r} {got}")
+    check("camera TIFFs without tags: not film scans (encoded at --distance, tagless "
+          "ones marked jxlphoto-scan:no)",
+          rc == 0 and bool(srcs) and not wrong, f"rc={rc} {len(srcs)} TIFFs, wrong={wrong}")
+    check("camera TIFFs without tags: no guessed-scan warning",
+          "only a guess" not in out, "")
+
+
 def jpeg_checks(jpegs):
     """Every file in <fixtures>/JPEG_varied (baseline/progressive, 4:2:0 to
     4:4:4 and 4:4:0, gray, MPF trailers, P3/Adobe/odd ICCs, broken
@@ -1638,6 +1755,14 @@ def main():
             jpeg_checks(args.fixtures / "JPEG_varied")
         else:
             print("\n(no JPEG_varied/: varied-JPEG checks skipped)")
+        if (args.fixtures / "silverfast_xmp").is_dir():
+            silverfast_checks(args.fixtures / "silverfast_xmp")
+        else:
+            print("\n(no silverfast_xmp/: SilverFast-original checks skipped)")
+        if (args.fixtures / "TIFF_tagless").is_dir():
+            tagless_checks(args.fixtures / "TIFF_tagless")
+        else:
+            print("\n(no TIFF_tagless/: tagless-camera-TIFF checks skipped)")
     finally:
         logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
                       if (REPO / "Logs").is_dir() else 0)
