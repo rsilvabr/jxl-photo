@@ -416,6 +416,6 @@ must-fix / should-fix items and a commit verdict.
   creates a DRAFT release; `python tests/battery_on_exe.py --app <that zip,
   extracted>` (runs the program from a hostile folder; must pass) before it is
   published (regular releases since v2.16.0-exe2, built by GitHub since
-  v2.16.1-exe1; jxl-thumb's releases are built the same way). A change
+  v2.16.2-exe1; jxl-thumb's releases are built the same way). A change
   to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
   goes in the same way.
