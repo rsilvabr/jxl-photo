@@ -1193,6 +1193,18 @@ Two things `auto`/`scans` never do:
   that preview out instead of reporting an error. `include` keeps the old
   behaviour (every thumbnail page, an error for one that cannot be encoded).
 
+**Pages a TIFF no longer has (v2.17.1).** When a run rewrites every page of a
+TIFF and the new layout has fewer pages than the archive it replaces — a
+re-archive with `--thumbnail-mode exclude --overwrite`, a photo re-exported
+from Capture One whose thumbnail `auto` now drops, a scan saved again without
+its IR page — the old pages would stay beside the new ones under the old group
+id, and the decoder would report an incomplete group. After the run, a leftover
+**thumbnail** page is removed (`Removed a thumbnail page left by an earlier
+encode of …`): only a file named like one of that TIFF's pages, carrying that
+TIFF's `jxlphoto-src` and a group id the new pages do not have, and only while
+the TIFF still exists. A leftover **real** page is never deleted: the run names
+it with a warning (`… KEPT; check it`) and counts it in the summary.
+
 **Dropped thumbnails are not warned per file.** A mode that leaves a thumbnail
 out does what was asked, so it produces a single summary line
 (`Thumbnails: excluded N thumbnail page(s) from M TIFF(s)`, naming the reason)

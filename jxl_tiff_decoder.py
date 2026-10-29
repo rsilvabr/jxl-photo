@@ -39,7 +39,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0"
+TOOLKIT_VERSION = "2.17.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -594,6 +594,48 @@ def _long_codec_paths(cmd):
     return out
 
 
+def _ansi_encodable(text) -> bool:
+    """Whether a program that reads its command line in the ANSI code page
+    gets `text` intact. Always True off Windows and with the UTF-8 code page."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        acp = ctypes.windll.kernel32.GetACP()
+    except Exception:
+        return True
+    if acp == 65001:
+        return True
+    try:
+        str(text).encode(f"cp{acp}")
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def _argfile_via_stdin(cmd):
+    """(cmd, None) unchanged — or, when `cmd` names an exiftool argfile
+    (`-@ <file>`) whose PATH the ANSI code page cannot carry, (the same
+    command with `-@ -`, the file's bytes for its stdin). exiftool reads that
+    path from its command line in the ANSI code page: with %TEMP% outside it
+    (a Windows user name in another script) every call failed with "Error
+    opening arg file". The file's CONTENT is UTF-8 with `-charset
+    filename=utf8` and is read the same way from stdin. Parity-pinned (four
+    backends)."""
+    try:
+        i = list(cmd).index("-@")
+    except ValueError:
+        return cmd, None
+    if i + 1 >= len(cmd):
+        return cmd, None
+    path = str(cmd[i + 1])
+    if path == "-" or _ansi_encodable(path):
+        return cmd, None
+    with open(path, "rb") as f:
+        data = f.read()
+    return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -619,6 +661,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     cmd = _long_codec_paths(cmd)
     if stall is not None and input is not None:
         raise ValueError("_run_captured: stall cannot be combined with input")
+    # An exiftool argfile whose path the ANSI code page cannot carry goes in
+    # on stdin (_argfile_via_stdin) — in a stall run too: exiftool reads its
+    # whole -@ list before it opens the first file.
+    cmd, _argfile_bytes = _argfile_via_stdin(cmd)
+    if _argfile_bytes is not None:
+        input = _argfile_bytes
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
@@ -627,8 +675,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
                                **stdin_kw)
             rc, o, e = r.returncode, r.stdout, r.stderr
         else:
-            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            p = subprocess.Popen(cmd, stdout=out, stderr=err,
+                                 stdin=_DEVNULL if input is None else subprocess.PIPE)
             try:
+                if input is not None:
+                    p.stdin.write(input)
+                    p.stdin.close()
                 started = grew = time.monotonic()
                 size = 0
                 while True:

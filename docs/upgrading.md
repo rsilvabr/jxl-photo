@@ -11,6 +11,23 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.17.1: old thumbnail pages are removed; derivatives skip thumbnail pages
+
+Nothing to do. Two things a run now does that it did not before:
+
+- **The encoder removes a thumbnail page an earlier encode of the same TIFF
+  left behind** — after re-archiving with `--thumbnail-mode exclude
+  --overwrite`, or when a photo re-exported from Capture One no longer keeps
+  its thumbnail under `auto`. Only for a TIFF the run rewrote completely and
+  that still exists, and only a file that carries that TIFF's provenance
+  marker. A leftover real page (a scan saved again without its IR page) is
+  never deleted: the run names it with a warning, for you to check.
+- **Derivative runs** (`--output-icc`, `--resize-*`, `--sharpen` — the SRGB and
+  MOBILE presets — and the transcoder's resized, sharpened or colour-converted
+  JXL → JPEG/PNG) make no derivative of a thumbnail page. Derivatives of
+  thumbnail pages written by v2.17.0 stay where they are; delete them if you
+  have any (`*_thumbnail*` in the derivative folders).
+
 ## v2.17.0: thumbnail pages are kept by default; film scans are lossless
 
 - **Film scans are encoded lossless** (`SCAN_DISTANCE = 0`), whatever

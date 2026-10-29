@@ -150,6 +150,15 @@
   (`--refresh-explorer-thumbnails`) restores each file's mtime: the
   encoder's sync compares it with the TIFF's. Helpers parity-pinned
   (encoder + recompressor).
+- **A split's group id hashes its page set (#303)**, so a TIFF re-encoded
+  with FEWER pages would leave the old pages under the old id (#551). After a
+  run, `_clean_stale_split_pages` removes a leftover THUMBNAIL page of a TIFF
+  the run rewrote completely (same `jxlphoto-src`, a group id the new pages do
+  not carry, the TIFF still on disk) and only reports a leftover REAL page —
+  never delete one. Derivative runs of the recompressor skip `jxlphoto-thumb`
+  pages (#552); a plain recompression keeps them so the split stays complete.
+  So does the transcoder's resized/sharpened/colour-converted JXL -> JPEG/PNG
+  (`_skip_thumbnail_pages`, #555; no marker read on a dry run).
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
   checks (`_abort_on_duplicate_outputs`, the output-vs-input collision guard)
   can therefore never see a problem that spans two entries — those guards have
@@ -219,7 +228,9 @@
   gets a REAL test whose fixture path has Japanese characters AND `[ ]` AND a
   space -- an ASCII `tmp_path` alone proves nothing. Known traps: exiftool reads
   its command line in the ANSI code page (Japanese arrives mangled -> argfile with
-  `-charset filename=utf8`, `_run_exiftool_argfile`); ImageMagick globs `[ ]` and
+  `-charset filename=utf8`, `_run_exiftool_argfile`; the argfile's own PATH is
+  on that command line too, so `_run_captured` hands an argfile whose path the
+  code page cannot hold to exiftool on stdin, `_argfile_via_stdin`, #553); ImageMagick globs `[ ]` and
   expands `%`; a hard link cannot cross drives (a fallback copy must be released
   per file); the 260-character limit (cjxl/djxl cannot open such a path:
   `_long_codec_paths` inside `_run_captured` gives them the `\\?\` prefix,

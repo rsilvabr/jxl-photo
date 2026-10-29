@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.17.0](#v2170)** | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
+| **[v2.17.1](#v2171)** | (not released yet) | A TIFF re-encoded with fewer pages no longer leaves its old thumbnail page beside the archive; derivative runs skip thumbnail pages; exiftool works with a temp folder outside the Windows code page (round 66, 5 fixes) |
+| [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
 | [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
 | [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
 | [v2.16.1](#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output (round 62, 1 fix) |
@@ -72,6 +73,47 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.17.1
+
+**Not released yet** (prepared 2026-10-29; more changes may join it before it
+is tagged — a new flag or setting would make it v2.18.0 instead). Fixes from
+an audit of what changed since v2.15.2 (round 66, #551–#555); none had a case
+on the owner's archive. See
+[Upgrading](upgrading.md#v2171-old-thumbnail-pages-are-removed-derivatives-skip-thumbnail-pages).
+
+- **A TIFF re-encoded with fewer pages no longer leaves its old pages behind
+  (#551).** The group id of a split hashes its page set, and nothing removed
+  the pages of the previous layout: `--thumbnail-mode exclude` with
+  `--overwrite` after an `auto` archive, a photo re-exported from Capture One
+  (whose thumbnail `auto` drops) after a first export from another program, or
+  a scan saved again without its IR page left `photo_page1_thumbnail.jxl` or
+  `photo_page1.jxl` under the old id; the decoder warned "Multi-page group is
+  INCOMPLETE" and wrote an extra TIFF, and derivative runs copied it. After a
+  run, for every TIFF it rewrote completely and that still exists, a leftover
+  thumbnail page is removed (its name pattern, this TIFF's `jxlphoto-src`, a
+  group id the new pages do not carry); a leftover real page is never deleted,
+  only reported with a warning. The summary counts both.
+- **A derivative run skips thumbnail pages (#552, #555).** `--output-icc`,
+  `--resize-*` and `--sharpen` (the SRGB and MOBILE presets) wrote a 160×120
+  copy of the preview a TIFF carried for every TIFF whose thumbnail page `auto`
+  keeps since v2.17.0. Logged once, apart from the "got no derivative"
+  warning; a plain recompression keeps the pages, so a split stays complete.
+  The transcoder's resized, sharpened or colour-converted JXL → JPEG/PNG did
+  the same and skips them too (`--force-convert` and auto mode); a plain
+  decode still converts every file.
+- **exiftool works with a temp folder outside the Windows code page (#553).**
+  The argfile's path goes on exiftool's command line, which it reads in the
+  ANSI code page: with `%TEMP%` in characters that code page does not hold (a
+  Windows user name in another script), every exiftool call of all four
+  backends failed, "Error opening arg file". Such an argfile now goes to
+  exiftool on stdin; every other call is unchanged.
+- **A film scan's refusal names `--scan-distance` (#554).** A scan archived at
+  the run's distance before v2.17.0 is refused by `--delete-skipped` and the
+  adopt scan (it is verified at `SCAN_DISTANCE`); the message now says so and
+  names `--scan-distance same`.
+
+Tests: `tests/test_audit_261029.py` (15, all failing against `989b670`).
 
 ## v2.17.0
 

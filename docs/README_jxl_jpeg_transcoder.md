@@ -732,6 +732,12 @@ file size IM needs q≈82–83, and at the same q its file comes out ~50% larger
 Any run with `--resize-long/-short/-percent` and/or `--sharpen` writes a **derivative**. It is
 disposable by construction:
 
+- **It is made of the photo, never of a thumbnail page.** The thumbnail page
+  a split TIFF carried (`<name>_page1_thumbnail.jxl`, marked `jxlphoto-thumb`)
+  is skipped, and so it is with `--icc-profile`/`--to-srgb` alone (since
+  v2.17.1; v2.17.0 wrote a 160×120 JPEG of each). A plain decode still
+  converts every file; a dry run still lists them (it reads no marker).
+
 - **It never deletes its source.** `--delete-source`/`--delete-skipped` are
   refused (exit 2).
 - **It never replaces its source.** The bit-exact JPEG recovery

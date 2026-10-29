@@ -79,6 +79,11 @@ SHARED_HELPERS = [
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_run_captured",
+    # An argfile path outside the ANSI code page goes to exiftool on stdin: a
+    # copy drifting is one backend failing every exiftool call with a temp
+    # folder the others handle.
+    "_ansi_encodable",
+    "_argfile_via_stdin",
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
     "_long_codec_paths",

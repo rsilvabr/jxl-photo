@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0"
+TOOLKIT_VERSION = "2.17.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1150,6 +1150,48 @@ def _long_codec_paths(cmd):
     return out
 
 
+def _ansi_encodable(text) -> bool:
+    """Whether a program that reads its command line in the ANSI code page
+    gets `text` intact. Always True off Windows and with the UTF-8 code page."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        acp = ctypes.windll.kernel32.GetACP()
+    except Exception:
+        return True
+    if acp == 65001:
+        return True
+    try:
+        str(text).encode(f"cp{acp}")
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def _argfile_via_stdin(cmd):
+    """(cmd, None) unchanged — or, when `cmd` names an exiftool argfile
+    (`-@ <file>`) whose PATH the ANSI code page cannot carry, (the same
+    command with `-@ -`, the file's bytes for its stdin). exiftool reads that
+    path from its command line in the ANSI code page: with %TEMP% outside it
+    (a Windows user name in another script) every call failed with "Error
+    opening arg file". The file's CONTENT is UTF-8 with `-charset
+    filename=utf8` and is read the same way from stdin. Parity-pinned (four
+    backends)."""
+    try:
+        i = list(cmd).index("-@")
+    except ValueError:
+        return cmd, None
+    if i + 1 >= len(cmd):
+        return cmd, None
+    path = str(cmd[i + 1])
+    if path == "-" or _ansi_encodable(path):
+        return cmd, None
+    with open(path, "rb") as f:
+        data = f.read()
+    return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -1175,6 +1217,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     cmd = _long_codec_paths(cmd)
     if stall is not None and input is not None:
         raise ValueError("_run_captured: stall cannot be combined with input")
+    # An exiftool argfile whose path the ANSI code page cannot carry goes in
+    # on stdin (_argfile_via_stdin) — in a stall run too: exiftool reads its
+    # whole -@ list before it opens the first file.
+    cmd, _argfile_bytes = _argfile_via_stdin(cmd)
+    if _argfile_bytes is not None:
+        input = _argfile_bytes
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
@@ -1183,8 +1231,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
                                **stdin_kw)
             rc, o, e = r.returncode, r.stdout, r.stderr
         else:
-            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            p = subprocess.Popen(cmd, stdout=out, stderr=err,
+                                 stdin=_DEVNULL if input is None else subprocess.PIPE)
             try:
+                if input is not None:
+                    p.stdin.write(input)
+                    p.stdin.close()
                 started = grew = time.monotonic()
                 size = 0
                 while True:
@@ -1823,6 +1875,9 @@ SHARPEN_THRESHOLD = None
 # Written into dc:Relation on every resized/sharpened output: it marks the file
 # as a DERIVATIVE — never an archive of its source.
 DERIVED_XMP_PREFIX = "jxlphoto-derived:"
+# The encoder's THUMB_XMP_FLAG: the JXL is the THUMBNAIL page of a split TIFF
+# (the reduced preview it carried). A derivative is never made of one (#555).
+THUMB_FLAG = "jxlphoto-thumb"
 # Final paths (normcase) whose existing jxlphoto-derived label names another
 # recipe: the skip logic must re-derive them instead of keeping them.
 _FORCE_REDERIVE = set()
@@ -4841,6 +4896,71 @@ def _derived_label(icc_label, resize_mode=None, resize_value=None,
             + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
 
 
+def _read_thumb_markers_batch(paths: list) -> set:
+    """normcased paths of the JXLs among `paths` marked jxlphoto-thumb (the
+    thumbnail page of a split TIFF), in as few exiftool calls as possible. A
+    batch that cannot be read marks nothing: its files are converted as
+    before."""
+    found = set()
+    if not paths:
+        return found
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(p) for p in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
+            if not r.stdout:
+                continue
+            for entry in json.loads(r.stdout):
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                values = rel if isinstance(rel, list) else [str(rel)]
+                if any(str(t).strip() == THUMB_FLAG for t in values):
+                    found.add(os.path.normcase(str(Path(src))))
+        except Exception as e:
+            logger.debug(f"Thumbnail-page check: marker batch failed ({e})")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return found
+
+
+def _skip_thumbnail_pages(pairs, dry_run=False):
+    """The pairs minus those whose source is the THUMBNAIL page of a split
+    TIFF (<name>_page1_thumbnail.jxl, marked jxlphoto-thumb): a resized,
+    sharpened or colour-converted copy is made of the photo, not of the
+    preview its TIFF carried (#555, the transcoder's side of the
+    recompressor's #552). Logged once. A dry run reads no marker (it runs no
+    subprocess), so its preview still lists them."""
+    if dry_run:
+        return pairs
+    thumbs = _read_thumb_markers_batch([s for s, _o in pairs
+                                        if s.suffix.lower() == ".jxl"])
+    if not thumbs:
+        return pairs
+    kept = [(s, o) for s, o in pairs if os.path.normcase(str(s)) not in thumbs]
+    logger.info(f"{len(pairs) - len(kept)} thumbnail page(s) of split TIFFs skipped: "
+                f"a derivative is made of the photo, not of the preview its TIFF "
+                f"carried.")
+    return kept
+
+
 def _is_derivative() -> bool:
     """True when this run shapes output pixels: resize and/or sharpen.
 
@@ -5577,6 +5697,11 @@ def cmd_convert(args, from_jxl: bool = True):
             continue  # Skip files outside _EXPORT for modes 6/7
         pairs.append((f, out))
 
+    # A resized, sharpened or colour-converted copy is made of the photo, not
+    # of a split TIFF's thumbnail page (#555).
+    if direction == "from_jxl" and (_is_derivative() or args.icc_profile):
+        pairs = _skip_thumbnail_pages(pairs, dry_run=args.dry_run)
+
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
     if len(pairs) != len(files):
@@ -6162,6 +6287,12 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         # Pre-pass: only collect pairs for cross-group duplicate detection
         collect_only.extend(pairs)
         return {"ok": 0, "err": 0, "skipped": 0}
+
+    # A resized, sharpened or colour-converted copy is made of the photo, not
+    # of a split TIFF's thumbnail page (#555); the discount below counts them.
+    if (not use_transcode and direction == "from_jxl"
+            and (_is_derivative() or args.icc_profile)):
+        pairs = _skip_thumbnail_pages(pairs, dry_run=args.dry_run)
 
     # Discount files filtered out by modes 6/7 from the progress total
     _counter["total"] = max(0, _counter.get("total", 0) - (len(files) - len(pairs)))

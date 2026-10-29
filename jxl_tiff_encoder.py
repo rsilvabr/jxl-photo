@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0"
+TOOLKIT_VERSION = "2.17.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -2136,6 +2136,48 @@ def _long_codec_paths(cmd):
     return out
 
 
+def _ansi_encodable(text) -> bool:
+    """Whether a program that reads its command line in the ANSI code page
+    gets `text` intact. Always True off Windows and with the UTF-8 code page."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        acp = ctypes.windll.kernel32.GetACP()
+    except Exception:
+        return True
+    if acp == 65001:
+        return True
+    try:
+        str(text).encode(f"cp{acp}")
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def _argfile_via_stdin(cmd):
+    """(cmd, None) unchanged — or, when `cmd` names an exiftool argfile
+    (`-@ <file>`) whose PATH the ANSI code page cannot carry, (the same
+    command with `-@ -`, the file's bytes for its stdin). exiftool reads that
+    path from its command line in the ANSI code page: with %TEMP% outside it
+    (a Windows user name in another script) every call failed with "Error
+    opening arg file". The file's CONTENT is UTF-8 with `-charset
+    filename=utf8` and is read the same way from stdin. Parity-pinned (four
+    backends)."""
+    try:
+        i = list(cmd).index("-@")
+    except ValueError:
+        return cmd, None
+    if i + 1 >= len(cmd):
+        return cmd, None
+    path = str(cmd[i + 1])
+    if path == "-" or _ansi_encodable(path):
+        return cmd, None
+    with open(path, "rb") as f:
+        data = f.read()
+    return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -2161,6 +2203,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     cmd = _long_codec_paths(cmd)
     if stall is not None and input is not None:
         raise ValueError("_run_captured: stall cannot be combined with input")
+    # An exiftool argfile whose path the ANSI code page cannot carry goes in
+    # on stdin (_argfile_via_stdin) — in a stall run too: exiftool reads its
+    # whole -@ list before it opens the first file.
+    cmd, _argfile_bytes = _argfile_via_stdin(cmd)
+    if _argfile_bytes is not None:
+        input = _argfile_bytes
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
@@ -2169,8 +2217,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
                                **stdin_kw)
             rc, o, e = r.returncode, r.stdout, r.stderr
         else:
-            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            p = subprocess.Popen(cmd, stdout=out, stderr=err,
+                                 stdin=_DEVNULL if input is None else subprocess.PIPE)
             try:
+                if input is not None:
+                    p.stdin.write(input)
+                    p.stdin.close()
                 started = grew = time.monotonic()
                 size = 0
                 while True:
@@ -3973,6 +4025,20 @@ def _distance_for(tiff_path) -> float:
     return plan[1] if plan else CJXL_DISTANCE
 
 
+def _scan_distance_hint(tiff_path) -> str:
+    """'' — or, for a film scan this run judges at SCAN_DISTANCE instead of
+    the run's --distance, the flag that matters: a scan archived at the run's
+    distance (before v2.17.0, or with --scan-distance same) fails a
+    comparison made at the scan distance, and "re-run with the archive's
+    --distance" alone would not change that."""
+    d = _distance_for(tiff_path)
+    if d == CJXL_DISTANCE:
+        return ""
+    return (f" (a film scan: this run judges it at SCAN_DISTANCE {d:g}, not "
+            f"--distance {CJXL_DISTANCE:g}; if it was archived at the run's distance, "
+            f"add --scan-distance same)")
+
+
 def _scan_kind_for(tiff_path):
     with _SCAN_PLAN_LOCK:
         plan = _SCAN_PLAN.get(os.path.normcase(str(tiff_path)))
@@ -5639,6 +5705,149 @@ def _thumbnail_sync_guard(tiff_path: Path, output_dir: Path, real_pages: list,
     return bool(thumb_names) and all((output_dir / n).exists() for n in thumb_names)
 
 
+def _read_page_markers_batch(paths: list) -> dict:
+    """{path: {'src': id|None, 'group': id|None, 'thumb': bool}} from each
+    file's dc:Relation, in as few exiftool calls as possible. A file whose
+    markers cannot be read comes back all None/False: _clean_stale_split_pages
+    then leaves it alone."""
+    markers = {str(p): {"src": None, "group": None, "thumb": False} for p in paths}
+    index = {os.path.normcase(str(p)): str(p) for p in paths}
+    if not paths:
+        return markers
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(p) for p in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
+            if not r.stdout:
+                continue
+            for entry in json.loads(r.stdout):
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                info = {"src": None, "group": None, "thumb": False}
+                for token in (rel if isinstance(rel, list) else [str(rel)]):
+                    token = str(token).strip()
+                    if token.startswith(SRC_PREFIX):
+                        info["src"] = token[len(SRC_PREFIX):]
+                    elif token.startswith(MULTIPAGE_XMP_MARKER):
+                        info["group"] = token[len(MULTIPAGE_XMP_MARKER):]
+                    elif token == THUMB_XMP_FLAG:
+                        info["thumb"] = True
+                key = os.path.normcase(str(Path(src)))
+                if key in index:
+                    markers[index[key]] = info
+        except Exception as e:
+            logger.debug(f"Stale split pages: marker batch failed ({e})")
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return markers
+
+
+def _clean_stale_split_pages(all_items, results, dry_run: bool = False) -> dict:
+    """Pages an EARLIER encode of a TIFF left beside the archive this run
+    rewrote: the group id hashes the page set (#303), so when a TIFF is
+    re-encoded with FEWER pages — a thumbnail page dropped by
+    --thumbnail-mode exclude or by "auto" for a re-export from Capture One,
+    a scan saved again without its IR page — the old pages stay in the folder
+    under the old id. The decoder then warns about an incomplete group and
+    writes an extra TIFF, and the recompressor makes derivatives of them.
+
+    Only for TIFFs this run wrote COMPLETELY (every planned page ok) and that
+    still exist. A leftover is a file named like one of its split pages (the
+    page names of _page_output_name, THUMBNAIL_SUFFIX included) that is not in
+    the new layout, carries this TIFF's jxlphoto-src and a group id the new
+    pages do not have. A leftover THUMBNAIL page is removed: it is a
+    reduced-resolution copy of a TIFF that is still here, with its new archive
+    verified. A leftover REAL page is never deleted, only reported.
+    Returns {"removed": n, "kept": n}."""
+    stats = {"removed": 0, "kept": 0}
+    planned, folder_of, tiff_of = {}, {}, {}
+    for item in all_items:
+        key = os.path.normcase(str(item[0]))
+        planned.setdefault(key, set()).add(os.path.normcase(str(item[1])))
+        folder_of.setdefault(key, Path(item[1]).parent)
+        tiff_of.setdefault(key, Path(item[0]))
+    written = {}
+    for r in results:
+        if r[1] in ("ok", "overwrite"):
+            written.setdefault(os.path.normcase(str(r[0][0])), set()).add(
+                os.path.normcase(str(r[2])))
+    owner = {}          # candidate path -> tiff key
+    new_pages = {}      # final path written this run -> tiff key
+    listed = {}         # folder -> its entries, read once per folder
+    for key, finals in planned.items():
+        if written.get(key) != finals or not tiff_of[key].exists():
+            continue
+        pat = re.compile(r"^" + re.escape(tiff_of[key].stem) + r"(?:_page\d+)?(?:"
+                         + re.escape(THUMBNAIL_SUFFIX) + r")?\.jxl$", re.IGNORECASE)
+        folder = folder_of[key]
+        if folder not in listed:
+            try:
+                listed[folder] = list(os.scandir(folder))
+            except OSError:
+                listed[folder] = []
+        entries = listed[folder]
+        found = [e.path for e in entries
+                 if pat.match(e.name) and os.path.normcase(e.path) not in finals
+                 and e.is_file(follow_symlinks=False)]
+        for p in found:
+            owner[p] = key
+        if found:
+            new_pages.update({p: key for p in finals})
+    if not owner:
+        return stats
+    marks = _read_page_markers_batch(list(owner) + list(new_pages))
+    new_groups = {}     # tiff key -> group ids its new pages carry
+    for p, key in new_pages.items():
+        g = (marks.get(p) or {}).get("group")
+        if g:
+            new_groups.setdefault(key, set()).add(g)
+    for cand, key in sorted(owner.items()):
+        m = marks.get(cand) or {}
+        if (m.get("src") != _source_path_id(tiff_of[key]) or not m.get("group")
+                or m["group"] in new_groups.get(key, set())):
+            continue
+        if m.get("thumb"):
+            if dry_run:
+                logger.info(f"Would remove a thumbnail page left by an earlier encode of "
+                            f"{tiff_of[key].name}: {cand}")
+                stats["removed"] += 1
+                continue
+            try:
+                os.unlink(cand)
+            except OSError as e:
+                logger.warning(f"Could not remove a thumbnail page left by an earlier "
+                               f"encode of {tiff_of[key].name}: {cand} ({e})")
+                continue
+            stats["removed"] += 1
+            logger.info(f"Removed a thumbnail page left by an earlier encode of "
+                        f"{tiff_of[key].name} (this run writes no such page): {cand}")
+        else:
+            stats["kept"] += 1
+            logger.warning(f"A page of an earlier encode of {tiff_of[key].name} is still "
+                           f"beside its new archive, which no longer has it (the TIFF has "
+                           f"fewer pages now): {cand} — KEPT; check it and delete it if the "
+                           f"TIFF lost that page on purpose")
+    return stats
+
+
 def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
     """
     Decide which pages of a TIFF to encode based on MULTIPAGE_TIFF_MODE and
@@ -5871,9 +6080,11 @@ def _warn_stale_split_outputs(tasks: list) -> list:
         return stale
     logger.warning(
         f"{len(stale)} JXL(s) in the destination look like pages of a PREVIOUS split "
-        f"of the same source and are not part of this run's output. Nothing was "
-        f"deleted — check them and remove them, or the decoder will have to tell "
-        f"them apart from the real split:")
+        f"of the same source and are not part of this run's output. A leftover "
+        f"THUMBNAIL page of a source this run rewrites completely is removed at the "
+        f"end, once its marker proves it came from that source; anything else here "
+        f"is kept — check it and remove it, or the decoder will have to tell it "
+        f"apart from the real split:")
     for f in stale[:STALE_WARN_LIMIT]:
         logger.warning(f"    {f}")
     if len(stale) > STALE_WARN_LIMIT:
@@ -6384,6 +6595,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     _pre = (" | this output was not written by this run (SKIP); "
                             "if it was archived at a different --distance, re-run "
                             "with that distance or drop --verify-roundtrip"
+                            + _scan_distance_hint(tiff_key)
                             if skipped_finals else "")
                     logger.warning(
                         f"  KEEP source (round-trip verification FAILED on page {_page}: "
@@ -7467,7 +7679,7 @@ def main():
                                 f"at a different --distance than this run "
                                 f"(d={_distance_for(t)}), re-run with the archive's "
                                 f"distance, or pass --no-adopt-scan to adopt "
-                                f"without the scan"))
+                                f"without the scan" + _scan_distance_hint(t)))
                 continue
             _why = ("no provenance marker — this archive predates them; re-run with "
                     "--provenance adopt to verify and stamp it"
@@ -7755,6 +7967,8 @@ def main():
         if Path(str(r[2])).stem.endswith(THUMBNAIL_SUFFIX):
             _thumbs_written[os.path.normcase(str(r[0][0]))] = (
                 _thumbs_written.get(os.path.normcase(str(r[0][0])), 0) + 1)
+    # Pages an earlier encode of a rewritten TIFF left beside its new archive.
+    _stale_pages = _clean_stale_split_pages(all_items, results)
 
     for result in results:
         status = result[1]
@@ -7867,6 +8081,8 @@ def main():
         extras={
             "Thumbnails excluded": _thumbnails_dropped["pages"],
             "Thumbnails kept": sum(_thumbs_written.values()),
+            "Old thumbnail pages removed": _stale_pages["removed"],
+            "Old pages kept (check them)": _stale_pages["kept"],
             "Film scans at their own distance": sum(len(v) for v in _scans_written.values()),
             "Film scans guessed (no Software, no camera EXIF)":
                 len(_scans_written.get("guessed") or ()),

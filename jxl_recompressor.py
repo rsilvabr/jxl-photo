@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.0"
+TOOLKIT_VERSION = "2.17.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1084,6 +1084,9 @@ ORIGIN_PREFIX = "jxlphoto-origin:"
 # Film scan marker written by the encoder: jxlphoto-scan:raw / :final.
 SCAN_PREFIX = "jxlphoto-scan:"
 SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
+# The encoder's THUMB_XMP_FLAG: this JXL is the THUMBNAIL page of a split TIFF
+# (a reduced-resolution preview). A derivative run makes none of it.
+THUMB_FLAG = "jxlphoto-thumb"
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
 # re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
@@ -2164,6 +2167,48 @@ def _long_codec_paths(cmd):
     return out
 
 
+def _ansi_encodable(text) -> bool:
+    """Whether a program that reads its command line in the ANSI code page
+    gets `text` intact. Always True off Windows and with the UTF-8 code page."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        acp = ctypes.windll.kernel32.GetACP()
+    except Exception:
+        return True
+    if acp == 65001:
+        return True
+    try:
+        str(text).encode(f"cp{acp}")
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+def _argfile_via_stdin(cmd):
+    """(cmd, None) unchanged — or, when `cmd` names an exiftool argfile
+    (`-@ <file>`) whose PATH the ANSI code page cannot carry, (the same
+    command with `-@ -`, the file's bytes for its stdin). exiftool reads that
+    path from its command line in the ANSI code page: with %TEMP% outside it
+    (a Windows user name in another script) every call failed with "Error
+    opening arg file". The file's CONTENT is UTF-8 with `-charset
+    filename=utf8` and is read the same way from stdin. Parity-pinned (four
+    backends)."""
+    try:
+        i = list(cmd).index("-@")
+    except ValueError:
+        return cmd, None
+    if i + 1 >= len(cmd):
+        return cmd, None
+    path = str(cmd[i + 1])
+    if path == "-" or _ansi_encodable(path):
+        return cmd, None
+    with open(path, "rb") as f:
+        data = f.read()
+    return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -2189,6 +2234,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     cmd = _long_codec_paths(cmd)
     if stall is not None and input is not None:
         raise ValueError("_run_captured: stall cannot be combined with input")
+    # An exiftool argfile whose path the ANSI code page cannot carry goes in
+    # on stdin (_argfile_via_stdin) — in a stall run too: exiftool reads its
+    # whole -@ list before it opens the first file.
+    cmd, _argfile_bytes = _argfile_via_stdin(cmd)
+    if _argfile_bytes is not None:
+        input = _argfile_bytes
     stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
     with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
             tempfile.TemporaryFile(dir=TEMP_DIR) as err:
@@ -2197,8 +2248,12 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
                                **stdin_kw)
             rc, o, e = r.returncode, r.stdout, r.stderr
         else:
-            p = subprocess.Popen(cmd, stdout=out, stderr=err, stdin=_DEVNULL)
+            p = subprocess.Popen(cmd, stdout=out, stderr=err,
+                                 stdin=_DEVNULL if input is None else subprocess.PIPE)
             try:
+                if input is not None:
+                    p.stdin.write(input)
+                    p.stdin.close()
                 started = grew = time.monotonic()
                 size = 0
                 while True:
@@ -2496,7 +2551,7 @@ def _read_encode_params_batch(paths: list) -> dict:
     """
     info = {str(p): {"desc": "", "software": "", "params": None, "gen": 0,
                      "pixels": 0, "width": 0, "height": 0, "origin": None,
-                     "scan": None}
+                     "scan": None, "thumb": False}
             for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
@@ -2588,7 +2643,9 @@ def _read_encode_params_batch(paths: list) -> dict:
                                         rel_values, software,
                                         camera=any(entry.get(k) is not None for k in
                                                    ("ExposureTime", "FNumber",
-                                                    "FocalLength")))}
+                                                    "FocalLength"))),
+                                    "thumb": any(str(t).strip() == THUMB_FLAG
+                                                 for t in rel_values)}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -6469,6 +6526,13 @@ def main():
             if combined == "ask" and scan_act == "ask":
                 it["category"] = "film scan"
             it["action"] = combined
+        # A derivative of a split TIFF's THUMBNAIL page (the reduced preview it
+        # carried) is no delivery copy of the photo: none is made. Not a policy
+        # skip — no flag would make one worth writing.
+        it["thumb"] = info.get("thumb", False)
+        if DERIVATIVE and it["thumb"]:
+            it["action"] = "skip_thumbnail"
+            it["reason"] = "thumbnail page of a split TIFF: no derivative is made of it"
 
     asks = [it for it in items if it["action"] == "ask"]
     if args.dry_run:
@@ -6751,7 +6815,12 @@ def main():
     # --- Work ----------------------------------------------------------------
     work_items = []
     n_policy_skip = 0
+    n_thumb_skip = 0
     for it in items:
+        if it["action"] == "skip_thumbnail":
+            n_thumb_skip += 1
+            logger.debug(f" SKIP (thumbnail page) | {it['src'].name}")
+            continue
         if it["action"] == "skip":
             n_policy_skip += 1
             logger.info(f" SKIP (policy) | {it['src'].name} | {it['reason']}")
@@ -6824,7 +6893,8 @@ def main():
     ok = sum(1 for s, _f in results.values() if s == "ok")
     copied = sum(1 for s, _f in results.values() if s == "copied")
     overwritten = sum(1 for s, _f in results.values() if s == "overwrite")
-    skipped = sum(1 for s, _f in results.values() if s == "skipped") + n_policy_skip
+    skipped = (sum(1 for s, _f in results.values() if s == "skipped") + n_policy_skip
+               + n_thumb_skip)
     # "aborted" is not an error: those files were never attempted because the
     # run gave up early (disk full, interrupt). They are reported separately
     # and only real failures count towards the exit code.
@@ -6848,6 +6918,9 @@ def main():
                        f"regeneration limit, or carries no encode record. Pass "
                        f"--on-downgrade convert (or --on-regeneration / --on-unknown "
                        f"convert) to write them.")
+    if n_thumb_skip:
+        logger.info(f"{n_thumb_skip} thumbnail page(s) of split TIFFs skipped: a derivative "
+                    f"is made of the photo, not of the preview its TIFF carried.")
 
     _n_mem = sum(1 for _src, _detail in failures
                  if any(s in str(_detail).lower() for s in _MEMORY_ERROR_SIGNATURES))

@@ -403,6 +403,12 @@ recompressing the master: `--output-icc` (colour conversion), `--resize-long/-sh
 (Lanczos resize) and/or `--sharpen` (output sharpening). The recipes combine,
 and every guarantee below applies to all of them.
 
+A derivative is made of the photo, never of the **thumbnail page** a split
+TIFF carried (`<name>_page1_thumbnail.jxl`, marked `jxlphoto-thumb`): those are
+skipped and counted in one line (since v2.17.1; v2.17.0 wrote a 160×120
+derivative of each). A plain recompression still includes them, so a split
+stays complete.
+
 `--output-icc sRGB|AdobeRGB|<path to .icc>` converts the master: it is decoded
 at 16 bits, converted with ImageMagick from its own profile (fixed **relative
 colorimetric + black point compensation**) and re-encoded at the requested

@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #551.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #556.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-66 — pages left by an earlier split, and a temp folder exiftool cannot name](#round-66--pages-left-by-an-earlier-split-and-a-temp-folder-exiftool-cannot-name-2026-10-29) | 2026-10-29 | v2.17.1 | #551–#555 (5) |
 | [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
 | [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
 | [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |
@@ -74,6 +75,21 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-66 — pages left by an earlier split, and a temp folder exiftool cannot name (2026-10-29)
+
+An audit of what changed since v2.15.2, with every finding proved on
+synthetic files in hostile folders. None had a case on the owner's archive
+(0 `*_thumbnail*` files under 2024–2026). Regression tests:
+`tests/test_audit_261029.py` (all 15 fail against `989b670`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 551 | **A TIFF re-encoded with fewer pages left its old pages beside the new archive.** The group id hashes the page set (#303), and nothing removed the pages of the previous layout: `--thumbnail-mode exclude` with `--overwrite` after an `auto` archive, a re-export from Capture One (whose thumbnail `auto` drops) of a photo first exported elsewhere, or a scan saved again without its IR page left `photo_page1_thumbnail.jxl` (or `photo_page1.jxl`) under the old id. The decoder then warned "Multi-page group is INCOMPLETE" and wrote an extra TIFF from it, and derivative runs copied it. The `_thumbnail_sync_guard` only covered the other direction (a thumbnail added). Now, for every TIFF the run rewrote completely and that still exists, a leftover THUMBNAIL page (its own name pattern, this TIFF's `jxlphoto-src`, a group id the new pages do not carry) is removed — a reduced-resolution copy of a TIFF that is still there, its new archive verified; a leftover REAL page is never deleted, only reported (KEPT). `_clean_stale_split_pages`. | jxl_tiff_encoder.py | Fixed |
+| 552 | **A derivative run made a derivative of every thumbnail page.** The recompressor did not read `jxlphoto-thumb`, so `--output-icc` / `--resize-*` / `--sharpen` (the SRGB and MOBILE presets) wrote a 160×120 copy of the preview a TIFF carried beside the photo's derivative — for every TIFF whose thumbnail page `auto` keeps since v2.17.0. A derivative run now skips those pages (logged once, apart from the #543 policy-skip warning). A plain recompression keeps them: the split stays complete. | jxl_recompressor.py | Fixed |
+| 553 | **With `%TEMP%` outside the ANSI code page every exiftool call failed.** The backends pass exiftool an argfile, and its PATH goes on exiftool's command line, which exiftool reads in the ANSI code page: a temp folder with characters that code page does not hold (a Windows user name in another script) gave "Error opening arg file" on every file — loud, nothing written wrong, and reported as "a '%' in its path" when the photo's name had one. Such an argfile now goes to exiftool on stdin (`-@ -`), in the planning-time batch reads too; every other call is unchanged. `_ansi_encodable`, `_argfile_via_stdin` in `_run_captured`, parity-pinned. | jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
+| 554 | **A film scan's delete-skipped or adopt-scan refusal named the wrong flag.** Since v2.17.0 a scan is verified at SCAN_DISTANCE (lossless by default), so a scan archived at the run's distance before v2.17.0 is refused (fail-closed) — and the message said "re-run with the archive's --distance", which changes nothing for a scan. It now adds that the scan is judged at SCAN_DISTANCE and names `--scan-distance same`. `_scan_distance_hint`. | jxl_tiff_encoder.py | Fixed |
+| 555 | **The transcoder's resized, sharpened or colour-converted JXL → JPEG/PNG made a copy of every thumbnail page too** — the transcoder's side of #552, found while fixing it: a JPEG export with `--resize-*`/`--sharpen`/`--icc-profile` from a folder of masters wrote a 160×120 `…_page1_thumbnail.jpg` beside each photo. Those sources (marked `jxlphoto-thumb`) are now skipped, in `--force-convert` and in auto mode alike, logged once; a plain decode still converts them. A dry run reads no marker (it runs no subprocess), so its preview still lists them. `_read_thumb_markers_batch`, `_skip_thumbnail_pages`. | jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-65 — a '%' in a file name (2026-10-24)
 
