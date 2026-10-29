@@ -151,6 +151,38 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
+# The existing TIFF each conversion judged safe to replace (this decoder's
+# own, unedited output — or --overwrite), as os.stat saw it at that moment;
+# None when there was none. Keyed by normcased final path, reset per run.
+_judged_outputs = {}
+
+
+def _output_changed_since_judged(final_path) -> bool:
+    """Has the destination changed since its conversion judged it (#560)?
+
+    The judgement (ours, not edited) comes when a group's decode STARTS; the
+    swap comes when it ends — or, with staging, when the whole folder is
+    done. A decoded TIFF is a file people edit: one saved in Photoshop in
+    between was replaced by the fresh decode, the edit gone. A destination
+    that appeared since an "absent" verdict counts as changed too."""
+    key = os.path.normcase(str(final_path))
+    if key not in _judged_outputs:
+        return False
+    st = _judged_outputs[key]
+    if st is None:
+        return os.path.exists(final_path)
+    try:
+        now = os.stat(final_path)
+    except OSError:
+        return True
+    return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+
+
+_CHANGED_WHILE_DECODING = ("the existing TIFF changed while it was being decoded over "
+                           "(an edit saved meanwhile?) — it was left as it is and the "
+                           "fresh decode discarded; the source is kept")
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -3493,6 +3525,12 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             logger.info(f" >SYNC: JXL newer than TIFF, reconverting | {main_jxl.name}")
 
     overwritten = already_exists
+    # What was just judged safe to replace; the swap replaces only that (#560).
+    try:
+        _judged_outputs[os.path.normcase(str(final_path))] = (
+            final_path.stat() if already_exists else None)
+    except OSError:
+        _judged_outputs[os.path.normcase(str(final_path))] = None
 
     try:
         write_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3747,6 +3785,15 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                                                 "was NOT deleted")
 
             if _promote_local:
+                if _output_changed_since_judged(final_path):
+                    try:
+                        write_path.unlink()
+                    except OSError:
+                        pass
+                    n, total = next_count()
+                    logger.warning(f"[{n}/{total}] KEEP ({_CHANGED_WHILE_DECODING}) | "
+                                   f"{main_jxl.name}")
+                    return str(main_jxl), "refused", str(final_path)
                 # Atomic same-folder swap (see the _promote_local note above):
                 # a partial never carries the final name. A failure raises
                 # into the error handler, which deletes the temp. Only a
@@ -3822,6 +3869,7 @@ def process_group(group_tasks, workers, target_icc=None):
 
     if use_staging:
         staging_dir.mkdir(parents=True, exist_ok=True)
+    _judged_outputs.clear()
 
     tasks = []
     for task in group_tasks:
@@ -3840,6 +3888,7 @@ def process_group(group_tasks, workers, target_icc=None):
         })
 
     moved_finals = set()
+    changed_at_move = set()      # main JXLs whose destination changed (#560)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -3862,6 +3911,16 @@ def process_group(group_tasks, workers, target_icc=None):
                 continue
             if not write_path.exists():
                 logger.warning(f"  KEEP (staging file missing) | {write_path.name}")
+                continue
+            if _output_changed_since_judged(final_tiff):
+                # Not moved; reported as refused once the pool is done, like
+                # the same check without staging. The decode can be made again.
+                try:
+                    write_path.unlink()
+                except OSError:
+                    pass
+                logger.warning(f"  KEEP ({_CHANGED_WHILE_DECODING}) | {main_jxl.name}")
+                changed_at_move.add(str(main_jxl))
                 continue
             # A locked/readonly destination must not abort the whole batch:
             # the file stays in staging and is logged for manual recovery.
@@ -3918,6 +3977,9 @@ def process_group(group_tasks, workers, target_icc=None):
             pending_by_dest[dest] -= 1
             if use_staging and pending_by_dest[dest] == 0:
                 _move_dest_from_staging(tasks_by_dest[dest], status_map)
+    if changed_at_move:
+        results = [(r[0], "refused", r[2] if len(r) > 2 else "")
+                   if r[0] in changed_at_move else r for r in results]
 
     # Any mode, not just 8: the mode decides where the TIFF lands, deleting the
     # source JXL is a separate opt-in. Every gate below certifies THIS run's

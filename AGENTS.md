@@ -24,13 +24,24 @@
   `--exclude-folders` (same semantics as the encoder's). Smart sync never
   overwrites a TIFF that lacks its own `jxlphoto-src` marker (an original
   master): that is status `"refused"` — NOT `"skipped"`, because a skip
-  admits the source to `--delete-skipped`
+  admits the source to `--delete-skipped`. An existing TIFF is judged when
+  its group's decode starts; the fresh decode replaces it (locally or out of
+  staging) only if it is still the file judged (`_output_changed_since_judged`,
+  #560 — an edit saved meanwhile), else `"refused"`
 - `jxl_jpeg_transcoder.py` — JPEG↔JXL lossless + JXL→JPEG/PNG lossy.
   Never writes XMP provenance markers into a jbrd container (they break
   `djxl --reconstruct_jpeg`); the encode delete gate proves bit-exact
   recovery with a real reconstruction before unlinking a JPEG; ships a
   `--repair-jbrd` audit/repair mode for archives written by affected
-  v2.0.0–v2.0.3 versions. On the decode direction `--resize-*/--sharpen`
+  v2.0.0–v2.0.3 versions. `checksums.md5` lines are filed per output as it
+  lands (staging: when its folder leaves staging; otherwise right AFTER the
+  atomic swap, never before it — #556); a jbrd JXL without its line is
+  adopted only by a real reconstruction hashed before and after
+  (`_adopt_reconstructed_archive`; never in a dry run, which runs no
+  subprocess), and an overwrite across such a lineless archive is refused
+  when the reconstruction gives other bytes (`_lineless_archive_refusal`,
+  #557 — positive evidence only: a reconstruction that cannot run proves
+  nothing). On the decode direction `--resize-*/--sharpen`
   write DERIVATIVES (`jxlphoto-derived:<recipe>`) — never deleting, refused
   with the bit-exact recovery, `jxlphoto-src`/`srcsum` stripped from the
   copied metadata (a 2048 px JPEG must never prove the master is archived),
@@ -46,7 +57,10 @@
   gen=1, so the guard must not fire on a file's first recompression), copies
   jbrd JXLs verbatim by default, keep-smaller net; same delete gates.
   `--delete-skipped` without `--delete-source` is inert (warning only), like
-  the other scripts; multi-page groups (jxlphoto-mpg, keyed by folder) delete
+  the other scripts; an existing jbrd output (no markers, ever) is
+  overwritten only by its own bytes or by an archive of the same JPEG
+  (`_jbrd_overwrite_refusal`, #558 — its verbatim copy may be the only one
+  once `--delete-source` removed the source); multi-page groups (jxlphoto-mpg, keyed by folder) delete
   all-or-nothing — the gate must see EVERY planned page, including the ones
   that failed, were policy-skipped or refused, or it cannot veto;
   in-place promotion goes through a temp file in the destination folder plus
@@ -128,11 +142,16 @@
   block + `_decode_output_is_ours`, recompressor
   `_foreign_overwrite_refusals`, transcoder `_foreign_overwrite_filter`'s
   marker branch). Off + `--delete-source` exits 2 in every backend. It
-  never relaxes the jbrd/checksum refusals, the decoder's original-master
+  never relaxes the jbrd/checksum refusals (#557's reconstruction check and
+  #558's jbrd-output rule included), the decoder's original-master
   and edited-TIFF refusals, the derivative own-output check or any delete
   gate. The encoder's `--restamp-moved` and the adopt stamp rewrite a
   master only through `_rewrite_master_relation` (temp + reorder +
-  integrity + read-back + mtime kept + os.replace) and write no History.
+  integrity + read-back + mtime kept + `_changed_since` + os.replace) and
+  write no History. Every in-place edit that swaps a worked-on copy over the
+  original (that one, the thumbnail refresh, `--repair-jbrd`) checks
+  `_changed_since` (parity-pinned) right before the swap (#559), like the
+  in-place recompression checks `_source_changed_since_read`.
 - **Explorer thumbnail box (v2.16.0, `EXPLORER_THUMBNAIL`)**: a 768 px sRGB
   JPEG in an ISO BMFF `uuid` box (UUID `4e0b4016-f51c-473d-9669-bc35aebe3c16`,
   payload `jxlphoto-thumbnail:v1:<bytes>:<fnv>\n` + JPEG) placed before the

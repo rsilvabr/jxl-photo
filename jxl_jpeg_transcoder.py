@@ -385,6 +385,18 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
+def _changed_since(path, st) -> bool:
+    """Is `path` no longer the file `st` (its os.stat before an in-place edit
+    began) describes? A file that cannot be read counts as changed. Checked
+    right before the edited copy replaces it (#559): one rewritten meanwhile
+    by another run would otherwise be put back to its old version."""
+    try:
+        now = os.stat(path)
+    except OSError:
+        return True
+    return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -2121,6 +2133,23 @@ def store_jxl_self_hash_db(jxl_path: Path, md5: str):
     entry = f"{md5}  {jxl_path.name}{JXL_SELF_HASH_SUFFIX}\n"
     _append_checksum_line(db_path, entry)
 
+def _file_checksum_lines(jxl_path: Path, src_md5: str, jxl_md5: Optional[str]) -> bool:
+    """An output's lines (source md5, JXL self-hash) in its own folder's db.
+
+    False, with a warning, when the db cannot be written (read-only, held open
+    by a scanner): the run goes on, the output simply has no line, which every
+    gate reads as "not proven" (fail closed), and the next deleting run
+    settles it by reconstruction (#556)."""
+    try:
+        store_md5_db(jxl_path, src_md5)
+        if jxl_md5:
+            store_jxl_self_hash_db(jxl_path, jxl_md5)
+        return True
+    except OSError as e:
+        logger.warning(f"  checksum of {jxl_path.name} NOT recorded ({e}) — fail closed")
+        return False
+
+
 def read_jxl_self_hash_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     if not db_path.exists():
@@ -2711,10 +2740,6 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             raise RuntimeError("tool returned 0 but the output failed the integrity check")
 
         if src_md5:
-            # Use write_path directory but final_path name (no UUID) for checksum entry
-            # This ensures checksums.md5 has correct filenames even with staging
-            checksum_path = write_path.parent / final_path.name
-            store_md5_db(checksum_path, src_md5)
             # Also record the JXL's OWN md5 under the suffixed key. The plain
             # entry binds the db to the SOURCE's bytes; this one binds it to
             # the OUTPUT's — the decode-side gates can then prove the JXL on
@@ -2722,19 +2747,31 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             # replacement. Hashed AFTER reorder_jxl_boxes + the integrity
             # check, so it is the exact bytes that reached the destination.
             jxl_md5 = md5_of_file(write_path)
-            store_jxl_self_hash_db(checksum_path, jxl_md5)
+            if not _promote_local:
+                # Staging: the staging db, under the final name (no uuid).
+                # The mover files the lines at the destination.
+                checksum_path = write_path.parent / final_path.name
+                store_md5_db(checksum_path, src_md5)
+                store_jxl_self_hash_db(checksum_path, jxl_md5)
 
         if _promote_local:
             # Atomic same-folder swap: the final name only ever names a
             # verified, complete file. A failure raises into the except
             # handler, which deletes the temp.
             os.replace(str(write_path), str(final_path))
+            # The lines only AFTER the swap (#556). Filed first, they named a
+            # file the swap had not replaced yet: a run stopped in between
+            # left the OLD archive under the NEW source's checksum. Stopped
+            # here instead, the JXL has no line yet, and the next deleting
+            # run adopts it by reconstruction.
+            if src_md5:
+                _file_checksum_lines(final_path, src_md5, jxl_md5)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {final_path.name}")
-        # result[4] carries the JXL self-hash so the staging redistribution
-        # below can file it next to the source hash at the destination.
+        # result[4] carries the JXL self-hash so the staging mover can file it
+        # next to the source hash at the destination.
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
                 src_md5, jxl_md5)
     except Exception as e:
@@ -3048,6 +3085,46 @@ def _jxl_reconstructs_to(jxl_path: Path, jpeg_path: Path) -> bool:
             pass
 
 
+def _adopt_reconstructed_archive(src_path: Path, jxl_path: Path,
+                                 dry_run: bool = False) -> bool:
+    """Adopt a jbrd JXL that has NO checksums.md5 line but that
+    `djxl --reconstruct_jpeg` turns back into exactly src_path's bytes (#556).
+
+    Such a file is that JPEG's archive, written by a run that stopped after the
+    JXL reached its folder and before its checksum lines did (killed, Ctrl+C,
+    a power cut), or with --no-md5. The reconstruction proves more than the
+    line itself would, so the lines (source md5, JXL self-hash) are written now
+    and the caller treats the pair as archived. False, and nothing written,
+    when it does not reconstruct, cannot be checked (djxl < 0.12 — and a dry
+    run, which runs no subprocess), STORE_MD5 is off, or the line could not be
+    recorded (the db lock): the caller then fails closed as before.
+    """
+    if dry_run or not STORE_MD5 or not has_jbrd_box(jxl_path):
+        return False
+    # Hashed before AND after the reconstruction: a file rewritten while it
+    # was being checked must not get a line for bytes nobody compared.
+    try:
+        src_md5, jxl_md5 = md5_of_file(src_path), md5_of_file(jxl_path)
+    except OSError:
+        return False
+    if not _jxl_reconstructs_to(jxl_path, src_path):
+        return False
+    try:
+        if md5_of_file(src_path) != src_md5 or md5_of_file(jxl_path) != jxl_md5:
+            return False
+        store_md5_db(jxl_path, src_md5)
+        store_jxl_self_hash_db(jxl_path, jxl_md5)
+    except OSError as e:
+        logger.warning(f" could not record the checksum of {jxl_path.name} ({e})")
+        return False
+    if read_md5_db(jxl_path) is None:
+        return False
+    logger.info(f" ADOPTED {jxl_path.name}: an earlier run wrote it but stopped before "
+                f"recording its checksum; djxl --reconstruct_jpeg gives {src_path.name} "
+                f"back from it byte for byte")
+    return True
+
+
 def _jxl_binds_to_archived_jpeg(jxl_path: Path, archived_jpeg: Path,
                                 stored_jpeg_md5: Optional[str]) -> bool:
     """Prove the JXL on disk is the file the archived JPEG came from.
@@ -3242,11 +3319,15 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
     else:
         tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
     try:
+        st = jxl_path.stat()
         rec_md5, detail = _strip_markers_proving_repair(jxl_path, tmp)
         if rec_md5 is None:
             return "broken", detail
         if dry_run:
             return "repairable", detail
+        if _changed_since(jxl_path, st):
+            return "broken", ("the file changed while it was being repaired (another "
+                              "run?) — left untouched; run --repair-jbrd again")
         os.replace(str(tmp), str(jxl_path))
         if (read_md5_db(jxl_path) is not None
                 or read_jxl_self_hash_db(jxl_path) is not None):
@@ -3387,8 +3468,23 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
             if _promote_from_staging(write_out, final_out):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_out)))
+                if not decode:
+                    _file_checksums(final_out, result_by_src.get(str(src)))
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
+
+    # The destination checksum lines of an output, filed right after its move
+    # (#556). They used to be written once the WHOLE run was over: a run
+    # stopped in between (killed, Ctrl+C, a power cut) left every folder
+    # already moved without them, and later deleting runs refused those JXLs.
+    filed = set()
+    result_by_src = {}
+
+    def _file_checksums(final_out, r):
+        if r is None or r[1] not in ("ok", "reconvert") or len(r) < 4 or not r[3]:
+            return
+        if _file_checksum_lines(final_out, r[3], r[4] if len(r) > 4 else None):
+            filed.add(os.path.normcase(str(final_out)))
 
     # Per-destination bookkeeping so a folder can be flushed the moment its last
     # file lands, instead of stalling the pool at every folder boundary.
@@ -3422,6 +3518,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 result = (str(task[0]), "error", str(e), None)
             results.append(result)
             status_map[result[0]] = result[1]
+            result_by_src[result[0]] = result
 
             # Flush this destination folder once every one of its files is done.
             # Runs on the main thread (inside the as_completed loop), so no two
@@ -3458,13 +3555,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 if os.path.normcase(str(_final)) not in moved_finals:
                     _stranded += 1
                     continue
-                _final.parent.mkdir(parents=True, exist_ok=True)
-                store_md5_db(_final, _r[3])
-                # The JXL's own md5 rode out of the worker at result[4]; file
-                # it next to the source hash so the destination db is complete
-                # (the staging copy of this line dies with the staging db).
-                if len(_r) > 4 and _r[4]:
-                    store_jxl_self_hash_db(_final, _r[4])
+                if os.path.normcase(str(_final)) in filed:
+                    continue                    # filed at its move (#556)
+                # Its filing at the move failed: one more try. The JXL's own
+                # md5 rode out of the worker at result[4] and goes next to the
+                # source hash (the staging copy dies with the staging db).
+                _file_checksum_lines(_final, _r[3], _r[4] if len(_r) > 4 else None)
             staging_db = staging_dir / CHECKSUMS_FILENAME
             if staging_db.exists():
                 if _stranded:
@@ -3531,6 +3627,9 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 #   decode (JXL -> JPEG): the stored md5 IS the original JPEG's,
                 #     so compare it against the recovered JPEG on disk.
                 stored = read_md5_db(final_file if not decode else src_path)
+                if (stored is None and not decode
+                        and _adopt_reconstructed_archive(src_path, final_file)):
+                    stored = read_md5_db(final_file)      # #556
                 if stored is None:
                     if DELETE_SOURCE_REQUIRE_MD5:
                         _delete_stats["kept"] += 1
@@ -3665,7 +3764,38 @@ def _prov_src_root(args):
     return args.input.parent if args.input.is_file() else args.input
 
 
-def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
+def _lineless_archive_refusal(jxl_path: Path, jpeg_path: Path, decode: bool) -> Optional[str]:
+    """Why an overwrite across a lossless JPEG archive that has NO checksums.md5
+    line must be refused (#557), or None.
+
+    A missing line used to be no evidence at all, so a lossless archive whose
+    db was deleted, left behind when only the .jxl files were copied, or
+    written with --no-md5 was overwritten by any same-named JPEG — though it
+    may be that photo's only copy. The archive is its own evidence: djxl
+    --reconstruct_jpeg gives back the JPEG it holds. Refused when that ran and
+    gave bytes other than jpeg_path's (another photo, or this one edited since:
+    what a recorded line refuses too), and when jpeg_path cannot be hashed
+    (fail closed). None when it gives jpeg_path back, or when it cannot run
+    (djxl < 0.12, a damaged archive): that proves nothing either way.
+    """
+    rec = _jxl_reconstruct_md5(jxl_path)
+    if rec is None:
+        return None
+    try:
+        if md5_of_file(jpeg_path) == rec:
+            return None
+    except OSError as e:
+        return f"could not hash {jpeg_path.name} ({e})"
+    if decode:
+        return ("the existing JPEG is not the one this JXL holds (no checksum "
+                "recorded, and djxl --reconstruct_jpeg gives other bytes) — another "
+                "photo, or a copy edited since")
+    return ("it is the lossless archive of a DIFFERENT JPEG (no checksum recorded, "
+            "and djxl --reconstruct_jpeg does not give this source back from it) — "
+            "if this is the same photo edited since, delete the old .jxl first")
+
+
+def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False):
     """The half of _provenance_filter that runs when this run does NOT delete
     in a collapsing mode: drop every pair this run is about to OVERWRITE onto
     an existing output that is provably ANOTHER source's.
@@ -3679,8 +3809,11 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
       * a lossless JPEG archive (jbrd, no XMP by design) whose recorded
         checksum is not this JPEG's — another photo, or this one edited since;
       * on the JXL -> JPEG recovery, an existing JPEG whose bytes are not the
-        checksum this JXL recorded.
-    No record either way (markerless, no checksums.md5 entry) keeps the old
+        checksum this JXL recorded;
+      * the same two without a recorded checksum, when djxl --reconstruct_jpeg
+        gives other bytes (#557, _lineless_archive_refusal). A dry run runs no
+        reconstruction: it only says how many a real run will check.
+    No record either way on a LOSSY output (markerless) keeps the old
     behaviour. A hash that cannot be computed is a refusal (fail closed).
 
     would_write(src, out) -> bool is the run's own should_process; without it
@@ -3699,6 +3832,7 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
         return pairs, []
     marks = _read_source_markers_batch(sorted({out for _s, out in targets}))
     refused = []
+    lineless = []       # (src, out, jxl, jpeg, decode): judged by reconstruction below
     _marker_refusal = False
     for src, out in targets:
         why = None
@@ -3722,6 +3856,8 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
                                "edited since")
                 except OSError as e:
                     why = f"could not hash the existing output ({e})"
+            else:
+                lineless.append((src, out, src, out, True))
         elif out.suffix.lower() == ".jxl" and has_jbrd_box(out):
             stored = read_md5_db(out)
             if stored is not None:
@@ -3733,8 +3869,21 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
                                ".jxl first")
                 except OSError as e:
                     why = f"could not hash the source ({e})"
+            else:
+                lineless.append((src, out, out, src, False))
         if why:
             refused.append((src, out, why))
+    if lineless and dry_run:
+        logger.info(f" DRY | {len(lineless)} existing lossless archive(s) without a "
+                    f"checksum line: a real run checks each with djxl --reconstruct_jpeg "
+                    f"before overwriting it")
+    elif lineless:
+        logger.info(f"Overwrite guard: {len(lineless)} existing lossless archive(s) have "
+                    f"no checksum line; checking each with djxl --reconstruct_jpeg...")
+        for src, out, jxl, jpeg, decode in lineless:
+            why = _lineless_archive_refusal(jxl, jpeg, decode)
+            if why:
+                refused.append((src, out, why))
     if not refused:
         return pairs, []
     _bad = {(os.path.normcase(str(s)), os.path.normcase(str(o))) for s, o, _w in refused}
@@ -3761,7 +3910,8 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write):
 
 
 def _provenance_filter(pairs, mode, decode_lossless=False,
-                       output_arg=None, source_root=None, would_write=None):
+                       output_arg=None, source_root=None, would_write=None,
+                       dry_run=False):
     """Drop pairs whose output already exists and came from a DIFFERENT source.
 
     The STRICT check (every existing output must prove it came from this
@@ -3778,7 +3928,7 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
     Returns (kept_pairs, refused) — refused is [(src, out, why)].
     """
     if not (DELETE_SOURCE and _run_collapses_structure(mode, output_arg, source_root)):
-        return _foreign_overwrite_filter(pairs, decode_lossless, would_write)
+        return _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run)
     existing = sorted({out for _s, out in pairs if out.exists()})
     if not existing:
         return pairs, []
@@ -3821,9 +3971,21 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
             # archived this source, not a swapped same-named replacement.
             if out.suffix.lower() == ".jxl" and has_jbrd_box(out):
                 stored = read_md5_db(out)
+                if stored is None and _adopt_reconstructed_archive(src, out, dry_run):
+                    kept.append((src, out))       # #556: proven by reconstruction
+                    continue
                 if stored is None:
-                    why = ("no checksum to prove it "
-                           "(was it written with --no-md5?)")
+                    if dry_run:
+                        why = ("no checksum to prove it (a real run checks whether "
+                               "djxl --reconstruct_jpeg gives this JPEG back from it)")
+                    elif not STORE_MD5:
+                        why = "no checksum to prove it (--no-md5 records none)"
+                    elif not _tool_at_least("djxl", 0, 12):
+                        why = ("no checksum to prove it, and djxl < 0.12 cannot check "
+                               "it by reconstruction")
+                    else:
+                        why = ("no checksum to prove it, and djxl --reconstruct_jpeg "
+                               "does not give this JPEG back from it")
                 else:
                     try:
                         _src_md5 = md5_of_file(src)
@@ -4078,7 +4240,8 @@ def cmd_transcode(args, auto_decode: bool = False):
     pairs, _refused = _provenance_filter(
         pairs, args.mode, decode_lossless=decode,
         output_arg=args.output, source_root=_prov_src_root(args),
-        would_write=lambda s, o: should_process(s, o, smart_mode, reconvert_explicit))
+        would_write=lambda s, o: should_process(s, o, smart_mode, reconvert_explicit),
+        dry_run=args.dry_run)
     if _refused:
         _counter["total"] = len(pairs)
 
@@ -4429,16 +4592,21 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # run in a collapsing mode with --delete-source fails closed with the
         # misleading "no checksum to prove it (was it written with --no-md5?)".
         jxl_md5 = None
-        if STORE_MD5 and src_md5 and has_jbrd_box(write_path):
-            checksum_path = write_path.parent / final_path.name
-            store_md5_db(checksum_path, src_md5)
+        jbrd_lines = bool(STORE_MD5 and src_md5 and has_jbrd_box(write_path))
+        if jbrd_lines:
             # Hashed AFTER reorder_jxl_boxes + the integrity check, so it is
             # the exact bytes that reach the destination.
             jxl_md5 = md5_of_file(write_path)
-            store_jxl_self_hash_db(checksum_path, jxl_md5)
+            if not _promote_local:
+                checksum_path = write_path.parent / final_path.name
+                store_md5_db(checksum_path, src_md5)
+                store_jxl_self_hash_db(checksum_path, jxl_md5)
 
         if _promote_local:
             os.replace(str(write_path), str(final_path))
+            if jbrd_lines:
+                # After the swap, never before it (#556; see encode_one_transcode).
+                _file_checksum_lines(final_path, src_md5, jxl_md5)
 
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
@@ -5431,12 +5599,24 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 if _promote_from_staging(write_out, final_out):
                     moved += 1
                     moved_finals.add(os.path.normcase(str(final_out)))
+                    if direction == "to_jxl":
+                        _file_checksums(final_out, result_by_src.get(str(src)))
             elif write_out.exists():
                 # Failed conversion: do not promote a partial/corrupt file to the
                 # final destination. Leave it in staging so the user can inspect.
                 logger.warning(f"Staging: not promoting {write_out.name} (status={status})")
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
+
+    # Filed right after each move (#556), as in process_group_transcode.
+    filed = set()
+    result_by_src = {}
+
+    def _file_checksums(final_out, r):
+        if r is None or r[1] not in ("ok", "reconvert") or len(r) < 4 or not r[3]:
+            return
+        if _file_checksum_lines(final_out, r[3], r[4] if len(r) > 4 else None):
+            filed.add(os.path.normcase(str(final_out)))
 
     # Per-destination bookkeeping so a folder can be flushed the moment its last
     # file lands, instead of stalling the pool at every folder boundary.
@@ -5471,6 +5651,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 result = (str(task[0]), "error", str(e), None)
             results.append(result)
             status_map[result[0]] = result[1]
+            result_by_src[result[0]] = result
 
             # Flush this destination folder once every one of its files is done.
             # Runs on the main thread (inside the as_completed loop), so no two
@@ -5495,10 +5676,9 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
             if os.path.normcase(str(_final)) not in moved_finals:
                 _stranded += 1
                 continue
-            _final.parent.mkdir(parents=True, exist_ok=True)
-            store_md5_db(_final, _r[3])
-            if len(_r) > 4 and _r[4]:
-                store_jxl_self_hash_db(_final, _r[4])
+            if os.path.normcase(str(_final)) in filed:
+                continue                        # filed at its move (#556)
+            _file_checksum_lines(_final, _r[3], _r[4] if len(_r) > 4 else None)  # a retry
         staging_db = staging_dir / CHECKSUMS_FILENAME
         if staging_db.exists():
             if _stranded:
@@ -5714,7 +5894,8 @@ def cmd_convert(args, from_jxl: bool = True):
         pairs, args.mode,
         output_arg=args.output, source_root=_prov_src_root(args),
         would_write=lambda s, o: (os.path.normcase(str(o)) in _FORCE_REDERIVE
-                                  or should_process(s, o, smart_mode, reconvert_explicit)))
+                                  or should_process(s, o, smart_mode, reconvert_explicit)),
+        dry_run=args.dry_run)
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -6305,7 +6486,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         decode_lossless=(use_transcode and all(
             s.suffix.lower() == '.jxl' for s, _o in pairs)),
         output_arg=args.output, source_root=_prov_src_root(args),
-        would_write=lambda s, o: should_process(s, o, args.sync, args.overwrite))
+        would_write=lambda s, o: should_process(s, o, args.sync, args.overwrite),
+        dry_run=args.dry_run)
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -6615,7 +6797,8 @@ Examples:
                         help="How an EXISTING output is matched to the source about "
                              "to overwrite it. Every --sync/--overwrite run refuses to "
                              "overwrite an output that is provably another source's "
-                             "(marker, or checksums.md5 for lossless JPEG archives); "
+                             "(marker; for lossless JPEG archives checksums.md5, or "
+                             "djxl --reconstruct_jpeg when there is no line); "
                              "with --delete-source in modes 2/4/5/6/7 every existing "
                              "output must also prove it came from this source. "
                              "path (default, free) compares the recorded LOCATION; "

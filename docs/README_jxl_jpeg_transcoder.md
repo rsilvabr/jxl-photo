@@ -435,10 +435,14 @@ Options:
                      provably another source's: a marker naming a different file,
                      a lossless JPEG archive (jbrd) whose recorded checksum is not
                      this JPEG's, or -- on the JXL->JPEG recovery -- an existing
-                     JPEG that is not the one this JXL recorded. The overwrite is
-                     the loss when an earlier run already deleted that other
-                     source. The refusal is an error (exit 1); an output with no
-                     record either way is overwritten as before. A JPEG edited in
+                     JPEG that is not the one this JXL recorded. A lossless
+                     archive with NO recorded checksum is its own record:
+                     djxl --reconstruct_jpeg must give that JPEG back, or it is
+                     refused too (a dry run does not reconstruct; it says how
+                     many a real run will check). The overwrite is the loss when
+                     an earlier run already deleted that other source. The
+                     refusal is an error (exit 1); a lossy output with no record
+                     either way is overwritten as before. A JPEG edited in
                      place since it was archived reads as "another source": delete
                      the old .jxl first to re-archive it.
                      There is NO `adopt` here (the encoder has one): an output
@@ -453,8 +457,10 @@ Options:
                      (the marker records the source's full PATH, so a renamed folder
                      reads as "a different source"). Refused together with
                      --delete-source (exit 2). Still refused: a lossless JPEG
-                     archive (jbrd) of a different JPEG, and a recovered JPEG whose
-                     checksum does not match. Same as OVERWRITE_GUARD = False.
+                     archive (jbrd) of a different JPEG (by its checksum, or by
+                     djxl --reconstruct_jpeg when it has none), and a recovered
+                     JPEG whose checksum or reconstruction does not match. Same
+                     as OVERWRITE_GUARD = False.
                      Details: behavior_and_limitations.md, "Renamed folders and the
                      overwrite guard" (#renamed-folders-and-the-overwrite-guard)
   --delete-skipped   [with --delete-source] Also delete sources whose output ALREADY
@@ -532,7 +538,7 @@ entirely on the direction, and the difference is large**:
 
 | Direction | Flags | What backs the delete |
 |---|---|---|
-| JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected |
+| JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected. A JXL without its line (a run stopped midway, or `--no-md5`) is accepted only when `djxl --reconstruct_jpeg` gives this JPEG back byte for byte; the line is written then |
 | JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN, bound to the JXL's content.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it — **and** the JXL itself must be the file that was archived: its own MD5 is stored beside the original's (a `<name>.jxl-md5` line), and databases written before that fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12). A same-named JXL that was never archived fails both, and when no proof can run the source is KEPT |
 | JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Provenance marker** naming this source + structural check |
 | JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Provenance marker** naming this source + structural check |
@@ -565,7 +571,8 @@ entirely on the direction, and the difference is large**:
 
 Without a stored checksum, the lossless directions refuse by default
 (`DELETE_SOURCE_REQUIRE_MD5 = True`) rather than fall back to the structural
-check. Setting it to `False` allows the delete and logs the missing provenance
+check — except a JPEG → JXL archive that `djxl --reconstruct_jpeg` proves, as
+above. Setting it to `False` allows the delete and logs the missing provenance
 per file.
 
 > ### Bit-exact recovery is proven, not assumed
@@ -826,6 +833,14 @@ output's name — and, on the second line, the JXL's **own** MD5 under the
 `<name>.jxl-md5` companion key. The companion line is backward-compatible:
 plain-name lookups match names exactly, so it never shadows them, and
 databases written before it existed simply have no self-hash line.
+
+**When the lines are written:** as each JXL lands in its folder — with
+staging, when its folder leaves staging; without, right after the JXL
+replaces its temp file, never before. A run stopped in between leaves a JXL
+without its line. The next run that needs it (a deleting run) accepts that
+JXL only when `djxl --reconstruct_jpeg` gives the JPEG back byte for byte,
+writes the line and logs `ADOPTED`; otherwise the JPEG is kept, as before. A
+dry run does not reconstruct and says so.
 
 **During decode:** Recovered JPEG MD5 is compared against stored hash.
 

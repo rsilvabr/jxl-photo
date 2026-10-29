@@ -84,6 +84,9 @@ SHARED_HELPERS = [
     # folder the others handle.
     "_ansi_encodable",
     "_argfile_via_stdin",
+    # The "still the file that was copied?" check before an in-place edit
+    # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
+    "_changed_since",
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
     "_long_codec_paths",

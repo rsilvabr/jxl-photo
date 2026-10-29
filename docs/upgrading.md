@@ -13,7 +13,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ## v2.17.1: old thumbnail pages are removed; derivatives skip thumbnail pages
 
-Nothing to do. Two things a run now does that it did not before:
+Nothing to do. Four things a run now does that it did not before:
 
 - **The encoder removes a thumbnail page an earlier encode of the same TIFF
   left behind** — after re-archiving with `--thumbnail-mode exclude
@@ -27,6 +27,18 @@ Nothing to do. Two things a run now does that it did not before:
   JXL → JPEG/PNG) make no derivative of a thumbnail page. Derivatives of
   thumbnail pages written by v2.17.0 stay where they are; delete them if you
   have any (`*_thumbnail*` in the derivative folders).
+- **A deleting JPEG → JXL run can delete JPEGs an earlier version kept.** A
+  lossless JXL without its `checksums.md5` line — left by a run that was
+  stopped midway, or written with `--no-md5` — is now accepted once
+  `djxl --reconstruct_jpeg` gives its JPEG back byte for byte, so
+  `--delete-source --delete-skipped` deletes that JPEG instead of keeping it
+  for good. Every other delete check is unchanged.
+- **A lossless JPEG archive is overwritten only by the same JPEG.** A sync or
+  `--overwrite` that meets an existing lossless archive with no checksum line
+  (transcoder), or an existing lossless archive in the output folder
+  (recompressor), now asks `djxl --reconstruct_jpeg` first, and refuses — exit
+  code 1, `REFUSING`/`REFUSED` in the log — when the archive holds another
+  JPEG. If the photo really changed, delete the old `.jxl` first.
 
 ## v2.17.0: thumbnail pages are kept by default; film scans are lossless
 

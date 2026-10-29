@@ -246,6 +246,18 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
+def _changed_since(path, st) -> bool:
+    """Is `path` no longer the file `st` (its os.stat before an in-place edit
+    began) describes? A file that cannot be read counts as changed. Checked
+    right before the edited copy replaces it (#559): one rewritten meanwhile
+    by another run would otherwise be put back to its old version."""
+    try:
+        now = os.stat(path)
+    except OSError:
+        return True
+    return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -4792,6 +4804,9 @@ def _rewrite_master_relation(jxl_path: Path, arg_lines: list, expect_src: str):
         if got != expect_src:
             return f"the record read back is {got!r}, expected {expect_src!r}"
         os.utime(str(tmp), ns=(st.st_atime_ns, st.st_mtime_ns))
+        if _changed_since(jxl_path, st):
+            return ("the master changed while its record was being rewritten (another "
+                    "run?) — left untouched")
         os.replace(str(tmp), str(jxl_path))
         return None
     except Exception as e:
@@ -5813,6 +5828,14 @@ def _clean_stale_split_pages(all_items, results, dry_run: bool = False) -> dict:
             new_pages.update({p: key for p in finals})
     if not owner:
         return stats
+    # Each candidate as it was before its marker was read: one rewritten in
+    # between (another run writing a new layout) is not the file judged (#559).
+    seen = {}
+    for p in owner:
+        try:
+            seen[p] = os.stat(p)
+        except OSError:
+            pass
     marks = _read_page_markers_batch(list(owner) + list(new_pages))
     new_groups = {}     # tiff key -> group ids its new pages carry
     for p, key in new_pages.items():
@@ -5829,6 +5852,12 @@ def _clean_stale_split_pages(all_items, results, dry_run: bool = False) -> dict:
                 logger.info(f"Would remove a thumbnail page left by an earlier encode of "
                             f"{tiff_of[key].name}: {cand}")
                 stats["removed"] += 1
+                continue
+            if cand not in seen or _changed_since(cand, seen[cand]):
+                stats["kept"] += 1
+                logger.warning(f"A thumbnail page left by an earlier encode of "
+                               f"{tiff_of[key].name} changed while it was checked "
+                               f"(another run?): {cand} — KEPT")
                 continue
             try:
                 os.unlink(cand)

@@ -182,10 +182,11 @@ def test_decoder_would_skip_matches_the_real_decision(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _tr_run(tmp_path, monkeypatch, *, delete_skipped, stored="match",
-            require_md5=True, integrity=True):
+            require_md5=True, integrity=True, reconstructs=True):
     """One JPEG whose JXL already exists, so it reports SKIP.
 
     stored: "match" | "wrong" | None (no checksums.md5 entry at all)
+    reconstructs: what the stubbed djxl --reconstruct_jpeg proves
     """
     src = tmp_path / "photo.jpg"
     src.write_bytes(b"\xff\xd8" + b"payload-of-the-real-source" + b"\xff\xd9")
@@ -208,7 +209,7 @@ def _tr_run(tmp_path, monkeypatch, *, delete_skipped, stored="match",
     # The delete gate now proves bit-exact recovery with a REAL
     # djxl --reconstruct_jpeg before unlinking a JPEG source; these stubs
     # cannot reconstruct, so stand in for a working reconstruction.
-    monkeypatch.setattr(tr, "_jxl_reconstructs_to", lambda j, s: True)
+    monkeypatch.setattr(tr, "_jxl_reconstructs_to", lambda j, s: reconstructs)
     tr.process_group_transcode([(src, final)], 1, decode=False, verify=False,
                                mode=3, reconvert_val=False, smart=True)
     return src
@@ -231,9 +232,19 @@ def test_transcoder_accepts_proven_provenance(tmp_path, monkeypatch):
 
 
 def test_transcoder_without_a_checksum_keeps_by_default(tmp_path, monkeypatch):
-    """No stored hash means no provenance at all; the default refuses."""
+    """No stored hash, and the JXL does not give this JPEG back: no provenance
+    at all; the default refuses."""
     assert _tr_run(tmp_path, monkeypatch, delete_skipped=True,
-                   stored=None).exists()
+                   stored=None, reconstructs=False).exists()
+
+
+def test_transcoder_without_a_checksum_adopts_what_djxl_reconstructs(tmp_path, monkeypatch):
+    """#556: no stored hash (a run stopped before recording it), but
+    djxl --reconstruct_jpeg gives this JPEG back byte for byte — a stronger
+    proof than the line. The line is written and the source deleted."""
+    src = _tr_run(tmp_path, monkeypatch, delete_skipped=True, stored=None)
+    assert not src.exists()
+    assert tr.read_md5_db(tmp_path / "photo.jxl") is not None
 
 
 def test_transcoder_without_a_checksum_can_be_opted_out(tmp_path, monkeypatch, caplog):

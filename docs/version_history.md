@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.17.1](#v2171)** | (not released yet) | A TIFF re-encoded with fewer pages no longer leaves its old thumbnail page beside the archive; derivative runs skip thumbnail pages; exiftool works with a temp folder outside the Windows code page (round 66, 5 fixes) |
+| **[v2.17.1](#v2171)** | (not released yet) | A TIFF re-encoded with fewer pages no longer leaves its old thumbnail page beside the archive; derivative runs skip thumbnail pages; exiftool works with a temp folder outside the Windows code page; lossless JPEG archives: a run stopped midway no longer leaves JPEGs that are never deleted, and another photo of the same name never overwrites one; in-place edits never put back an older version, and the decoder never writes over a TIFF edited during the decode (round 66, 10 fixes) |
 | [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
 | [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
 | [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
@@ -78,8 +78,8 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 **Not released yet** (prepared 2026-10-29; more changes may join it before it
 is tagged — a new flag or setting would make it v2.18.0 instead). Fixes from
-an audit of what changed since v2.15.2 (round 66, #551–#555); none had a case
-on the owner's archive. See
+an audit of what changed since v2.15.2 (round 66, #551–#560); none of those
+looked for had a case on the owner's archive. See
 [Upgrading](upgrading.md#v2171-old-thumbnail-pages-are-removed-derivatives-skip-thumbnail-pages).
 
 - **A TIFF re-encoded with fewer pages no longer leaves its old pages behind
@@ -112,8 +112,44 @@ on the owner's archive. See
   the run's distance before v2.17.0 is refused by `--delete-skipped` and the
   adopt scan (it is verified at `SCAN_DISTANCE`); the message now says so and
   names `--scan-distance same`.
+- **A JPEG → JXL run stopped midway no longer leaves JPEGs that are never
+  deleted (#556).** With staging, the archives' checksum lines reached their
+  folders only once the whole run was over; a run stopped before that
+  (killed, Ctrl+C, a power cut) left the JXLs already moved without them, and
+  every later deleting run kept their JPEGs ("no checksum to prove it").
+  Nothing was deleted wrongly. The lines are now filed as each JXL lands
+  (without staging, right after its atomic swap, never before it), and a JXL
+  found without one is accepted once `djxl --reconstruct_jpeg` gives the JPEG
+  back byte for byte. Found by stopping the OUTTAKES preset midway on copies
+  of real outtakes.
+- **A lossless JPEG archive is never overwritten by another photo of the same
+  name (#557, #558).** Without its `checksums.md5` line (deleted, left behind
+  when only the `.jxl` files were copied, or written with `--no-md5`), the
+  transcoder's lossless archive was overwritten by any same-named JPEG a later
+  `--sync` or `--overwrite` met, and the lossless JXL → JPEG recovery could
+  overwrite a JPEG its JXL does not hold. The recompressor's verbatim copy of
+  such an archive — the only copy once `--delete-source` removed its source —
+  was overwritten by another same-named file in a flat output folder: a jbrd
+  file carries no provenance marker to compare. Both now ask
+  `djxl --reconstruct_jpeg` and refuse unless it is the same JPEG, with
+  `--no-overwrite-guard` too.
+- **In-place edits never put back an older version (#559).** The restamp of
+  a renamed folder (`--restamp-moved`, `--restamp-then-sync`, the adopt
+  stamp), `--refresh-explorer-thumbnails` and `--repair-jbrd` work on a copy
+  for a second or two and then swap it in; a file another run rewrote in that
+  window went back to its old version. The swap now happens only if the file
+  did not change meanwhile — otherwise it is left as it is and reported.
+- **The decoder never writes over a TIFF edited during the decode (#560).**
+  It checks that an existing TIFF is its own unedited decode when a decode
+  starts and swaps the new one in when it ends (with staging, when the whole
+  folder is done); an edit saved in between was replaced. Now the TIFF must
+  be unchanged at the swap, or the new decode is discarded, the TIFF kept and
+  the photo reported as refused.
 
-Tests: `tests/test_audit_261029.py` (15, all failing against `989b670`).
+Tests: `tests/test_audit_261029.py` (the 15 of #551–#555 all fail against
+`989b670`; against `025b1dc`, 6 of the 7 of #556, 3 of the 4 of #557 and of
+#558, the 4 of #559 and the 2 of #560 fail — the others guard the legitimate
+case) and one in `tests/test_delete_skipped_children.py`.
 
 ## v2.17.0
 

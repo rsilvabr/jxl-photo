@@ -334,6 +334,14 @@ overwritten): there is nothing to compare. `--overwrite` does not override the
 refusal — rename one of the files or write into another folder (moved
 sources: `--provenance content`).
 
+A lossless JPEG archive (jbrd) never carries markers, so it has its own rule
+(#558): an existing jbrd output is overwritten only by the same bytes, or by an
+archive that `djxl --reconstruct_jpeg` turns into the same JPEG (that photo
+archived again at another effort). Anything else is refused — another JPEG's
+archive, or a file that is no JPEG archive at all — with
+`--no-overwrite-guard` too: the verbatim copy may be the only one left once
+`--delete-source` removed its source.
+
 ## Deleting the originals
 
 `--delete-source` removes each source JXL — unless the JXL changed on disk

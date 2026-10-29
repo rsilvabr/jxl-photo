@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #556.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #561.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-66 — pages left by an earlier split, and a temp folder exiftool cannot name](#round-66--pages-left-by-an-earlier-split-and-a-temp-folder-exiftool-cannot-name-2026-10-29) | 2026-10-29 | v2.17.1 | #551–#555 (5) |
+| [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.17.1 | #551–#560 (10) |
 | [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
 | [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
 | [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |
@@ -76,12 +76,22 @@ were never tagged and never shipped.
 
 ---
 
-## Round-66 — pages left by an earlier split, and a temp folder exiftool cannot name (2026-10-29)
+## Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run (2026-10-29)
 
 An audit of what changed since v2.15.2, with every finding proved on
-synthetic files in hostile folders. None had a case on the owner's archive
-(0 `*_thumbnail*` files under 2024–2026). Regression tests:
-`tests/test_audit_261029.py` (all 15 fail against `989b670`).
+synthetic files in hostile folders. None of #551–#556 had a case on the
+owner's archive (0 `*_thumbnail*` files under 2024–2026; the outtakes of
+#556 were never converted); #557–#560 were not looked for there.
+#556 came from killing the OUTTAKES JPEG + APAGAR preset midway on copies of
+234 real outtakes; #557 and #558 from asking what else a missing line, or a
+jbrd file's missing marker, lets through; #559 and #560 from comparing every
+in-place edit and every overwrite with the in-place recompression, which
+already checked. Regression tests: `tests/test_audit_261029.py` (the 15 of
+#551–#555 all fail against `989b670`; against `025b1dc`, 6 of the 7 of
+#556, 3 of the 4 of #557, 3 of the 4 of #558, the 4 of #559 and the 2 of
+#560 fail — the others guard the legitimate case: another photo is never
+adopted, the same JPEG still syncs) and one in
+`tests/test_delete_skipped_children.py` (fails against `025b1dc`).
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
@@ -90,6 +100,11 @@ synthetic files in hostile folders. None had a case on the owner's archive
 | 553 | **With `%TEMP%` outside the ANSI code page every exiftool call failed.** The backends pass exiftool an argfile, and its PATH goes on exiftool's command line, which exiftool reads in the ANSI code page: a temp folder with characters that code page does not hold (a Windows user name in another script) gave "Error opening arg file" on every file — loud, nothing written wrong, and reported as "a '%' in its path" when the photo's name had one. Such an argfile now goes to exiftool on stdin (`-@ -`), in the planning-time batch reads too; every other call is unchanged. `_ansi_encodable`, `_argfile_via_stdin` in `_run_captured`, parity-pinned. | jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
 | 554 | **A film scan's delete-skipped or adopt-scan refusal named the wrong flag.** Since v2.17.0 a scan is verified at SCAN_DISTANCE (lossless by default), so a scan archived at the run's distance before v2.17.0 is refused (fail-closed) — and the message said "re-run with the archive's --distance", which changes nothing for a scan. It now adds that the scan is judged at SCAN_DISTANCE and names `--scan-distance same`. `_scan_distance_hint`. | jxl_tiff_encoder.py | Fixed |
 | 555 | **The transcoder's resized, sharpened or colour-converted JXL → JPEG/PNG made a copy of every thumbnail page too** — the transcoder's side of #552, found while fixing it: a JPEG export with `--resize-*`/`--sharpen`/`--icc-profile` from a folder of masters wrote a 160×120 `…_page1_thumbnail.jpg` beside each photo. Those sources (marked `jxlphoto-thumb`) are now skipped, in `--force-convert` and in auto mode alike, logged once; a plain decode still converts them. A dry run reads no marker (it runs no subprocess), so its preview still lists them. `_read_thumb_markers_batch`, `_skip_thumbnail_pages`. | jxl_jpeg_transcoder.py | Fixed |
+| 556 | **A JPEG → JXL run stopped midway left its archives without their checksum lines, and later deleting runs kept those JPEGs for good.** With staging, the destination `checksums.md5` lines were written only once the WHOLE run was over, while each folder left staging as soon as its last file was done: a run stopped in between (killed, Ctrl+C, a power cut) left every JXL already moved without its line. Nothing was lost — no JPEG was deleted — but every later `--delete-source --delete-skipped` run refused those JXLs ("no checksum to prove it (was it written with --no-md5?)"), so their JPEGs were kept forever, with advice that did not apply. The lines are now filed the moment each JXL lands in its folder; without staging, only after the atomic swap (filed before it, a run stopped in between left the OLD archive under the NEW source's checksum). A jbrd JXL found without a line is adopted when `djxl --reconstruct_jpeg` gives the JPEG back byte for byte — both files hashed before and after that check — and the line is written then; the usual delete gates still run after it. Anything else is refused as before; a dry run does not reconstruct (it runs no subprocess) and says so. A checksum line that cannot be written no longer stops a staging run: it is a warning, and that JPEG is kept. `_adopt_reconstructed_archive`, `_file_checksum_lines`. | jxl_jpeg_transcoder.py | Fixed |
+| 557 | **A lossless JPEG archive without its checksum line could be overwritten by another JPEG of the same name.** The overwrite guard (T3 of the 2026-10-08 audit) refuses only on positive evidence, and for a jbrd JXL that evidence was its `checksums.md5` line: an archive whose db had been deleted (as clutter), left behind when only the `.jxl` files were copied, or written with `--no-md5` was overwritten by any same-named JPEG a later `--sync` or `--overwrite` met — the only copy of that photo once its JPEG was gone. The lossless JXL → JPEG recovery had the same gap the other way round: it overwrote an existing JPEG its JXL does not hold. The archive is now its own evidence: `djxl --reconstruct_jpeg` must give that JPEG back, or the overwrite is refused — with `--no-overwrite-guard` too, like every jbrd refusal. A reconstruction that cannot run (djxl < 0.12, a damaged archive) proves nothing, and the old behaviour stands; a dry run does not reconstruct and says how many archives a real run will check. `_lineless_archive_refusal`. | jxl_jpeg_transcoder.py | Fixed |
+| 558 | **The recompressor's verbatim copy of a lossless JPEG archive could be overwritten by another file of the same name.** It copies jbrd JXLs verbatim (`--jbrd-policy copy`, the default) and `--delete-source` then deletes their source after an MD5 check, so the copy can be the only one left; but a jbrd file never carries provenance markers, and the overwrite guard let any markerless output be overwritten: a later plain `--sync` in a flat mode (mode 2) with another `foto.jxl` — another archive, or a lossy master through the keep-smaller copy — replaced it, exit 0, no warning. An existing jbrd output is now overwritten only by its own bytes or by an archive of the same JPEG (`djxl --reconstruct_jpeg` on both: archived again at another effort); anything else is refused, `--no-overwrite-guard` or not. A reconstruction that cannot run proves nothing. `_jbrd_overwrite_refusal`, `_reconstructed_jpeg_md5`. | jxl_recompressor.py | Fixed |
+| 559 | **Three in-place edits could put back the old version of a file another run rewrote meanwhile.** The encoder's restamp and adopt stamp (`_rewrite_master_relation` — the SYNC preset's `--restamp-then-sync`), the recompressor's `--refresh-explorer-thumbnails` and the transcoder's `--repair-jbrd` copy the file, work on the copy for a second or two (exiftool, a decode for the thumbnail, a reconstruction) and swap it in — without checking that the original was still the file copied. A master re-encoded by another run in that window (a scheduled sync beside a manual run) went back to its old version under its old date; had that run deleted the re-exported TIFF, the new export was gone. The swap now happens only while the file keeps the size and date it had when copied; otherwise it is left untouched and reported as an error (the in-place recompression already checked this). #551's removal of a leftover thumbnail page checks the same between reading its marker and removing it. `_changed_since`, parity-pinned. | jxl_tiff_encoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
+| 560 | **The decoder could write over a decoded TIFF edited while it decoded.** It judges an existing TIFF (its own decode, not edited since — D5 of the 2026-10-08 audit) when a group's decode starts, and swaps the fresh decode in when it ends — with staging, only once the whole folder is done. An edit saved in between (the decoded TIFF open in Photoshop while a sync runs) was replaced by the fresh decode. The swap now happens only while the TIFF keeps the size and date it had when judged (one that appeared after an "absent" verdict counts as changed); otherwise the fresh decode is discarded, the TIFF left as it is, and the group reported as refused — its JXL is not deleted. `_judged_outputs`, `_output_changed_since_judged`. | jxl_tiff_decoder.py | Fixed |
 
 ## Round-65 — a '%' in a file name (2026-10-24)
 

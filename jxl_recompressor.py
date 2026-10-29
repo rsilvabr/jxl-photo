@@ -252,6 +252,18 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
+def _changed_since(path, st) -> bool:
+    """Is `path` no longer the file `st` (its os.stat before an in-place edit
+    began) describes? A file that cannot be read counts as changed. Checked
+    right before the edited copy replaces it (#559): one rewritten meanwhile
+    by another run would otherwise be put back to its old version."""
+    try:
+        now = os.stat(path)
+    except OSError:
+        return True
+    return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+
+
 # Why an in-place replacement was refused (process_group). Logged and kept as
 # the file's error detail; the next run re-encodes the new version.
 _CHANGED_IN_PLACE = ("the source changed while it was being re-encoded (another "
@@ -5241,6 +5253,70 @@ def _read_mpg_markers(paths: list):
     return mpg, complete
 
 
+def _reconstructed_jpeg_md5(jxl_path: Path) -> Optional[str]:
+    """MD5 of the JPEG `djxl --reconstruct_jpeg` gives back from a lossless
+    JPEG archive, or None when that cannot run or fails (djxl < 0.12, not an
+    archive, a damaged one, an empty result)."""
+    if not _tool_at_least("djxl", 0, 12):
+        return None
+    fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="jxlrec_", dir=TEMP_DIR)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        r = _run_captured(["djxl", "--reconstruct_jpeg", str(jxl_path), str(tmp)],
+                          CJXL_TIMEOUT)
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            return None
+        return md5_of_file(tmp)
+    except Exception:
+        return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _jbrd_overwrite_refusal(it) -> Optional[str]:
+    """Why overwriting an existing lossless JPEG archive (jbrd) must be
+    refused (#558), or None.
+
+    A jbrd file never carries provenance markers, so the marker check let it be
+    overwritten — yet this script copies such archives verbatim and
+    --delete-source then deletes their source: the copy can be the only one.
+    Allowed: the source's own bytes, or (both jbrd) the same JPEG back from
+    djxl --reconstruct_jpeg (that photo archived again at another effort).
+    Refused: a source that is no lossless archive at all, one that gives
+    another JPEG back, and a file that cannot be compared (fail closed). A
+    reconstruction that cannot run proves nothing: the overwrite goes ahead as
+    before. Like every jbrd refusal, not relaxed by --no-overwrite-guard.
+    """
+    src, final = it["src"], it["final"]
+    if not has_jbrd_box(final):
+        return None
+    try:
+        if md5_of_file(src) == md5_of_file(final):
+            return None
+    except OSError as e:
+        return (f"the existing output is a lossless JPEG archive (jbrd) that could "
+                f"not be compared with this source ({e})")
+    src_jbrd = it.get("jbrd")
+    if src_jbrd is None:
+        src_jbrd = has_jbrd_box(src)
+    if not src_jbrd:
+        return ("the existing output is a lossless JPEG archive (jbrd) and this source "
+                "is not that archive — overwriting it would destroy the only bit-exact "
+                "copy of that JPEG if its source was deleted; rename one of them or "
+                "write into another folder")
+    theirs, ours = _reconstructed_jpeg_md5(final), _reconstructed_jpeg_md5(src)
+    if theirs is None or ours is None or theirs == ours:
+        return None
+    return ("the existing output is the lossless archive of a DIFFERENT JPEG (djxl "
+            "--reconstruct_jpeg gives other bytes) — overwriting it would destroy that "
+            "JPEG if its source was deleted; rename one of them or write into another "
+            "folder")
+
+
 def _foreign_overwrite_refusals(items):
     """[(item, reason)] for every item this run is about to OVERWRITE onto an
     existing output whose provenance markers name a DIFFERENT origin.
@@ -5253,7 +5329,9 @@ def _foreign_overwrite_refusals(items):
     warning at all in the collapsing modes where same-named sources meet
     (#268's missing half). So it is a refusal now, in every mode. A markerless
     or unreadable output keeps the old behaviour: nothing to compare, and
-    refusing would block every archive written before the markers existed.
+    refusing would block every archive written before the markers existed —
+    except a lossless JPEG archive, which never has markers and is judged by
+    its bytes and its JPEG instead (#558, _jbrd_overwrite_refusal).
     """
     targets = [it for it in items
                if not it["in_place"]
@@ -5269,7 +5347,12 @@ def _foreign_overwrite_refusals(items):
         out_info = marks.get(str(it["final"])) or {"src": None, "srcsum": None}
         src_info = marks.get(str(it["src"])) or {"src": None, "srcsum": None}
         if out_info.get("src") is None and out_info.get("srcsum") is None:
-            continue    # markerless (or unreadable): nothing to compare
+            # Markerless (or unreadable): nothing to compare — unless it is a
+            # lossless JPEG archive, which never carries markers.
+            why = _jbrd_overwrite_refusal(it)
+            if why:
+                refused.append((it, why))
+            continue
         if not _markers_match(out_info, src_info, PROVENANCE_CHECK):
             if not OVERWRITE_GUARD:
                 logger.warning(f"  OVERWRITE (overwrite guard off) | {it['final'].name}: "
@@ -5717,6 +5800,9 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
             if not _verify_jxl_integrity(tmp):
                 return "error", "the edited copy failed the integrity check — file left untouched"
             os.utime(str(tmp), ns=(st.st_atime_ns, st.st_mtime_ns))
+            if _changed_since(jxl_path, st):
+                return "error", ("the file changed while its thumbnail was being made "
+                                 "(another run?) — left untouched")
             os.replace(str(tmp), str(jxl_path))
         except Exception as e:
             return "error", str(e)
