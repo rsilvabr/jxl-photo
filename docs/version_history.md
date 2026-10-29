@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.18.0_beta1](#v2180_beta1)** | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
+| **[v2.18.0](#v2180)** | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
+| [v2.18.0_beta1](#v2180_beta1) | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
 | [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
 | [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
 | [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
@@ -74,9 +75,18 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.18.0
+
+**Released 2026-10-29.** Supersedes v2.17.0 and the v2.18.0_beta1
+pre-release, and ships all of it (below) with no change since: runs that delete
+TIFFs check every JXL's pixels first, plus the round-66 hardening (#551–#560).
+See [Upgrading](upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them).
+2835 tests; the real-photo battery passes (125 checks).
+
 ## v2.18.0_beta1
 
-**Pre-release, 2026-10-29** (last stable: v2.17.0). One safer default and the
+**Released 2026-10-29 as a pre-release, superseded by v2.18.0** (which ships
+all of it). One safer default and the
 fixes from an audit of what changed since v2.15.2 (round 66, #551–#560); none
 of those looked for had a case on the owner's archive. See
 [Upgrading](upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them).
