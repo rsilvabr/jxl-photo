@@ -688,7 +688,10 @@ MODES_STUB = [(str(i), f"mode {i}", "") for i in range(9)]
 
 
 def _gateway(menu, monkeypatch, answers, layout="3", origin="tiff", dest="jxl",
-             conv="jxl_tiff_encoder"):
+             conv="jxl_tiff_encoder", encoder_verifies=False):
+    # The verify question is asked only when the encoder's VERIFY_ROUNDTRIP is
+    # off (on, it verifies whatever the answer): these tests script it.
+    monkeypatch.setattr(enc, "VERIFY_ROUNDTRIP", encoder_verifies)
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
     it = iter(answers)
     monkeypatch.setattr("builtins.input", lambda *a: next(it))
@@ -706,6 +709,17 @@ def test_D_arms_delete_on_the_chosen_layout(menu, monkeypatch):
     assert wf["delete_source"] is True
     assert wf.get("verify_roundtrip") is False
     assert wf.get("delete_skipped") is False
+
+
+def test_D_verify_is_not_asked_when_the_encoder_always_verifies(menu, monkeypatch, capsys):
+    """VERIFY_ROUNDTRIP is on by default (v2.18.0): a "no" could not turn it
+    off, so the wizard says it is on instead of asking."""
+    # gate 1 yes, layout 3, gate 2 yes, delete-skipped no — no verify question
+    ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "n"], encoder_verifies=True)
+    assert ok is True
+    assert wf["verify_roundtrip"] is True
+    assert wf.get("delete_skipped") is False
+    assert "VERIFY_ROUNDTRIP" in _out(capsys)
 
 
 def test_D_can_arm_verify_too(menu, monkeypatch):

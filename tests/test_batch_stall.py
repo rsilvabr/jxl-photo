@@ -43,8 +43,8 @@ SCRIPTS = ["jxl_tiff_encoder", "jxl_tiff_decoder", "jxl_jpeg_transcoder",
 # Batch readers that are not named *_batch (the recompressor's mpg reader).
 EXTRA_BATCH_FUNCS = {"_read_mpg_markers"}
 # Batch call sites per script (base commit 4921caf: 11 in all).
-# Encoder: + _read_page_markers_batch (v2.17.1, the leftover split pages, #551).
-# Transcoder: + _read_thumb_markers_batch (v2.17.1, no derivative of a thumbnail
+# Encoder: + _read_page_markers_batch (v2.18.0, the leftover split pages, #551).
+# Transcoder: + _read_thumb_markers_batch (v2.18.0, no derivative of a thumbnail
 # page, #555).
 EXPECTED_SITES = {"jxl_tiff_encoder": 3, "jxl_tiff_decoder": 3,
                   "jxl_jpeg_transcoder": 3, "jxl_recompressor": 4}

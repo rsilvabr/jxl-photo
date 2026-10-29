@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.17.1 | #551–#560 (10) |
+| [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.18.0_beta1 | #551–#560 (10) |
 | [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
 | [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
 | [Round-63 — the checksum lock under contention](#round-63--the-checksum-lock-under-contention-2026-10-23) | 2026-10-23 | v2.16.2 | #547 (1) |

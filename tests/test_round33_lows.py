@@ -235,6 +235,8 @@ def test_delete_options_do_not_mutate_the_config(menu, cfg, monkeypatch):
     """Cancelling the wizard after these questions used to leave the answers
     in the in-memory config, persisted by the next unrelated save_config()."""
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    import jxl_tiff_encoder
+    monkeypatch.setattr(jxl_tiff_encoder, "VERIFY_ROUNDTRIP", False)   # asked only then
     # verify? y — delete already-converted? n — match by: <enter> (path)
     monkeypatch.setattr("builtins.input", mock.Mock(side_effect=["y", "n", ""]))
     workflow = {"origin_format": "tiff", "dest_format": "jxl"}

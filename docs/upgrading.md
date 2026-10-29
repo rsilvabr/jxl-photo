@@ -11,9 +11,18 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.17.1: old thumbnail pages are removed; derivatives skip thumbnail pages
+## v2.18.0: deleting TIFFs checks pixels; old thumbnail pages are removed; derivatives skip them
 
-Nothing to do. Four things a run now does that it did not before:
+Nothing to do. Five things a run now does that it did not before:
+
+- **A run of the encoder that deletes TIFFs verifies every JXL first.**
+  `VERIFY_ROUNDTRIP` is now on by default: before a TIFF is deleted, its JXL
+  is decoded and compared with it (identical pixels for `--distance 0`, a
+  brightness and PSNR sanity check for lossy). Such runs take roughly twice
+  as long and need imagecodecs (the exe includes it); runs that delete
+  nothing are unchanged. For the old structure-only gate, set
+  `VERIFY_ROUNDTRIP = False` at the top of `jxl_tiff_encoder.py`. The menu no
+  longer asks about it for TIFF → JXL while it is on.
 
 - **The encoder removes a thumbnail page an earlier encode of the same TIFF
   left behind** — after re-archiving with `--thumbnail-mode exclude
@@ -22,8 +31,8 @@ Nothing to do. Four things a run now does that it did not before:
   that still exists, and only a file that carries that TIFF's provenance
   marker. A leftover real page (a scan saved again without its IR page) is
   never deleted: the run names it with a warning, for you to check.
-- **Derivative runs** (`--output-icc`, `--resize-*`, `--sharpen` — the SRGB and
-  MOBILE presets — and the transcoder's resized, sharpened or colour-converted
+- **Derivative runs** (the recompressor's `--output-icc`, `--resize-*` and
+  `--sharpen`, and the transcoder's resized, sharpened or colour-converted
   JXL → JPEG/PNG) make no derivative of a thumbnail page. Derivatives of
   thumbnail pages written by v2.17.0 stay where they are; delete them if you
   have any (`*_thumbnail*` in the derivative folders).

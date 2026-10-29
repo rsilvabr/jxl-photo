@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.17.1](#v2171)** | (not released yet) | A TIFF re-encoded with fewer pages no longer leaves its old thumbnail page beside the archive; derivative runs skip thumbnail pages; exiftool works with a temp folder outside the Windows code page; lossless JPEG archives: a run stopped midway no longer leaves JPEGs that are never deleted, and another photo of the same name never overwrites one; in-place edits never put back an older version, and the decoder never writes over a TIFF edited during the decode (round 66, 10 fixes) |
+| **[v2.18.0_beta1](#v2180_beta1)** | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
 | [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
 | [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
 | [v2.16.2](#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once (round 63, 1 fix) |
@@ -74,13 +74,12 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
-## v2.17.1
+## v2.18.0_beta1
 
-**Not released yet** (prepared 2026-10-29; more changes may join it before it
-is tagged — a new flag or setting would make it v2.18.0 instead). Fixes from
-an audit of what changed since v2.15.2 (round 66, #551–#560); none of those
-looked for had a case on the owner's archive. See
-[Upgrading](upgrading.md#v2171-old-thumbnail-pages-are-removed-derivatives-skip-thumbnail-pages).
+**Pre-release, 2026-10-29** (last stable: v2.17.0). One safer default and the
+fixes from an audit of what changed since v2.15.2 (round 66, #551–#560); none
+of those looked for had a case on the owner's archive. See
+[Upgrading](upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them).
 
 - **A TIFF re-encoded with fewer pages no longer leaves its old pages behind
   (#551).** The group id of a split hashes its page set, and nothing removed
@@ -95,8 +94,9 @@ looked for had a case on the owner's archive. See
   group id the new pages do not carry); a leftover real page is never deleted,
   only reported with a warning. The summary counts both.
 - **A derivative run skips thumbnail pages (#552, #555).** `--output-icc`,
-  `--resize-*` and `--sharpen` (the SRGB and MOBILE presets) wrote a 160×120
-  copy of the preview a TIFF carried for every TIFF whose thumbnail page `auto`
+  `--resize-*` and `--sharpen` (colour-converted, resized or sharpened copies
+  of the masters) wrote a 160×120 copy of the small preview page some TIFFs
+  carry, for every TIFF whose thumbnail page `auto`
   keeps since v2.17.0. Logged once, apart from the "got no derivative"
   warning; a plain recompression keeps the pages, so a split stays complete.
   The transcoder's resized, sharpened or colour-converted JXL → JPEG/PNG did
@@ -120,8 +120,8 @@ looked for had a case on the owner's archive. See
   Nothing was deleted wrongly. The lines are now filed as each JXL lands
   (without staging, right after its atomic swap, never before it), and a JXL
   found without one is accepted once `djxl --reconstruct_jpeg` gives the JPEG
-  back byte for byte. Found by stopping the OUTTAKES preset midway on copies
-  of real outtakes.
+  back byte for byte. Found by stopping a deleting JPEG → JXL run midway on
+  copies of real JPEGs.
 - **A lossless JPEG archive is never overwritten by another photo of the same
   name (#557, #558).** Without its `checksums.md5` line (deleted, left behind
   when only the `.jxl` files were copied, or written with `--no-md5`), the
@@ -139,6 +139,14 @@ looked for had a case on the owner's archive. See
   for a second or two and then swap it in; a file another run rewrote in that
   window went back to its old version. The swap now happens only if the file
   did not change meanwhile — otherwise it is left as it is and reported.
+- **A run that deletes TIFFs verifies every JXL first.** `VERIFY_ROUNDTRIP`
+  in the encoder is now on by default (it was opt-in): the JXL is decoded and
+  compared with its TIFF before the TIFF goes — the only delete check that
+  looks at pixels, and the one that catches a black or scrambled encode that
+  passes every structural check. Deleting runs take about twice as long;
+  other runs are unchanged. `VERIFY_ROUNDTRIP = False` restores the old gate;
+  the menu says it is on instead of asking. See
+  [Upgrading](upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them).
 - **The decoder never writes over a TIFF edited during the decode (#560).**
   It checks that an existing TIFF is its own unedited decode when a decode
   starts and swaps the new one in when it ends (with staging, when the whole

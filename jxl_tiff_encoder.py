@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.1"
+TOOLKIT_VERSION = "2.18.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1031,11 +1031,13 @@ CLEANUP_XMP_ICC_MARKER = False
 # True  -> clears xmp-icc:all and xmp-photoshop:ICCProfile tags that might conflict
 # False -> keeps existing ICC markers (default)
 
-VERIFY_ROUNDTRIP = False
-# Opt-in extra gate before DELETE_SOURCE removes a source TIFF: decode the JXL
-# that was just written and compare it against the source page. Costs one full
-# decode per output, so it roughly doubles a run — worth it exactly when the
-# original is about to stop existing.
+VERIFY_ROUNDTRIP = True
+# Extra gate before DELETE_SOURCE removes a source TIFF: decode the JXL that
+# was just written and compare it against the source page. Costs one full
+# decode per output, so it roughly doubles a DELETING run — worth it exactly
+# when the original is about to stop existing. On by default since v2.18.0
+# (it used to be opt-in); runs that delete nothing never pay for it. False
+# brings back the old, structure-only gate.
 #
 # _verify_jxl_integrity, which always runs, proves the file is a well-formed,
 # untruncated container with a codestream. It does NOT prove the pixels came
@@ -6623,7 +6625,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     # rather than let it read as corruption.
                     _pre = (" | this output was not written by this run (SKIP); "
                             "if it was archived at a different --distance, re-run "
-                            "with that distance or drop --verify-roundtrip"
+                            "with that distance or set VERIFY_ROUNDTRIP = False"
                             + _scan_distance_hint(tiff_key)
                             if skipped_finals else "")
                     logger.warning(
@@ -6931,7 +6933,8 @@ def main():
                              "or a brightness+PSNR sanity check for lossy (catches a "
                              "black/scrambled encode, not quality loss). Roughly doubles "
                              "the run. Needs djxl and imagecodecs. Only affects "
-                             "--delete-source.")
+                             "--delete-source. On by default (VERIFY_ROUNDTRIP = True); "
+                             "set it to False at the top of the script to turn it off.")
     parser.add_argument("--delete-confirm-off", action="store_true",
                         help="Skip the interactive delete confirmation. For automation/"
                              "wrappers that already asked the user (DELETE_CONFIRM stays "
@@ -7387,9 +7390,12 @@ def main():
     _needs_decode = VERIFY_ROUNDTRIP or (PROVENANCE_CHECK == "adopt" and ADOPT_SCAN)
     if _needs_decode and not args.dry_run:
         if not DELETE_SOURCE:
-            logger.warning("--verify-roundtrip has no effect without --delete-source: "
-                           "it is a gate in front of the deletion, not a standalone check. "
-                           "Nothing will be verified.")
+            # Only for the flag typed by hand: the setting is on by default,
+            # and a run that deletes nothing simply does not need it.
+            if args.verify_roundtrip:
+                logger.warning("--verify-roundtrip has no effect without --delete-source: "
+                               "it is a gate in front of the deletion, not a standalone "
+                               "check. Nothing will be verified.")
         else:
             if shutil.which("djxl") is None:
                 logger.error("This run needs djxl in PATH: --verify-roundtrip and the "

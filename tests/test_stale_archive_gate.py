@@ -62,10 +62,15 @@ def _run(script, *args):
 
 
 def _tiff(path: Path, seed: int):
+    """A photo-like image (a gradient plus some grain), not pure noise: the
+    encoder's round-trip check (on by default since v2.18.0) holds a lossy
+    archive to a 20 dB floor that real photos clear at 40-50 dB and pure noise
+    at d=1 does not."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(str(path),
-                     (np.random.default_rng(seed).random((48, 64, 3)) * 65535)
-                     .astype("uint16"), photometric="rgb")
+    grad = np.linspace(0.1, 0.9, 64)[None, :, None] * np.ones((48, 64, 3))
+    grain = np.random.default_rng(seed).random((48, 64, 3)) * 0.1
+    tifffile.imwrite(str(path), ((grad + grain) * 65535).astype("uint16"),
+                     photometric="rgb")
 
 
 def _jxl(path: Path, seed: int, distance="1"):

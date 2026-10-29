@@ -551,7 +551,7 @@ What backs that up depends on the direction, and `[D]` says which one you are in
 | Direction | What backs a delete of an already-converted original |
 |---|---|
 | JPEG ↔ JXL lossless | **Provenance PROVEN** — `checksums.md5` holds the source's hash; it must match |
-| TIFF → JXL | Provenance marker naming THIS source + structural check, plus the round-trip pixel comparison below if you enable it |
+| TIFF → JXL | Provenance marker naming THIS source + structural check, plus the round-trip pixel comparison (on by default since v2.18.0: `VERIFY_ROUNDTRIP` in `jxl_tiff_encoder.py`; `[D]` then says so instead of asking) |
 | JXL → TIFF | Provenance marker naming THIS source + structural check |
 | Any lossy direction | ⚠️ Provenance marker naming THIS source + structural check — no checksum, no pixel comparison |
 

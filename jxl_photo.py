@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.17.1"
+TOOLKIT_VERSION = "2.18.0_beta1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -4438,7 +4438,21 @@ class InteractiveMenu:
         # Round-trip verification. Offered only here, because it is a gate in
         # front of the deletion and nowhere else, and only for TIFF -> JXL and
         # JXL -> JXL — the directions where the source is the master.
-        if (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
+        _enc_verifies = (origin == 'tiff' and dest == 'jxl'
+                         and _child_bool_setting('jxl_tiff_encoder', 'VERIFY_ROUNDTRIP', True))
+        if _enc_verifies:
+            # On in the encoder's own settings: it verifies whatever is answered
+            # here (there is no flag to turn it off), so say so instead of
+            # asking a question whose "no" would do nothing.
+            _msg = ("Each JXL is decoded and compared with its TIFF before the TIFF is "
+                    "deleted (VERIFY_ROUNDTRIP in jxl_tiff_encoder.py).")
+            if RICH_AVAILABLE and console:
+                console.print(f"\n[dim]{_msg}[/dim]")
+            else:
+                print(f"\n{_msg}")
+            verify = True
+            workflow['verify_roundtrip'] = True
+        elif (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
             vr_default = bool(self.config.config.last_verify_roundtrip)
             explain = ("Decode each JXL and compare it with the source before deleting. "
                        "Lossless: the pixels must match exactly. Lossy: a brightness and "

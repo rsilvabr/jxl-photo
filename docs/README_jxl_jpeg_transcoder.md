@@ -742,7 +742,7 @@ disposable by construction:
 - **It is made of the photo, never of a thumbnail page.** The thumbnail page
   a split TIFF carried (`<name>_page1_thumbnail.jxl`, marked `jxlphoto-thumb`)
   is skipped, and so it is with `--icc-profile`/`--to-srgb` alone (since
-  v2.17.1; v2.17.0 wrote a 160×120 JPEG of each). A plain decode still
+  v2.18.0; v2.17.0 wrote a 160×120 JPEG of each). A plain decode still
   converts every file; a dry run still lists them (it reads no marker).
 
 - **It never deletes its source.** `--delete-source`/`--delete-skipped` are

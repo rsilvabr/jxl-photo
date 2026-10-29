@@ -247,8 +247,8 @@ DELETE_SOURCE = False
 # mode (0-8): the mode decides where the JXL lands, this decides whether the
 # TIFF survives it. The source only goes once its JXL exists at the FINAL
 # destination (after the staging move, and that move must have succeeded),
-# passes the integrity check there, and — with --verify-roundtrip — decodes
-# back to the source pixels.
+# passes the integrity check there, and — with VERIFY_ROUNDTRIP (on by
+# default since v2.18.0) — decodes back to the source pixels.
 # WARNING: irreversible. Only enable after testing on a small batch first.
 
 # — Safety (DELETE_SOURCE, any mode) —
@@ -545,7 +545,10 @@ Options:
                   Lossy: a brightness + PSNR sanity check that catches a black or
                   scrambled encode -- NOT a quality check, since quality loss is
                   what you asked for. Roughly doubles the run. Needs djxl and
-                  imagecodecs. Only affects --delete-source
+                  imagecodecs. Only affects --delete-source. ON by default
+                  since v2.18.0 (VERIFY_ROUNDTRIP = True): a run that deletes
+                  TIFFs always verifies; set VERIFY_ROUNDTRIP = False at the
+                  top of the script for the old structure-only gate
   --delete-confirm-off  Skip the interactive delete confirmation (for wrappers/
                    automation that already asked the user)
   --export-subfolder NAME
@@ -1193,7 +1196,7 @@ Two things `auto`/`scans` never do:
   that preview out instead of reporting an error. `include` keeps the old
   behaviour (every thumbnail page, an error for one that cannot be encoded).
 
-**Pages a TIFF no longer has (v2.17.1).** When a run rewrites every page of a
+**Pages a TIFF no longer has (v2.18.0).** When a run rewrites every page of a
 TIFF and the new layout has fewer pages than the archive it replaces — a
 re-archive with `--thumbnail-mode exclude --overwrite`, a photo re-exported
 from Capture One whose thumbnail `auto` now drops, a scan saved again without
