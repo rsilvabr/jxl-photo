@@ -398,6 +398,10 @@ must-fix / should-fix items and a commit verdict.
   section per release that changed an existing command line's behaviour)
 - `docs/behavior_and_limitations.md` — defaults, limits and viewer quirks
   (the README's "Good to know" links into it)
+- `docs/file_sizes.md` — measured file sizes per camera and for film scans,
+  effort 7 vs 9 (sizes, time, ssimulacra2/butteraugli) and `--buffering 0`;
+  libjxl 0.12.0, 2026-10-30. The README's size table is its summary — update
+  both together, and never name the owner's shoots or folders there
 - `docs/metadata_written.md` — every field the toolkit writes into a photo
   (CreatorTool ICC, encode record, each `jxlphoto-*` token, xmpMM:History)
   and what it reveals. A new token or a new written field goes there in the

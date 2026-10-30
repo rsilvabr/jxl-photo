@@ -36,15 +36,18 @@ Spectacular compression with no compromise on bit depth.
 - Lossy 16-bit files — small files that retain full 16-bit tonal information, something no other common format achieves (JPEG is 8-bit, TIFF lossless is large)
 - This is genuinely new: small lossy files, but with 16-bit color depth
 
-Here is an example of the gains when using JXL with 45MP Nikon Z7 files:
+Typical sizes of 16-bit ProPhoto exports from Capture One (median of 10 photos per camera, ISO 64–4000; in brackets the range without the smallest and largest 10% — detail and noise move the size more than the camera does):
 
-| Format | Typical size (45MP, 16-bit) |
-|--------|-----------------------------|
-| TIFF 16-bit | ~260 MB, ~245 MB (zip/deflate) |
-| JXL 16-bit lossless | ~173 MB |
-| JXL 16-bit lossy `d=0.05` | ~47 MB |
-| JXL 16-bit lossy `d=0.1` | ~34 MB |
-| JXL 16-bit lossy `d=1.0` (visually lossless) | ~8 MB |
+| Format | Nikon Z7 / Z8 (45 MP) | Nikon Zf (24 MP) |
+|--------|-----------------------|------------------|
+| TIFF 16-bit | 273 MB (~255 MB zip) | 146 MB (~139 MB zip) |
+| JXL lossless | ~173 MB (152–187) | ~89 MB (82–101) |
+| JXL `d=0.05` | ~42 MB (36–51) | ~21 MB (19–26) |
+| JXL `d=0.1` | ~31 MB (24–38) | ~15 MB (13–20) |
+| JXL `d=0.5` | ~11 MB (7–16) | ~5 MB (3.5–9) |
+| JXL `d=1.0` (visually lossless) | ~5.5 MB (3–10) | ~2.7 MB (1.4–6) |
+
+Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB). On 8-bit scans, `d=0.05`/`0.1` save little or nothing over lossless, so keep those lossless. Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0` for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
 
 The numbers behind these settings are measured and posted on r/jpegxl, on 16-bit ProPhoto exports from Capture One:
 
@@ -221,7 +224,7 @@ Capture One
     ↓ Export 16-bit TIFF (sRGB, AdobeRGB, ProPhoto RGB)
 jxl_tiff_encoder.py      TIFF → JXL  (archive, stays 16-bit, lossless or lossy)
     ↓
-    JXLs on disk — ~8–47MB each for lossy, ~173MB for lossless (45MP example)
+    JXLs on disk — ~5–42MB each for lossy, ~173MB for lossless (45MP example)
     ↓
 jxl_tiff_decoder.py      JXL → TIFF  (when master TIFF is needed again)
     ↓ OR
@@ -311,11 +314,11 @@ Every option of every script: the per-script READMEs under [Documentation](#docu
 
 ```python
 # jxl_tiff_encoder.py
-CJXL_DISTANCE = 0.05      # Near-lossless, ~47MB for 45MP
+CJXL_DISTANCE = 0.05      # Near-lossless, ~42MB for 45MP
 #OR#
-CJXL_DISTANCE = 0.1       # Also Near-lossless, ~34MB for 45MP
+CJXL_DISTANCE = 0.1       # Also Near-lossless, ~31MB for 45MP
 
-CJXL_EFFORT = 7           # Good compression speed tradeoff
+CJXL_EFFORT = 7           # Effort 9 gains nothing at these distances (docs/file_sizes.md)
 EMBED_ICC_IN_JXL = True   # Always preserve ICC!
 ```
 
@@ -323,7 +326,7 @@ EMBED_ICC_IN_JXL = True   # Always preserve ICC!
 
 ```python
 # jxl_tiff_encoder.py
-CJXL_DISTANCE = 1.0       # Visually lossless, ~8MB
+CJXL_DISTANCE = 1.0       # Visually lossless, ~5.5MB for 45MP
 CJXL_EFFORT = 7
 
 # jxl_tiff_decoder.py
@@ -378,6 +381,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | JPEG ↔ JXL / JXL → PNG |
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | JXL → JXL recompression |
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
+| [docs/file_sizes.md](docs/file_sizes.md) | File sizes per camera and for film scans, and what effort 9 buys |
 | [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
 | [docs/upgrading.md](docs/upgrading.md) | What to check when you upgrade from an older version |

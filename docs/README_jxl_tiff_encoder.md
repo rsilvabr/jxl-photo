@@ -110,12 +110,13 @@ Edit at the top of the script:
 ```python
 CJXL_DISTANCE = 0.1
 # 0   = mathematically lossless (pixel-perfect, ~173MB for 45MP)
-# 0.05 = near-lossless (~47MB, imperceptible difference) ⭐ RECOMMENDED for archive
-# 0.1 = near-lossless (~34MB, imperceptible difference)  ⭐ ALSO RECOMMENDED for archive
-# 0.5 = high quality lossy (~13MB) — recommended starting point (libjxl authors)
-# 1.0 = "visually lossless" per libjxl documentation (~8MB)
+# 0.05 = near-lossless (~42MB, imperceptible difference) ⭐ RECOMMENDED for archive
+# 0.1 = near-lossless (~31MB, imperceptible difference)  ⭐ ALSO RECOMMENDED for archive
+# 0.5 = high quality lossy (~11MB) — recommended starting point (libjxl authors)
+# 1.0 = "visually lossless" per libjxl documentation (~5.5MB)
+# Sizes: medians of 20 Z7/Z8 photos; per camera and for scans see docs/file_sizes.md
 
-CJXL_EFFORT = 7
+CJXL_EFFORT = 7   # effort 9 gains nothing on large files below d=1.0 (docs/file_sizes.md)
 # Compression effort (1-10). Controls file size, NOT quality.
 # 7 is the sweet spot for camera photos.
 # Effort 8-10 is much slower and can produce larger files for high-ISO images.
