@@ -143,11 +143,28 @@ Planning 1355 file(s): reading each one's encode record and checking for a jbrd 
   Encode records: 600/1355 read (1m46s, ~2m left)
   Encode records: 800/1355 read (2m21s, ~2m left)
   Encode records: 1200/1355 read (3m31s, ~27s left)
-Planned in 3m58s (encode records 3m58s, jbrd check 0s, output checks 0s)
+Planned in 3m58s (up-to-date check 0s, encode records 3m58s, jbrd check 0s, output checks 0s)
 ```
 
 Practically all of it is the exiftool read of each file's record. The `jbrd`
 walk that follows finds the same files already in the system's cache.
+
+**A sync plans only what it will process.** A file whose output already
+exists and is newer than the source is skipped whatever its record says, so
+it is set aside first, from the two files' dates alone, and never read:
+
+```text
+1290 file(s) already up to date at the destination: skipped without reading them
+Planning 65 file(s): reading each one's encode record and checking for a jbrd box — ...
+```
+
+A derivative run (`--output-icc`, `--resize-long` and the other resize flags,
+`--sharpen`) still reads the
+existing derivatives' `jxlphoto-derived` label first (one exiftool read per
+output) to see whether the recipe or the distance/effort changed; only its
+own derivatives with nothing to re-derive are set aside. Runs that delete
+(`--delete-source`), `--overwrite` and in-place runs (mode 8, mode 0 without
+an output folder) plan every file, as before.
 
 ### JXLs transcoded from JPEG (jbrd box)
 

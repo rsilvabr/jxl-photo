@@ -919,9 +919,19 @@ def wrapper_checks(A1, A2):
           and all(max(int(x) for x in exif(["-s3", "-ImageWidth", "-ImageHeight", m]).split())
                   == 2048 for m in mob), str(srgb_named[:1]))
 
-    rcs = {n: preset(f"wr2_{n.split()[0].lower()}", n)[0] for n in names}
+    runs = {n: preset(f"wr2_{n.split()[0].lower()}", n) for n in names}
+    rcs = {n: rc for n, (rc, _out) in runs.items()}
     check("presets run again: nothing rewritten, every run exits 0",
           snapshot() == first and all(v == 0 for v in rcs.values()), f"rc={rcs}")
+    # SRGB and MOBILE are recompressor derivatives of up-to-date masters: the
+    # sync sets every file aside before reading its encode record or jbrd box.
+    check("presets run again: the recompressor plans nothing that is up to date",
+          all("2 file(s) already up to date at the destination" in runs[n][1]
+              and "Planning " not in runs[n][1] for n in ("SRGB", "MOBILE")),
+          " | ".join(f"{n}: " + next((l.strip() for l in runs[n][1].splitlines()
+                                      if "up to date at the destination" in l
+                                      or "Planning " in l), "no planning line")
+                     for n in ("SRGB", "MOBILE")))
 
     # A re-export of one photo: its master and both derivatives follow, the
     # other photo's files stay as they are.

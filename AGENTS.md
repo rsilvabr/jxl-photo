@@ -85,6 +85,13 @@
   encode (traps A1-A5 in the plan doc).
   `--rename-from`/`--rename-to` (transcoder semantics) rename the output at
   planning time, so sync/refusals/duplicate aborts see the final name.
+  Up-to-date items are set aside BEFORE classification
+  (`_mark_up_to_date_items` → action `"skip_uptodate"`: no encode record, no
+  jbrd read, never handed to convert_one) — never when deleting, with
+  `--overwrite` or in place; a derivative run only sets aside its own
+  derivatives with no `_rederive_reason`. A new check that must see every
+  planned file has to handle that action (the duplicate abort and the orphan
+  sweep count it as a writing item).
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
 
 ## Settings are never hardcoded

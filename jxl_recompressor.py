@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.18.0"
+TOOLKIT_VERSION = "2.18.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -3071,9 +3071,73 @@ def _plan_item_would_skip(it) -> bool:
     derivative item whose existing output names ANOTHER recipe
     (_FORCE_REDERIVE) is re-derived, not skipped. Used by the dry-run preview
     and by the space preflight, which must not count skips."""
+    if it["action"] == "skip_uptodate":
+        return True
     return (not it["in_place"] and it["action"] in ("convert", "copy")
             and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
             and _would_skip(it["src"], it["final"]))
+
+
+def _derived_keep_note(label):
+    """Why an existing derivative that is NOT re-derived is worth a summary
+    line: "better" (kept because its encode outranks this run's — only the
+    lower-effort setting would re-derive it), "unrecorded" (its label predates
+    the distance/effort record), or None."""
+    if not REDERIVE_ON_ENCODE_CHANGE or OVERWRITE is True:
+        # --overwrite rewrites them anyway: the "run once with --overwrite"
+        # hint would be false there.
+        return None
+    if not REDERIVE_ON_LOWER_EFFORT and _rederive_reason(label, _DERIVED_LABEL, True, True):
+        return "better"
+    if _split_encode_suffix(label)[1] is None:
+        return "unrecorded"
+    return None
+
+
+def _mark_up_to_date_items(items):
+    """Mark the planned items whose output is already up to date as
+    "skip_uptodate", BEFORE classification reads anything from them.
+
+    convert_one SKIPs an existing, up-to-date output before it looks at the
+    item's action, so neither the encode record nor the jbrd box can change
+    the outcome of such an item — reading them was most of a sync's planning
+    time. Two stats per item decide it (_would_skip).
+
+    Never on a run that deletes (the delete gate and its multi-page veto must
+    see a fully planned item), never with --overwrite (nothing is a skip) and
+    never in place (an in-place item is never a skip). A derivative run first
+    reads the existing outputs' jxlphoto-derived labels: only an output that is
+    this run's own derivative with no reason to re-derive is marked; anything
+    else (another recipe, not a derivative, unreadable) goes through the full
+    plan and the derivative check in main(), exactly as before.
+
+    Returns (marked, derived "unrecorded" notes, derived "better" notes) — the
+    notes are counted into main()'s derivative summary lines."""
+    if DELETE_SOURCE or DELETE_SKIPPED or OVERWRITE is True:
+        return 0, 0, 0
+    cands = [it for it in items
+             if not it["in_place"] and _would_skip(it["src"], it["final"])]
+    n_unrecorded = n_better = 0
+    if DERIVATIVE and cands:
+        labels = _read_derived_markers_batch([it["final"] for it in cands])
+        kept = []
+        for it in cands:
+            lab = labels.get(str(it["final"]), False)
+            if lab is False or lab is None:
+                continue
+            if _rederive_reason(lab, _DERIVED_LABEL, REDERIVE_ON_ENCODE_CHANGE,
+                                REDERIVE_ON_LOWER_EFFORT):
+                continue
+            note = _derived_keep_note(lab)
+            n_better += note == "better"
+            n_unrecorded += note == "unrecorded"
+            kept.append(it)
+        cands = kept
+    for it in cands:
+        it["action"] = "skip_uptodate"
+        it["category"] = "up to date"
+        it["reason"] = "output exists and is up to date"
+    return len(cands), n_unrecorded, n_better
 
 
 # ---------------------------------------------------------------------------
@@ -6542,19 +6606,32 @@ def main():
                           errors=0, log_file=log_file, dry_run=args.dry_run)
         sys.exit(0)
 
+    # Up-to-date outputs first, from two stats each: convert_one SKIPs such an
+    # item before it looks at its action, so the encode record and the jbrd
+    # box below would be read only to be thrown away — on a sync where almost
+    # everything is up to date that was nearly the whole planning time.
+    _t_plan = time.monotonic()
+    n_uptodate, n_derived_unrecorded, n_derived_better = _mark_up_to_date_items(items)
+    if n_uptodate:
+        logger.info(f"{n_uptodate} file(s) already up to date at the destination: "
+                    f"skipped without reading them")
+    _to_plan = [it for it in items if it.get("action") != "skip_uptodate"]
+
     # Classification reads the encoder's d=/e= record (batched) and the jbrd box.
     # Planning opens every file at least twice before the first [n/total] line:
     # on a hard disk that is ~0.15-0.25 s per file, and a 3327-file folder sat
     # almost 8 minutes with nothing on screen after "JXLs found". Announce the
     # phase, and time each part so the log shows where a slow plan went.
-    _t_plan = time.monotonic()
-    logger.info(f"Planning {len(items)} file(s): reading each one's encode record "
-                f"and checking for a jbrd box — on a hard disk this can take "
-                f"several minutes...")
-    param_info = _read_encode_params_batch([it["src"] for it in items])
-    _t_records = time.monotonic() - _t_plan
+    _t_uptodate = time.monotonic() - _t_plan
+    if _to_plan:
+        logger.info(f"Planning {len(_to_plan)} file(s): reading each one's encode record "
+                    f"and checking for a jbrd box — on a hard disk this can take "
+                    f"several minutes...")
+    _t_rec0 = time.monotonic()
+    param_info = _read_encode_params_batch([it["src"] for it in _to_plan])
+    _t_records = time.monotonic() - _t_rec0
     _t_jbrd = 0.0
-    for it in items:
+    for it in _to_plan:
         info = param_info[str(it["src"])]
         it["desc"] = info["desc"]
         it["software"] = info["software"]
@@ -6639,12 +6716,16 @@ def main():
                                  f"the requested derivative")
 
     # Duplicates abort: two WRITING actions onto one destination is never allowed.
+    # An up-to-date item counts as one: before it skipped planning it was a
+    # convert/copy like the others, and two sources sharing a destination are
+    # a collision whether or not this run happens to write it.
+    _writing = ("convert", "copy", "skip_uptodate")
     _abort_on_duplicate_outputs(
         [(it["src"], it["final"]) for it in items
-         if it["action"] in ("convert", "copy")])
+         if it["action"] in _writing])
     if not args.dry_run:
         _sweep_orphan_temps(it["final"] for it in items
-                            if it["action"] in ("convert", "copy"))
+                            if it["action"] in _writing)
 
     # Timed from here, not from _t_plan: the batch prompt above waits on a
     # person, and that wait is not planning.
@@ -6667,10 +6748,11 @@ def main():
     if DERIVATIVE:
         existing = [it for it in items
                     if it["action"] in ("convert",) and it["final"].exists()]
+        # The up-to-date ones skipped above were judged on the same rules.
+        _n_unrecorded = n_derived_unrecorded
+        _n_better = n_derived_better
         if existing:
             labels = _read_derived_markers_batch([it["final"] for it in existing])
-            _n_unrecorded = 0
-            _n_better = 0
             for it in existing:
                 lab = labels.get(str(it["final"]), False)
                 if lab is False or lab is None:
@@ -6692,28 +6774,21 @@ def main():
                     if _why:
                         _FORCE_REDERIVE.add(os.path.normcase(str(it["final"])))
                         logger.info(f" {_why}: re-deriving | {it['src'].name}")
-                    elif (REDERIVE_ON_ENCODE_CHANGE and not REDERIVE_ON_LOWER_EFFORT
-                          and OVERWRITE is not True
-                          and _rederive_reason(lab, _DERIVED_LABEL, True, True)):
-                        # Kept only because the existing encode is the better
-                        # one; the lower-effort setting would re-derive it.
-                        _n_better += 1
-                    elif (REDERIVE_ON_ENCODE_CHANGE and OVERWRITE is not True
-                          and _split_encode_suffix(lab)[1] is None):
-                        # --overwrite rewrites them anyway: the "run once
-                        # with --overwrite" hint would be false there.
-                        _n_unrecorded += 1
-            if _n_unrecorded:
-                logger.info(f"{_n_unrecorded} existing derivative(s) predate the "
-                            f"distance/effort record and keep their old encode "
-                            f"settings — run once with --overwrite to refresh them")
-            if _n_better:
-                logger.info(f"{_n_better} existing derivative(s) kept: already encoded "
-                            f"at a higher effort than this run's at the same distance "
-                            f"(--rederive-on-lower-effort re-derives them)")
+                    else:
+                        _note = _derived_keep_note(lab)
+                        _n_better += _note == "better"
+                        _n_unrecorded += _note == "unrecorded"
             if derived_refused:
                 _ids = {id(it) for it in derived_refused}
                 items = [it for it in items if id(it) not in _ids]
+        if _n_unrecorded:
+            logger.info(f"{_n_unrecorded} existing derivative(s) predate the "
+                        f"distance/effort record and keep their old encode "
+                        f"settings — run once with --overwrite to refresh them")
+        if _n_better:
+            logger.info(f"{_n_better} existing derivative(s) kept: already encoded "
+                        f"at a higher effort than this run's at the same distance "
+                        f"(--rederive-on-lower-effort re-derives them)")
     # Also runs in a dry run — as a PREVIEW: the refusals are reported (and
     # counted in the summary's errors) but no item leaves the plan. Gating this
     # on `not args.dry_run` made the simulation promise outputs the real run
@@ -6778,8 +6853,9 @@ def main():
     _hold_incomplete_in_place_groups(items)
 
     _t_outputs = time.monotonic() - _t_out0
-    logger.info(f"Planned in {_fmt_secs(_t_records + _t_jbrd + _t_outputs)} "
-                f"(encode records {_fmt_secs(_t_records)}, jbrd check "
+    logger.info(f"Planned in {_fmt_secs(_t_uptodate + _t_records + _t_jbrd + _t_outputs)} "
+                f"(up-to-date check {_fmt_secs(_t_uptodate)}, "
+                f"encode records {_fmt_secs(_t_records)}, jbrd check "
                 f"{_fmt_secs(_t_jbrd)}, output checks {_fmt_secs(_t_outputs)})")
 
     # --- Dry run: report and stop ------------------------------------------
@@ -6902,7 +6978,15 @@ def main():
     work_items = []
     n_policy_skip = 0
     n_thumb_skip = 0
+    n_uptodate_skip = 0
     for it in items:
+        if it["action"] == "skip_uptodate":
+            # Not handed to convert_one: it was never classified, so if its
+            # source changed since planning it must wait for the next run
+            # rather than be converted past the downgrade/jbrd policies.
+            n_uptodate_skip += 1
+            logger.info(f" SKIP (exists) | {it['src'].name}")
+            continue
         if it["action"] == "skip_thumbnail":
             n_thumb_skip += 1
             logger.debug(f" SKIP (thumbnail page) | {it['src'].name}")
@@ -6980,7 +7064,7 @@ def main():
     copied = sum(1 for s, _f in results.values() if s == "copied")
     overwritten = sum(1 for s, _f in results.values() if s == "overwrite")
     skipped = (sum(1 for s, _f in results.values() if s == "skipped") + n_policy_skip
-               + n_thumb_skip)
+               + n_thumb_skip + n_uptodate_skip)
     # "aborted" is not an error: those files were never attempted because the
     # run gave up early (disk full, interrupt). They are reported separately
     # and only real failures count towards the exit code.

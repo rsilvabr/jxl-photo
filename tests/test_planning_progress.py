@@ -57,8 +57,8 @@ def test_planning_is_announced_and_timed(tmp_path, monkeypatch, caplog):
 
     text = caplog.text
     assert "Planning 1 file(s): reading each one's encode record" in text, text
-    m = re.search(r"Planned in (\S+) \(encode records (\S+), jbrd check (\S+), "
-                  r"output checks (\S+)\)", text)
+    m = re.search(r"Planned in (\S+) \(up-to-date check (\S+), encode records (\S+), "
+                  r"jbrd check (\S+), output checks (\S+)\)", text)
     assert m, text
     # Order: announced after discovery, reported before the plan is printed.
     assert (text.index("JXLs found") < text.index("Planning 1 file(s)")
