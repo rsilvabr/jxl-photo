@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.18.0](#v2180)** | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
+| **[v2.18.1](#v2181)** | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
+| [v2.18.0](#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
 | [v2.18.0_beta1](#v2180_beta1) | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
 | [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
 | [v2.17.0_beta1](#v2170_beta1) | 2026-10-23 | Pre-release. Film scans keep what their scanner software needs: the XMP is copied whole, private TIFF tags are kept; `--thumbnail-mode auto` (default) keeps thumbnail pages except Capture One's (round 64, 2 fixes) |
@@ -75,9 +76,56 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.18.1
+
+**Released 2026-11-01.** Supersedes v2.18.0. A faster sync in the
+recompressor; nothing to do when upgrading.
+
+**A sync plans only what it will process.** Before the first file is
+converted, the recompressor used to read every source's encode record with
+exiftool and walk its boxes for a `jbrd`. On a hard disk that is roughly
+0.15–0.25 s per file, minutes on a big folder. And on a scheduled sync most of
+those files are then skipped because their output is already up to date. That
+skip never depended on what planning read: `convert_one` checks "the output
+exists and is newer than the source" before it looks at anything else. So the
+planning time of those files was thrown away.
+
+Up-to-date files are now set aside first, from the two files' dates alone
+(`_mark_up_to_date_items`), and never read. The log says how many:
+
+```text
+1290 file(s) already up to date at the destination: skipped without reading them
+Planning 65 file(s): reading each one's encode record and checking for a jbrd box — ...
+```
+
+and the `Planned in` line gains the time of that check. What stays as it was:
+
+- **Derivative runs** (`--output-icc`, resize, sharpen: the sRGB and mobile
+  copies) still read each existing derivative's `jxlphoto-derived` label, to
+  see whether the recipe or the distance/effort changed. Only their own
+  derivatives with nothing to re-derive are set aside; a file at the
+  destination that is not one keeps its refusal. Their planning roughly halves
+  (one exiftool read per file instead of two).
+- **Runs that delete** (`--delete-source`), `--overwrite` and **in-place runs**
+  (mode 8, mode 0 without an output folder) plan every file, as before: the
+  delete gates and the multi-page veto see fully planned items.
+
+Side effects: an up-to-date file no longer reaches the batch prompt of
+`--on-downgrade ask` (and the other `ask` policies). A file whose source
+changes while the run is going waits for the next run instead of being
+converted unplanned. Two sources sharing one destination still abort the run
+even when that output is up to date.
+
+The encoder's sync (TIFF → JXL) is unchanged. It reads each TIFF's page
+layout because the output names depend on it, and `--restamp-then-sync` has
+to read every master's record.
+
+2844 tests; the real-photo battery passes (126 checks; a new one runs the
+SRGB and MOBILE presets again and checks that they plan nothing).
+
 ## v2.18.0
 
-**Released 2026-10-29.** Supersedes v2.17.0 and the v2.18.0_beta1
+**Released 2026-10-29, superseded by v2.18.1.** Supersedes v2.17.0 and the v2.18.0_beta1
 pre-release, and ships all of it (below) with no change since: runs that delete
 TIFFs check every JXL's pixels first, plus the round-66 hardening (#551–#560).
 See [Upgrading](upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them).

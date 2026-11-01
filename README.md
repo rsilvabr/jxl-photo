@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.18.0** (2026-10-29) · [What's new](#whats-new-in-v2180) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.18.1** (2026-11-01) · [What's new](#whats-new-in-v2181) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.18.0](#whats-new-in-v2180)
+- [What's new in v2.18.1](#whats-new-in-v2181)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -393,30 +393,27 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.18.0
+## What's new in v2.18.1
 
-2026-10-29. One safer default and a round of hardening; nothing to do when upgrading.
+2026-11-01. A faster sync; nothing to do when upgrading.
 
-- **Runs that delete TIFFs check every JXL's pixels first** (`VERIFY_ROUNDTRIP` is now on by default). Those runs take about twice as long; runs that delete nothing are unchanged. `VERIFY_ROUNDTRIP = False` at the top of the encoder restores the old behaviour ([Upgrading](docs/upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them)).
-- **Lossless JPEG archives:** a JPEG → JXL run stopped midway no longer leaves JPEGs that later runs never delete, and an archive is never overwritten by another photo of the same name (#556–#558).
-- **Thumbnail pages:** a TIFF re-archived with fewer pages no longer leaves its old preview page behind, and colour-converted, resized or sharpened copies skip preview pages (#551, #552, #555).
-- **Edge cases closed:** edits that work on a copy (restamp, thumbnail refresh, `--repair-jbrd`) and the decoder never undo a change another program made meanwhile; exiftool works when the Windows temp folder has characters outside the system code page (#553, #559, #560).
+- **A recompressor sync plans only what it will process.** Files whose output is already up to date are skipped without being read, so a scheduled sync where almost everything is done no longer spends minutes reading every file first. Copies made with `--output-icc`, resize or sharpening still read each existing copy's label, so their planning roughly halves ([details](docs/README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk)).
 
-Full notes: [version history](docs/version_history.md#v2180). **2835 tests**, and the real-photo battery passes (125 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2181). **2844 tests**, and the real-photo battery passes (126 checks, run inside a hostile folder).
 
-### In v2.17.0
+### In v2.18.0
 
-- **Film scans are archived lossless by default** and never recompressed lossy unless asked; a SilverFast scan decoded back opens in SilverFast with its IR channel and dust removal ([details](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
-- **Thumbnail pages are kept by default** (`--thumbnail-mode auto`), except Capture One's ([Upgrading](docs/upgrading.md#v2170-thumbnail-pages-are-kept-by-default-film-scans-are-lossless)).
-- **File names with a `%`** keep their metadata (#550).
+- **Runs that delete TIFFs check every JXL's pixels first** (`VERIFY_ROUNDTRIP` on by default) ([Upgrading](docs/upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them)).
+- **Hardening** around lossless JPEG archives, thumbnail pages and in-place edits (#551–#560).
 
-Full notes: [version history](docs/version_history.md#v2170).
+Full notes: [version history](docs/version_history.md#v2180).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.18.0** | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first; hardening around lossless JPEG archives, thumbnail pages and in-place edits |
+| **v2.18.1** | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
+| [v2.18.0](docs/version_history.md#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first; hardening around lossless JPEG archives, thumbnail pages and in-place edits |
 | [v2.17.0](docs/version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 | [v2.16.2](docs/version_history.md#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once |
 | [v2.16.1](docs/version_history.md#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output |
@@ -424,7 +421,6 @@ Full notes: [version history](docs/version_history.md#v2170).
 | [v2.15.2](docs/version_history.md#v2152) | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode; a derivative run says when it wrote nothing |
 | [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
 | [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
-| [v2.14.0](docs/version_history.md#v2140) | 2026-10-13 | The overwrite guard can be turned off for renamed folders; `--restamp-moved`; faster resized derivatives |
 
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
