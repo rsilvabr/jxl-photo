@@ -170,7 +170,9 @@ def test_resize_without_output_icc_keeps_the_source_colour_space(tmp_path):
     assert not any(t.startswith("jxlphoto-srcsum:") for t in tokens), tokens
 
     ct = _exif_value(out, "-XMP-xmp:CreatorTool")
-    assert rec._xmp_icc_from_creator_tool(ct), ct          # source ICC kept
+    # source ICC kept — moved from the v2.18.x CreatorTool to the token
+    assert ct == "Test", ct
+    assert rec._carried_icc("", tokens), tokens
     assert _size_of(out) == (320, 240)
 
 

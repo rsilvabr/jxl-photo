@@ -518,7 +518,8 @@ def test_transcoder_metadata_strips_icc_blob(monkeypatch, tmp_path):
 
     def fake_argfile(args_lines, timeout=60):
         if any(str(a) == "-XMP-xmp:CreatorTool" for a in args_lines) and not any("CreatorTool=" in str(a) for a in args_lines):
-            return _FakeRun(stdout="ICC:QUJDRA== | Capture One 23\n")
+            # a JSON read since v2.19.0 (CreatorTool and dc:Relation together)
+            return _FakeRun(stdout='[{"SourceFile": "a.jpg", "CreatorTool": "ICC:QUJDRA== | Capture One 23"}]')
         if any("CreatorTool=" in str(a) for a in args_lines):
             writes.append(args_lines)
         return _FakeRun()
@@ -551,7 +552,11 @@ def test_encoder_drops_stale_icc_from_existing_creator(monkeypatch, tmp_path):
     creator_line = [ln for ln in content.splitlines() if "CreatorTool=" in ln][0]
     assert "OldApp" in creator_line
     assert "T0xESUJD" not in creator_line, "stale ICC blob survived"
-    assert creator_line.count("ICC:") == 1
+    # v2.19.0: CreatorTool keeps only the program name; the new ICC is ONE
+    # jxlphoto-iccprofile token in dc:Relation.
+    assert creator_line.count("ICC:") == 0
+    assert len([ln for ln in content.splitlines()
+                if ln.startswith("-XMP-dc:Relation+=jxlphoto-iccprofile:")]) == 1
 
 
 def test_transcoder_verify_integrity_truncated_jxl(tmp_path):
@@ -755,7 +760,8 @@ def test_transcoder_metadata_strips_bare_icc_blob(monkeypatch, tmp_path):
 
     def fake_argfile(args_lines, timeout=60):
         if any(str(a) == "-XMP-xmp:CreatorTool" for a in args_lines) and not any("CreatorTool=" in str(a) for a in args_lines):
-            return _FakeRun(stdout="ICC:QUJDRA==\n")
+            # a JSON read since v2.19.0 (CreatorTool and dc:Relation together)
+            return _FakeRun(stdout='[{"SourceFile": "a.jpg", "CreatorTool": "ICC:QUJDRA=="}]')
         if any("CreatorTool=" in str(a) for a in args_lines):
             writes.append(args_lines)
         return _FakeRun()

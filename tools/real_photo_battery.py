@@ -45,6 +45,7 @@ AI_tools/<YYMMDD>_battery_report.md (gitignored) and printed. Exit code 0 when
 every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
 """
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -1191,6 +1192,42 @@ def varied_checks(varied):
           f"worst {worst[0]:.1f} dB ({worst[1]})")
     check("varied: Make/Model/date/ISO/lens carried to the JXL and back",
           not bad_exif and len(e_src) == len(srcs), f"differ={bad_exif[:4]}")
+
+    # v2.19.0: the ICC copy is ONE jxlphoto-iccprofile token holding the
+    # source's profile byte for byte; CreatorTool keeps only the program
+    # name, and the decoded TIFF carries neither.
+    def _icc_rows(files):
+        try:
+            rows = json.loads(exif(["-j", "-XMP-xmp:CreatorTool", "-XMP-dc:Relation"]
+                                   + list(files)))
+        except Exception:
+            return {}
+        out = {}
+        for r in rows:
+            rel = r.get("Relation")
+            rel = [] if rel is None else (rel if isinstance(rel, list) else [rel])
+            out[Path(r["SourceFile"]).stem] = (
+                str(r.get("CreatorTool") or ""),
+                [str(t) for t in rel if str(t).startswith("jxlphoto-iccprofile:")])
+        return out
+
+    m_jxl = _icc_rows(jxls)
+    m_tif = _icc_rows(sorted((vd / "converted_tiff").glob("*.tif")))
+    bad_tok, bad_ct = [], []
+    for s in srcs:
+        with tifffile.TiffFile(s) as t0:
+            i0 = t0.pages[0].tags.get(34675)
+        ct, toks = m_jxl.get(s.stem, ("", []))
+        want = [] if i0 is None else [bytes(i0.value)]
+        if [base64.b64decode(t.split(":", 1)[1]) for t in toks] != want:
+            bad_tok.append(s.name)
+        tct, ttoks = m_tif.get(s.stem, ("", ["missing"]))
+        if "ICC:" in ct or "ICC:" in tct or ttoks:
+            bad_ct.append(s.name)
+    check("varied: each master carries its ICC as one jxlphoto-iccprofile token",
+          len(m_jxl) == len(srcs) and not bad_tok, f"bad={bad_tok[:4]}")
+    check("varied: no ICC copy in CreatorTool (JXL, TIFF) nor left in the TIFF",
+          len(m_tif) == len(srcs) and not bad_ct, f"bad={bad_ct[:4]}")
     if ratios:
         check("varied: size ratio JXL/TIFF at d=0.1 (information)", True,
               f"{min(ratios):.1%}-{max(ratios):.1%}")

@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.18.1"
+TOOLKIT_VERSION = "2.19.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1355,6 +1355,11 @@ SRCSUM_PREFIX = "jxlphoto-srcsum:"
 # Must match the encoder's SRC_XMP_PREFIX / SRCSUM_XMP_PREFIX: they record
 # WHICH source made an output, so a later run can refuse to overwrite one
 # archive with a different file that happens to share its name.
+ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+# Must match the encoder's: the ORIGINAL ICC profile in dc:Relation as
+# "jxlphoto-iccprofile:<base64>" (XMP CreatorTool "ICC:<base64>" in JXLs
+# written up to v2.18.x). Read as the source profile of a decode; never left
+# in a delivered JPEG/PNG, whose profile is in the normal place.
 ORIGIN_PREFIX = "jxlphoto-origin:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
@@ -1751,9 +1756,10 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
 
     Used for lossy convert paths where cjxl/djxl may not preserve metadata.
     Failures are ignored so the conversion itself always succeeds.
-    Also strips any 'ICC:<base64>' blob from XMP CreatorTool (written by the
-    TIFF encoder for TIFF round-trips): it bloats delivered JPEG/PNGs and,
-    after an ICC conversion, points at the wrong profile.
+    Also strips the ICC copy the TIFF encoder writes for TIFF round-trips —
+    the jxlphoto-iccprofile token in dc:Relation, and the 'ICC:<base64>' blob
+    in XMP CreatorTool of files written up to v2.18.x: it bloats delivered
+    JPEG/PNGs and, after an ICC conversion, points at the wrong profile.
     """
     if shutil.which(_get_exiftool_cmd()) is None:
         return
@@ -1766,14 +1772,18 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                  "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
-        # Strip ICC:<base64> segments from CreatorTool (same logic as the
-        # TIFF decoder's cleanup_xmp_icc).
+        # Strip the ICC copy: jxlphoto-iccprofile tokens from dc:Relation,
+        # ICC:<base64> segments from CreatorTool (same logic as the TIFF
+        # decoder's cleanup_xmp_icc) — one read, one write.
         try:
-            r = _run_exiftool_argfile(
-                ["-s", "-s", "-s", "-XMP-xmp:CreatorTool", str(dst_path)], timeout=EXIFTOOL_TIMEOUT
-            )
-            if r.returncode == 0 and r.stdout and "ICC:" in r.stdout:
-                content = r.stdout.strip()
+            try:
+                content, _toks = _read_creator_and_relation(dst_path)
+            except Exception:
+                content, _toks = "", []
+            strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
+                     for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
+            if "ICC:" in content:
+                content = content.strip()
                 # Blob is bounded: base64 chars only up to the next pipe or EOL,
                 # so a trailing " | Real App" segment is never eaten.
                 clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
@@ -1791,13 +1801,14 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                 # otherwise the blob survives intact.
                 if not clean:
                     clean = "jxl_jpeg_transcoder"
+                # _argfile_safe like every other CreatorTool write in the
+                # toolkit: an argfile is one argument per LINE, so a
+                # multi-line CreatorTool copied from another program would
+                # split into several bogus arguments here.
+                strip.append(f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}")
+            if strip:
                 _run_exiftool_argfile(
-                    ["-overwrite_original",
-                     # _argfile_safe like every other CreatorTool write in the
-                     # toolkit: an argfile is one argument per LINE, so a
-                     # multi-line CreatorTool copied from another program would
-                     # split into several bogus arguments here.
-                     f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}", str(dst_path)],
+                    ["-overwrite_original"] + strip + [str(dst_path)],
                     timeout=EXIFTOOL_TIMEOUT
                 )
         except Exception:
@@ -4735,6 +4746,25 @@ def _xmp_icc_from_creator_tool(text: str):
     return None
 
 
+def _carried_icc(creator, tokens):
+    """The original ICC profile a toolkit JXL carries in XMP, or None: the
+    jxlphoto-iccprofile token in dc:Relation first, else the ICC:<base64>
+    segment of CreatorTool (where JXLs written up to v2.18.x keep it). Same
+    validation for both: strict base64, >= 128 bytes, 'acsp' at offset 36.
+    Parity-pinned (decoder + transcoder + recompressor)."""
+    for token in tokens or ():
+        token = str(token).strip()
+        if not token.startswith(ICC_PROFILE_PREFIX):
+            continue
+        try:
+            data = base64.b64decode(token[len(ICC_PROFILE_PREFIX):], validate=True)
+        except Exception:
+            continue
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
+    return _xmp_icc_from_creator_tool(creator)
+
+
 def _read_creator_and_relation(jxl_path: Path):
     """(creator_tool str, [relation tokens]) of one file. Raises on failure:
     a derivative whose source profile cannot be read must not be produced."""
@@ -4853,14 +4883,15 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
     identical to a plain assignment, 35.7 dB away from the correct
     conversion). The source profile is therefore assigned EXPLICITLY before
     any target profile, with the same precedence the recompressor uses:
-    XMP CreatorTool ICC > the decoded PNG's own iCCP > an sRGB chunk >
-    refuse to guess.
+    the XMP ICC (_carried_icc: the jxlphoto-iccprofile token, else the
+    CreatorTool ICC of older files) > the decoded PNG's own iCCP > an sRGB
+    chunk > refuse to guess.
 
     Returns the path of the profile that describes the pixels; a caller that
     sharpens in Lab loses it (trap B2) and must re-assign this one.
     """
     creator, _tokens = _read_creator_and_relation(jxl_path)
-    icc = _xmp_icc_from_creator_tool(creator)
+    icc = _carried_icc(creator, _tokens)
     if icc:
         path = tmp_dir / "src.icc"
         path.write_bytes(icc)
@@ -5217,7 +5248,9 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     2026-09-25) — the master's jxlphoto-src survived onto the derivative.
     """
     _creator, tokens = _read_creator_and_relation(jxl_path)
-    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
+    # ICC_PROFILE_PREFIX too: a delivered JPEG/PNG has its profile in the
+    # normal place (_copy_metadata strips the copied token the same way).
+    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX)
     keep = [t for t in tokens if t and not t.startswith(drop)]
     lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
@@ -5450,7 +5483,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     # Grey: djxl's own original profile, always single-
                     # channel (an XMP ICC could be RGB).
                     _xmp_icc = (None if _png_is_grayscale(tmp_png)
-                                else _xmp_icc_from_creator_tool(creator))
+                                else _carried_icc(creator, _tokens))
                     if _xmp_icc:
                         orig_target = Path(tmp) / "orig_target.icc"
                         orig_target.write_bytes(_xmp_icc)

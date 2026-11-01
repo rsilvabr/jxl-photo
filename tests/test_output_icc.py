@@ -132,29 +132,41 @@ def test_derivative_metadata_args_rewrite(tmp_path, monkeypatch):
     assert "jxlphoto-src:" not in joined
     assert "srcsum" not in joined
     assert "icc:inherited" not in joined
-    ct = next(l for l in lines if l.startswith("-XMP-xmp:CreatorTool="))
-    assert ct.startswith("-XMP-xmp:CreatorTool=App | ICC:")
-    assert base64.b64decode(ct.split("ICC:", 1)[1]) == prof
+    # v2.19.0: the target profile is a jxlphoto-iccprofile token, and the
+    # master's old CreatorTool copy is taken out (the program name stays).
+    assert "-XMP-xmp:CreatorTool=App" in lines
+    icc_lines = [l for l in lines if l.startswith("-XMP-dc:Relation+=jxlphoto-iccprofile:")]
+    assert len(icc_lines) == 1, icc_lines
+    assert base64.b64decode(icc_lines[0].split(":", 2)[2]) == prof
 
 
 def test_derivative_metadata_args_keeps_creator_tool_when_not_converted(tmp_path, monkeypatch):
-    """The CreatorTool follows what _derive_pixels DID (converted=False for a
+    """The ICC copy follows what _derive_pixels DID (converted=False for a
     grey image), not the jxlphoto-grayscale marker: a grey JXL without the
     marker was left unconverted but used to get the RGB target stamped in."""
+    import base64
+    target = rec._adobe_rgb_icc_bytes()
     monkeypatch.setattr(rec, "_OUTPUT_ICC_LABEL", "sRGB")
-    monkeypatch.setattr(rec, "_OUTPUT_ICC_BYTES", rec._adobe_rgb_icc_bytes())
+    monkeypatch.setattr(rec, "_OUTPUT_ICC_BYTES", target)
     monkeypatch.setattr(rec, "_DERIVED_LABEL", "sRGB")
-    for tokens in (["jxlphoto-grayscale"], []):          # with and WITHOUT the marker
+    src_tok = "jxlphoto-iccprofile:" + base64.b64encode(b"x" * 200).decode("ascii")
+    for tokens in (["jxlphoto-grayscale", src_tok], [src_tok]):  # with and WITHOUT the marker
         monkeypatch.setattr(rec, "_read_creator_and_relation",
                             lambda p, t=tokens: ("App", t))
         lines = rec._derivative_metadata_args(tmp_path / "a.jxl", converted=False)
         assert not any(l.startswith("-XMP-xmp:CreatorTool=") for l in lines), tokens
         assert "-XMP-dc:Relation+=jxlphoto-derived:sRGB" in lines
-    # And a converted image gets the target even if it carries the marker.
+        # the master's own profile token is kept, no target added
+        assert [l for l in lines if "jxlphoto-iccprofile:" in l] == [
+            "-XMP-dc:Relation+=" + src_tok]
+    # And a converted image gets the target even if it carries the marker,
+    # REPLACING the master's token.
     monkeypatch.setattr(rec, "_read_creator_and_relation",
-                        lambda p: ("App", ["jxlphoto-grayscale"]))
+                        lambda p: ("App", ["jxlphoto-grayscale", src_tok]))
     lines = rec._derivative_metadata_args(tmp_path / "a.jxl", converted=True)
-    assert any(l.startswith("-XMP-xmp:CreatorTool=App | ICC:") for l in lines)
+    assert [l for l in lines if "jxlphoto-iccprofile:" in l] == [
+        "-XMP-dc:Relation+=" + rec._icc_profile_token(target)]
+    assert not any(l.startswith("-XMP-xmp:CreatorTool=") for l in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +349,9 @@ def test_real_derive_to_srgb_pixels_and_markers(tmp_path):
 
     from PIL import ImageCms
     ct = _exif_value(out, "-XMP-xmp:CreatorTool")
-    icc = rec._xmp_icc_from_creator_tool(ct)
-    assert icc, ct
+    assert "ICC:" not in ct, ct
+    icc = rec._carried_icc(ct, tokens)
+    assert icc, tokens
     prof = ImageCms.ImageCmsProfile(io.BytesIO(icc))
     assert "srgb" in ImageCms.getProfileDescription(prof).lower()
 
@@ -452,4 +465,5 @@ def test_real_grey_jxl_without_marker_keeps_its_creator_tool(tmp_path):
     assert out.exists()
     assert _exif_value(out, "-XMP-xmp:CreatorTool") == "Other App"
     assert "jxlphoto-derived:sRGB" + _label_suffix(1.0) in _relation_tokens(out)
+    assert not any(t.startswith("jxlphoto-iccprofile:") for t in _relation_tokens(out))
 

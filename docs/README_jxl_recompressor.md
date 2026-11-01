@@ -2,7 +2,7 @@
 
 Batch **JXL → JXL recompressor**: shrink an existing JPEG XL archive by
 re-encoding it at a new distance/effort, keeping everything this toolkit
-stamps into the files — the base64 ICC in XMP CreatorTool, EXIF/XMP/IPTC
+stamps into the files — the base64 ICC (`jxlphoto-iccprofile`), EXIF/XMP/IPTC
 metadata, provenance markers (`jxlphoto-*`) and multi-page group markers.
 
 The typical workflow: photos were archived at near-lossless (`d=0.05–0.1`)
@@ -188,8 +188,8 @@ on a real scan the first recompression of a lossless master came back at
 like the encoder's default:
 
 - a source whose profile has no native form is decoded in its own space and
-  re-encoded **tagged sRGB with the real profile in XMP** (`CreatorTool`
-  `ICC:`, the encoder's "skip") — the toolkit's decoder assigns it back; other
+  re-encoded **tagged sRGB with the real profile in XMP** (the
+  `jxlphoto-iccprofile` item, the encoder's "skip") — the toolkit's decoder assigns it back; other
   viewers show the numbers as sRGB, exactly as for an encoder "skip" file.
   The same applies to the final encode of a derivative. Whether a profile has
   a native form is probed once per run on a 16x16 image;
@@ -522,7 +522,7 @@ Guarantees, all fail-closed:
 - **Removes the archive provenance**: `jxlphoto-src:`/`jxlphoto-srcsum:` are
   dropped (a derivative must never prove the original TIFF is archived — the
   encoder would otherwise accept it under `--delete-skipped`), and the
-  `ICC:<base64>` blob in `CreatorTool` is replaced by the target profile, so
+  `jxlphoto-iccprofile` copy is replaced by the target profile, so
   decoding the derivative to TIFF labels it with the colour space its pixels
   are really in.
 - `copy` policies (downgrade/regeneration/jbrd) become **skip** and
@@ -589,7 +589,7 @@ gamma-encoded space (the ImageMagick default), not in linear light.
 Resize and sharpening work with or without `--output-icc`: without it the
 source colour space is kept — the source profile is assigned explicitly before
 the shaping pass and re-assigned after the Lab sharpening drops it, so the
-output's `CreatorTool` ICC still describes its pixels. A greyscale image is
+output's ICC copy still describes its pixels. A greyscale image is
 never colour-converted (an RGB profile on a single channel is invalid), but it
 is still resized and sharpened.
 

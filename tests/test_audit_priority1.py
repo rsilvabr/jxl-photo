@@ -88,7 +88,10 @@ def test_stale_icc_stripped_with_real_reader(monkeypatch, tmp_path):
     content = args_file.read_text(encoding="utf-8")
     creator_line = [ln for ln in content.splitlines() if "CreatorTool=" in ln][0]
     assert "T0xESUJD" not in creator_line, "stale ICC blob survived"
-    assert creator_line.count("ICC:") == 1
+    # v2.19.0: the new ICC is a jxlphoto-iccprofile token, not in CreatorTool.
+    assert creator_line == "-xmp-xmp:CreatorTool=OldApp"
+    assert len([ln for ln in content.splitlines()
+                if ln.startswith("-XMP-dc:Relation+=jxlphoto-iccprofile:")]) == 1
 
 
 # ---------------------------------------------------------------------------

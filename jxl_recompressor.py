@@ -3,7 +3,7 @@
 jxl_recompressor.py — Batch JPEG XL -> JPEG XL recompressor (smaller archives, same metadata)
 
 Re-encodes JXL files at a new distance/effort with `cjxl in.jxl out.jxl`, keeping
-everything this toolkit stamps into an archive: the base64 ICC in XMP CreatorTool,
+everything this toolkit stamps into an archive: the base64 ICC (jxlphoto-iccprofile),
 EXIF/XMP metadata, provenance markers (jxlphoto-*) and multi-page group markers.
 
 If a JXL was written by this toolkit it carries its encoding parameters
@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.18.1"
+TOOLKIT_VERSION = "2.19.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1122,6 +1122,12 @@ DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # sRGB / AdobeRGB / icc-<md5[:12]>. Marks the file as a colour-converted
 # derivative (NOT an archive of the original) and records its target, so a
 # run with a different target re-derives instead of trusting the old file.
+ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+# The encoder's: the ORIGINAL ICC profile, byte for byte, as
+# "jxlphoto-iccprofile:<base64>" in dc:Relation. Files written up to v2.18.x
+# carry it in XMP CreatorTool as "ICC:<base64>"; both are read (_carried_icc),
+# and an output written from such a file moves it to the token
+# (_legacy_icc_lines). A --output-icc derivative carries the TARGET profile.
 ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
 # Written by the encoder on pages that inherit IFD0's ICC. Meaningless on a
 # derivative (it carries its own converted profile) — removed there.
@@ -3517,7 +3523,8 @@ def _disk_full_need(jxl_path: Path) -> int:
 #          iCCP; `magick in.png -profile target.icc` then ASSIGNS the target
 #          instead of converting. The source profile must always be assigned
 #          explicitly before the conversion.
-#   A4:    the master's XMP CreatorTool carries the ORIGINAL ICC in base64; the
+#   A4:    the master's XMP carries the ORIGINAL ICC in base64 (the
+#          jxlphoto-iccprofile token; CreatorTool up to v2.18.x); the
 #          derivative must replace it with the TARGET profile, or a later decode
 #          to TIFF would label the converted pixels with the wrong space.
 #   A5:    cjxl 0.12 copies input PNG metadata as Brotli "brob" boxes; the
@@ -4059,7 +4066,7 @@ def _png_iccp(png_path: Path):
 def _png_without_colour_chunks(src: Path, dst: Path) -> None:
     """Copy a PNG dropping iCCP/sRGB/gAMA/cHRM/cICP: cjxl then reads the
     pixels as sRGB and keeps their numbers — the encoder's "skip" layout,
-    with the real profile carried in XMP CreatorTool."""
+    with the real profile carried in XMP (the jxlphoto-iccprofile token)."""
     drop = {b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP"}
     with open(src, "rb") as fi, open(dst, "wb") as fo:
         sig = fi.read(8)
@@ -4087,18 +4094,17 @@ def _png_without_colour_chunks(src: Path, dst: Path) -> None:
                 break
 
 
-def _skip_icc_creator_line(jxl_path: Path, skip_icc: bytes) -> list:
-    """[] when the source's CreatorTool already records an ICC (the toolkit
-    decoder assigns THAT one, so it keeps describing the pixels exactly as it
-    did for the source), else the line that records `skip_icc` there — the
-    output's pixels are tagged sRGB and would otherwise lose their profile."""
-    creator, _tokens = _read_creator_and_relation(jxl_path)
-    if _xmp_icc_from_creator_tool(creator):
+def _skip_icc_lines(jxl_path: Path, skip_icc: bytes) -> list:
+    """[] when the source's XMP already records an ICC (the toolkit decoder
+    assigns THAT one, so it keeps describing the pixels exactly as it did for
+    the source; a v2.18.x CreatorTool copy moves to the token through
+    _legacy_icc_lines), else the jxlphoto-iccprofile line that records
+    `skip_icc` — the output's pixels are tagged sRGB and would otherwise lose
+    their profile."""
+    creator, tokens = _read_creator_and_relation(jxl_path)
+    if _carried_icc(creator, tokens):
         return []
-    b64 = base64.b64encode(skip_icc).decode("ascii")
-    base = creator.strip()
-    return ["-XMP-xmp:CreatorTool=" + _argfile_safe(f"{base} | ICC:{b64}" if base
-                                                    else f"ICC:{b64}")]
+    return ["-XMP-dc:Relation+=" + _icc_profile_token(skip_icc)]
 
 
 def _keep_invisible_flag() -> list:
@@ -4394,6 +4400,47 @@ def _xmp_icc_from_creator_tool(text: str):
     return None
 
 
+def _carried_icc(creator, tokens):
+    """The original ICC profile a toolkit JXL carries in XMP, or None: the
+    jxlphoto-iccprofile token in dc:Relation first, else the ICC:<base64>
+    segment of CreatorTool (where JXLs written up to v2.18.x keep it). Same
+    validation for both: strict base64, >= 128 bytes, 'acsp' at offset 36.
+    Parity-pinned (decoder + transcoder + recompressor)."""
+    for token in tokens or ():
+        token = str(token).strip()
+        if not token.startswith(ICC_PROFILE_PREFIX):
+            continue
+        try:
+            data = base64.b64decode(token[len(ICC_PROFILE_PREFIX):], validate=True)
+        except Exception:
+            continue
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
+    return _xmp_icc_from_creator_tool(creator)
+
+
+def _icc_profile_token(icc_bytes: bytes) -> str:
+    """The dc:Relation token that carries an ICC profile byte for byte.
+    Parity-pinned (encoder + recompressor)."""
+    return ICC_PROFILE_PREFIX + base64.b64encode(icc_bytes).decode("ascii")
+
+
+def _legacy_icc_lines(creator: str, tokens, migrate: bool = True) -> list:
+    """exiftool lines that take a v2.18.x-style ICC:<base64> out of the
+    output's CreatorTool (the copied XMP brought it along), keeping the real
+    program name — an empty value removes the tag. With `migrate`, the same
+    profile moves to a jxlphoto-iccprofile token when the source carries
+    none, so the output keeps it. [] when CreatorTool holds no valid ICC
+    (text that merely looks like one is left alone)."""
+    legacy = _xmp_icc_from_creator_tool(creator)
+    if legacy is None:
+        return []
+    lines = ["-XMP-xmp:CreatorTool=" + _argfile_safe(_creator_tool_without_icc(creator))]
+    if migrate and not any(str(t).startswith(ICC_PROFILE_PREFIX) for t in tokens or ()):
+        lines.append("-XMP-dc:Relation+=" + _icc_profile_token(legacy))
+    return lines
+
+
 def _creator_tool_without_icc(text: str) -> str:
     """CreatorTool with every ICC:<base64> blob removed — same regexes as the
     encoder's stale-blob strip (jxl_tiff_encoder.py, 'Strip any stale
@@ -4465,7 +4512,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
 
     The recipe is any of: colour conversion to --output-icc, a Lanczos resize,
     Lab-L sharpening. The SOURCE profile is always assigned explicitly (trap
-    A3): the encoder's original ICC from XMP CreatorTool when present — exactly
+    A3): the encoder's original ICC carried in XMP (_carried_icc) — exactly
     what jxl_tiff_decoder attaches to the same pixels — else the iCCP djxl
     wrote (extracted to a file for magick), else sRGB (djxl writes an sRGB
     chunk, no iCCP, for sRGB-encoded files). Without --output-icc there is no
@@ -4487,7 +4534,8 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
     cannot be done faithfully.
 
     Returns (converted, size, skip_icc): converted True only for a colour
-    conversion (CreatorTool then carries the TARGET profile); size is the
+    conversion (the jxlphoto-iccprofile token then carries the TARGET
+    profile); size is the
     resized (w, h) or None; skip_icc the profile bytes when the pixels were
     encoded tagged sRGB, else None. _derivative_metadata_args takes both instead of guessing again
     from the jxlphoto-grayscale marker: a grey JXL that does not carry the
@@ -4547,7 +4595,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # the RGB case. Grey is never colour-converted, so go back to
                 # the file's own grey profile (djxl's --orig_icc_out: always
                 # single-channel, unlike an XMP ICC that could be RGB). The
-                # copied CreatorTool keeps describing these pixels.
+                # copied XMP ICC keeps describing these pixels.
                 if _icc_a2b_only(orig_icc.read_bytes()):
                     raise RuntimeError(_A2B_ONLY_TARGET_MSG)
                 args += ["-intent", "Relative", "-black-point-compensation",
@@ -4565,9 +4613,9 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                         # "keep" derivative: re-assigning linear sRGB would
                         # leave the master's space, so CONVERT to the original
                         # ICC (XMP, else the file's own as djxl reported it).
-                        # converted stays False: the copied CreatorTool already
+                        # converted stays False: the copied XMP already
                         # carries that same ICC.
-                        src_icc = _xmp_icc_from_creator_tool(creator)
+                        src_icc = _carried_icc(creator, _tokens)
                         if src_icc:
                             orig_path = tmp / "orig_target.icc"
                             orig_path.write_bytes(src_icc)
@@ -4579,7 +4627,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                                  "-profile", str(orig_path)]
                         out_profile = orig_path
                 else:
-                    src_icc = _xmp_icc_from_creator_tool(creator)
+                    src_icc = _carried_icc(creator, _tokens)
                     chunks = _png_chunk_types(dec_png)
                     if src_icc:
                         src_path = tmp / "src.icc"
@@ -4642,7 +4690,8 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # R1 (2026-10-08 audit): with the profile in iCCP cjxl would
                 # write a lossy ICC blob — read back through linear sRGB (27 dB
                 # on a real scan with its A2B-only profile). Encode the pixels
-                # tagged sRGB instead; the profile rides in XMP CreatorTool.
+                # tagged sRGB instead; the profile rides in XMP
+                # (the jxlphoto-iccprofile token).
                 skip_png = tmp / "skip.png"
                 _png_without_colour_chunks(enc_in, skip_png)
                 enc_in = skip_png
@@ -4702,26 +4751,28 @@ def _derivative_metadata_args(jxl_path: Path, converted: bool = True,
     - dc:Relation: drop jxlphoto-src/srcsum (a derivative must never prove the
       original is archived — trap A7), drop any old jxlphoto-derived and the
       page-level icc:inherited flag, add jxlphoto-derived:<recipe>;
-    - CreatorTool: replace the ICC:<b64> blob by the TARGET profile when the
+    - the jxlphoto-iccprofile token: replaced by the TARGET profile when the
       pixels were colour-converted, so the decoder labels a decoded TIFF with
       the colour space the pixels are really in (trap A4). When they were not
       (`converted` False: a grey image or a resize/sharpening-only recipe) the
-      copied CreatorTool is kept — its ICC still describes the pixels;
+      copied one is kept — it still describes the pixels;
+    - CreatorTool: a v2.18.x ICC:<b64> blob is taken out (_legacy_icc_lines),
+      moved to the token when the pixels were not converted;
     - pixel dimensions: corrected to the resized output's own (the XMP pair
       only when the source already carried it).
     """
     creator, tokens = _read_creator_and_relation(jxl_path)
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX)
+    if converted:
+        drop = drop + (ICC_PROFILE_PREFIX,)
     keep = [t for t in tokens
             if t and not t.startswith(drop) and t != ICC_INHERITED_XMP_FLAG]
     lines = ["-XMP-dc:Relation="]
     lines += ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + _DERIVED_LABEL)
     if converted:
-        base = _creator_tool_without_icc(creator)
-        b64 = base64.b64encode(_OUTPUT_ICC_BYTES).decode("ascii")
-        new_ct = f"{base} | ICC:{b64}" if base else f"ICC:{b64}"
-        lines.append("-XMP-xmp:CreatorTool=" + _argfile_safe(new_ct))
+        lines.append("-XMP-dc:Relation+=" + _icc_profile_token(_OUTPUT_ICC_BYTES))
+    lines += _legacy_icc_lines(creator, keep, migrate=not converted)
     if size:
         nw, nh = size
         lines.append(f"-ExifImageWidth={nw}")
@@ -4850,21 +4901,33 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 return (str(jxl_path), "copied", str(final_path))
 
         # Metadata: everything the source JXL carries (EXIF, XMP, the base64 ICC
-        # in CreatorTool, jxlphoto-* provenance and multi-page group markers)
-        # copied verbatim — then the encoding tag restamped to the NEW d/e.
+        # token, jxlphoto-* provenance and multi-page group markers) copied
+        # verbatim — then the encoding tag restamped to the NEW d/e, and a
+        # v2.18.x CreatorTool ICC moved to the token (_legacy_icc_lines).
         #
         # -api Compress=0: cjxl >= 0.12 carries the source's Exif/XMP across
         # itself, as Brotli-compressed "brob" boxes, and exiftool edits them in
         # that form. IrfanView cannot read brob (README: "Viewer quirks"), so
         # without this the recompressed archive lost its visible EXIF even
         # with the boxes reordered — the encoder's outputs use plain boxes.
-        _extra = (_derivative_metadata_args(jxl_path, converted, size)
-                  if DERIVATIVE else [])
+        if DERIVATIVE:
+            _extra = _derivative_metadata_args(jxl_path, converted, size)
+        else:
+            # A v2.18.x master keeps its ICC in CreatorTool: the copy moves
+            # it to the jxlphoto-iccprofile token and gives CreatorTool back
+            # its program name. Cosmetic: when the read fails, the output
+            # keeps the old copy (still read everywhere) — never an error.
+            try:
+                _ct, _toks = _read_creator_and_relation(jxl_path)
+                _extra = _legacy_icc_lines(_ct, _toks)
+            except Exception as _e_ct:
+                logger.debug(f"CreatorTool ICC not moved ({_e_ct}) | {jxl_path.name}")
+                _extra = []
         if skip_icc is not None and not (DERIVATIVE and converted):
             # The pixels are tagged sRGB; their real profile must reach the
             # XMP the decoder reads (already there for every encoder output;
             # a colour-converted derivative gets the TARGET profile above).
-            _extra = _extra + _skip_icc_creator_line(jxl_path, skip_icc)
+            _extra = _extra + _skip_icc_lines(jxl_path, skip_icc)
         # jxlphoto-origin for a source that has none (ORIGIN_PREFIX).
         _extra = _extra + _origin_marker_lines(jxl_path, src_distance is not None)
         # Which toolkit version wrote this output (write-only; see

@@ -154,14 +154,16 @@ def test_r1_encoder_auto_by_bytes_end_to_end(tmp_path):
     assert "D50 patch: 1 applied" in r.stdout, r.stdout
     assert "1 other illuminant (left as is)" in r.stdout, r.stdout
 
-    # The XMP copy (CreatorTool) keeps the ORIGINAL profile: only the profile
-    # handed to cjxl is patched, never the archived bytes.
-    probe = subprocess.run(
-        ["exiftool", "-s3", "-XMP-xmp:CreatorTool", str(folder / "kodak.jxl")],
-        capture_output=True, text=True, timeout=60,
-        stdin=subprocess.DEVNULL)
-    val = probe.stdout.strip()
-    b64 = val.split("ICC:", 1)[1].strip().split("|", 1)[0].strip()
-    prof = base64.b64decode(b64)
+    # The XMP copy (the jxlphoto-iccprofile token, v2.19.0) keeps the
+    # ORIGINAL profile: only the profile handed to cjxl is patched, never the
+    # archived bytes.
+    import json
+    probe = enc._run_exiftool_argfile(
+        ["-j", "-XMP-dc:Relation", str(folder / "kodak.jxl")], timeout=60)
+    rel = json.loads(probe.stdout)[0].get("Relation") or []
+    tokens = rel if isinstance(rel, list) else [rel]
+    b64 = [t for t in tokens if str(t).startswith("jxlphoto-iccprofile:")]
+    assert len(b64) == 1, tokens
+    prof = base64.b64decode(b64[0].split(":", 1)[1])
     assert prof[76:80] == bytes.fromhex("0000d32b"), (
-        f"the archived CreatorTool ICC was patched: {prof[76:80].hex()}")
+        f"the archived ICC copy was patched: {prof[76:80].hex()}")

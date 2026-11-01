@@ -39,7 +39,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.18.1"
+TOOLKIT_VERSION = "2.19.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1209,6 +1209,11 @@ DEPTH_POLICY = "preserve_thumbnails"
 MULTIPAGE_MARKER_PREFIX = "jxlphoto-mpg:"
 # Must match the encoder's MULTIPAGE_XMP_MARKER. Stored in XMP-dc:Relation (a bag/list).
 
+ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+# Must match the encoder's: "jxlphoto-iccprofile:<base64>" in dc:Relation is
+# the ORIGINAL ICC profile, byte for byte. JXLs written up to v2.18.x carry it
+# in XMP CreatorTool as "ICC:<base64>" instead; both are read (_carried_icc).
+
 ICC_INHERITED_FLAG = "jxlphoto-icc:inherited"
 # Must match the encoder's ICC_INHERITED_XMP_FLAG. Indicates that a page inherited
 # its effective ICC from IFD0; the reconstructed TIFF should not write an ICC tag on
@@ -1411,7 +1416,9 @@ Image.MAX_IMAGE_PIXELS = PIL_MAX_IMAGE_PIXELS
 
 # ICC Color Management
 CLEANUP_XMP_ICC_MARKER = True
-# Remove ICC:base64 marker from XMP CreatorTool after extraction
+# Remove the ICC copy from the TIFF's XMP after extraction: the
+# jxlphoto-iccprofile token in dc:Relation, and the ICC:base64 marker in XMP
+# CreatorTool of JXLs written up to v2.18.x (the TIFF has its ICC tag)
 
 USE_MATRIX_MODE = False
 # Use Matrix decode mode (linear + LittleCMS color transform)
@@ -1695,50 +1702,71 @@ def confirm_deletion_jxl():
 
 def extract_icc_from_xmp(jxl_path):
     """
-    Extract ICC profile from XMP CreatorTool (base64 encoded by jxl_tiff_encoder).
-    Returns ICC bytes or None.
+    The original ICC profile the encoder carried in XMP: the
+    jxlphoto-iccprofile token in dc:Relation, else (JXLs written up to
+    v2.18.x) the ICC:<base64> segment of CreatorTool. Returns ICC bytes or None.
     """
     try:
-        r = _run_exiftool_argfile(
-            ["-b", "-XMP-xmp:CreatorTool", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT
-        )
-        if r.returncode != 0 or not r.stdout:
-            return None
-
-        return _icc_from_creator_text(r.stdout)
+        creator, tokens = _read_creator_and_relation(Path(jxl_path))
+        return _carried_icc(creator, tokens)
     except Exception as e:
         logger.debug(f"XMP ICC extraction failed: {e}")
     return None
 
 
-def _icc_from_creator_text(text):
-    """The ICC profile carried in an XMP CreatorTool value, or None.
-
-    CreatorTool may contain multiple tokens separated by '|'. Find the one
-    that carries the ICC payload and validate it before returning."""
-    for segment in str(text or "").split("|"):
+def _xmp_icc_from_creator_tool(text: str):
+    """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
+    rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
+    prefix, strict base64, >= 128 bytes, 'acsp' at 36)."""
+    for segment in (text or "").split("|"):
         segment = segment.strip()
         if not segment.startswith("ICC:"):
             continue
-        b64_data = segment[len("ICC:"):].strip()
-        if not b64_data:
-            continue
         try:
-            data = base64.b64decode(b64_data, validate=True)
+            data = base64.b64decode(segment[4:].strip(), validate=True)
         except Exception:
             continue
-        if len(data) < 128:
-            continue
-        # Validate ICC magic number 'acsp' at header offset 36-39
-        if data[36:40] != b"acsp":
-            continue
-        return data
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
     return None
 
 
+def _carried_icc(creator, tokens):
+    """The original ICC profile a toolkit JXL carries in XMP, or None: the
+    jxlphoto-iccprofile token in dc:Relation first, else the ICC:<base64>
+    segment of CreatorTool (where JXLs written up to v2.18.x keep it). Same
+    validation for both: strict base64, >= 128 bytes, 'acsp' at offset 36.
+    Parity-pinned (decoder + transcoder + recompressor)."""
+    for token in tokens or ():
+        token = str(token).strip()
+        if not token.startswith(ICC_PROFILE_PREFIX):
+            continue
+        try:
+            data = base64.b64decode(token[len(ICC_PROFILE_PREFIX):], validate=True)
+        except Exception:
+            continue
+        if len(data) >= 128 and data[36:40] == b"acsp":
+            return data
+    return _xmp_icc_from_creator_tool(creator)
+
+
+def _read_creator_and_relation(jxl_path: Path):
+    """(creator_tool str, [relation tokens]) of one file. Raises on failure:
+    a derivative whose source profile cannot be read must not be produced."""
+    r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
+                               "-XMP-dc:Relation", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
+    if not r.stdout:
+        raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
+    entry = json.loads(r.stdout)[0]
+    rel = entry.get("Relation")
+    tokens = [] if rel is None else [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
+    return str(entry.get("CreatorTool") or ""), tokens
+
+
 def _xmp_icc_jxls_batch(jxls: list) -> set:
-    """normcased paths of the JXLs whose XMP CreatorTool carries an ICC
-    profile — the files a --basic decode would KEEP when djxl's profile
+    """normcased paths of the JXLs whose XMP carries an ICC profile (the
+    jxlphoto-iccprofile token, or CreatorTool in JXLs written up to v2.18.x)
+    — the files a --basic decode would KEEP when djxl's profile
     differs. Dry-run preview only (the real run decides per file, after
     the decode); a batch that cannot be read counts its files in (the
     preview must not promise a deletion it cannot rule out)."""
@@ -1751,8 +1779,8 @@ def _xmp_icc_jxls_batch(jxls: list) -> set:
                                              dir=TEMP_DIR, encoding="utf-8",
                                              newline="\n") as af:
                 argfile = af.name
-                af.write("-j\n-b\n-XMP-xmp:CreatorTool\n-charset\nFileName=UTF8\n"
-                         "-charset\nUTF8\n")
+                af.write("-j\n-b\n-XMP-xmp:CreatorTool\n-XMP-dc:Relation\n"
+                         "-charset\nFileName=UTF8\n-charset\nUTF8\n")
                 for j in chunk:
                     af.write(str(j) + "\n")
             r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
@@ -1762,7 +1790,9 @@ def _xmp_icc_jxls_batch(jxls: list) -> set:
             if data is None:
                 raise RuntimeError(f"exiftool rc={r.returncode}")
             for entry in data:
-                if _icc_from_creator_text(entry.get("CreatorTool")):
+                _rel = entry.get("Relation")
+                _toks = [] if _rel is None else (_rel if isinstance(_rel, list) else [_rel])
+                if _carried_icc(str(entry.get("CreatorTool") or ""), _toks):
                     found.add(os.path.normcase(str(Path(entry.get("SourceFile", "")))))
         except Exception:
             found.update(os.path.normcase(str(j)) for j in chunk)
@@ -2624,6 +2654,11 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                             # Written back as real tags on the page.
                             or t.startswith(TIFFTAG_PREFIX)
                             or t.startswith(SCAN_PREFIX)
+                            # The JXL's copy of the original ICC: the TIFF
+                            # has its real ICC tag (kept with --no-icc-clean,
+                            # like the old CreatorTool marker).
+                            or (CLEANUP_XMP_ICC_MARKER
+                                and t.startswith(ICC_PROFILE_PREFIX))
                             or t == ICC_INHERITED_FLAG
                             or t == GRAYSCALE_FLAG
                             or t == THUMB_FLAG
@@ -2697,7 +2732,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         return False
 
 def cleanup_xmp_icc(tiff_path):
-    """Remove ICC:base64 marker from XMP CreatorTool"""
+    """Remove the ICC:base64 marker from XMP CreatorTool (JXLs written up to
+    v2.18.x). The jxlphoto-iccprofile token of newer ones leaves with the
+    other internal dc:Relation markers (_is_internal_marker)."""
     if not CLEANUP_XMP_ICC_MARKER:
         return
     try:
@@ -5105,7 +5142,9 @@ Examples:
     parser.add_argument("--target-icc", type=str, default=None,
                         help="Convert to specific ICC profile. Can be a file path or built-in: sRGB")
     parser.add_argument("--no-icc-cleanup", action="store_true", dest="no_icc_clean",
-                      help="Keep ICC:base64 marker in XMP")
+                      help="Keep the JXL's ICC copy in the TIFF's XMP "
+                           "(jxlphoto-iccprofile token; ICC:base64 in "
+                           "CreatorTool for JXLs written up to v2.18.x)")
 
     # Output options
     parser.add_argument("--depth", type=int, choices=[8, 16], default=None,

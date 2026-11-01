@@ -11,6 +11,25 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.19.0: the ICC copy moves to a jxlphoto-iccprofile marker
+
+Nothing to do for your files. The copy of the original ICC profile that the
+encoder keeps in the XMP is now a `jxlphoto-iccprofile:<base64>` entry in
+`XMP-dc:Relation` instead of a block appended to `CreatorTool`, so "creator
+software" shows only the program's name again
+([details](metadata_written.md#the-icc-copy-jxlphoto-iccprofile)).
+
+- **Files written by older versions keep working**, and are not rewritten.
+  They move to the new form only when a run writes a new file from them:
+  re-encode the TIFFs with `--overwrite` (a sync skips up-to-date masters),
+  or recompress.
+- **Use v2.19.0 everywhere you decode.** An older version cannot read the
+  new marker. A master whose profile is only in that copy (some scanner
+  profiles, or `--icc-png-strategy skip`) decodes there to a TIFF with no
+  profile, shown as sRGB; other masters keep their colours but get djxl's
+  equivalent profile instead of the original one. Update every copy of the
+  scripts, and the Windows program, together.
+
 ## v2.18.0: deleting TIFFs checks pixels; old thumbnail pages are removed; derivatives skip them
 
 Nothing to do. Five things a run now does that it did not before:

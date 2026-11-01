@@ -201,6 +201,12 @@ SHARED_HELPERS = [
     "_png_chunk_types",
     "_xmp_icc_from_creator_tool",
     "_read_creator_and_relation",
+    # Where the original ICC is carried (v2.19.0): the jxlphoto-iccprofile
+    # token first, the v2.18.x CreatorTool copy second. The decoder, the
+    # transcoder and the recompressor must find the SAME profile in the same
+    # file, and the encoder and the recompressor write the same token.
+    "_carried_icc",
+    "_icc_profile_token",
     "_png_is_grayscale",
     # Resize/sharpening geometry and the derivative label: a copy drifting
     # would derive a DIFFERENT label for the same recipe, so one backend would
@@ -228,7 +234,8 @@ SHARED_HELPERS = [
 #                              `(jxl_path, label, size)`; recompressor:
 #                              `(jxl_path, converted=True, ...)`. Only the
 #                              recompressor has --output-icc, so only its copy
-#                              rewrites the CreatorTool ICC. Same as
+#                              writes the TARGET jxlphoto-iccprofile token
+#                              (the transcoder's drops it). Same as
 #                              _cjxl_buffering_flag, a divergence by design.
 #   _move_dest_from_staging    UNPINNABLE under the current mechanism: it is a
 #                              NESTED function, and the transcoder defines two

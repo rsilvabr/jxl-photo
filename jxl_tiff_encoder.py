@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.18.1"
+TOOLKIT_VERSION = "2.19.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -965,7 +965,8 @@ ENCODE_TAG_MODE = "xmp"
 # "off"      -> records nothing AND strips any gen=/cjxl chain the source TIFF
 #              carries — the only way to deliberately discard the lineage
 # NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
-# the encoding tag is concatenated to dc:Description, and ICC goes to CreatorTool.
+# the encoding tag is concatenated to dc:Description, and the ICC goes to
+# dc:Relation as a jxlphoto-iccprofile token.
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
@@ -973,7 +974,9 @@ EMBED_ICC_IN_JXL = True
 # but is preserved for round-trip conversion back to TIFF/JPEG.
 # This ensures the exact original ICC (with TRC curves, copyright, etc.)
 # is available when converting JXL -> TIFF, even for lossy JXLs.
-# True  -> embed ICC profile in JXL XMP CreatorTool (recommended, default)
+# True  -> embed ICC profile in the JXL's XMP dc:Relation, as
+#          "jxlphoto-iccprofile:<base64>" (recommended, default; up to
+#          v2.18.x it went to XMP CreatorTool, which is still read)
 # False -> do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
 ICC_PNG_STRATEGY = "cautious"
@@ -1225,6 +1228,13 @@ MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
 # with this prefix, so independently-named files like scan.jxl + scan_page2.jxl
 # are never silently merged. Files without the marker decode as standalone TIFFs.
 # dc:Relation is a list, so appending preserves any Relation the user already had.
+
+ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+# "jxlphoto-iccprofile:<base64>" in dc:Relation: the ORIGINAL ICC profile,
+# byte for byte (EMBED_ICC_IN_JXL). Must match the other scripts'. Up to
+# v2.18.x it lived in XMP CreatorTool as "ICC:<base64>", where every viewer
+# that shows the creating program printed it; the readers still accept that
+# form, and an output written from such a file moves it here.
 
 ICC_INHERITED_XMP_FLAG = "jxlphoto-icc:inherited"
 # Marker appended to dc:Relation when a page (page_idx > 0) has no own ICC and
@@ -3362,6 +3372,10 @@ _INTERNAL_RELATION_PREFIXES = (
     "jxlphoto-pixsum:",
     DERIVED_XMP_PREFIX,
     ORIGIN_PREFIX,
+    # The ICC this encode writes fresh from the TIFF's own profile: a copy
+    # carried in from the source (a TIFF decoded with --no-icc-clean) would
+    # be a second, possibly stale, profile.
+    ICC_PROFILE_PREFIX,
 )
 
 
@@ -3389,6 +3403,12 @@ def read_existing_relation(xmp_path):
     except Exception as e:
         logger.debug(f"Failed to read dc:Relation: {e}")
         return []
+
+
+def _icc_profile_token(icc_bytes: bytes) -> str:
+    """The dc:Relation token that carries an ICC profile byte for byte.
+    Parity-pinned (encoder + recompressor)."""
+    return ICC_PROFILE_PREFIX + base64.b64encode(icc_bytes).decode("ascii")
 
 
 def read_existing_creator_tool(xmp_path):
@@ -3652,39 +3672,33 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     if src_content_id:
         args_lines.append(f"-XMP-dc:Relation+={SRCSUM_PREFIX}{src_content_id}")
     
-    # 4. Embed ICC in XMP CreatorTool if enabled (for round-trip preservation)
-    # This operates independently of ENCODE_TAG_MODE
+    # 4. The original ICC, byte for byte, as a jxlphoto-iccprofile token in
+    # dc:Relation (round-trip preservation; independent of ENCODE_TAG_MODE).
+    # After the Relation reset above, so it is the only one the master holds.
     if EMBED_ICC_IN_JXL and icc_bytes:
-        icc_b64 = base64.b64encode(icc_bytes).decode('ascii')
-        
-        # Read existing CreatorTool to concatenate if present
-        existing_creator = ""
-        if xmp_original:
-            existing_creator = read_existing_creator_tool(xmp_original)
-            # Strip any stale ICC:<base64> blob (e.g. from a previous encode
-            # that skipped cleanup): the decoder extracts the FIRST valid ICC
-            # segment, so an old blob would shadow the new one.
-            if existing_creator and "ICC:" in existing_creator:
-                # Blob is bounded: base64 chars only up to the next pipe or EOL,
-                # so a trailing " | Real App" segment is never eaten.
-                existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', existing_creator, flags=re.MULTILINE).strip()
-                if 'ICC:' in existing_creator and '|' not in existing_creator:
-                    # No pipe separators: the lookahead could not fire, but a
-                    # long base64 blob is unambiguous (real words are never
-                    # 64+ base64 chars).
-                    existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', existing_creator).strip()
-                existing_creator = re.sub(r'\s*\|\s*$', '', existing_creator).strip()
-                existing_creator = re.sub(r'^\s*\|\s*', '', existing_creator).strip()
-                existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
+        args_lines.append("-XMP-dc:Relation+=" + _icc_profile_token(icc_bytes))
 
-        # Build CreatorTool content: existing | ICC:base64 or just ICC:base64
-        if existing_creator:
-            creator_tool = f"{existing_creator} | ICC:{icc_b64}"
-        else:
-            creator_tool = f"ICC:{icc_b64}"
+    # 4b. CreatorTool names the program that made the photo, nothing else.
+    # Up to v2.18.x the ICC went there as "ICC:<base64>"; a TIFF decoded with
+    # --no-icc-clean (or re-tagged by hand) still carries it, and the XMP copy
+    # above would bring it into the master: strip it, keeping the real text
+    # ("Capture One Windows"). An empty value removes the tag.
+    if xmp_original:
+        existing_creator = read_existing_creator_tool(xmp_original)
+        if existing_creator and "ICC:" in existing_creator:
+            # Blob is bounded: base64 chars only up to the next pipe or EOL,
+            # so a trailing " | Real App" segment is never eaten.
+            existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', existing_creator, flags=re.MULTILINE).strip()
+            if 'ICC:' in existing_creator and '|' not in existing_creator:
+                # No pipe separators: the lookahead could not fire, but a
+                # long base64 blob is unambiguous (real words are never
+                # 64+ base64 chars).
+                existing_creator = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', existing_creator).strip()
+            existing_creator = re.sub(r'\s*\|\s*$', '', existing_creator).strip()
+            existing_creator = re.sub(r'^\s*\|\s*', '', existing_creator).strip()
+            existing_creator = re.sub(r'\s*\|\s*\|\s*', ' | ', existing_creator)
+            args_lines.append(f"-xmp-xmp:CreatorTool={_argfile_safe(existing_creator)}")
 
-        args_lines.append(f"-xmp-xmp:CreatorTool={_argfile_safe(creator_tool)}")
-    
     # 5. Cleanup legacy ICC markers from XMP if requested
     if CLEANUP_XMP_ICC_MARKER:
         # Remove common legacy ICC marker tags that might conflict
@@ -5277,7 +5291,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
 
             # 2. Extract ICC profiles:
             #    - icc_bytes: patched for PNG iCCP (cjxl encoding)
-            #    - icc_original: unmodified for XMP CreatorTool (round-trip preservation)
+            #    - icc_original: unmodified for the jxlphoto-iccprofile token (round-trip preservation)
             #    Per-page: the page's own ICC tag (34675) wins; if absent, page N>0
             #    inherits IFD0's ICC for color interpretation, but we record that
             #    inheritance so the decoder can reproduce the original tag structure.

@@ -146,10 +146,26 @@ def _compare_psnr(a: Path, b: Path) -> float:
 
 
 def _creator_tool_icc(jxl: Path):
-    """The ICC:<base64> profile recorded in the file's XMP CreatorTool."""
-    ct = subprocess.run(["exiftool", "-s3", "-XMP-xmp:CreatorTool", str(jxl)],
-                        capture_output=True, text=True, timeout=300).stdout
-    return rec._xmp_icc_from_creator_tool(ct)
+    """The ICC profile the file carries in XMP (the jxlphoto-iccprofile
+    token; ICC:<base64> in CreatorTool for files written up to v2.18.x)."""
+    return rec._carried_icc(*rec._read_creator_and_relation(jxl))
+
+
+def _legacy_copy(jxl: Path, dst: Path) -> Path:
+    """A copy of `jxl` with its ICC where v2.18.x and earlier keep it: no
+    jxlphoto-iccprofile token, "ICC:<base64>" in CreatorTool."""
+    import base64
+    shutil.copy2(jxl, dst)
+    creator, tokens = rec._read_creator_and_relation(dst)
+    icc = rec._carried_icc(creator, tokens)
+    assert icc, "the master carries no ICC copy"
+    lines = ["-overwrite_original"]
+    lines += ["-XMP-dc:Relation-=" + t for t in tokens
+              if t.startswith("jxlphoto-iccprofile:")]
+    lines.append("-XMP-xmp:CreatorTool=ICC:" + base64.b64encode(icc).decode("ascii"))
+    r = rec._run_exiftool_argfile(lines + [str(dst)], timeout=300)
+    assert r.returncode == 0, r.stderr
+    return dst
 
 
 def _make_master(tmp_path: Path, name: str, icc: bytes, strategy: str):
@@ -340,8 +356,11 @@ def test_non_blob_derivatives_are_byte_identical_to_before(tmp_path, monkeypatch
     masters = [_make_master(tmp_path, "elle", _elle_g22_icc(), "always")[1],
                _make_master(tmp_path, "skip", romm_toe_icc(), "skip")[1]]
     for jxl in masters:
+        # HEAD may predate the jxlphoto-iccprofile token (v2.19.0): it gets
+        # the same master with the profile where it reads it, CreatorTool.
+        legacy = _legacy_copy(jxl, tmp_path / f"{jxl.stem}_legacy.jxl")
         digests = []
-        for mod, tag in ((rec, "new"), (old, "old")):
+        for mod, tag, src in ((rec, "new", jxl), (old, "old", legacy)):
             out = tmp_path / f"{jxl.stem}_{tag}.jxl"
             monkeypatch.setattr(mod, "TEMP_DIR", str(tmp_path))
             monkeypatch.setattr(mod, "OUTPUT_ICC", "sRGB")
@@ -354,7 +373,7 @@ def test_non_blob_derivatives_are_byte_identical_to_before(tmp_path, monkeypatch
             monkeypatch.setattr(mod, "CJXL_EFFORT", 1)
             # (converted, size) before the 2026-10-08 audit, (converted,
             # size, skip_icc) after: only `converted` matters here.
-            converted = mod._derive_pixels(jxl, out)[0]
+            converted = mod._derive_pixels(src, out)[0]
             assert converted is True
             digests.append(hashlib.md5(out.read_bytes()).hexdigest())
         assert digests[0] == digests[1], (

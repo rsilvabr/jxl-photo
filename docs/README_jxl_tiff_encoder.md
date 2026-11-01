@@ -161,8 +161,9 @@ ENCODE_TAG_MODE = "xmp"
 # "off"      → records nothing AND strips any gen=/cjxl record the source
 #              TIFF carries — the only way to deliberately discard the lineage
 # Can also be set via --encode-tag CLI argument (xmp/software/off)
-# NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP:CreatorTool
-# and encoding params are concatenated to dc:Description.
+# NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP dc:Relation
+# (jxlphoto-iccprofile token) and encoding params are concatenated to
+# dc:Description.
 
 EXPLORER_THUMBNAIL = "auto"
 # A 768 px sRGB JPEG of the image stored inside the output (its own box, not
@@ -686,7 +687,11 @@ TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original Pro
 
 1. **Extract ICC** from source TIFF using exiftool (original ICC for XMP, patched for PNG)
 2. **Base64-encode** the ICC profile
-3. **Embed in XMP** metadata (`xmp:CreatorTool` field with `ICC:` prefix)
+3. **Embed in XMP** metadata: a `jxlphoto-iccprofile:<base64>` item in
+   `dc:Relation`, next to the toolkit's other markers. Up to v2.18.x it was
+   appended to `xmp:CreatorTool` as `ICC:<base64>`; that copy is still read,
+   and a re-encode moves it (CreatorTool keeps only the program name — see
+   [metadata_written.md](metadata_written.md#the-icc-copy-jxlphoto-iccprofile))
 4. **Encoding params** go to `dc:description` as an append-only lineage
    chain (`gen=1 | cjxl d=0.1 e=7`, visible in Windows Properties); any
    existing user text (a caption) stays first. Every encode **appends** one
@@ -707,7 +712,12 @@ When converting back with `jxl_tiff_decoder.py`:
 
 The embedded ICC is stored as:
 ```xml
-<xmp:CreatorTool>ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</xmp:CreatorTool>
+<dc:relation>
+  <rdf:Bag>
+    <rdf:li>jxlphoto-depth:16</rdf:li>
+    <rdf:li>jxlphoto-iccprofile:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</rdf:li>
+  </rdf:Bag>
+</dc:relation>
 <dc:description>
   <rdf:Alt>
     <rdf:li xml:lang="x-default">gen=1 | cjxl d=0.1 e=7</rdf:li>
@@ -918,7 +928,9 @@ the TIFF (real 16 MP ProPhoto export, 2026-09-24).
 
 Metadata is written with **targeted XMP updates**:
 - `-xmp-dc:Description=` for the encode record (`gen=N | cjxl d=/e=` chain appended after any existing dc:description)
-- `-xmp-xmp:CreatorTool=` for ICC data (base64-encoded ICC profile)
+- `-XMP-dc:Relation+=jxlphoto-iccprofile:` for ICC data (base64-encoded ICC
+  profile); `-xmp-xmp:CreatorTool=` only to take an old `ICC:` copy out of a
+  CreatorTool the TIFF carried in
 - All other XMP tags preserved via `-tagsfromfile`
 
 Original ratings, keywords and descriptions coexist with the encoding info and the ICC.
@@ -1065,8 +1077,9 @@ D50 patch: 0 applied | 0 skipped (already correct) | 0 needed patch, 42 already 
 ## How to verify output
 
 ```powershell
-# Check JXL has embedded ICC (ICC lives in XMP CreatorTool)
-exiftool -XMP-xmp:CreatorTool photo.jxl | findstr "ICC:"
+# Check JXL has embedded ICC (a jxlphoto-iccprofile item in dc:Relation;
+# files written up to v2.18.x have it in XMP CreatorTool as "ICC:")
+exiftool -XMP-dc:Relation photo.jxl | findstr "jxlphoto-iccprofile:"
 
 # Check encoding params (they live in dc:Description)
 exiftool -XMP-dc:Description photo.jxl

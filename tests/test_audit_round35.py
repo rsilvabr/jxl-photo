@@ -459,6 +459,8 @@ def test_convert_one_reorders_boxes_after_restamp(tmp_path, monkeypatch):
     # The origin read is its own exiftool call (ORIGIN_PREFIX); this test
     # counts exiftool invocations, so have it report "unknown" (plan §8).
     monkeypatch.setattr(rec, "_read_origin_inputs", lambda p: (None, False))
+    # Same for the v2.18.x CreatorTool-ICC read (_legacy_icc_lines).
+    monkeypatch.setattr(rec, "_read_creator_and_relation", lambda p: ("", []))
 
     def _reorder(p):
         calls.append("reorder")

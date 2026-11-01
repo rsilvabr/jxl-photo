@@ -23,7 +23,7 @@ cannot give away.
 
 | Field | What the toolkit puts there | Written by |
 |---|---|---|
-| `XMP-xmp:CreatorTool` | `ICC:<base64>` — the original ICC profile, byte for byte, appended after any text already there (`Capture One Windows \| ICC:…`) | encoder (`EMBED_ICC_IN_JXL`), recompressor |
+| `XMP-xmp:CreatorTool` | nothing since v2.19.0 — it keeps naming the program that made the photo. Files written up to v2.18.x carry the ICC copy there, as `ICC:<base64>` after the program name (`Capture One Windows \| ICC:…`); [see below](#the-icc-copy-jxlphoto-iccprofile) | encoder and recompressor up to v2.18.x |
 | `XMP-dc:Description` | the encode record `gen=N \| cjxl d=… e=… \| …` (after your own caption, which stays first) | encoder, recompressor (`ENCODE_TAG_MODE = "xmp"`, the default) |
 | `EXIF:Software` | the same encode record, instead of the Description | encoder, recompressor (`ENCODE_TAG_MODE = "software"`) |
 | `XMP-dc:Relation` | `jxlphoto-*` tokens — see [the next table](#markers-in-xmp-dcrelation). Your own Relation values are kept | all four scripts |
@@ -31,7 +31,7 @@ cannot give away.
 | `ExifImageWidth/Height`, `XMP-exif:PixelX/YDimension` | corrected to the new size | derivatives that were resized |
 | A thumbnail box (ISO BMFF `uuid` box, not a metadata field) | `jxlphoto-thumbnail:v1:<image data bytes>:<hash>` and a 768 px sRGB JPEG of the image, for [jxl-thumb](https://github.com/rsilvabr/jxl-thumb); the hash names the image data it was made from, so it is shown only while current ([details](README_jxl_tiff_encoder.md#explorer-thumbnails-explorer_thumbnail---explorer-thumbnail)). Reveals nothing the image does not | encoder and recompressor (`EXPLORER_THUMBNAIL = "auto"`: every output when jxl-thumb is installed, lossless outputs otherwise); the recompressor's `--refresh-explorer-thumbnails` on existing files. Never in a `jbrd` container; never copied to another file |
 
-### The ICC copy in `CreatorTool`
+### The ICC copy (`jxlphoto-iccprofile`)
 
 A lossy JXL does not always keep the exact ICC profile: some come back from
 `djxl` as a generic linear-sRGB decode. The base64 copy is what lets the
@@ -39,8 +39,25 @@ decoder give a TIFF back **in the original profile, with the original curves**
 (see [jxl_color_internals.md](jxl_color_internals.md)). It is usually 1–3 KB;
 a scanner profile with lookup tables can be larger.
 
+Since v2.19.0 it is a `jxlphoto-iccprofile:<base64>` token in
+`XMP-dc:Relation`, with the other markers. Up to v2.18.x it was appended to
+`XMP-xmp:CreatorTool` as `ICC:<base64>`, where every program that shows "the
+software that made this file" printed the whole block.
+
+- Files written up to v2.18.x keep working: the decoder, the transcoder and
+  the recompressor read the token first and the old `CreatorTool` copy second.
+- Nothing rewrites your existing files. An output written **from** an old file
+  moves the copy (a recompressor re-encode or derivative; a re-encode of the
+  TIFF with the encoder): the profile goes to the token and `CreatorTool`
+  goes back to the program name.
+- **An older version cannot read the token.** Decoding a v2.19.0+ file with
+  v2.18.x or earlier loses the exact profile: the decoder falls back to what
+  `djxl` reports, and a file whose pixels were encoded tagged sRGB (the
+  encoder's `skip`, for profiles with no native JXL form) comes back as a TIFF
+  with the right pixel values but **no profile at all**, which programs show
+  as sRGB. Decode with the version that wrote the file, or newer.
 - The decoder reads it and then **removes** it from the TIFF it writes
-  (`CLEANUP_XMP_ICC_MARKER`).
+  (`CLEANUP_XMP_ICC_MARKER`; `--no-icc-cleanup` keeps it).
 - The JPEG transcoder **removes** it from the JPEG/PNG it decodes: a delivered
   file has its profile in the normal place.
 - A recompressor derivative with `--output-icc` **replaces** it with the target
@@ -66,6 +83,7 @@ carries.
 | `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([what it reveals](#what-these-fields-reveal)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it; rewritten by the encoder's `--restamp-moved` after a folder rename |
 | `jxlphoto-srcsum:<16 hex>` | the same source's **content**: a hash of its bytes | same as `src` | derivatives drop it |
 | `jxlphoto-origin:<v>` | what the **first** master was made from: `tiff8`, `tiff16`, `jpeg`, `png8`, `png16`, `png`, `jxl-lossy`, `jxl-lossless`, `jxl`. Absent = unknown (also every file written before v2.10.0) | encoder, transcoder, recompressor; carried by the decoder and by derivatives | never |
+| `jxlphoto-iccprofile:<base64>` | the **original ICC profile**, byte for byte ([details](#the-icc-copy-jxlphoto-iccprofile)) | encoder (`EMBED_ICC_IN_JXL`), recompressor (moved from an old `CreatorTool`; the target profile on an `--output-icc` derivative, or the profile of pixels it re-encoded tagged sRGB) | decoder, transcoder |
 | `jxlphoto-depth:<8\|16>` | bit depth of the TIFF that was encoded | encoder | decoder |
 | `jxlphoto-mpg:<id>` | the group a page of a split multi-page TIFF belongs to (a hash) | encoder | decoder |
 | `jxlphoto-page:<n>` / `jxlphoto-pages:<n>` | page index / number of pages in the group | encoder | decoder |
@@ -121,7 +139,8 @@ A derivative is a recompressor or transcoder output made with `--output-icc`,
   never prove the master is archived;
 - `jxlphoto-derived:<recipe>` is added;
 - the pixel dimensions are corrected when it was resized;
-- the `CreatorTool` ICC names the target profile (recompressor `--output-icc`).
+- the `jxlphoto-iccprofile` token names the target profile (recompressor
+  `--output-icc`); a transcoder JPEG/PNG carries none.
 
 ## Where nothing is written
 
@@ -183,14 +202,14 @@ A real master and its mobile derivative (camera fields left out):
 
 ```
 16B_JXL/DSC_2290_ProPhoto-g22_v1.jxl
-  Relation    : jxlphoto-depth:16, jxlphoto-src:b9cf20e1422140c1, jxlphoto-srcsum:e6317b596c1e840d
+  Relation    : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-iccprofile:<base64, 1580 chars: LargeRGB-elle-V4-g22>, jxlphoto-src:b9cf20e1422140c1, jxlphoto-srcsum:e6317b596c1e840d
   Description : gen=1 | cjxl d=0.05 e=9
-  CreatorTool : Capture One Windows | ICC:<base64, 1580 chars: LargeRGB-elle-V4-g22>
+  CreatorTool : Capture One Windows
 
 JXL_mobile/DSC_2290_sRGB_v1.jxl
-  Relation    : jxlphoto-depth:16, jxlphoto-derived:sRGB/d3e9
+  Relation    : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-derived:sRGB/d3e9, jxlphoto-iccprofile:<base64, 812 chars: sRGB>
   Description : gen=2 | cjxl d=0.05 e=9 | cjxl d=3.0 e=9
-  CreatorTool : Capture One Windows | ICC:<base64, 812 chars: sRGB>
+  CreatorTool : Capture One Windows
 ```
 
 ## Checking a file yourself
@@ -200,6 +219,9 @@ exiftool -XMP-dc:Relation -XMP-dc:Description -EXIF:Software file.jxl
 exiftool -s3 -XMP-xmp:CreatorTool file.jxl
 exiftool -struct -XMP-xmpMM:History file.jxl
 ```
+
+The Relation line includes the base64 profile, so it is long. A file written
+up to v2.18.x shows that block in `CreatorTool` instead.
 
 `tests/test_metadata_doc.py` fails when a script gains a `jxlphoto-*` token
 that this page does not list.

@@ -77,8 +77,8 @@
   itself stays parity-pinned, the suffix is appended in main()) — and drop
   the `jxlphoto-src`/`jxlphoto-srcsum` markers (a derivative must never prove
   the TIFF is archived). `--output-icc`
-  replaces the `ICC:<b64>` in CreatorTool with the target profile; resize/
-  sharpen without it keep the source profile and CreatorTool ICC (assigned
+  replaces the `jxlphoto-iccprofile` token with the target profile; resize/
+  sharpen without it keep the source profile and its token (assigned
   explicitly before the ImageMagick pass, re-assigned after the Lab sharpening
   drops it). The source profile is always assigned explicitly before the
   ImageMagick conversion, and a converted PNG without its `iCCP` refuses the
@@ -121,6 +121,20 @@
   the master via the recompressor/transcoder and never carry that proof. Do
   not add such options to the encoder; see "Why the encoder never converts
   colour or resizes" in `docs/README_jxl_tiff_encoder.md`.
+- **The original ICC copy is `jxlphoto-iccprofile:<base64>` in dc:Relation
+  (v2.19.0)**, never `jxlphoto-icc:` (that prefix is the page flag
+  `jxlphoto-icc:inherited`). Up to v2.18.x it was `ICC:<base64>` appended to
+  XMP CreatorTool; every reader goes through `_carried_icc` (token first,
+  CreatorTool second — parity-pinned in decoder/transcoder/recompressor), and
+  an output written FROM an old file moves it: the encoder strips a carried
+  CreatorTool blob, the recompressor's `_legacy_icc_lines` moves it to the
+  token. It is in the encoder's `_INTERNAL_RELATION_PREFIXES`; the decoder
+  drops it from the TIFF (`CLEANUP_XMP_ICC_MARKER`), the transcoder from
+  every JPEG/PNG. An older version cannot read the token — a v2.19.0 'skip'
+  master decoded by v2.18.1 comes back with the right pixel numbers but NO
+  ICC tag (shown as sRGB; measured 2026-11-02), and a master with its
+  profile in the codestream gets djxl's equivalent profile, not the original
+  bytes.
 - **`jxlphoto-origin:<v>` (v2.10.0) names what the FIRST master came from**
   (`tiff8`/`tiff16`, `jpeg`/`png8`/`png16`/`png`,
   `jxl-lossy`/`jxl-lossless`/`jxl`). Written once on a clean input, then only

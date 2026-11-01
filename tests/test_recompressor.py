@@ -344,6 +344,9 @@ class TestConvertOne:
         # The origin read is its own exiftool call (ORIGIN_PREFIX) and would
         # land in exif_calls first; report "unknown" here (plan §8).
         monkeypatch.setattr(rec, "_read_origin_inputs", lambda p: (None, False))
+        # So is the v2.18.x CreatorTool-ICC read (_legacy_icc_lines): no
+        # old copy to move here.
+        monkeypatch.setattr(rec, "_read_creator_and_relation", lambda p: ("", []))
         _src, status, _f = rec.convert_one(src, final, final, "convert", False,
                                            "cjxl d=0.1 e=7", "", 0.1)
         assert status == "ok"
