@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.18.1** (2026-11-01) · [What's new](#whats-new-in-v2181) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.19.0** (2026-11-02) · [What's new](#whats-new-in-v2190) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.18.1](#whats-new-in-v2181)
+- [What's new in v2.19.0](#whats-new-in-v2190)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -344,7 +344,7 @@ Plain cjxl/djxl:   TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIF
 With this toolkit: TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
 ```
 
-The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (`xmp:CreatorTool`), and the decoder's Roundtrip mode puts it back byte for byte. `dc:Description` carries the encode record (`gen=1 | cjxl d=0.1 e=7`), which the recompressor reads. To check a round trip:
+The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. `dc:Description` carries the encode record (`gen=1 | cjxl d=0.1 e=7`), which the recompressor reads. To check a round trip:
 
 ```powershell
 exiftool -ProfileDescription -ProfileCopyright original.tif roundtrip.tif   # should match
@@ -393,26 +393,27 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.18.1
+## What's new in v2.19.0
 
-2026-11-01. A faster sync; nothing to do when upgrading.
+2026-11-02. A tidier metadata field; nothing to do for your files.
 
-- **A recompressor sync plans only what it will process.** Files whose output is already up to date are skipped without being read, so a scheduled sync where almost everything is done no longer spends minutes reading every file first. Copies made with `--output-icc`, resize or sharpening still read each existing copy's label, so their planning roughly halves ([details](docs/README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk)).
+- **"Creator software" shows only the program's name again.** The copy of the original ICC profile used to be appended to XMP `CreatorTool` (`Capture One Windows | ICC:AAAD…`); it is now a `jxlphoto-iccprofile` marker next to the toolkit's other markers ([details](docs/metadata_written.md#the-icc-copy-jxlphoto-iccprofile)). Files written by older versions are still read and are not rewritten; re-encoding with `--overwrite` or recompressing writes the new form.
+- **Decode with v2.19.0 everywhere**: older versions cannot read the new marker ([Upgrading](docs/upgrading.md#v2190-the-icc-copy-moves-to-a-jxlphoto-iccprofile-marker)).
 
-Full notes: [version history](docs/version_history.md#v2181). **2844 tests**, and the real-photo battery passes (126 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2190). **2866 tests**, and the real-photo battery passes (128 checks, run inside a hostile folder).
 
-### In v2.18.0
+### In v2.18.1
 
-- **Runs that delete TIFFs check every JXL's pixels first** (`VERIFY_ROUNDTRIP` on by default) ([Upgrading](docs/upgrading.md#v2180-deleting-tiffs-checks-pixels-old-thumbnail-pages-are-removed-derivatives-skip-them)).
-- **Hardening** around lossless JPEG archives, thumbnail pages and in-place edits (#551–#560).
+- **A recompressor sync plans only what it will process**: up-to-date files are skipped without being read ([details](docs/README_jxl_recompressor.md#planning-takes-a-while-on-a-hard-disk)).
 
-Full notes: [version history](docs/version_history.md#v2180).
+Full notes: [version history](docs/version_history.md#v2181).
 
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.18.1** | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
+| **v2.19.0** | 2026-11-02 | The ICC profile's copy moves out of "creator software" into a `jxlphoto-iccprofile` marker; older files are still read |
+| [v2.18.1](docs/version_history.md#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](docs/version_history.md#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first; hardening around lossless JPEG archives, thumbnail pages and in-place edits |
 | [v2.17.0](docs/version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 | [v2.16.2](docs/version_history.md#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once |
@@ -420,8 +421,6 @@ Full notes: [version history](docs/version_history.md#v2180).
 | [v2.16.0](docs/version_history.md#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |
 | [v2.15.2](docs/version_history.md#v2152) | 2026-10-22 | Paths of 260+ characters convert; a deleting transcoder run leaves JXLs alone unless told to decode; a derivative run says when it wrote nothing |
 | [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
-| [v2.15.0](docs/version_history.md#v2150) | 2026-10-16 | `--restamp-then-sync`; the D50 patch decides from the profile; a quiet sync skips the space estimate |
-
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
 ---

@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.18.1](#v2181)** | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
+| **[v2.19.0](#v2190)** | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
+| [v2.18.1](#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
 | [v2.18.0_beta1](#v2180_beta1) | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
 | [v2.17.0](#v2170) | 2026-10-24 | Film scans archived lossless by default (`SCAN_DISTANCE`) and never recompressed lossy unless asked (`--on-scan`); everything in v2.17.0_beta1 |
@@ -76,9 +77,72 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.19.0
+
+**Released 2026-11-02.** Supersedes v2.18.1. The copy of the original ICC
+profile moves to where the toolkit keeps its other markers. Nothing to do
+for files you already have; read the note on older versions in
+[Upgrading](upgrading.md#v2190-the-icc-copy-moves-to-a-jxlphoto-iccprofile-marker)
+if another computer still runs an older one.
+
+**Why.** Since v1.x the encoder appended the original profile, base64, to the
+XMP `CreatorTool` field: `Capture One Windows | ICC:AAAD…`. Any program
+that shows the "creator software" field showed that block of thousands of
+characters there, and CreatorTool is meant to say which program made the
+photo, not to hold data.
+
+**What changed.** The copy is now one entry of `XMP-dc:Relation`, next to
+`jxlphoto-src`, `jxlphoto-depth` and the rest:
+`jxlphoto-iccprofile:<base64>` (not `jxlphoto-icc:`, which is the page flag
+`jxlphoto-icc:inherited`). CreatorTool keeps only the program's name.
+
+- **Encoder**: writes the token. A TIFF that still carries an old
+  `ICC:` block (decoded with `--no-icc-cleanup` by an older version) gets it
+  stripped from CreatorTool, so the new master has one copy.
+- **Decoder, transcoder, recompressor** read the token first and the old
+  CreatorTool block second (`_carried_icc`, parity-pinned in the three), with
+  the same validation as before (strict base64, at least 128 bytes, `acsp` at
+  offset 36). The decoder drops the token from the TIFF (`CLEANUP_XMP_ICC_MARKER`,
+  kept with `--no-icc-cleanup`). The transcoder drops both forms from every
+  JPEG/PNG.
+- **Recompressor**: an output written from a v2.18.x file moves the old block
+  to the token (`_legacy_icc_lines`); `--output-icc` replaces the token with
+  the target profile, resize/sharpening keep the source's. In a plain
+  recompression the move costs one exiftool read per file; when that read
+  fails, the output keeps the old form (still readable) instead of failing.
+- **No migration.** Files already on disk are never rewritten for this.
+  Re-encoding the TIFFs with `--overwrite`, or recompressing, writes the new
+  form.
+
+**Why not a custom XMP namespace** (`XMP-jxlphoto:SourceICC`): exiftool reads
+an unknown namespace without a config file, but `-tagsfromfile … -xmp:all`
+without `-config` silently drops it. The scripts make 29 such copies; one
+missed `-config` would lose the only exact profile of a lossy master.
+`dc:Relation` is already carried by every one of them.
+
+**Older versions cannot read the token.** It matters for a lossy master
+whose profile was kept out of the codestream (`ICC_PNG_STRATEGY`: some
+scanner profiles under the default `cautious`, every profile under `skip`),
+where the XMP copy is the only real profile. Measured: such a v2.19.0 master
+decoded by the v2.18.1 decoder gives the right pixel numbers but no ICC tag
+at all, so the TIFF looks like sRGB. A master whose profile is in the
+codestream (most camera exports) keeps its colours, but the older decoder
+writes the equivalent profile djxl reports (`RGB_0.3457;0.3585_…`) instead
+of the original bytes and name (measured on a lossy ProPhoto master).
+
+Not changed: the transcoder's plain JXL → JPEG/PNG decode (no
+`--icc-profile`, resize or sharpening) still keeps the profile djxl reports
+and never reads the XMP copy, in either form.
+
+19 new real-codec tests (`tests/test_icc_in_relation.py`, Japanese + `[ ]` +
+space + `%` paths; 16 of them fail on v2.18.1, the other 3 guard the old form).
+2866 tests; the real-photo battery passes (128 checks; two new ones check that
+every master carries its profile as one token, byte for byte the TIFF's, and
+that no copy is left in CreatorTool or in a decoded TIFF).
+
 ## v2.18.1
 
-**Released 2026-11-01.** Supersedes v2.18.0. A faster sync in the
+**Released 2026-11-01, superseded by v2.19.0.** Supersedes v2.18.0. A faster sync in the
 recompressor; nothing to do when upgrading.
 
 **A sync plans only what it will process.** Before the first file is
