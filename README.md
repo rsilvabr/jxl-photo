@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.19.1** (2026-11-02) · [What's new](#whats-new-in-v2191) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.19.2** (2026-11-03) · [What's new](#whats-new-in-v2192) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.19.1](#whats-new-in-v2191)
+- [What's new in v2.19.2](#whats-new-in-v2192)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -65,9 +65,11 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 
 **JXL → TIFF** — Roundtrip, Basic and Matrix decode modes, a JPEG preview for fast Explorer thumbnails, and a sync that reconverts only what changed.
 
-**JPEG ↔ JXL, JXL → JPEG/PNG** — lossless JPEG → JXL with the bit-exact JPEG back on demand; JPEG/PNG delivery copies with colour conversion (sRGB, AdobeRGB or any profile), resize and output sharpening fitted to Capture One's presets.
+**JPEG ↔ JXL, JXL → JPEG/PNG** — lossless JPEG → JXL with the bit-exact JPEG back on demand, its EXIF visible in IrfanView too; JPEG/PNG delivery copies with colour conversion (sRGB, AdobeRGB or any profile), resize and output sharpening fitted to Capture One's presets.
 
 **JXL → JXL** — shrink an archive to a new distance in one step, with counterproductive re-encodes refused and metadata carried over; light 16-bit derivatives (sRGB, resized, sharpened) made from the master.
+
+**Viewer compatibility** — every JXL keeps its EXIF where IrfanView reads it: in a plain box, before the XMP and the image data. cjxl compresses it by default, which saves a median 2.3 KB per photo (0.19 %) and hides the EXIF from IrfanView; one setting turns that compression on if you prefer the smallest file ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
 
 **Batch work** — folder modes for flat, recursive and Capture One / Lightroom export layouts, parallel workers, SSD staging, folder exclusions; [manifests](docs/README_manifest.md) (one CSV, many folders, checked before anything runs) and presets that run unattended from Task Scheduler ([setup](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron)).
 
@@ -365,7 +367,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
-- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed), IrfanView hides EXIF of JPEG → JXL files; the files themselves are fine. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
 ---
@@ -393,13 +395,18 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.19.1
+## What's new in v2.19.2
 
-2026-11-02. IrfanView shows the EXIF again.
+2026-11-03. IrfanView shows the EXIF of JPEG → JXL files too.
 
-- **IrfanView showed no EXIF in JXLs written by v2.17.0 to v2.19.0** (the EXIF was in the files, stored after the XMP, where IrfanView does not look). New files are right; menu option 9 (*Explorer thumbnails for existing JXLs*) repairs the ones you have in minutes, without re-encoding ([Upgrading](docs/upgrading.md#v2191-irfanview-shows-the-exif-again-repair-older-files-in-place)).
+- **IrfanView never showed the EXIF of a JPEG → JXL file**: cjxl stored it compressed, and IrfanView cannot read that. It is now stored uncompressed, which costs a median 2.3 KB per photo (0.19 %). The rebuilt JPEG is byte-identical either way. To keep it compressed: `COMPRESS_METADATA_BOXES = True` in the transcoder ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
+- **Repairing the files you have:** menu option 8 (*Repair JPEG->JXL files*) / `--repair-jbrd` rewrites their EXIF without touching the image, and replaces a file only after proving it still rebuilds the very same JPEG ([Upgrading](docs/upgrading.md#v2192-irfanview-shows-the-exif-of-jpeg--jxl-files-repair-older-ones-in-place)).
 
-Full notes: [version history](docs/version_history.md#v2191). **2877 tests**, and the real-photo battery passes (129 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2192). **2889 tests**, and the real-photo battery passes (132 checks, run inside a hostile folder).
+
+### In v2.19.1
+
+- **IrfanView showed no EXIF in JXLs written by v2.17.0 to v2.19.0** (the EXIF was stored after the XMP). New files are right; menu option 9 repairs the ones you have in minutes, without re-encoding ([Upgrading](docs/upgrading.md#v2191-irfanview-shows-the-exif-again-repair-older-files-in-place)).
 
 ### In v2.19.0
 
@@ -412,14 +419,15 @@ Full notes: [version history](docs/version_history.md#v2190).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.19.1** | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place |
+| **v2.19.2** | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files; menu option 8 repairs older ones in place, proving the same JPEG comes back |
+| [v2.19.1](docs/version_history.md#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place |
 | [v2.19.0](docs/version_history.md#v2190) | 2026-11-02 | The ICC profile's copy moves out of "creator software" into a `jxlphoto-iccprofile` marker; older files are still read |
 | [v2.18.1](docs/version_history.md#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](docs/version_history.md#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first; hardening around lossless JPEG archives, thumbnail pages and in-place edits |
 | [v2.17.0](docs/version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 | [v2.16.2](docs/version_history.md#v2162) | 2026-10-23 | A deleting JPEG → JXL run no longer keeps a JPEG because two workers finished at once |
 | [v2.16.1](docs/version_history.md#v2161) | 2026-10-23 | A run killed at the wrong moment no longer leaves a temp file beside the output |
-| [v2.16.0](docs/version_history.md#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes || [v2.15.1](docs/version_history.md#v2151) | 2026-10-17 | `--delete-skipped` checks the source's bytes; in-place recompression never overwrites a newer version |
+| [v2.16.0](docs/version_history.md#v2160) | 2026-10-22 | Explorer thumbnails: lossless JXLs show in Explorer in milliseconds with jxl-thumb; a menu tip about JXL thumbnails; two wizard display fixes |
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
 ---

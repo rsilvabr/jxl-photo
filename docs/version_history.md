@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.19.1](#v2191)** | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
+| **[v2.19.2](#v2192)** | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
+| [v2.19.1](#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
 | [v2.19.0](#v2190) | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
 | [v2.18.1](#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
@@ -78,9 +79,53 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.19.2
+
+**Released 2026-11-03.** Supersedes v2.19.1. IrfanView shows the EXIF of
+JPEG → JXL files; older ones can be repaired in place. See
+[Upgrading](upgrading.md#v2192-irfanview-shows-the-exif-of-jpeg--jxl-files-repair-older-ones-in-place).
+
+**IrfanView never showed the EXIF of a JPEG → JXL file (#562).** cjxl
+Brotli-compresses the Exif and XMP boxes it copies from a JPEG (`brob`
+boxes) unless told otherwise, and IrfanView reads the EXIF only from a
+PLAIN `Exif` box placed before the XMP and before the image data. Three
+copies of one transcoded JPEG, checked by the owner: the transcoder's
+(compressed) showed only the file name; cjxl's own with plain boxes but the
+Exif after the first codestream box showed nothing; the transcoder's with
+its boxes decompressed in place showed everything. Documented as a viewer
+limitation until now.
+
+- The transcoder passes `--compress_boxes=0` to cjxl on both encode paths
+  (lossless JPEG → JXL and the convert path). The JPEG rebuilt with
+  `djxl --reconstruct_jpeg` is byte-identical either way.
+- New setting `COMPRESS_METADATA_BOXES` (default `False`; flag
+  `--compress-metadata`) keeps cjxl's compression for the smallest file.
+  Measured over 23 varied JPEGs (libjxl 0.12.0, effort 7): plain boxes cost
+  a median 2.3 KB per photo, 30 KB at most, 0.19 % of the total; 0.03 %–0.6 %
+  on camera JPEGs of several MB — the JPEG itself spent that room on them.
+- `--repair-jbrd` (menu option 8) also fixes existing `jbrd` archives whose
+  layout IrfanView cannot read (compressed EXIF/XMP, or an Exif box after
+  the XMP or the image data). The plain boxes come from cjxl run on the
+  rebuilt JPEG and replace the compressed ones one for one; the codestream
+  and the `jbrd` box must come out byte-identical and the copy must rebuild
+  the very same JPEG (MD5) before it replaces the file, which keeps its
+  modified date; `checksums.md5` gets the JXL's new self-hash. A file that
+  cannot be proven is left as it was (`EXIF LAYOUT LEFT AS IS`, a warning).
+  With `COMPRESS_METADATA_BOXES` the layout is left alone. The audit now
+  checks files in parallel (`--workers`, up to 8) and shows N/total with the
+  time left. The layout step uses cjxl; without it the run still repairs
+  the reconstruction and says, once, that the layout was not checked.
+
+12 new real-codec tests (`tests/test_jpeg_exif_plain_boxes.py`, Japanese +
+`[ ]` + space + `%` paths); the 11 that exist at v2.19.1 fail there.
+2889 tests; the real-photo battery passes (132
+checks; new: every transcoded JPEG has a plain Exif where IrfanView reads
+it, and `--repair-jbrd` fixes old-style archives of all 23 varied JPEGs that
+still rebuild bit for bit).
+
 ## v2.19.1
 
-**Released 2026-11-02.** Supersedes v2.19.0. IrfanView shows the EXIF of
+**Released 2026-11-02.** Superseded by v2.19.2. Supersedes v2.19.0. IrfanView shows the EXIF of
 new JXLs again; files written by v2.17.0 to v2.19.0 can be repaired in place.
 See [Upgrading](upgrading.md#v2191-irfanview-shows-the-exif-again-repair-older-files-in-place).
 
