@@ -1514,6 +1514,58 @@ def jpeg_checks(jpegs):
     check("JPEGs: every transcoded JPEG reconstructs bit for bit", rc == 0 and not bad,
           f"rc={rc} bad={bad[:4]}")
 
+    # #562: IrfanView reads the EXIF only from a PLAIN Exif box before the
+    # XMP and the image data; cjxl compresses them (brob) unless told not to.
+    def irfanview_problem(p):
+        data, pos, seen = p.read_bytes(), 12, []
+        while pos + 8 <= len(data):
+            size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+            hdr = 8
+            if size == 1:
+                size, hdr = struct.unpack(">Q", data[pos + 8:pos + 16])[0], 16
+            elif size == 0:
+                size = len(data) - pos
+            if size < hdr:
+                return "unreadable"
+            if typ == b"brob" and data[pos + hdr:pos + hdr + 4] in (b"Exif", b"xml "):
+                return "compressed " + data[pos + hdr:pos + hdr + 4].decode().strip()
+            if typ in (b"Exif", b"xml ", b"jxlc", b"jxlp"):
+                seen.append(typ)
+            pos += size
+        if b"Exif" in seen and set(seen[:seen.index(b"Exif")]) & {b"xml ", b"jxlc", b"jxlp"}:
+            return "Exif too late"
+        return None
+
+    jx_made = sorted((j / "converted_jxl").glob("*.jxl"))
+    bad = [f"{p.name}: {w}" for p in jx_made if (w := irfanview_problem(p))]
+    check("JPEGs: every JXL has a plain Exif box where IrfanView reads it (#562)",
+          jx_made and not bad, f"bad={bad[:4]}")
+
+    # Archives written before v2.19.2 (cjxl's default: brob boxes) are fixed
+    # in place by --repair-jbrd and still rebuild the very same JPEG.
+    o = B / "jpg_old"
+    olds = {}
+    for s in valid:
+        if s.stem not in made:
+            continue
+        out = o / f"{s.stem}.jxl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if subprocess.run(["cjxl", str(s), str(out), "--lossless_jpeg=1", "--effort", "7"],
+                          capture_output=True).returncode == 0:
+            olds[s.stem] = s
+    rc, out = run("jpg_relayout", [TR, o, "--repair-jbrd"])
+    still = [f"{p.name}: {w}" for p in sorted(o.glob("*.jxl")) if (w := irfanview_problem(p))]
+    check("--repair-jbrd: every old JPEG archive gets a plain Exif where IrfanView reads it",
+          rc == 0 and olds and not still, f"rc={rc} {len(olds)} archives, left={still[:4]}")
+    ro = B / "jpg_old_rec"
+    for p in o.glob("*.jxl"):
+        cp(p, ro / p.name)
+    rc, _ = run("jpg_old_reconstruct", [TR, ro, "--mode", "1", "--decode", "--force-transcode"])
+    recs = {p.stem: p for p in ro.rglob("*.jp*g")}
+    bad = [n for n, s in olds.items() if n not in recs or md5(recs[n]) != md5(s)]
+    check("--repair-jbrd: every relaid archive still rebuilds its JPEG bit for bit",
+          rc == 0 and not bad, f"rc={rc} bad={bad[:4]}")
+
     d = B / "jpg_del"
     for s in srcs:
         cp(s, d / s.name)

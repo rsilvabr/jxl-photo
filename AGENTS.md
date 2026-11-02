@@ -141,7 +141,14 @@
   writes the XMP before the EXIF, so without that sort every master comes
   out XMP → Exif (v2.17.0–v2.19.0 did). `--refresh-explorer-thumbnails`
   repairs existing files in place (`_move_exif_first`, status `REORDERED`).
-  Any new path that writes boxes must keep that order.
+  Any new path that writes boxes must keep that order. The Exif box must
+  also be PLAIN (#562): IrfanView cannot read a `brob` (Brotli) box, which
+  is cjxl's default for the EXIF/XMP it copies from a JPEG — the transcoder
+  passes `_metadata_boxes_flag()` (`--compress_boxes=0` unless
+  `COMPRESS_METADATA_BOXES`). The refresh never edits a jbrd container;
+  `--repair-jbrd` fixes those (`_relayout_one_jbrd`: plain boxes from cjxl
+  run on the rebuilt JPEG, codestream + jbrd byte-identical, same JPEG MD5
+  before the swap, new self-hash line in `checksums.md5`).
 - **`jxlphoto-origin:<v>` (v2.10.0) names what the FIRST master came from**
   (`tiff8`/`tiff16`, `jpeg`/`png8`/`png16`/`png`,
   `jxl-lossy`/`jxl-lossless`/`jxl`). Written once on a clean input, then only

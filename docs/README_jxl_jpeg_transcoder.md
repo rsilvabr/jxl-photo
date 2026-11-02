@@ -165,6 +165,14 @@ CJXL_BUFFERING = None
 # ~1.2% smaller files (see the v1.8.0 release notes benchmark on GitHub).
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
 
+COMPRESS_METADATA_BOXES = False
+# False (default) → the EXIF/XMP copied from the JPEG go in PLAIN boxes:
+#   IrfanView shows the EXIF (it cannot read Brotli-compressed boxes).
+# True → Brotli-compressed (brob), cjxl's own default: a median 2.3 KB
+#   smaller per photo (0.19 % over 23 varied JPEGs), but no EXIF in
+#   IrfanView. The rebuilt JPEG is byte-identical either way.
+# Also: --compress-metadata.
+
 CODEC_TIMEOUT = 900
 # Timeout (seconds) for each cjxl/djxl/magick invocation; a timeout is a
 # per-file error.
@@ -400,7 +408,13 @@ Options:
                      djxl --reconstruct_jpeg for sources that had XMP), strip
                      those markers where found, retest, and report. --dry-run
                      reports without writing. Exit 1 while any file is still
-                     broken. See "Repairing broken JPEG reconstruction".
+                     broken. Also rewrites the EXIF/XMP of jbrd JXLs so
+                     IrfanView shows it (v2.19.2; codestream untouched, same
+                     JPEG proven). See "Repairing broken JPEG reconstruction".
+  --compress-metadata [JPEG -> JXL] store the copied EXIF/XMP Brotli-compressed
+                     (a few KB smaller per photo) instead of plain; IrfanView
+                     then shows no EXIF and --repair-jbrd leaves the layout
+                     alone. Same as COMPRESS_METADATA_BOXES = True.
   --auto-repair-jbrd [JXL -> JPEG lossless decode, djxl >= 0.12] when the
                      reconstruction fails, repair a COPY of the JXL and decode
                      from it — the JXL itself is never modified (heal the
@@ -629,6 +643,30 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd
 
 **Every JPEG→JXL archive made with v2.0.0+ should pass through this check
 once** before the source JPEGs are discarded.
+
+### EXIF for IrfanView (v2.19.2)
+
+The same run also rewrites the metadata layout of every `jbrd` JXL that
+IrfanView cannot read the EXIF from (see *IrfanView and the EXIF* under
+Troubleshooting): compressed EXIF/XMP (`brob`, what the transcoder wrote
+before v2.19.2), or an Exif box after the XMP or the image data. It logs
+`EXIF MADE READABLE (<reason>)`, or `WOULD MAKE EXIF READABLE` on a dry run.
+
+- The JPEG is rebuilt (`djxl --reconstruct_jpeg`) and given to cjxl again
+  with plain boxes; only its Exif/XMP boxes are taken, one for one in place
+  of the compressed ones. The codestream and the `jbrd` box keep their
+  bytes, checked byte for byte.
+- The copy must rebuild the **very same JPEG** (MD5) before it replaces the
+  file; otherwise the file is left as it was and the run logs
+  `EXIF LAYOUT LEFT AS IS (<reason>)` (a warning: the archive itself is
+  fine, the exit code stays 0).
+- The file keeps its modified date. When `checksums.md5` has lines for it,
+  the JXL's new self-hash is appended; the JPEG's own line stays valid
+  (same JPEG).
+- With `COMPRESS_METADATA_BOXES = True` (or `--compress-metadata`) the EXIF
+  layout is left alone: you chose the smaller file.
+- Uses cjxl: without it on `PATH` the run still repairs the reconstruction
+  and says, once, that the EXIF layout was not checked.
 
 ### Decode-side remedies
 
@@ -983,17 +1021,25 @@ The JXL was modified after encoding, or was not encoded with `--lossless_jpeg=1`
 
 Some JPEGs lack EXIF or use non-standard formats. EXIF is optional for viewing but may affect metadata workflows.
 
-### IrfanView EXIF display limitations
+### IrfanView and the EXIF
 
-IrfanView has specific requirements for displaying EXIF in JXL files:
+IrfanView reads a JXL's EXIF only from a **plain** `Exif` box placed **before
+the XMP and before the image data**. cjxl's own default is to
+Brotli-compress the EXIF and XMP it copies from a JPEG (`brob` boxes), which
+IrfanView cannot read: it then shows only the file name.
 
-| File Source | EXIF Visible in IrfanView | Notes |
-|-------------|---------------------------|-------|
-| **TIFF → JXL** (this tool) | ✅ Yes | Boxes reordered: Exif before codestream |
-| **JPEG → JXL** lossless | ❌ No | Uses Brotli compression (`brob` box) |
-| **JPEG → JXL** lossy | ❌ No | Uses Brotli compression (`brob` box) |
+| File | EXIF in IrfanView |
+|------|-------------------|
+| JPEG → JXL, v2.19.2 or later (default) | ✅ plain boxes, Exif first |
+| JPEG → JXL with `--compress-metadata` | ❌ compressed (`brob`), by choice |
+| JPEG → JXL written before v2.19.2 | ❌ until `--repair-jbrd` (below) rewrites it |
+| TIFF → JXL | ✅ (v2.17.0–v2.19.0 masters: after the refresh, see the recompressor) |
 
-**Workaround:** Use **XnView MP** or **digiKam** for reliable EXIF viewing regardless of JXL source or compression. These applications read EXIF correctly even with Brotli compression.
+The EXIF is in the file in every case: exiftool, XnView MP and digiKam read
+the compressed boxes too, and the JPEG rebuilt from the JXL is byte-identical
+either way. Compressing saves a few KB per photo; measured on 23 varied
+JPEGs (libjxl 0.12.0, effort 7): a median of 2.3 KB, 30 KB at most, 0.19 %
+of the total — 0.03 %–0.6 % on camera JPEGs of several MB.
 
 ### IrfanView shows wrong colors (reported & fixed)
 

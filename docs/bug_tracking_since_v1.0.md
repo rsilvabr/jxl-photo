@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #562.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #563.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |
 | [Round-67 — EXIF hidden from IrfanView](#round-67--exif-hidden-from-irfanview-2026-11-02) | 2026-11-02 | v2.19.1 | #561 (1) |
 | [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.18.0_beta1 | #551–#560 (10) |
 | [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
@@ -76,6 +77,22 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-68 — the EXIF of JPEG → JXL files in IrfanView (2026-11-03)
+
+A limitation documented since v1.7 ("IrfanView hides EXIF of JPEG → JXL
+files: Brotli `brob` box"), looked at again after #561. Three copies of one
+transcoded JPEG, checked by the owner in IrfanView: the transcoder's output
+(`brob` Exif/XMP) showed only the file name; cjxl's own with
+`--compress_boxes=0` (plain boxes, but the Exif after the first `jxlp`
+box) showed nothing; the transcoder's output with its boxes decompressed in
+place showed everything. Regression tests:
+`tests/test_jpeg_exif_plain_boxes.py` (all 11 that exist at v2.19.1 fail
+there; a 12th covers the new `--compress-metadata`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 562 | **IrfanView showed no EXIF in JPEG → JXL files.** cjxl Brotli-compresses the Exif/XMP boxes it copies from a JPEG unless given `--compress_boxes=0`, and IrfanView reads the EXIF only from a plain Exif box placed before the XMP and the image data. The transcoder now passes `--compress_boxes=0` on both its encode paths (`_metadata_boxes_flag`; `COMPRESS_METADATA_BOXES = True` / `--compress-metadata` keeps cjxl's compression for the smallest file — a median 2.3 KB per photo, 0.19 % over 23 varied JPEGs). `--repair-jbrd` (menu option 8) also rewrites existing `jbrd` archives whose layout IrfanView cannot read (`_irfanview_layout_problem`: compressed EXIF/XMP, Exif after the XMP or the image data): the JPEG is rebuilt, cjxl gives plain boxes for it, they replace the `brob` ones one for one (`_plain_metadata_copy`), the codestream and the `jbrd` box must come out byte-identical and the copy must rebuild the same JPEG (MD5) before the swap (`_relayout_one_jbrd`: kept modified date, `_changed_since`, new self-hash line in `checksums.md5`); otherwise the file is left as it was. The audit now runs in parallel with N/total progress. | jxl_jpeg_transcoder.py, jxl_photo.py | Fixed |
 
 ## Round-67 — EXIF hidden from IrfanView (2026-11-02)
 

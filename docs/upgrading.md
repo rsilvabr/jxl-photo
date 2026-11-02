@@ -11,6 +11,26 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.19.2: IrfanView shows the EXIF of JPEG → JXL files; repair older ones in place
+
+Lossless JPEG → JXL files written before v2.19.2 show no EXIF in IrfanView:
+cjxl stored it Brotli-compressed, which IrfanView cannot read (exiftool,
+XnView MP and digiKam can). New files store it uncompressed, a median 2.3 KB
+more per photo. To repair the ones you have, without touching the image:
+
+- menu option 8, *Repair JPEG->JXL files*, on the folder (audit first, then
+  the real run), or
+- `py jxl_jpeg_transcoder.py "G:\Photos" --repair-jbrd --dry-run`, then
+  without `--dry-run`.
+
+Files it fixed are logged `EXIF MADE READABLE`; each still rebuilds the very
+same JPEG (checked before the file is replaced) and keeps its modified date.
+This step uses cjxl; without it on `PATH` the run says so and skips it.
+
+Prefer the smallest file over IrfanView? Set `COMPRESS_METADATA_BOXES = True`
+at the top of `jxl_jpeg_transcoder.py` (or pass `--compress-metadata`); the
+repair then leaves the EXIF layout alone.
+
 ## v2.19.1: IrfanView shows the EXIF again; repair older files in place
 
 JXLs written by v2.17.0, v2.18.x and v2.19.0 (masters and the copies made

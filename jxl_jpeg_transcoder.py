@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.1"
+TOOLKIT_VERSION = "2.19.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -767,6 +767,16 @@ CJXL_BUFFERING = None
 # See the detailed comment in jxl_tiff_encoder.py.
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
 
+COMPRESS_METADATA_BOXES = False
+# How the EXIF and XMP copied from a JPEG are stored in the JXL.
+# False (default) — plain boxes: IrfanView (and any reader without Brotli)
+#   shows the EXIF. They take the same room they took in the JPEG.
+# True — Brotli-compressed (brob) boxes, cjxl's own default: a few KB smaller
+#   per photo (see docs/behavior_and_limitations.md for measured numbers),
+#   but IrfanView then shows no EXIF at all, and --repair-jbrd leaves the
+#   EXIF layout alone. The rebuilt JPEG is byte-identical either way.
+# Can also be set via --compress-metadata.
+
 AUTO_REPAIR_JBRD = False
 # [JXL -> JPEG lossless decode, djxl >= 0.12]
 # True — when djxl --reconstruct_jpeg fails on a jbrd JXL (the v2.0.0-v2.0.3
@@ -929,6 +939,17 @@ def _cjxl_buffering_flag():
     if CJXL_BUFFERING is not None and _tool_at_least("cjxl", 0, 12):
         return [f"--buffering={CJXL_BUFFERING}"]
     return []
+
+# cjxl Brotli-compresses the Exif/xml boxes it copies from a JPEG (brob
+# boxes) unless told not to, and IrfanView then shows no EXIF at all (#562).
+# Plain boxes cost the few KB the JPEG itself spent on them; a JPEG rebuilt
+# with --reconstruct_jpeg is byte-identical either way. libjxl 0.7+.
+_PLAIN_BOXES_FLAG = ["--compress_boxes=0"]
+
+
+def _metadata_boxes_flag():
+    """cjxl's --compress_boxes as COMPRESS_METADATA_BOXES asks."""
+    return ["--compress_boxes=1"] if COMPRESS_METADATA_BOXES else _PLAIN_BOXES_FLAG
 
 _MIN_EFFECTIVE_DISTANCE = 0.05
 # cjxl >= 0.12 clamps every lossy distance below this to the same value:
@@ -2727,9 +2748,12 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             raise RuntimeError(f"encode_one_transcode received a non-JPEG input: {src_path.name}")
 
         output_dirty = True
+        # Plain Exif/xml boxes unless COMPRESS_METADATA_BOXES: IrfanView reads
+        # no EXIF from a Brotli-compressed (brob) box, the cjxl default (#562);
+        # the reconstructed JPEG is the same either way.
         r = _run_captured(
             ["cjxl", str(src_path), str(write_path), "--lossless_jpeg=1",
-             "--effort", str(effort)],
+             "--effort", str(effort)] + _metadata_boxes_flag(),
             CODEC_TIMEOUT
         )
         if r.returncode != 0:
@@ -3366,6 +3390,181 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
             pass
 
 
+_JXL_SIGNATURE = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
+_METADATA_TYPES = (b"Exif", b"xml ")
+
+
+def _parse_jxl_boxes(data: bytes):
+    """[(type, header, payload)] of a JXL container held in memory, or None
+    when it is not a container or a box is truncated or malformed."""
+    if data[:12] != _JXL_SIGNATURE:
+        return None
+    boxes, i, n = [], 0, len(data)
+    while i < n:
+        if i + 8 > n:
+            return None
+        size, typ, hdr = int.from_bytes(data[i:i + 4], "big"), data[i + 4:i + 8], 8
+        if size == 1:
+            if i + 16 > n:
+                return None
+            size, hdr = int.from_bytes(data[i + 8:i + 16], "big"), 16
+        elif size == 0:
+            size = n - i
+        if size < hdr or i + size > n:
+            return None
+        boxes.append((typ, data[i:i + hdr], data[i + hdr:i + size]))
+        i += size
+    return boxes
+
+
+def _irfanview_layout_problem(jxl_path: Path) -> Optional[str]:
+    """Why IrfanView would show no EXIF for this JXL, or None.
+
+    IrfanView reads the EXIF only from a PLAIN Exif box placed before the
+    image data and before the XMP (#561, #562). Reads box headers only (plus
+    the 4-byte inner type of a brob box); a file it cannot parse is None —
+    the repair then leaves it alone."""
+    try:
+        with open(jxl_path, "rb") as f:
+            if f.read(12) != _JXL_SIGNATURE:
+                return None
+            end = f.seek(0, 2)
+            pos, kinds = 12, []
+            while pos + 8 <= end:
+                f.seek(pos)
+                head = f.read(8)
+                size, typ, hdr = int.from_bytes(head[:4], "big"), head[4:8], 8
+                if size == 1:
+                    size, hdr = int.from_bytes(f.read(8), "big"), 16
+                elif size == 0:
+                    size = end - pos
+                if size < hdr or pos + size > end:
+                    return None
+                if typ == b"brob":
+                    inner = f.read(4)
+                    if inner in _METADATA_TYPES:
+                        kinds.append(("brob", inner))
+                elif typ in _METADATA_TYPES:
+                    kinds.append(("plain", typ))
+                elif typ in (b"jxlc", b"jxlp"):
+                    kinds.append(("image", typ))
+                pos += size
+    except (OSError, ValueError):
+        return None
+    if any(k == "brob" for k, _t in kinds):
+        return "compressed EXIF/XMP"
+    order = [t for _k, t in kinds]
+    if b"Exif" not in order:
+        return None
+    first_exif = order.index(b"Exif")
+    if any(t in (b"jxlc", b"jxlp") for t in order[:first_exif]):
+        return "EXIF after the image data"
+    if b"xml " in order[:first_exif]:
+        return "EXIF after the XMP"
+    return None
+
+
+def _codestream_and_jbrd(boxes):
+    """(codestream bytes, jbrd payload) of parsed boxes: what the repair of
+    the metadata layout must leave byte-identical."""
+    cs = b"".join(p for t, _h, p in boxes if t in (b"jxlc", b"jxlp"))
+    jb = b"".join(p for t, _h, p in boxes if t == b"jbrd")
+    return cs, jb
+
+
+def _plain_metadata_copy(jxl_path: Path, tmp: Path, work: Path):
+    """(rec_md5, detail): write to `tmp` a copy of the jbrd JXL `jxl_path`
+    whose Exif/XMP boxes are plain and placed where IrfanView reads them.
+    (None, why) when that cannot be done and proven; jxl_path is never
+    touched, the caller owns tmp.
+
+    The plain boxes come from cjxl itself: the JPEG is rebuilt
+    (djxl --reconstruct_jpeg) and encoded again with --compress_boxes=0; its
+    Exif/xml boxes replace the brob ones, one for one, and everything else
+    keeps its bytes. The codestream and the jbrd box must come out
+    byte-identical, and the copy must rebuild the very same JPEG (MD5)."""
+    data = jxl_path.read_bytes()
+    boxes = _parse_jxl_boxes(data)
+    if boxes is None:
+        return None, "unreadable container"
+    rec_jpg, fresh_jxl = work / "rebuilt.jpg", work / "plain.jxl"
+    r = _run_captured(["djxl", "--reconstruct_jpeg", str(jxl_path), str(rec_jpg)],
+                      CODEC_TIMEOUT)
+    if r.returncode != 0 or not rec_jpg.exists() or rec_jpg.stat().st_size == 0:
+        return None, "the JPEG could not be rebuilt"
+    rec_md5 = md5_of_file(rec_jpg)
+    r = _run_captured(["cjxl", str(rec_jpg), str(fresh_jxl), "--lossless_jpeg=1",
+                       "--effort", "1"] + _PLAIN_BOXES_FLAG, CODEC_TIMEOUT)
+    fresh = _parse_jxl_boxes(fresh_jxl.read_bytes()) if r.returncode == 0 and fresh_jxl.exists() else None
+    if fresh is None:
+        return None, f"cjxl could not re-read the JPEG ({_stderr_tail(r.stderr)})"
+    plain = {k: [b for b in fresh if b[0] == k] for k in _METADATA_TYPES}
+    used = {k: 0 for k in _METADATA_TYPES}
+    out = []
+    for typ, hdr, payload in boxes:
+        kind = payload[:4] if typ == b"brob" else None
+        if kind in _METADATA_TYPES:
+            if used[kind] >= len(plain[kind]):
+                return None, "cjxl wrote fewer metadata boxes than the file holds"
+            box = plain[kind][used[kind]]
+            used[kind] += 1
+            out.append(box[1] + box[2])
+        else:
+            out.append(hdr + payload)
+    tmp.write_bytes(b"".join(out))
+    reorder_jxl_boxes(tmp)      # Exif first, all metadata before the codestream
+    new_boxes = _parse_jxl_boxes(tmp.read_bytes())
+    if new_boxes is None or _codestream_and_jbrd(new_boxes) != _codestream_and_jbrd(boxes):
+        return None, "the image data or the jbrd box would change"
+    if not _verify_file_integrity(tmp):
+        return None, "the rewritten copy failed the integrity check"
+    if _jxl_reconstruct_md5(tmp) != rec_md5:
+        return None, "the rewritten copy does not rebuild the same JPEG"
+    return rec_md5, "EXIF readable by IrfanView"
+
+
+def _relayout_one_jbrd(jxl_path: Path, dry_run: bool, problem: str):
+    """(state, detail) — fix the metadata layout of a jbrd JXL that
+    reconstructs fine but shows IrfanView no EXIF (#562). state: "relaid" /
+    "would_relay" / "failed". Same rules as _repair_one_jbrd: the work is
+    done on a copy (beside the file, in TEMP_DIR on a dry run), proven, and
+    swapped in with os.replace only if the file did not change meanwhile.
+    The file keeps its modified date; when checksums.md5 has lines for it,
+    the JXL's new self-hash is appended (the JPEG's line stays valid: the
+    rebuilt JPEG is the same)."""
+    _dir = Path(TEMP_DIR) if TEMP_DIR else Path(tempfile.gettempdir())
+    if dry_run:
+        _dir.mkdir(parents=True, exist_ok=True)
+        tmp = _dir / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
+    else:
+        tmp = jxl_path.parent / f"{uuid.uuid4().hex}_repair_{jxl_path.stem}.tmp"
+    work = Path(tempfile.mkdtemp(prefix="jxl_relayout_", dir=str(TEMP_DIR) if TEMP_DIR else None))
+    try:
+        st = jxl_path.stat()
+        rec_md5, detail = _plain_metadata_copy(jxl_path, tmp, work)
+        if rec_md5 is None:
+            return "failed", f"{problem}: {detail}; the file was left untouched"
+        if dry_run:
+            return "would_relay", problem
+        os.utime(str(tmp), ns=(st.st_atime_ns, st.st_mtime_ns))
+        if _changed_since(jxl_path, st):
+            return "failed", (f"{problem}: the file changed meanwhile (another run?) "
+                              "— left untouched")
+        os.replace(str(tmp), str(jxl_path))
+        if (read_md5_db(jxl_path) is not None
+                or read_jxl_self_hash_db(jxl_path) is not None):
+            store_jxl_self_hash_db(jxl_path, md5_of_file(jxl_path))
+            return "relaid", f"{problem}; checksums.md5 updated"
+        return "relaid", problem
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
 def cmd_repair_jbrd(args) -> int:
     """Audit (and fix) JXLs whose jbrd reconstruction is broken.
 
@@ -3385,7 +3584,14 @@ def cmd_repair_jbrd(args) -> int:
     A repaired file rebuilds a JPEG with IDENTICAL image data; its metadata
     bytes differ from the original (exiftool re-serializes the XMP packet),
     so its MD5 is not the original's. With --dry-run nothing is written.
-    Exit code: 0 when nothing is STILL BROKEN, 1 otherwise.
+
+    Every jbrd JXL that reconstructs (or was just repaired) is also checked
+    for the EXIF layout IrfanView needs (#562): a Brotli-compressed Exif/XMP
+    box (the cjxl default before v2.19.2), or an Exif box after the XMP or
+    the image data, is rewritten by _relayout_one_jbrd — codestream and jbrd
+    untouched, the very same JPEG rebuilt, or the file is left as it was.
+    Exit code: 0 when nothing is STILL BROKEN, 1 otherwise (a layout that
+    could not be fixed is a warning: the archive itself is fine).
     """
     log_file = setup_logger()
     root = args.input
@@ -3395,35 +3601,95 @@ def cmd_repair_jbrd(args) -> int:
                 + (" (dry run: nothing is written)" if args.dry_run else ""))
     if not args.dry_run:
         _sweep_orphan_temps(files)
-    ok = repaired = still_broken = no_jbrd = 0
-    for f in files:
+    counts = {"ok": 0, "repaired": 0, "broken": 0, "no_jbrd": 0,
+              "relaid": 0, "relay_failed": 0}
+    lock = threading.Lock()
+    t0 = time.time()
+    # The EXIF layout step (#562) needs cjxl; the reconstruction repair does
+    # not, and must still run on a machine without it.
+    relayout = not COMPRESS_METADATA_BOXES and shutil.which("cjxl") is not None
+    if not COMPRESS_METADATA_BOXES and not relayout:
+        logger.warning("cjxl not found: the EXIF layout for IrfanView is not checked "
+                       "in this run (the JPEG recovery is)")
+
+    def work(f):
+        lines = []          # (level, text), logged together under the lock
         if not has_jbrd_box(f):
-            no_jbrd += 1
-            continue
-        if _jxl_reconstruct_ok(f):
-            ok += 1
-            logger.info(f" OK | {f.name}")
-            continue
+            return "no_jbrd", False, lines
+        state = "ok"
+        if not _jxl_reconstruct_ok(f):
+            try:
+                state, detail = _repair_one_jbrd(f, args.dry_run)
+            except Exception as e:
+                # A locked/read-only/in-use file must not abort the whole audit:
+                # report it as still broken and keep walking the remaining files.
+                state, detail = "broken", f"repair raised {type(e).__name__}: {e}"
+            if state == "repaired":
+                lines.append((logger.warning,
+                              f"REPAIRED (JPEG recoverable again with identical image "
+                              f"data; its metadata bytes differ from the original -- "
+                              f"{detail})"))
+            elif state == "repairable":
+                state = "repaired"
+                lines.append((logger.warning, f"WOULD REPAIR ({detail})"))
+            else:
+                lines.append((logger.error, f"STILL BROKEN ({detail})"))
+                return "broken", False, lines
+        # IrfanView: plain Exif before the XMP and the image data (#562). A
+        # file this run just repaired is checked on disk; in a dry run the
+        # unrepaired original is what gets looked at.
+        # COMPRESS_METADATA_BOXES: the user chose size over IrfanView.
+        relaid = False
+        problem = _irfanview_layout_problem(f) if relayout else None
+        if problem and not (args.dry_run and state == "repaired"):
+            try:
+                rstate, rdetail = _relayout_one_jbrd(f, args.dry_run, problem)
+            except Exception as e:
+                rstate, rdetail = "failed", f"{problem}: {type(e).__name__}: {e}"
+            if rstate == "failed":
+                lines.append((logger.warning, f"EXIF LAYOUT LEFT AS IS ({rdetail})"))
+                relaid = None
+            else:
+                relaid = True
+                lines.append((logger.info,
+                              ("WOULD MAKE EXIF READABLE" if args.dry_run
+                               else "EXIF MADE READABLE") + f" ({rdetail})"))
+        if state == "ok" and not lines:
+            lines.append((logger.info, "OK"))
+        return state, relaid, lines
+
+    def run_one(f):
         try:
-            state, detail = _repair_one_jbrd(f, args.dry_run)
+            state, relaid, lines = work(f)
         except Exception as e:
-            # A locked/read-only/in-use file must not abort the whole audit:
-            # report it as still broken and keep walking the remaining files.
-            state, detail = "broken", f"repair raised {type(e).__name__}: {e}"
-        if state == "repaired":
-            repaired += 1
-            logger.warning(f" REPAIRED (JPEG recoverable again with identical image "
-                           f"data; its metadata bytes differ from the original -- "
-                           f"{detail}) | {f.name}")
-        elif state == "repairable":
-            repaired += 1
-            logger.warning(f" WOULD REPAIR ({detail}) | {f.name}")
-        else:
-            still_broken += 1
-            logger.error(f" STILL BROKEN ({detail}) | {f.name}")
+            state, relaid, lines = "broken", False, [
+                (logger.error, f"STILL BROKEN (audit raised {type(e).__name__}: {e})")]
+        with lock:
+            counts[state] += 1
+            if relaid:
+                counts["relaid"] += 1
+            elif relaid is None:
+                counts["relay_failed"] += 1
+            done = sum(counts[k] for k in ("ok", "repaired", "broken", "no_jbrd"))
+            left = (time.time() - t0) / done * (len(files) - done)
+            eta = f"  ~{left / 60:.0f} min left" if done % 25 == 0 and left > 60 else ""
+            for log, text in lines:
+                log(f" [{done}/{len(files)}] {text} | {f.name}{eta}")
+            if not lines and eta:
+                logger.info(f" [{done}/{len(files)}]{eta}")
+
+    with ThreadPoolExecutor(max_workers=max(1, min(getattr(args, "workers", 1) or 1, 8))) as pool:
+        list(pool.map(run_one, files))
+    ok, repaired = counts["ok"], counts["repaired"]
+    still_broken, no_jbrd = counts["broken"], counts["no_jbrd"]
     logger.info(f"Repair summary: {ok} OK, {repaired} "
                 + ("repairable (dry run)" if args.dry_run else "repaired")
                 + f", {still_broken} still broken, {no_jbrd} without jbrd")
+    if counts["relaid"] or counts["relay_failed"]:
+        logger.info(f"EXIF for IrfanView: {counts['relaid']} file(s) "
+                    + ("would be fixed (dry run)" if args.dry_run else "fixed")
+                    + (f", {counts['relay_failed']} left as they were (see the warnings)"
+                       if counts["relay_failed"] else ""))
     if still_broken:
         logger.error("These files can no longer reproduce their original "
                      "JPEG -- keep any source JPEGs you still have.")
@@ -3434,6 +3700,11 @@ def cmd_repair_jbrd(args) -> int:
     _extras = {"without jbrd (not applicable)": no_jbrd}
     if args.dry_run:
         _extras["repairable (dry run)"] = repaired
+    if counts["relaid"]:
+        _extras["EXIF made readable by IrfanView"
+                + (" (dry run)" if args.dry_run else "")] = counts["relaid"]
+    if counts["relay_failed"]:
+        _extras["EXIF layout left as is"] = counts["relay_failed"]
     record_summary(ok=ok + repaired, overwritten=0, skipped=no_jbrd,
                    errors=still_broken, log_file=log_file, extras=_extras,
                    dry_run=bool(args.dry_run))
@@ -4543,7 +4814,8 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         write_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Build cjxl command
-        cmd = ["cjxl", str(src_path), str(write_path), "--effort", str(effort), "-d", str(distance)]
+        cmd = (["cjxl", str(src_path), str(write_path), "--effort", str(effort), "-d", str(distance)]
+               + _metadata_boxes_flag())
         is_jpeg_input = src_path.suffix.lower() in ('.jpg', '.jpeg', '.jfif', '.jpe')
         # --lossless_jpeg=0 only for d>0 (convert = pixel re-encode). At d=0
         # the cjxl default (lossless_jpeg=1) yields a CONTAINER with jbrd —
@@ -6929,6 +7201,12 @@ Examples:
                              "The recovered JPEG has identical image data but "
                              "re-serialized XMP, so the delete gate never "
                              "deletes that JXL in the same run.")
+    parser.add_argument("--compress-metadata", action="store_true",
+                        help="[JPEG -> JXL] store the copied EXIF/XMP Brotli-"
+                             "compressed (a few KB smaller per photo) instead of "
+                             "plain; IrfanView then shows no EXIF, and "
+                             "--repair-jbrd leaves the EXIF layout alone. Same "
+                             "as COMPRESS_METADATA_BOXES = True.")
 
     return parser
 
@@ -6941,6 +7219,7 @@ _RUN_DEFAULTS = {
     "EXPORT_MARKER": EXPORT_MARKER,
     "EXPORT_JPEG_SUBFOLDER": EXPORT_JPEG_SUBFOLDER,
     "AUTO_REPAIR_JBRD": AUTO_REPAIR_JBRD,
+    "COMPRESS_METADATA_BOXES": COMPRESS_METADATA_BOXES,
     "DELETE_CONFIRM": DELETE_CONFIRM,
     "DELETE_SOURCE": DELETE_SOURCE,
     "DELETE_SKIPPED": DELETE_SKIPPED,
@@ -7061,6 +7340,7 @@ def main():
 
     # Apply configurable export marker before resolving outputs
     global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5, OVERWRITE_GUARD
+    global COMPRESS_METADATA_BOXES
     # Each global was restored to its SCRIPT setting at the top of main()
     # (_RUN_DEFAULTS); the flags override it here, one way.
     if args.export_marker is not None:
@@ -7068,6 +7348,8 @@ def main():
         EXPORT_MARKER = args.export_marker
     if args.auto_repair_jbrd:
         AUTO_REPAIR_JBRD = True
+    if args.compress_metadata:
+        COMPRESS_METADATA_BOXES = True
     if args.export_subfolder is not None:
         EXPORT_JPEG_SUBFOLDER = args.export_subfolder
     if args.delete_confirm_off:

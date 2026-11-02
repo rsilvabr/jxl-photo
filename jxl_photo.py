@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.1"
+TOOLKIT_VERSION = "2.19.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2554,7 +2554,7 @@ class InteractiveMenu:
             ("5", "Reset all settings", True),
             ("6", "Move settings file", True),
             ("7", preset_label, True),
-            ("8", "Repair JPEG recovery in JXLs (jbrd audit/repair)", True),
+            ("8", "Repair JPEG->JXL files (jbrd recovery, EXIF for IrfanView)", True),
             ("9", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
             ("0", "Exit", True),
         ])
@@ -2611,9 +2611,11 @@ class InteractiveMenu:
                 "[dim]v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files, "
                 "which can make djxl --reconstruct_jpeg fail for sources that already "
                 "had XMP. This scans every JXL under a folder and repairs the broken "
-                "ones. The repair works on a COPY and only replaces a file when the "
-                "copy provably reconstructs — the cautious route is still to run it "
-                "on a copy of the folder first.[/dim]")
+                "ones. It also rewrites the EXIF of JPEG->JXL files written before "
+                "v2.19.2 so IrfanView shows it (image data untouched). Every repair "
+                "works on a COPY and only replaces a file when the copy provably "
+                "rebuilds the same JPEG — the cautious route is still to run it on a "
+                "copy of the folder first.[/dim]")
             # Explorer's "Copy as path" wraps the folder in double quotes;
             # every other wizard prompt strips them (_strip_surrounding_quotes)
             # and this one used to hand them to Path().is_dir() raw — "Folder
@@ -2625,9 +2627,11 @@ class InteractiveMenu:
             print("\n--- Repair JPEG recovery (jbrd) ---")
             print("v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files,")
             print("which can make djxl --reconstruct_jpeg fail for sources that")
-            print("already had XMP. The repair works on a COPY and only replaces a")
-            print("file when the copy provably reconstructs — the cautious route is")
-            print("still to run it on a copy of the folder first.")
+            print("already had XMP. It also rewrites the EXIF of JPEG->JXL files")
+            print("written before v2.19.2 so IrfanView shows it (image data untouched).")
+            print("Every repair works on a COPY and only replaces a file when the copy")
+            print("provably rebuilds the same JPEG — the cautious route is still to")
+            print("run it on a copy of the folder first.")
             folder = _strip_surrounding_quotes(
                 input(f"Folder to scan [{default_dir}]: ").strip() or default_dir)
             audit_input = input("Audit only (dry run, nothing written)? [Y/n]: ").strip().lower()
