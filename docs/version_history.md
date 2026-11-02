@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.19.0](#v2190)** | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
+| **[v2.19.1](#v2191)** | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
+| [v2.19.0](#v2190) | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
 | [v2.18.1](#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); everything in v2.18.0_beta1 |
 | [v2.18.0_beta1](#v2180_beta1) | 2026-10-29 | Pre-release. Runs that delete TIFFs check every JXL's pixels first (`VERIFY_ROUNDTRIP` on by default); hardening around lossless JPEG archives, thumbnail pages, in-place edits and temp folders outside the Windows code page (round 66, 10 fixes) |
@@ -77,9 +78,49 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.19.1
+
+**Released 2026-11-02.** Supersedes v2.19.0. IrfanView shows the EXIF of
+new JXLs again; files written by v2.17.0 to v2.19.0 can be repaired in place.
+See [Upgrading](upgrading.md#v2191-irfanview-shows-the-exif-again-repair-older-files-in-place).
+
+**IrfanView showed no EXIF in JXLs written since v2.17.0 (#561).** IrfanView
+reads the EXIF only when the `Exif` box comes before the `xml ` (XMP) box.
+`reorder_jxl_boxes` moves the metadata boxes ahead of the codestream
+(IrfanView stops reading there) but kept their relative order, and since
+v2.17.0_beta1 the encoder writes the source's XMP as one block, in its own
+exiftool call, before the EXIF (`_preload_xmp_block`, which keeps a
+scanner's XMP whole). Every master came out XMP → Exif, and so did the
+recompressor's derivatives made from them. Found by the owner while
+re-encoding with v2.19.0; three copies of one master settled it (only the
+one with its Exif box moved first showed the EXIF), and the encoders of
+v2.14.0–v2.16.2 write Exif → XMP. The EXIF was always in the files: exiftool
+reads it and the decoder carries it to the TIFF.
+
+- The reorder sorts the Exif box (or a `brob` holding one) first in the
+  encoder, the recompressor and the transcoder (`_exif_box_rank`,
+  parity-pinned; a stable sort, so every other box keeps its order).
+- `--refresh-explorer-thumbnails` (menu option 9) also repairs existing
+  files: it moves the Exif box before the XMP box in place
+  (`_exif_after_xml`, `_move_exif_first`), logged `REORDERED`, through the
+  same temp copy, whole-codestream SHA-256 comparison, integrity check, kept
+  modified date and atomic swap as the thumbnail rewrite, and also where it
+  writes no thumbnail (a lossy file without jxl-thumb, `off`).
+
+**`WORKER_MEMORY_FRACTION` in the TIFF encoder is 1.0** (was 0.8), the same
+as the recompressor since v2.9.0: the per-worker estimate already sits above
+the measured peak. Set 0.8 back for a machine that runs other heavy programs
+during a conversion.
+
+10 new real-codec tests (`tests/test_exif_box_order.py`, Japanese + `[ ]` +
+space + `%` paths); 8 fail on v2.19.0, the plain recompression and the
+transcoder were right already and stay as guards. 2877 tests; the real-photo
+battery passes (129 checks; a new one: every master has its Exif box before
+the XMP).
+
 ## v2.19.0
 
-**Released 2026-11-02.** Supersedes v2.18.1. The copy of the original ICC
+**Released 2026-11-02, superseded by v2.19.1.** Supersedes v2.18.1. The copy of the original ICC
 profile moves to where the toolkit keeps its other markers. Nothing to do
 for files you already have; read the note on older versions in
 [Upgrading](upgrading.md#v2190-the-icc-copy-moves-to-a-jxlphoto-iccprofile-marker)
