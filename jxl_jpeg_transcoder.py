@@ -46,7 +46,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.0"
+TOOLKIT_VERSION = "2.19.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -2238,6 +2238,13 @@ def has_jbrd_box(jxl_path: Path) -> bool:
     except Exception:
         return False
 
+def _exif_box_rank(box) -> int:
+    """Sort key of reorder_jxl_boxes: 0 for an Exif box (plain, or brob
+    holding one), 1 for the rest."""
+    name, _header, payload = box
+    return 0 if name == b"Exif" or (name == b"brob" and payload[:4] == b"Exif") else 1
+
+
 def reorder_jxl_boxes(jxl_path: Path):
     """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
     data = jxl_path.read_bytes()
@@ -2316,6 +2323,11 @@ def reorder_jxl_boxes(jxl_path: Path):
             codestream_boxes.append((name, h, p))
         else:
             other_boxes.append((name, h, p))
+
+    # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
+    # first (#561). Stable sort: every other box keeps its order (jbrd
+    # reconstruction pairs boxes by type, never across types).
+    meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
     ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes

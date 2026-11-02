@@ -30,7 +30,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.0"
+TOOLKIT_VERSION = "2.19.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -859,7 +859,7 @@ CJXL_BUFFERING = None
 #     "Streaming vs whole-image"). Ignored automatically when cjxl is < 0.12
 #     (flag doesn't exist there).
 
-WORKER_MEMORY_FRACTION = 0.8
+WORKER_MEMORY_FRACTION = 1.0
 # Caps --workers so the parallel cjxl processes fit in memory. The peak of
 # each worker is estimated from the largest image in the batch and the encode
 # settings: cjxl encodes the whole image at once (2.5-8x the memory of its
@@ -3772,6 +3772,13 @@ def make_png_bytes(img, icc_bytes=None):
     out += chunk(b"IEND", b"")
     return out
 
+def _exif_box_rank(box) -> int:
+    """Sort key of reorder_jxl_boxes: 0 for an Exif box (plain, or brob
+    holding one), 1 for the rest."""
+    name, _header, payload = box
+    return 0 if name == b"Exif" or (name == b"brob" and payload[:4] == b"Exif") else 1
+
+
 def reorder_jxl_boxes(jxl_path):
     """Reorders ISOBMFF boxes so Exif comes BEFORE the codestream.
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
@@ -3861,6 +3868,12 @@ def reorder_jxl_boxes(jxl_path):
             codestream_boxes.append((name, h, p))
         else:
             other_boxes.append((name, h, p))
+
+    # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
+    # first. Since v2.17.0 the encoder writes the source's XMP block in its
+    # own exiftool call BEFORE the EXIF (_preload_xmp_block), so the Exif box
+    # arrived second (#561). Stable sort: every other box keeps its order.
+    meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
     ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes

@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #561.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #562.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-67 — EXIF hidden from IrfanView](#round-67--exif-hidden-from-irfanview-2026-11-02) | 2026-11-02 | v2.19.1 | #561 (1) |
 | [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.18.0_beta1 | #551–#560 (10) |
 | [Round-65 — a '%' in a file name](#round-65--a--in-a-file-name-2026-10-24) | 2026-10-24 | v2.17.0 | #550 (1) |
 | [Round-64 — film scans and their scanner software](#round-64--film-scans-and-their-scanner-software-2026-10-23) | 2026-10-23 | v2.17.0_beta1 | #548–#549 (2) |
@@ -75,6 +76,21 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-67 — EXIF hidden from IrfanView (2026-11-02)
+
+Found by the owner while re-encoding the library with v2.19.0: IrfanView
+showed no EXIF in the new masters. Three copies of one master settled it —
+a v2.18.0 master (XMP box first) and the v2.19.0 one showed none, the same
+v2.19.0 file with only its Exif box moved first showed it; v2.14.0 masters
+(Exif first) always did. The encoders of v2.14.0, v2.16.0 and v2.16.2 write
+Exif → XMP, v2.17.0_beta1 to v2.19.0 write XMP → Exif. Regression tests:
+`tests/test_exif_box_order.py` (8 of the 10 fail against v2.19.0; the plain
+recompression and the transcoder were right already and stay as guards).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 561 | **IrfanView showed no EXIF in JXLs written since v2.17.0.** IrfanView reads the EXIF only when the Exif box comes before the XMP box. `reorder_jxl_boxes` moves the metadata boxes ahead of the codestream (IrfanView stops there) but kept their relative order, and since v2.17.0_beta1 the encoder writes the source's XMP as one block in its own exiftool call BEFORE the EXIF (`_preload_xmp_block`, which keeps a scanner's XMP whole) — so every master came out XMP → Exif, and so did the recompressor's derivatives made from them. The reorder now sorts the Exif box (or a `brob` holding one) first in all three backends (`_exif_box_rank`, parity-pinned; stable, so every other box keeps its order). `--refresh-explorer-thumbnails` (menu option 9) also repairs files already written: it moves the Exif box before the XMP box in place (`_exif_after_xml`, `_move_exif_first`; status `REORDERED`), through the same temp copy, whole-codestream SHA-256 comparison, integrity check, kept modified date and atomic swap as the thumbnail rewrite — even where it writes no thumbnail. | jxl_tiff_encoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run (2026-10-29)
 

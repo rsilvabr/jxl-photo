@@ -834,7 +834,7 @@ exception: they are set in menu option 4.
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
-| `WORKER_MEMORY_FRACTION` | `0.8` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
+| `WORKER_MEMORY_FRACTION` | `1.0` | Caps `--workers` so the parallel cjxl processes fit in this share of the memory budget; `0` = no cap |
 | `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 | `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance marker names another source path (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2). [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |

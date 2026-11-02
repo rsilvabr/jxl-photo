@@ -41,7 +41,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.0"
+TOOLKIT_VERSION = "2.19.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -3361,6 +3361,13 @@ def find_jxls_mode7(input_path: Path):
 # Per-file conversion
 # ---------------------------------------------------------------------------
 
+def _exif_box_rank(box) -> int:
+    """Sort key of reorder_jxl_boxes: 0 for an Exif box (plain, or brob
+    holding one), 1 for the rest."""
+    name, _header, payload = box
+    return 0 if name == b"Exif" or (name == b"brob" and payload[:4] == b"Exif") else 1
+
+
 def reorder_jxl_boxes(jxl_path: Path):
     """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
     data = jxl_path.read_bytes()
@@ -3439,6 +3446,10 @@ def reorder_jxl_boxes(jxl_path: Path):
             codestream_boxes.append((name, h, p))
         else:
             other_boxes.append((name, h, p))
+
+    # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
+    # first (#561). Stable sort: every other box keeps its order.
+    meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
     ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
@@ -3828,6 +3839,79 @@ def _write_thumbnail_box(jxl_path, jpeg, fingerprint) -> None:
                         left -= len(chunk)
                 if not placed:
                     out.write(new_box)
+        os.replace(str(tmp), str(jxl_path))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _metadata_box_kinds(f, boxes):
+    """'exif' / 'xml' / None for each box of `boxes` (from _jxl_boxes): a
+    brob box counts as the kind it compresses."""
+    kinds = []
+    for typ, pos, hdr, size in boxes:
+        if typ == b"brob" and size - hdr >= 4:
+            f.seek(pos + hdr)
+            typ = f.read(4)
+        kinds.append({b"Exif": "exif", b"xml ": "xml"}.get(typ))
+    return kinds
+
+
+def _exif_after_xml(jxl_path):
+    """True when an Exif box follows an XMP box: IrfanView then shows no
+    EXIF. The encoder wrote that order from v2.17.0 to v2.19.0 (#561).
+    False when it does not, None when the file cannot be read."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            kinds = _metadata_box_kinds(f, _jxl_boxes(f, end))
+    except (OSError, struct.error):
+        return None
+    return "xml" in kinds and "exif" in kinds[kinds.index("xml"):]
+
+
+def _move_exif_first(jxl_path) -> None:
+    """Rewrite `jxl_path` with its Exif box(es) moved to where its first XMP
+    box was. Every other box keeps its bytes and order (the codestream and
+    the thumbnail box included). Through a temp file beside it and
+    os.replace."""
+    jxl_path = Path(jxl_path)
+    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_{jxl_path.name}.tmp"
+
+    def copy_box(f, out, pos, size):
+        f.seek(pos)
+        left = size
+        while left:
+            chunk = f.read(min(left, 1 << 22))
+            if not chunk:
+                raise OSError("short read")
+            out.write(chunk)
+            left -= len(chunk)
+
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            boxes = _jxl_boxes(f, end)
+            if not boxes or boxes[-1][1] + boxes[-1][3] != end:
+                raise ValueError("unreadable container")
+            kinds = _metadata_box_kinds(f, boxes)
+            exif = [b for b, k in zip(boxes, kinds) if k == "exif"]
+            with open(tmp, "wb") as out:
+                placed = False
+                for box, kind in zip(boxes, kinds):
+                    if kind == "exif":
+                        continue
+                    if kind == "xml" and not placed:
+                        for _t, pos, _h, size in exif:
+                            copy_box(f, out, pos, size)
+                        placed = True
+                    copy_box(f, out, box[1], box[3])
+                if not placed:
+                    for _t, pos, _h, size in exif:
+                        copy_box(f, out, pos, size)
         os.replace(str(tmp), str(jxl_path))
     finally:
         try:
@@ -5876,8 +5960,11 @@ def _wrap_bare_codestream(path: Path) -> None:
 
 def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
     """(status, detail) for one existing JXL. status: written / removed /
-    current / skipped / error. The file is edited only through a temp copy
-    beside it: the thumbnail box rewrite, the integrity check and the WHOLE
+    reordered / current / skipped / error. "reordered": only the Exif box
+    was moved before the XMP (#561, files written by v2.17.0-v2.19.0 —
+    IrfanView shows no EXIF otherwise); written/removed do that too when
+    needed and say so in the detail. The file is edited only through a temp
+    copy beside it: the box rewrites, the integrity check and the WHOLE
     codestream compared byte for byte (SHA-256); then its own modified date
     goes back on and it replaces the file with an atomic same-folder
     os.replace. Keeping the date matters: the encoder's sync compares it with
@@ -5886,25 +5973,31 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
         return "skipped", "JPEG recovery (jbrd) container: never edited"
     fp = _codestream_fingerprint(jxl_path)
     current = _thumbnail_box_fingerprint(jxl_path)
-    if fp is None or current is None:
+    misordered = _exif_after_xml(jxl_path)
+    if fp is None or current is None or misordered is None:
         return "error", "not a JPEG XL file"
+    action, why_not = None, ""      # action: "write" / "remove" / None
     if EXPLORER_THUMBNAIL == "off":
-        if not current:
-            return "skipped", "no thumbnail"
-        want = False
+        if current:
+            action = "remove"
+        else:
+            why_not = "no thumbnail"
     else:
         if EXPLORER_THUMBNAIL == "auto" and not _jxl_thumb_installed():
             _kind, lossy = _jxlinfo_colour(jxl_path)
             if lossy is None:
-                return "skipped", "jxlinfo could not tell lossy from lossless"
-            if lossy:
-                return "skipped", ("lossy (EXPLORER_THUMBNAIL = auto without jxl-thumb "
-                                   "installed: lossless only)")
-        want = True
-        if current == fp:
-            return "current", ""
+                why_not = "jxlinfo could not tell lossy from lossless"
+            elif lossy:
+                why_not = ("lossy (EXPLORER_THUMBNAIL = auto without jxl-thumb "
+                           "installed: lossless only)")
+        if not why_not and current != fp:
+            action = "write"
+    if action is None and not misordered:
+        return ("skipped", why_not) if why_not else ("current", "")
+    moved = "EXIF box moved before the XMP" if misordered else ""
+    status = {"write": "written", "remove": "removed", None: "reordered"}[action]
     if dry_run:
-        return ("written" if want else "removed"), "dry run"
+        return status, "dry run" + (f"; {moved}" if moved else "")
     st = jxl_path.stat()
     before = _codestream_sha256(jxl_path)
     if before is None:
@@ -5914,13 +6007,17 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
         try:
             shutil.copy2(str(jxl_path), str(tmp))
             _wrap_bare_codestream(tmp)
-            if want:
+            if misordered:
+                _move_exif_first(tmp)
+            if action == "write":
                 added = _add_explorer_thumbnail(tmp, ttmp)
-                if added == "small":
+                if added == "small" and not misordered:
                     return "skipped", "small file: decodes fast without one"
-                if added != "written":
+                if added == "small":
+                    status = "reordered"
+                elif added != "written":
                     return "error", "the thumbnail could not be made (see the warning)"
-            else:
+            elif action == "remove":
                 _write_thumbnail_box(tmp, None, None)
             if _codestream_sha256(tmp) != before:
                 return "error", "the codestream changed — file left untouched"
@@ -5939,7 +6036,7 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
                     tmp.unlink()
             except OSError:
                 pass
-    return ("written" if want else "removed"), ""
+    return status, moved
 
 
 def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
@@ -5950,7 +6047,8 @@ def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
              "on": "every file", "off": "removing them"}
     logger.info(f"Explorer thumbnails ({EXPLORER_THUMBNAIL}: {_what[EXPLORER_THUMBNAIL]}) "
                 f"for {len(files)} JXL(s){' — DRY RUN' if dry_run else ''}")
-    counts = {"written": 0, "removed": 0, "current": 0, "skipped": 0, "error": 0}
+    counts = {"written": 0, "removed": 0, "reordered": 0, "current": 0, "skipped": 0,
+              "error": 0}
     if not dry_run:
         _sweep_orphan_temps(files)
     t0 = time.time()
@@ -5975,6 +6073,9 @@ def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
     logger.info(f"Explorer thumbnails: {counts['written']} written, {counts['removed']} removed, "
                 f"{counts['current']} already current, {counts['skipped']} skipped, "
                 f"{counts['error']} error(s)")
+    if counts["reordered"]:
+        logger.info(f"EXIF moved before the XMP (IrfanView) in {counts['reordered']} more "
+                    f"file(s) whose thumbnail needed nothing")
     return counts["error"]
 
 

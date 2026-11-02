@@ -296,6 +296,13 @@ lossless. Small files are skipped (see the encoder's
 *Explorer thumbnails*: an image no larger than the thumbnail, or a thumbnail
 over 10% of the file).
 
+It also **puts the EXIF back where IrfanView reads it.** Files written by
+v2.17.0 to v2.19.0 have their EXIF stored after the XMP, and IrfanView then
+shows no EXIF at all. The refresh moves the EXIF block before the XMP in
+every file that needs it, whatever `EXPLORER_THUMBNAIL` says, and logs
+`REORDERED` for a file where only that changed. Nothing else in the file
+moves.
+
 Each file is edited through a copy beside it: the thumbnail box rewritten,
 the integrity check, and the **whole image data compared byte for byte**
 (SHA-256) before the copy replaces the file. The file then gets its **own

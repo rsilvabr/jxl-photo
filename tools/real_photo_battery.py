@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1228,6 +1229,30 @@ def varied_checks(varied):
           len(m_jxl) == len(srcs) and not bad_tok, f"bad={bad_tok[:4]}")
     check("varied: no ICC copy in CreatorTool (JXL, TIFF) nor left in the TIFF",
           len(m_tif) == len(srcs) and not bad_ct, f"bad={bad_ct[:4]}")
+
+    # #561: the Exif box before the XMP box, or IrfanView shows no EXIF.
+    def _meta_order(p):
+        data, pos, kinds = p.read_bytes(), 0, []
+        while pos + 8 <= len(data):
+            size, typ = struct.unpack(">I4s", data[pos:pos + 8])
+            if size == 1:
+                size = struct.unpack(">Q", data[pos + 8:pos + 16])[0]
+            elif size == 0:
+                size = len(data) - pos
+            if size < 8:
+                break
+            if typ == b"brob":
+                typ = data[pos + 8:pos + 12]
+            if typ in (b"Exif", b"xml "):
+                kinds.append(typ)
+            pos += size
+        return kinds
+
+    bad_order = [j.name for j in jxls
+                 if b"Exif" in (o := _meta_order(j)) and b"xml " in o
+                 and o.index(b"Exif") > o.index(b"xml ")]
+    check("varied: every master has its Exif box before the XMP (IrfanView)",
+          jxls and not bad_order, f"bad={bad_order[:4]}")
     if ratios:
         check("varied: size ratio JXL/TIFF at d=0.1 (information)", True,
               f"{min(ratios):.1%}-{max(ratios):.1%}")

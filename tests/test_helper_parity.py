@@ -115,6 +115,9 @@ SHARED_HELPERS = [
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
     # leaves stale jxlphoto-src/srcsum on one script's derivatives.
     "_collapse_list_reset",
+    # Exif box before the XMP box in every output (#561): IrfanView shows no
+    # EXIF otherwise.
+    "_exif_box_rank",
     # A '%' in a source name (#550): a copy drifting is one script writing an
     # output with none of its source's metadata.
     "_exiftool_source",

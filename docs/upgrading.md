@@ -11,6 +11,26 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.19.1: IrfanView shows the EXIF again; repair older files in place
+
+JXLs written by v2.17.0, v2.18.x and v2.19.0 (masters and the copies made
+from them) show no EXIF in IrfanView: the EXIF is in the file, but stored
+after the XMP, where IrfanView does not look. New files are right. To
+repair the ones you have, without re-encoding:
+
+- menu option 9, *Explorer thumbnails for existing JXLs*, on the folder
+  (with subfolders), or
+- `py jxl_recompressor.py "G:\Photos" --mode 8 --refresh-explorer-thumbnails`
+
+Files it repaired are logged `REORDERED` (or `WRITTEN` when they also got a
+thumbnail, with "EXIF box moved before the XMP"). The image data is not
+touched and each file keeps its modified date. Re-encoding with
+`--overwrite` gives the same result.
+
+The TIFF encoder's `WORKER_MEMORY_FRACTION` is now 1.0 (was 0.8): it may
+start a few more workers on the same machine. Set 0.8 back at the top of
+`jxl_tiff_encoder.py` if other heavy programs run during your conversions.
+
 ## v2.19.0: the ICC copy moves to a jxlphoto-iccprofile marker
 
 Nothing to do for your files. The copy of the original ICC profile that the

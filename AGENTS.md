@@ -135,6 +135,13 @@
   ICC tag (shown as sRGB; measured 2026-11-02), and a master with its
   profile in the codestream gets djxl's equivalent profile, not the original
   bytes.
+- **The Exif box goes before the XMP box (#561)**, or IrfanView shows no
+  EXIF. `reorder_jxl_boxes` (all three backends) sorts it first with
+  `_exif_box_rank` (parity-pinned); the encoder's `_preload_xmp_block`
+  writes the XMP before the EXIF, so without that sort every master comes
+  out XMP → Exif (v2.17.0–v2.19.0 did). `--refresh-explorer-thumbnails`
+  repairs existing files in place (`_move_exif_first`, status `REORDERED`).
+  Any new path that writes boxes must keep that order.
 - **`jxlphoto-origin:<v>` (v2.10.0) names what the FIRST master came from**
   (`tiff8`/`tiff16`, `jpeg`/`png8`/`png16`/`png`,
   `jxl-lossy`/`jxl-lossless`/`jxl`). Written once on a clean input, then only
@@ -217,8 +224,9 @@
   copy). The recompressor caps the full-size cjxl instead
   (`_memory_capped_pipeline` + `_run_cjxl_full`, a semaphore) and spends the
   leftover memory on extra workers that run djxl/magick/exiftool for the next
-  files. Its `WORKER_MEMORY_FRACTION` is 1.0, the encoder's 0.8 — on purpose
-  (v2.9.0); `test_constants_agree` no longer compares them. A resized
+  files. `WORKER_MEMORY_FRACTION` is 1.0 in both (the encoder's was 0.8
+  until v2.19.x; the owner's call, 2026-11-02); `test_constants_agree` still
+  does not compare them — they may differ again. A resized
   derivative budgets cjxl by the size it ENCODES (`cjxl_pixels` from
   `_largest_encode_pixels`, #535) and the side steps by the full source.
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to

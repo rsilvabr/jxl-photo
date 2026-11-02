@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.19.0"
+TOOLKIT_VERSION = "2.19.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2667,7 +2667,9 @@ class InteractiveMenu:
                 "[dim]A small sRGB JPEG stored inside each file, which jxl-thumb shows "
                 "in Windows Explorer without decoding the photo (most useful for "
                 "lossless files). Nothing is re-encoded; each file keeps its "
-                "modified date. JPEG->JXL lossless files (jbrd) are never touched.[/dim]")
+                "modified date. JPEG->JXL lossless files (jbrd) are never touched. "
+                "It also moves the EXIF where IrfanView reads it, in files written "
+                "by v2.17.0 to v2.19.0.[/dim]")
             folder = _strip_surrounding_quotes(Prompt.ask("Folder", default=default_dir))
             recursive = Confirm.ask("Include subfolders?", default=True)
             console.print("[1] automatic (recommended)   [2] every file   "
@@ -2679,6 +2681,8 @@ class InteractiveMenu:
             print("A small sRGB JPEG stored inside each file, which jxl-thumb shows in")
             print("Windows Explorer without decoding the photo. Nothing is re-encoded;")
             print("each file keeps its modified date. jbrd files are never touched.")
+            print("It also moves the EXIF where IrfanView reads it, in files written")
+            print("by v2.17.0 to v2.19.0.")
             folder = _strip_surrounding_quotes(
                 input(f"Folder [{default_dir}]: ").strip() or default_dir)
             recursive = not input("Include subfolders? [Y/n]: ").strip().lower().startswith('n')

@@ -132,7 +132,7 @@ CJXL_BUFFERING = None
 # 1-3  = always stream.
 # Ignored automatically when cjxl is < 0.12 (flag doesn't exist there).
 
-WORKER_MEMORY_FRACTION = 0.8
+WORKER_MEMORY_FRACTION = 1.0
 # Caps --workers so the parallel cjxl processes fit in memory. The peak of each
 # worker is estimated from the largest page in the batch and the encode
 # settings (see "RAM per worker"); the run then uses at most this fraction of
