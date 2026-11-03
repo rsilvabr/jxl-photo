@@ -3858,6 +3858,7 @@ def reorder_jxl_boxes(jxl_path):
     meta_extra_boxes  = []
     codestream_boxes  = []
     other_boxes       = []
+    pre_codestream_boxes = []
 
     for name, h, p in boxes:
         if name in META_ORDER:
@@ -3866,8 +3867,14 @@ def reorder_jxl_boxes(jxl_path):
             meta_extra_boxes.append((name, h, p))
         elif name in CODESTREAM:
             codestream_boxes.append((name, h, p))
-        else:
+        elif codestream_boxes:
             other_boxes.append((name, h, p))
+        else:
+            # E-G (2026-11-03 audit): an unknown box that sat BEFORE the
+            # codestream stays before it — the Explorer thumbnail (uuid) box is
+            # put there so a reader finds it without crossing the image data,
+            # and moving it to the end made every restamp/adopt hide it.
+            pre_codestream_boxes.append((name, h, p))
 
     # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
     # first. Since v2.17.0 the encoder writes the source's XMP block in its
@@ -3876,7 +3883,8 @@ def reorder_jxl_boxes(jxl_path):
     meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
-    ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
+    ordered = (meta_order_boxes + meta_extra_boxes + pre_codestream_boxes
+               + codestream_boxes + other_boxes)
 
     # A box that declared size 0 ("extends to EOF") is only valid as the LAST
     # box in the file. If regrouping moved it earlier, rewrite its header with
