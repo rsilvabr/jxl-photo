@@ -377,6 +377,12 @@ requested via `EXPORT_TIFF_SUBFOLDER`; mode 6 has no requested subfolder, so it
 skips **all** of them — a leftover `EXPORT_TIFF_SUBFOLDER` value does not
 exempt one there.
 
+**Which `_EXPORT` counts.** The first folder matching the marker **at or
+below the input folder**; only when there is none below it, the closest one
+above (a run pointed at a folder inside `_EXPORT`). A library stored under a
+folder whose name also matches the marker (`Lightroom_Export`, `C1_Export`)
+no longer anchors there instead of on the real `_EXPORT` below.
+
 The output folder is `EXPORT_MARKER/EXPORT_JXL_FOLDER` (default `_EXPORT/16B_JXL`).
 `--export-jxl-folder` overrides it per run, so different presets can write to
 different folders — e.g. a separate "Print" TIFF export encoded at a lower
@@ -386,6 +392,28 @@ distance, with its own output folder:
 py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder TIFF16 --distance 0.05
 py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder Print --export-jxl-folder PRINT_JXL --distance 0.5
 ```
+
+---
+
+## Script settings overlay
+
+The settings at the top of this script can also be changed without editing
+it, in the JSON file the wrapper's menu S writes
+([details](README_jxl_tools.md#script-settings-menu-s)):
+
+```json
+{"jxl_tiff_encoder": {"EXPLORER_THUMBNAIL_SIZE": 512, "SCANNER_SOFTWARE": ["SilverFast", "VueScan"]}}
+```
+
+Read when the script starts, from the path in `JXLPHOTO_SETTINGS` (set but
+empty = off), else `.jxl_script_settings.json` next to the scripts, else the
+same name in the user profile. Only the settings this script lists in
+`_OVERLAY_SETTINGS` are taken, each checked against its type, range or
+choices; the safety settings (deletion, confirmations, guards, verification
+thresholds, `OVERWRITE`, `STRIP_METADATA`) never are. The log names the file
+and every setting it changed (`Script settings overlay: <file>: N value(s):
+...`) and every entry it refused. A flag on the command line still wins over
+both.
 
 ---
 

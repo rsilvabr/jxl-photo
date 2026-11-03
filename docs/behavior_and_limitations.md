@@ -68,7 +68,7 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 
 - **You sync, and you rename or move folders anywhere on the path to the photo** (an event folder, a year folder, a drive letter) — and you never delete sources with the toolkit: turn the guard off. CLI `--no-overwrite-guard`, `OVERWRITE_GUARD = False` at the top of the script, or "Overwrite guard: off" in the wizard (saved in the preset). Each overwrite it would have refused is logged.
 - **You keep your folder names stable** — typical with Lightroom, whose catalog tracks folders by path: keep the default.
-- **You keep the guard on but renamed a folder:** before re-editing any photo in it, run the encoder once with `--restamp-moved` on that folder. It rewrites the path record of every master whose TIFF is unchanged, in seconds, without re-encoding (file dates kept, so derivative runs do not redo them). Masters whose TIFF was already edited are listed: delete those old JXLs by hand (the TIFF is kept) and sync again.
+- **You keep the guard on but renamed a folder:** before re-editing any photo in it, run the encoder once with `--restamp-moved` on that folder (menu R of `jxl_photo.py`: dry run first). It rewrites the path record of every master whose TIFF is unchanged, in seconds, without re-encoding (file dates kept, so derivative runs do not redo them). Masters whose TIFF was already edited are listed: delete those old JXLs by hand (the TIFF is kept) and sync again.
 - **A scheduled sync can do this on every run:** `--restamp-then-sync` restamps the unchanged masters first and then syncs in the same pass (opt-in; it reads the record of every existing master, and it is refused with any deletion).
 
 **Never with deletion:** `--no-overwrite-guard` together with `--delete-source` is refused (exit 2).
@@ -76,6 +76,18 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 **When the record cannot be read** (exiftool's planning read failed or stalled — a very busy disk, a file locked by another program): the existing output is refused too, with "its provenance markers could not be read", in every script. Re-run once the disk is quiet. With the guard off it is overwritten with a warning, like a record naming another path. (Until this fix such an output was taken for an old archive without a record, and overwritten.)
 
 **Still protected with the guard off:** a lossless JPEG archive (`jbrd`) of a different JPEG, an original TIFF master (the decoder never overwrites a TIFF it did not write) or an edited decode, and a file a derivative run did not write.
+
+## A JPEG or 8-bit PNG made from a JXL never deletes it
+
+A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has fewer bits and, for a JPEG, a lossy encode. Like the decoder's 8-bit TIFF and the recompressor's derivatives, it never deletes the JXL: the transcoder refuses `--force-convert --decode` to JPEG/8-bit PNG with `--delete-source` (exit 2), auto mode keeps each such JXL with a `KEEP` line, and the wizard refuses the combination before asking for the HHMM time. The bit-exact recovery of a lossless JPEG archive and a 16-bit PNG still delete, behind their checks.
+
+## Modes 6/7: which `_EXPORT` counts, and what is left out
+
+The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.
+
+## The scripts' settings: in the file, or in the overlay
+
+Each script's settings are the variables at the top of the file. `jxl_photo.py`'s menu S changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA` — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-s)
 
 ## Default re-run behavior differs per script
 

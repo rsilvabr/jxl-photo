@@ -308,6 +308,23 @@ session/_EXPORT/JXL/photo.jxl      → session/_EXPORT/JPEG_recovered/photo.jpg 
 session/_EXPORT/AdobeRGB/photo.jxl → ignored
 ```
 
+**Which `_EXPORT` counts.** The first folder matching the marker **at or
+below the input folder**; only when there is none below it, the closest one
+above (a run pointed at a folder inside `_EXPORT`). A library stored under a
+folder whose name also matches the marker (`Lightroom_Export`, `C1_Export`)
+no longer anchors there instead of on the real `_EXPORT` below.
+
+**When decoding (JXL → JPEG/PNG), derivatives are left out** in mode 6, and in mode 7 without an explicit
+subfolder: a file carrying `jxlphoto-derived` (a colour-converted, resized or
+sharpened copy written by the recompressor or the transcoder) sits next to
+its master with the same name and would land on the same output, so the run
+used to stop on the duplicate — even when its folder was named only on a
+command line (`--export-jxl-folder 16B_JXL_sRGB`). A file whose marker
+cannot be read is kept. To process a derivative folder on purpose, use mode
+7 with that folder as the subfolder.
+This changes nothing for the bit-exact JPEG recovery: a lossless JPEG archive
+never carries a marker, and a derivative holds no JPEG to recover.
+
 ## Output modes
 
 Modes 0-8 mirror the original [`jxl_jpg_lossless_transcoder.py`](https://github.com/rsilvabr/jxl_jpg_lossless_transcoder) structure:
@@ -539,6 +556,48 @@ Options:
 | `130` | Interrupted with Ctrl+C (cancelled) |
 
 * * *
+
+## A JXL → JPEG or 8-bit PNG conversion never deletes the JXL
+
+A JPEG decoded from a JXL (`--force-convert --decode`, or auto mode decoding
+a JXL that has no JPEG inside) or an 8-bit PNG is not a copy of the master:
+fewer bits, often a lossy JPEG of a lossless 16-bit master. Like the
+decoder's `--depth 8` and the recompressor's derivatives, it never deletes
+its source:
+
+- `--force-convert --decode --format jpeg` (or `--format png --bit-depth 8`)
+  with `--delete-source` is refused at startup (exit 2);
+- auto mode and the 16-bit PNG check the result per file: a JXL whose output
+  is a JPEG or an 8-bit PNG is kept (`KEEP`, with the reason), the rest of
+  the run goes on.
+
+What still deletes, behind its gates: the bit-exact JPEG recovery of a
+lossless JPEG → JXL archive (`djxl --reconstruct_jpeg` + the checksum), and a
+16-bit PNG.
+
+---
+
+## Script settings overlay
+
+The settings at the top of this script can also be changed without editing
+it, in the JSON file the wrapper's menu S writes
+([details](README_jxl_tools.md#script-settings-menu-s)):
+
+```json
+{"jxl_jpeg_transcoder": {"JPEG_DEFAULT_QUALITY": 92, "EXPORT_JXL_FOLDER": "JXL_jpeg"}}
+```
+
+Read when the script starts, from the path in `JXLPHOTO_SETTINGS` (set but
+empty = off), else `.jxl_script_settings.json` next to the scripts, else the
+same name in the user profile. Only the settings this script lists in
+`_OVERLAY_SETTINGS` are taken, each checked against its type, range or
+choices; the safety settings (deletion, confirmations, guards, verification
+thresholds, `OVERWRITE`, `STRIP_METADATA`) never are. The log names the file
+and every setting it changed (`Script settings overlay: <file>: N value(s):
+...`) and every entry it refused. A flag on the command line still wins over
+both.
+
+---
 
 ## Deleting already-converted sources (`--delete-skipped`)
 

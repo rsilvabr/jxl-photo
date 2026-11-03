@@ -123,7 +123,12 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `7` | Presets | Save the last workflow under a name and re-run it later. See below |
 | `8` | Repair JPEG->JXL files | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG |
 | `9` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
+| `R` | Renamed or moved folders | After a folder of TIFFs was renamed or moved, the masters' path record names the old place and the overwrite guard refuses to re-encode them. This rewrites the record of every master whose TIFF is unchanged — nothing is re-encoded, file dates are kept, masters whose TIFF changed are listed and left alone. Dry run first, then asks. Runs `jxl_tiff_encoder.py <folder> --mode N --restamp-moved` ([details](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)) |
+| `C` | Reset the ICC test cache | The encoder's cautious ICC strategy remembers, per profile and cjxl version, whether a profile survives a lossy encode; clearing it makes the next lossy run test each profile again (after a libjxl update, or to re-check a profile). Runs `jxl_tiff_encoder.py --clear-icc-cache` |
+| `S` | Script settings | Change the four scripts' own settings (folder names, timeouts, memory cap, scanner software lists, thumbnail sizes, recompressor policies, ...) without editing the `.py` files. See [Script settings (menu S)](#script-settings-menu-s) |
 | `0` | Exit | Quit |
+
+Letters are taken in either case (`r`, `R`).
 
 The stored workflow is validated before a repeat or a preset replays it: the
 config is plain JSON you can hand-edit, so not just the numbers (mode, workers,
@@ -671,7 +676,8 @@ Basic parameters always shown:
 - **Output sharpening** — the same directions: `none` (default), `screen` or
   `print` (`--sharpen`), applied after the resize on the output pixels' size.
   The expert overrides (`--sharpen-sigma`/`--sharpen-gain`/
-  `--sharpen-threshold`) have no wizard question — use Expert flags in Step 6B.
+  `--sharpen-threshold`) have no wizard question: set them on the Step 7
+  options screen (`O`), which lists them once sharpening is on.
   A run with resize and/or sharpening plus a delete option is refused up front
   (a derivative never deletes its source), and the Step 7 summary shows a
   `Resize:` and a `Sharpening:` line
@@ -706,7 +712,36 @@ Optional advanced and expert flags follow.
 > ```
 
 ### Step 7 — Summary
-Full review of all settings before execution. Type `YES` to confirm.
+Full review of all settings before execution. Type `YES` to confirm, or `O`
+for **all the options of this job**.
+
+**`O` — all options for this job.** Every option the job's script takes, for
+this direction only, grouped (existing outputs, deletion, multi-page,
+colour, metadata, derivative, files, performance), each with its current
+value and its flag. The wizard's questions cover the common ones; the rest
+are here: `--buffering`, `--no-preflight`, `--clean-staging` (with staging),
+`--icc-png-strategy`, `--scan-scope`, `--warn-thumbnail-discard`,
+`--restamp-then-sync`, `--explorer-thumbnail`, the recompressor's
+`--encode-tag`, `--allow-incomplete-groups`, `--compress-metadata`,
+`--output-name` (modes 1/3 of a JPEG/PNG conversion) and the sharpening
+overrides. Type a number to change one (`/text` filters the list, Enter goes
+back to the summary). The options the wizard asks itself (dry run,
+overwrite/sync, distance, bit depth) and the delete rules are shown but
+changed in the wizard's steps, where their checks are. An option that relaxes
+a safety check (`--allow-incomplete-groups`) asks first. The summary then
+lists what you set (`Options: --buffering 1, --scan-scope raw`), and the
+values are saved with the workflow and with presets.
+
+Options that cannot go together are refused on the screen and again before
+the run, before any HHMM confirmation: `--restamp-then-sync` never with a
+delete or Overwrite, `--allow-incomplete-groups` only with Delete originals.
+
+**Expert flags (Step 6B) are checked before the run** against the script's
+own command line: a typo, another script's flag or a value outside its
+choices is refused with the reason, before the HHMM confirmation (the script
+used to stop on it after the confirmation). A `--mode` there is refused too:
+the mode is chosen in the wizard (or the manifest's Mode column), and every
+check before the run uses that one.
 
 * * *
 
@@ -814,9 +849,14 @@ Some options are available directly in the wizard, others must be edited in the 
 | Export marker | Default: `_EXPORT` |
 | Explorer thumbnail tip | On by default; asked only when it applies |
 
-### 🔧 Must be edited directly in the scripts
+### 🔧 The scripts' own settings (menu S, or the script file)
 
-These are hardcoded global variables at the top of each script. To change them, open the script file and edit the variable at the top.
+These are global variables at the top of each script. Change them in
+[menu S](#script-settings-menu-s) (an overlay file, the `.py` files stay as
+they are), or open the script and edit the variable at the top. The safety
+settings (`DELETE_CONFIRM`, `OVERWRITE_GUARD`, the verification thresholds,
+...) are not in menu S: they are per-run choices, or a deliberate edit of the
+script.
 
 The wizard reads them too: its default for every option it passes to a script
 (multi-page and thumbnail mode, thumbnail suffix, D50 patch, encode tag, RAM
@@ -847,7 +887,7 @@ exception: they are set in menu option 4.
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 | `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance marker names another source path (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2). [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
-**CLI-only encoder flags (no wizard question — pass via Expert flags in Step 6B):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time), `--clear-icc-cache` (reset the cautious ICC cache). Expert flags are appended LAST, so they override earlier wizard choices.
+**Encoder flags without a wizard question (Step 7 options screen, `O`):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time). `--clear-icc-cache` (reset the cautious ICC cache) is menu C. Expert flags still work and are appended LAST, so they override earlier wizard choices.
 
 #### jxl_tiff_decoder.py
 | Variable | Default | What it does |
@@ -906,9 +946,10 @@ exception: they are set in menu option 4.
 **effort 10**, cjxl (libjxl 0.12) stops streaming and encodes the whole image at
 once. Each worker then needs ~3.6 GB (effort 7) or ~12.4 GB (effort 8+) on a
 45 MP photo instead of ~1.5 GB, and the run lowers `--workers` to fit in memory
-— an e9 preset can drop to a handful of workers. Putting **`--buffering 1`** in
-**Expert flags** (Step 6B) keeps those settings on the streaming path, with the
-memory and worker count of a light setting; the flag is saved with the preset.
+— an e9 preset can drop to a handful of workers. Setting **`--buffering 1`** on the
+Step 7 options screen (`O`, or in Expert flags) keeps those settings on the
+streaming path, with the memory and worker count of a light setting; it is
+saved with the preset.
 What it costs depends on the effort (measured with cjxl 0.12.0 on 45 MP
 photos, d=3):
 
@@ -924,6 +965,44 @@ with 8 + `--buffering 1`, 0.73 with 16 + `--buffering 1`. Details:
 [Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured),
 [Memory and --workers](README_jxl_recompressor.md#memory-and---workers) and
 [the whole-image threshold](README_jxl_tiff_encoder.md#exception-the-whole-image-threshold).
+
+### Script settings (menu S)
+
+Menu **S** edits the settings at the top of the four scripts without touching
+the `.py` files: pick a script, then a setting (`/text` filters), and type the
+new value; `-` puts it back to the script's own value. The list shows each
+setting's value, `(overlay)` where menu S changed it, and the comment the
+script has under it.
+
+The values go to a JSON file the scripts read when they start:
+
+1. the path in the `JXLPHOTO_SETTINGS` environment variable, if it is set
+   (set but **empty** turns the overlay off — the test suite and the
+   real-photo battery do this);
+2. else `.jxl_script_settings.json` next to the scripts (portable install,
+   like this program's own settings file);
+3. else `.jxl_script_settings.json` in your user profile (`%USERPROFILE%`).
+
+Each script checks every value again (type, range, the allowed choices,
+folder names without path separators) and takes only the settings menu S
+offers; anything else in the file is ignored with a warning in the run's
+log. Every run logs the file and the settings it changed, e.g.
+`Script settings overlay: C:\Users\me\.jxl_script_settings.json: 1 value(s): EXPLORER_THUMBNAIL_SIZE`.
+**Never** taken from it, in any script: deletion (`DELETE_SOURCE`,
+`DELETE_SKIPPED`, `DELETE_CONFIRM`, `DELETE_SOURCE_REQUIRE_MD5`,
+`STORE_MD5`), the guards and checks (`OVERWRITE_GUARD`, `PROVENANCE_CHECK`,
+`ADOPT_SCAN`, `ALLOW_INCOMPLETE_GROUPS`, `VERIFY_ROUNDTRIP` and its
+thresholds), `OVERWRITE`, `STRIP_METADATA` and `AUTO_REPAIR_JBRD`. Those stay
+per-run choices (the wizard, the flags) or a deliberate edit of the script.
+
+A change applies to every script run from then on; the wizard's own defaults
+(which are read from the scripts) show it the next time this program starts.
+The file is plain JSON, one object per script:
+
+```json
+{"jxl_tiff_encoder": {"EXPLORER_THUMBNAIL_SIZE": 512, "SCANNER_SOFTWARE": ["SilverFast", "VueScan"]},
+ "jxl_recompressor": {"ON_DOWNGRADE": "skip"}}
+```
 
 * * *
 

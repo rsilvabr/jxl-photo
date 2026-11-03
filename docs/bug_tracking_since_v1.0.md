@@ -9,12 +9,13 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #586.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #605.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
 v1.9.0_beta2 row) and were renumbered on 2026-10-07 — each of those sections
-says so.
+says so. #586–#599 were set aside for round 70, which was worked on in
+parallel with round 71, and stay unused.
 
 **Rounds are not releases.** A round is one audit or fix batch; the *Shipped
 in* column says which release carried it. The version numbers some rounds
@@ -23,6 +24,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | — | #600–#604 (5) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |
 | [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | v2.20.0 | #563–#567 (5) |
 | [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |
@@ -79,6 +81,25 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-71 — delivery B of the wrapper redesign (2026-11-04)
+
+The 261103 audit's E-H, T-B (the owner's decision: option 1) and W-B, S1/S2
+of the 261103 review of delivery A, and the expert-flag check that came with
+`build_parser()`. Delivery B also brings the wrapper's "all options" screen,
+menus R/C/S and the script settings overlay (not bugs: see the READMEs).
+Regression tests: `tests/test_lossy_decode_delete.py`,
+`tests/test_marker_anchor.py`, `tests/test_derivative_inputs.py`,
+`tests/test_build_parser_and_expert_flags.py` (each fails on the commit
+before its fix).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 600 | **A JXL decoded to a JPEG or an 8-bit PNG deleted the JXL.** With `--delete-source`, the transcoder unlinked a 16-bit lossless master after writing a q90 8-bit JPEG of it, behind the HHMM token only — while the decoder's `--depth 8` and the recompressor's derivatives never delete. Now such an output never deletes its source: `--force-convert --decode` to JPEG/8-bit PNG with `--delete-source` exits 2, auto mode and the PNG path keep the JXL per file (`_lossy_decode_keep_reason`), and the wrapper refuses the direct run before the token and drops the delete from a manifest row. The bit-exact JPEG recovery and a 16-bit PNG still delete. | jxl_jpeg_transcoder.py, jxl_photo.py | Changed (owner's decision) |
+| 601 | **Modes 6/7 anchored on a folder above the input.** The anchor was the first folder of the ABSOLUTE path matching the marker, so a library under `Lightroom_Export` or `C1_Export` (both match `_EXPORT` by the documented rules) anchored there, not on the real `_EXPORT` below: wrong output folders, mode 7's subfolder never matched. `_marker_anchor_index` (parity-pinned in the four backends) takes the first match at or below the input root, else the closest one above; the wrapper's collision walk follows. | all four backends, jxl_photo.py | Fixed |
+| 602 | **A derivative next to its master stopped modes 6/7 on a duplicate output.** The decoder, the recompressor and the transcoder's JPEG/PNG conversion skip the other tools' folders by the names in their settings (#565), so a derivative folder named only on a command line (`--export-jxl-folder 16B_JXL_sRGB`) was still taken: same file names as the masters, same output, the run aborted. They now leave out every file carrying `jxlphoto-derived` in mode 6 and in mode 7 without an explicit subfolder (`_drop_derivative_inputs`, `_drop_derivative_pairs`, the decoder's marker read); a marker that cannot be read keeps the file. The wrapper's manifest collision walk re-checks the files that collide. | jxl_tiff_decoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py, jxl_photo.py | Fixed |
+| 603 | **A `--mode` in the expert flags ran behind checks made for another mode.** The flags are appended last and win in the child's argparse, while the wrapper's in-place and delete confirmations, collision checks and counts had judged the wizard's mode. The wrapper now refuses the run (`_flags_set_mode`). | jxl_photo.py | Fixed |
+| 604 | **A typo in the expert flags stopped the run after the HHMM confirmation.** The child's argparse exited 2 only once it started. The wrapper now parses the flags with the child's own parser (`build_parser()`, moved out of `main()` in the encoder, decoder and recompressor; `--help` unchanged) before the run and names the problem (`_expert_flags_problem`); a child that cannot be imported leaves the check to the child, as before. | jxl_photo.py, jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py | Fixed |
 
 ## Round-70 — what the 261103 audit left open (2026-11-03)
 

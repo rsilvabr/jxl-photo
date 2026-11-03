@@ -92,7 +92,9 @@
   derivatives with no `_rederive_reason`. A new check that must see every
   planned file has to handle that action (the duplicate abort and the orphan
   sweep count it as a writing item).
-- `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess
+- `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess.
+  Menus R (`--restamp-moved`, dry run first), C (`--clear-icc-cache`) and S
+  (the script settings overlay); Step 7 takes `O` (all options of the job)
 
 ## Settings are never hardcoded
 - Every script's user-editable settings live at the TOP of the script
@@ -108,6 +110,31 @@
 - The wrapper reads a child's setting from the child module
   (`_child_setting`); a shipped default may appear only as the fallback when
   the child cannot be imported. It always passes its own marker to the child.
+- **The script settings overlay (Phase 4).** Right after its settings block
+  (just before `SCRIPT_DIR`, so before `_RUN_DEFAULTS` / the decoder's
+  per-run snapshot), each child calls `_apply_settings_overlay(globals(),
+  "<module>", _OVERLAY_SETTINGS, _OVERLAY_DERIVED)` on its section of the
+  JSON file (`JXLPHOTO_SETTINGS`, set but empty = off; else
+  `.jxl_script_settings.json` next to the scripts, gitignored; else the
+  home folder). The overlay value IS the script's setting: the per-run reset
+  restores it, the wrapper's `_child_setting` sees it. Only names in that
+  script's `_OVERLAY_SETTINGS` (kind + range/choices, checked by
+  `_overlay_value`) are taken — a new setting is NOT overlay-able until it
+  is listed there, and `tests/test_settings_overlay.py` checks every spec
+  against the script's own value and every choice against its flag's.
+  `_OVERLAY_SAFETY_SETTINGS` (identical in the four: deletion,
+  confirmations, guards, provenance, verification thresholds, `OVERWRITE`,
+  `STRIP_METADATA`, `AUTO_REPAIR_JBRD`) is never taken; never list one of
+  those, a marker constant (`*_PREFIX`, `*_FLAG`) or a value computed at
+  import (`PIL_MAX_IMAGE_PIXELS` feeds `Image.MAX_IMAGE_PIXELS`). A setting
+  computed from another (`EXIFTOOL_TIMEOUT = CJXL_TIMEOUT`) goes in
+  `_OVERLAY_DERIVED`. `setup_logger` logs the audit line
+  (`_log_settings_overlay`). The sibling readers of #565
+  (`_sibling_str_settings`, the encoder's `_decoder_output_folders`) add the
+  overlay's folder names. Helpers parity-pinned. The suite (conftest) and
+  the battery run with `JXLPHOTO_SETTINGS=""`; the battery's
+  `--settings-overlay <file>` runs with one. The wrapper's menu S edits the
+  file from the child's own table (no copy of types in the wrapper).
 
 ## Architecture gotchas
 - **djxl returns a lossy ICC-blob file in LINEAR sRGB**: never paste/assign the
@@ -283,6 +310,11 @@
   match this exactly (it takes the root into account too) and follows the
   configured folder via `_with_child_marker`, which applies the global on the
   imported child module and restores it afterwards.
+- **The modes 6/7 anchor** is `_marker_anchor_index` (#601, parity-pinned in
+  the four backends, used by the wrapper's collision walk): the first marker
+  match at or below the input root, else the closest one above; a path not
+  under the root keeps the first match. Never search the absolute path from
+  its start again (`Lightroom_Export` above the library matches `_EXPORT`).
 - Below the export marker, modes 6/7 of the decoder and the recompressor skip
   the OTHER tools' JXL output folders (#565: `_skip_other_tool_output`, names
   from the siblings' settings via `ast` plus the shipped defaults, per-script
@@ -290,9 +322,21 @@
   writes masters into (`_MASTER_FOLDER_SOURCES`: `EXPORT_JXL_FOLDER`,
   `CONVERTED_JXL_FOLDER`, `JXL_FOLDER_NAME` — `converted_jxl` is the
   transcoder's name too, M1 of the 261103 review), never mode 7's requested
-  subfolder; the transcoder's decode stays
-  unfiltered (it is how a JPEG archive comes back). The wrapper's
-  `_skip_check` mirrors it (`_other_tool_skip`).
+  subfolder; the transcoder's decode is not folder-filtered (it is how a JPEG
+  archive comes back). The wrapper's `_skip_check` mirrors it
+  (`_other_tool_skip`). On top of that, the decoder, the recompressor and the
+  transcoder's decode leave out DERIVATIVES by their `jxlphoto-derived`
+  marker in mode 6 and in mode 7 without an explicit subfolder (#602:
+  decoder's marker read, `_drop_derivative_inputs`,
+  `_drop_derivative_pairs`); an unreadable marker keeps the file. The
+  wrapper's `_without_derivative_collisions` re-checks colliding files.
+- **A JXL → JPEG or 8-bit PNG never deletes its source (#600, owner's
+  decision T-B).** The transcoder refuses `--force-convert --decode` to
+  JPEG/8-bit PNG with `--delete-source` (exit 2) and both lossy gates keep
+  such a JXL per file (`_lossy_decode_keep_reason`); the wrapper refuses the
+  direct run before the HHMM token (`_lossy_decode_never_deletes`) and drops
+  the delete from a manifest row. The bit-exact recovery and a 16-bit PNG
+  still delete. Do not reintroduce a lossy-decode delete path.
 - **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION
   REGISTRY ===`). Both the direct run and every manifest entry build the
   child's argv through `build_child_cmd`; never add a flag to a builder by
@@ -301,9 +345,26 @@
   `_policy_*` rule when it needs more than "emit when set"; the value comes
   from the run or the child (`_workflow_or_child`), never a literal default.
   A flag the wrapper deliberately does not pass goes in `NOT_OFFERED` with the
-  reason. `tests/test_wrapper_option_registry.py` fails on an undeclared child
-  flag; `tests/test_wrapper_argv_golden.py` pins the argv of 25 runs (regen
-  only from a known-good commit: `JXLPHOTO_REGEN_ARGV_GOLDEN=1`).
+  reason, a flag of a maintenance screen (menus 8/9/R/C) in
+  `MAINTENANCE_FLAGS`. `tests/test_wrapper_option_registry.py` fails on an
+  undeclared child flag; `tests/test_wrapper_argv_golden.py` pins the argv of
+  25 runs (regen only from a known-good commit:
+  `JXLPHOTO_REGEN_ARGV_GOLDEN=1`). A flag the wizard does not ask about takes
+  `legacy_key="extra.<id>"`: its value lives in the run's `extra_options`
+  (saved as `last_extra_options`, so presets keep it), the Step 7 `O` screen
+  sets it (`_all_options_screen`; essentials and delete rules stay in the
+  wizard, `danger=True` asks first) and the summary lists it. Combinations
+  go in `requires`/`conflicts` (ids), checked by `_registry_rule_problem` on
+  the screen and in `execute_workflow` before any HHMM token — e.g.
+  `--restamp-then-sync` conflicts with the deletes and Overwrite. Expert
+  flags are parsed with the child's `build_parser()` before the run
+  (`_expert_flags_problem`) and a `--mode` there is refused
+  (`_flags_set_mode`): every pre-run check judged the wizard's mode.
+- **The UI layer** (`UI`, `PlainUI`, `RichUI`, `ScriptedUI`) asks by
+  question id (`opt.screen`, `opt.<id>`, `restamp.*`, `icccache.confirm`,
+  `settings.*`); tests answer by id with `ScriptedUI` (a question with no
+  answer left is an error). The new screens use it; the older wizard steps
+  still ask through Rich/`input()` (phase 3 moves them).
 
 ## Verification
 - **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").

@@ -474,7 +474,45 @@ default). A folder the encoder writes masters into is never skipped
 neither is a folder mode 7 asks for by name. The log says
 `Ignored N JXL(s) in other tools' output folders`. A folder named only on a
 command line (another run's `--export-jxl-folder`, e.g. `16B_JXL_sRGB`) is not
-known here: use mode 7 with `--export-subfolder` set to the masters' folder.
+known by name, but its files are derivatives and are left out by their marker
+(below).
+
+**Derivatives are left out** in mode 6, and in mode 7 without an explicit
+subfolder: a file carrying `jxlphoto-derived` (a colour-converted, resized or
+sharpened copy written by the recompressor or the transcoder) sits next to
+its master with the same name and would land on the same output, so the run
+used to stop on the duplicate — even when its folder was named only on a
+command line (`--export-jxl-folder 16B_JXL_sRGB`). A file whose marker
+cannot be read is kept. To process a derivative folder on purpose, use mode
+7 with that folder as the subfolder.
+
+**Which `_EXPORT` counts.** The first folder matching the marker **at or
+below the input folder**; only when there is none below it, the closest one
+above (a run pointed at a folder inside `_EXPORT`). A library stored under a
+folder whose name also matches the marker (`Lightroom_Export`, `C1_Export`)
+no longer anchors there instead of on the real `_EXPORT` below.
+
+---
+
+## Script settings overlay
+
+The settings at the top of this script can also be changed without editing
+it, in the JSON file the wrapper's menu S writes
+([details](README_jxl_tools.md#script-settings-menu-s)):
+
+```json
+{"jxl_tiff_decoder": {"JPEG_PREVIEW_SIZE": 512, "EXPORT_TIFF_FOLDER": "TIFF16"}}
+```
+
+Read when the script starts, from the path in `JXLPHOTO_SETTINGS` (set but
+empty = off), else `.jxl_script_settings.json` next to the scripts, else the
+same name in the user profile. Only the settings this script lists in
+`_OVERLAY_SETTINGS` are taken, each checked against its type, range or
+choices; the safety settings (deletion, confirmations, guards, verification
+thresholds, `OVERWRITE`, `STRIP_METADATA`) never are. The log names the file
+and every setting it changed (`Script settings overlay: <file>: N value(s):
+...`) and every entry it refused. A flag on the command line still wins over
+both.
 
 ---
 

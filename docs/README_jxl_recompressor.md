@@ -349,6 +349,21 @@ writes masters into is never skipped (`16B_JXL`, `converted_jxl`,
 `JXL_16bits` and their configured names — `converted_jxl` is the
 transcoder's name too), nor a folder mode 7 asks for.
 
+**Derivatives are left out** in mode 6, and in mode 7 without an explicit
+subfolder: a file carrying `jxlphoto-derived` (a colour-converted, resized or
+sharpened copy written by the recompressor or the transcoder) sits next to
+its master with the same name and would land on the same output, so the run
+used to stop on the duplicate — even when its folder was named only on a
+command line (`--export-jxl-folder 16B_JXL_sRGB`). A file whose marker
+cannot be read is kept. To process a derivative folder on purpose, use mode
+7 with that folder as the subfolder.
+
+**Which `_EXPORT` counts.** The first folder matching the marker **at or
+below the input folder**; only when there is none below it, the closest one
+above (a run pointed at a folder inside `_EXPORT`). A library stored under a
+folder whose name also matches the marker (`Lightroom_Export`, `C1_Export`)
+no longer anchors there instead of on the real `_EXPORT` below.
+
 Mode 2 is recursive and writes **flat by name**: an output folder that
 equals the input folder is refused at startup (exit 2) — root files would be
 replaced in place while files from subfolders were flattened into the root,
@@ -896,6 +911,28 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --summary-json        Machine-readable ##JXLSUM## line consumed by jxl_photo.py
                       (hidden from the help text; not a user-facing flag)
 ```
+
+## Script settings overlay
+
+The settings at the top of this script can also be changed without editing
+it, in the JSON file the wrapper's menu S writes
+([details](README_jxl_tools.md#script-settings-menu-s)):
+
+```json
+{"jxl_recompressor": {"ON_DOWNGRADE": "skip", "WORKER_MEMORY_FRACTION": 0.8}}
+```
+
+Read when the script starts, from the path in `JXLPHOTO_SETTINGS` (set but
+empty = off), else `.jxl_script_settings.json` next to the scripts, else the
+same name in the user profile. Only the settings this script lists in
+`_OVERLAY_SETTINGS` are taken, each checked against its type, range or
+choices; the safety settings (deletion, confirmations, guards, verification
+thresholds, `OVERWRITE`, `STRIP_METADATA`) never are. The log names the file
+and every setting it changed (`Script settings overlay: <file>: N value(s):
+...`) and every entry it refused. A flag on the command line still wins over
+both.
+
+---
 
 ## Settings
 
