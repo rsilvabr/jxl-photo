@@ -5493,7 +5493,10 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # Chunks that describe a PNG's colour space; an iCCP replaces all of them.
-_PNG_COLOUR_CHUNKS = (b"iCCP", b"sRGB", b"gAMA", b"cHRM")
+# cICP too: PNG 3rd edition gives it precedence over iCCP, so a reader that
+# knows it would keep showing the old space (djxl 0.12 writes sRGB/gAMA/cHRM
+# for the SDR masters measured on 2026-11-04, not cICP; 261104 review, S2).
+_PNG_COLOUR_CHUNKS = (b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP")
 _JPEG_ICC_HEADER = b"ICC_PROFILE\x00"
 _JPEG_ICC_CHUNK = 65519        # 65535 - 2 (length) - 14 (header + seq + count)
 
