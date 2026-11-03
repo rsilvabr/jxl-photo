@@ -11,7 +11,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## Unreleased: lossy JXL → JPEG/PNG keeps the master's profile; metadata failures keep the source
+## v2.21.0: lossy JXL → JPEG/PNG keeps the master's profile; metadata failures keep the source
 
 - **A JXL → JPEG/PNG conversion without `--icc-profile` now gives the output
   the master's own profile** when the master kept it only in XMP (the
