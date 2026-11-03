@@ -4329,19 +4329,126 @@ def find_jxls_recursive(path):
     """Find all JXL files recursively"""
     return _iter_jxls(path.rglob("*"), path)
 
+# X-B (2026-11-03 audit): below the export marker, modes 6/7 skip the JXL
+# OUTPUT folders of the other tools — the recompressor's derivatives and the
+# transcoder's JPEG archives sit next to the encoder's masters there, share
+# their names, and resolve to the SAME 16B_TIFF output. (script, setting,
+# shipped default); the shipped default is skipped too, like the encoder's
+# _DECODER_DEFAULT_OUTPUT_FOLDERS.
+_OTHER_TOOL_FOLDER_SOURCES = (
+    ("jxl_recompressor.py", "EXPORT_JXL_FOLDER", "16B_JXL_small"),
+    ("jxl_jpeg_transcoder.py", "EXPORT_JXL_FOLDER", "JXL_jpeg"),
+    ("jxl_jpeg_transcoder.py", "JXL_SIBLING_FOLDER", "JXL_jpeg"),
+    ("jxl_jpeg_transcoder.py", "CONVERTED_JXL_FOLDER", "converted_jxl"),
+)
+# The recompressor's fixed output names (its _RECOMPRESSOR_OUTPUT_FOLDERS —
+# code, not a setting; tests/test_other_tool_folders.py pins the copy).
+_OTHER_TOOL_FIXED_FOLDERS = frozenset(
+    {"recompressed_jxl", "jxl_recompressed", "jxl_small", "16b_jxl_small"})
+# Mode 4's fallback folder of the recompressor: <name>_JXL_small.
+_OTHER_TOOL_SUFFIX_SOURCES = (("jxl_recompressor.py", "JXL_SUFFIX_REPLACE", "JXL_small"),)
+_MASTER_FOLDER_SOURCE = ("jxl_tiff_encoder.py", "EXPORT_JXL_FOLDER", "16B_JXL")
+_other_tool_folders_cache = None
+def _sibling_str_settings(script_name: str, names) -> dict:
+    """{name: value} of the plain string settings `names` at the top of the
+    sibling script `script_name` (next to this one), read with `ast` —
+    nothing is imported or executed. Missing or unreadable -> {}."""
+    out = {}
+    try:
+        import ast
+        src = (Path(__file__).resolve().parent / script_name).read_text(
+            encoding="utf-8")
+        for node in ast.parse(src).body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in names
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                out[node.targets[0].id] = node.value.value.strip()
+    except Exception:
+        pass
+    return out
+
+
+def _other_tool_output_folders() -> tuple:
+    """(names, suffixes, master), lowercased: the JXL OUTPUT folders of the
+    OTHER tools (_OTHER_TOOL_FOLDER_SOURCES, _OTHER_TOOL_FIXED_FOLDERS,
+    _OTHER_TOOL_SUFFIX_SOURCES) — each configured value AND its shipped
+    default — and the encoder's master folder, which is never among them: it
+    is what modes 6/7 are for. Read from the siblings' settings once (X-B of
+    the 2026-11-03 audit; the encoder's _decoder_output_folders is the
+    mirror), then cached."""
+    global _other_tool_folders_cache
+    if _other_tool_folders_cache is None:
+        wanted = {}
+        for script, setting, _default in (_OTHER_TOOL_FOLDER_SOURCES
+                                          + _OTHER_TOOL_SUFFIX_SOURCES
+                                          + (_MASTER_FOLDER_SOURCE,)):
+            wanted.setdefault(script, set()).add(setting)
+        read = {s: _sibling_str_settings(s, n) for s, n in wanted.items()}
+
+        def _values(script, setting, default):
+            got = (read.get(script) or {}).get(setting) or ""
+            return {v.strip().lower() for v in (got, default) if v.strip()}
+
+        master = ((read.get(_MASTER_FOLDER_SOURCE[0]) or {}).get(_MASTER_FOLDER_SOURCE[1])
+                  or _MASTER_FOLDER_SOURCE[2]).strip().lower()
+        names = {n.lower() for n in _OTHER_TOOL_FIXED_FOLDERS}
+        for src in _OTHER_TOOL_FOLDER_SOURCES:
+            names |= _values(*src)
+        suffixes = set()
+        for src in _OTHER_TOOL_SUFFIX_SOURCES:
+            suffixes |= {"_" + v for v in _values(*src)}
+        names.discard(master)
+        _other_tool_folders_cache = (frozenset(names), frozenset(suffixes), master)
+    return _other_tool_folders_cache
+
+
+def _skip_other_tool_output(parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
+    """True if a folder below the export marker is another tool's JXL output
+    folder (_other_tool_output_folders) — never the encoder's master folder,
+    and, in mode 7, never the EXPORT_JXL_SUBFOLDER explicitly requested (an
+    explicit request wins over this heuristic; mode 6 has none and passes
+    honor_requested_subfolder=False). Without it a derivative or a JPEG
+    archive next to the master resolved to the master's output: the run
+    aborted on the duplicate, or decoded/recompressed the derivative as a
+    master."""
+    names, suffixes, master = _other_tool_output_folders()
+    requested = EXPORT_JXL_SUBFOLDER.lower() if honor_requested_subfolder else ""
+    return any(p != requested and p != master
+               and (p in names or any(p.endswith(s) for s in suffixes))
+               for p in parts_below_marker)
+
+
+def _log_other_tool_skips(count: int) -> None:
+    if count:
+        names, suffixes, _master = _other_tool_output_folders()
+        logger.info(f"Ignored {count} JXL(s) in other tools' output folders "
+                    f"({', '.join(sorted(names))}"
+                    + (f", or any folder ending in {', '.join(sorted(suffixes))}"
+                       if suffixes else "")
+                    + ") — derivatives and JPEG archives, not masters; use another "
+                      "mode to process them")
+
+
 def find_jxls_mode6(input_path):
     """Mode 6: only JXLs inside folders containing EXPORT_MARKER (any subfolder)."""
     all_jxls = find_jxls_recursive(input_path)
     filtered = []
     marker_lower = EXPORT_MARKER.lower()
+    skipped_other = 0
     for j in all_jxls:
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(j.parts[:-1])
-        # Match folders starting or ending with EXPORT_MARKER case-insensitively
         export_idx = next((i for i, p in enumerate(parts_str)
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is not None:
+            below = [p.lower() for p in parts_str[export_idx + 1:]]
+            if _skip_other_tool_output(below, honor_requested_subfolder=False):
+                skipped_other += 1
+                continue
             filtered.append(j)
+    _log_other_tool_skips(skipped_other)
     return sorted(filtered)
 
 def find_jxls_mode7(input_path):
@@ -4350,6 +4457,7 @@ def find_jxls_mode7(input_path):
     filtered = []
     marker_lower = EXPORT_MARKER.lower()
     subfolder_lower = EXPORT_JXL_SUBFOLDER.lower()
+    skipped_other = 0
     for j in all_jxls:
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(j.parts[:-1])
@@ -4357,11 +4465,15 @@ def find_jxls_mode7(input_path):
                            if _marker_matches(p.lower(), marker_lower)), None)
         if export_idx is None:
             continue
+        if _skip_other_tool_output([p.lower() for p in parts_str[export_idx + 1:]]):
+            skipped_other += 1
+            continue
         if EXPORT_JXL_SUBFOLDER:
             if export_idx + 1 < len(parts_str) and parts_str[export_idx + 1].lower() == subfolder_lower:
                 filtered.append(j)
         else:
             filtered.append(j)
+    _log_other_tool_skips(skipped_other)
     return sorted(filtered)
 
 def _is_thumbnail_jxl(jxl_path: Path) -> bool:

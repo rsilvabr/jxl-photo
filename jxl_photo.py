@@ -7578,9 +7578,29 @@ class InteractiveMenu:
                 #   * transcoder ENCODE (jpeg->jxl): skips its own output
                 #     folders via _is_tool_output_path, and only on recursive
                 #     scans (modes 2-8) — the flat finders are unfiltered;
-                #   * decoder (jxl->tiff) and transcoder DECODE (jxl->jpeg):
-                #     deliberately UNFILTERED (round-trip sources must be
-                #     found) — no skip at all.
+                #   * decoder (jxl->tiff): in modes 6/7 only, the OTHER
+                #     tools' JXL output folders below the export marker
+                #     (_skip_other_tool_output, X-B) — every other finder is
+                #     unfiltered (round-trip sources must be found);
+                #   * transcoder DECODE (jxl->jpeg): deliberately UNFILTERED
+                #     (it is how a JPEG archive comes back) — no skip at all.
+                def _other_tool_skip(f: Path, mode: int) -> bool:
+                    """The decoder's/recompressor's mode 6/7 filter (X-B),
+                    mirrored: a folder below the marker that is another
+                    tool's JXL output folder."""
+                    if mode not in (6, 7) or not hasattr(_child, '_skip_other_tool_output'):
+                        return False
+                    parts = list(f.parts[:-1])
+                    marker_lower = _child.EXPORT_MARKER.lower()
+                    idx = next((i for i, p in enumerate(parts)
+                                if _child._marker_matches(p.lower(), marker_lower)), None)
+                    if idx is None:
+                        return False
+                    below = [p.lower() for p in parts[idx + 1:]]
+                    # Mode 6's finder passes honor_requested_subfolder=False.
+                    return _child._skip_other_tool_output(
+                        below, honor_requested_subfolder=(mode != 6))
+
                 if _child.__name__ == 'jxl_tiff_encoder':
                     def _skip_check(f: Path, root: Path, mode: int) -> bool:
                         if mode not in (6, 7):
@@ -7626,7 +7646,11 @@ class InteractiveMenu:
                         except ValueError:
                             below = [p.lower() for p in f.parts[:-1]]
                         return (_child._is_own_output_path(below)
-                                or any(p.endswith("_jxl_small") for p in below))
+                                or any(p.endswith("_jxl_small") for p in below)
+                                or _other_tool_skip(f, mode))
+                elif _child.__name__ == 'jxl_tiff_decoder':
+                    def _skip_check(f: Path, root: Path, mode: int) -> bool:
+                        return _other_tool_skip(f, mode)
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []

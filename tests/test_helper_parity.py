@@ -71,6 +71,14 @@ SHARED_HELPERS = [
     # wrapper's collision walk): a drifting copy would let one site see a file
     # set another does not.
     "_path_excluded_below_root",
+    # X-B: the decoder's and the recompressor's modes 6/7 skip the OTHER
+    # tools' JXL output folders below the marker (tables differ per script,
+    # the logic must not). A copy drifting is one finder taking a derivative
+    # for a master again.
+    "_sibling_str_settings",
+    "_other_tool_output_folders",
+    "_skip_other_tool_output",
+    "_log_other_tool_skips",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_validate_export_folder_name",
