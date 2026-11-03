@@ -6378,6 +6378,14 @@ def _read_group_markers_batch(outputs: list) -> dict:
     return markers
 
 
+def _split_group_id(key: str, pages) -> str:
+    """The group id of a split: its resolved source path + the page set it
+    produces (bug #303; see process_group's _make_group_id)."""
+    pages = sorted(pages)
+    blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
                             dir_per_tiff: Dict[str, Path],
                             pages_per_tiff: Dict[str, set]) -> Dict[str, str]:
@@ -6416,10 +6424,8 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
         return adopted
     marks = _read_group_markers_batch(
         [f for sibs in candidates.values() for f in sibs])
+    moved: Dict[str, tuple] = {}
     for key, sibs in candidates.items():
-        legacy = _legacy_group_id(split_tiffs[key])
-        if {marks.get(str(f)) for f in sibs} != {legacy}:
-            continue
         # Only heal when every on-disk page is part of THIS run's page set. A
         # page the run no longer produces is a leftover of a changed structure
         # (bug #303's own shape), and adopting the legacy id there would invite
@@ -6428,12 +6434,44 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
         if not all(_parse_output_page_suffix(f.stem)[1:] in
                    {(p, t) for p, t in planned} for f in sibs):
             continue
-        adopted[key] = legacy
-        logger.info(
-            f"Multi-page archive predates the v2.0.2 group-id change: the "
-            f"{len(sibs)} existing page(s) of {split_tiffs[key].name} all carry "
-            f"its legacy group id, so this run's page(s) are stamped with the "
-            f"SAME id and the archive heals into one group.")
+        ids = {marks.get(str(f)) for f in sibs}
+        legacy = _legacy_group_id(split_tiffs[key])
+        if ids == {legacy}:
+            adopted[key] = legacy
+            logger.info(
+                f"Multi-page archive predates the v2.0.2 group-id change: the "
+                f"{len(sibs)} existing page(s) of {split_tiffs[key].name} all carry "
+                f"its legacy group id, so this run's page(s) are stamped with the "
+                f"SAME id and the archive heals into one group.")
+        elif (len(ids) == 1 and None not in ids
+              and ids != {_split_group_id(key, planned)}):
+            moved[key] = (next(iter(ids)), sibs)
+    # #576: the id hashes the source's absolute PATH, so a split whose folder
+    # moved (another drive letter, a renamed event folder) and lost one page
+    # would get a new id on that page while its siblings keep the old one —
+    # two incomplete groups. Adopt the siblings' id when they unanimously
+    # carry it AND their jxlphoto-srcsum proves they were made from this
+    # TIFF's current bytes (an unreadable marker never adopts). When the id
+    # is already the one this run computes, adopting it changes nothing.
+    if moved:
+        src_marks = _read_source_markers_batch(
+            [f for _gid, sibs in moved.values() for f in sibs])
+        for key, (gid, sibs) in moved.items():
+            infos = [src_marks.get(str(f)) or {} for f in sibs]
+            if any(i.get("unread") or not i.get("srcsum") for i in infos):
+                continue
+            try:
+                content = _file_content_id(split_tiffs[key])
+            except OSError:
+                continue
+            if any(i["srcsum"] != content for i in infos):
+                continue
+            adopted[key] = gid
+            logger.info(
+                f"Multi-page archive moved or renamed since it was split: the "
+                f"{len(sibs)} existing page(s) of {split_tiffs[key].name} carry "
+                f"group id {gid} and this TIFF's content, so this run's page(s) "
+                f"are stamped with the SAME id.")
     return adopted
 
 
@@ -6492,9 +6530,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         I/O — the page list is already in hand.
         """
         key = str(tiff_path.resolve())
-        pages = sorted(pages_per_tiff.get(key, ()))
-        blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+        return _split_group_id(key, pages_per_tiff.get(key, ()))
 
     # The formula above is unconditional, which strands archives split by
     # v2.0.0/v2.0.1: they carry the LEGACY id, and re-encoding one lost page of
