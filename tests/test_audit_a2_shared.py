@@ -92,3 +92,87 @@ def test_ec_real_cjxl_relative_long_path(tmp_path):
     assert final.exists(), (r.stdout + r.stderr)[-3000:]
 
 
+# ===========================================================================
+# E-F (#578)
+# ===========================================================================
+
+_HOLDER = r'''
+import os, sys, time
+stg, ready, release = sys.argv[1], sys.argv[2], sys.argv[3]
+if sys.argv[4] == "helper":
+    sys.path.insert(0, sys.argv[5])
+    import importlib
+    m = importlib.import_module(sys.argv[6])
+    cm = m._staging_hold(stg)
+    cm.__enter__()
+else:   # the lock exactly as a live run holds it, without the helper
+    import msvcrt
+    fh = open(os.path.join(stg, ".jxlphoto-live-" + "ab" * 16), "w+b")
+    fh.write(b"1"); fh.flush(); fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+open(ready, "w").close()
+for _ in range(600):
+    if os.path.exists(release):
+        break
+    time.sleep(0.05)
+'''
+
+
+def _leftover(stg: Path) -> Path:
+    f = stg / ("0123456789abcdef" * 2 + "_DSC_0001 (2).jxl")
+    f.write_bytes(b"x" * 64)
+    old = time.time() - 7200
+    os.utime(f, (old, old))
+    return f
+
+
+def _start_holder(tmp_path, stg, how, name):
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(stg), str(ready),
+                          str(release), how, str(_SCRIPTS), name],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for _ in range(400):
+        if ready.exists() or p.poll() is not None:
+            break
+        time.sleep(0.05)
+    return p, ready, release
+
+
+@windows
+@pytest.mark.parametrize("how", ["by-hand", "helper"])
+@pytest.mark.parametrize("name", BACKENDS)
+def test_ef_live_run_blocks_the_sweep(name, how, tmp_path):
+    mod = importlib.import_module(name)
+    mod.setup_logger()
+    stg = tmp_path / "ステージング [s] 5%"
+    stg.mkdir()
+    waiting = _leftover(stg)
+    p, ready, release = _start_holder(tmp_path, stg, how, name)
+    try:
+        assert ready.exists(), p.communicate(timeout=30)
+        mod._clean_staging(stg)
+        assert waiting.exists(), "another live run's waiting output was swept"
+    finally:
+        release.write_text("")
+        p.wait(timeout=60)
+    # The holder is gone: its lock file is stale and the sweep runs.
+    mod._clean_staging(stg)
+    assert not waiting.exists(), "the leftover of a finished run was not swept"
+    assert not list(stg.glob(".jxlphoto-live-*")) or how == "by-hand", (
+        "the dead run's lock file was not removed")
+
+
+@pytest.mark.parametrize("name", BACKENDS)
+def test_ef_hold_leaves_staging_clean(name, tmp_path):
+    mod = importlib.import_module(name)
+    stg = tmp_path / "ステージング [t] 5%"
+    with mod._staging_hold(stg):
+        assert len(list(stg.glob(".jxlphoto-live-*"))) == 1
+        with mod._staging_hold(stg):                     # reentrant
+            assert len(list(stg.glob(".jxlphoto-live-*"))) == 1
+        assert len(list(stg.glob(".jxlphoto-live-*"))) == 1
+    assert list(stg.iterdir()) == []
+    with mod._staging_hold(None):
+        pass
+
+

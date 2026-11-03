@@ -96,6 +96,14 @@ SHARED_HELPERS = [
     # folder the others handle.
     "_ansi_encodable",
     "_argfile_via_stdin",
+    # #578: a run writing into staging marks it as in use, and --clean-staging
+    # of another run sweeps nothing meanwhile. A copy drifting is one backend
+    # sweeping the outputs another one has waiting there.
+    "_try_lock_nb",
+    "_unlock_nb",
+    "_staging_hold",
+    "_holds_staging",
+    "_staging_used_by_another_run",
     # The "still the file that was copied?" check before an in-place edit
     # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
     "_changed_since",
