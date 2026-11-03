@@ -243,6 +243,36 @@ def test_ed_moved_split_heals_into_one_group(tmp_path):
         f"the re-encoded page joined another group: {after}")
 
 
+@real
+def test_ed_changed_page_set_is_not_adopted(tmp_path):
+    """261104 review S1: the same TIFF, moved, and a second run that plans one
+    page MORE (its thumbnail is now kept). The siblings' id belongs to the old
+    two-page set; lending it to the new page would make the pages declare
+    different counts and the decoder refuse the whole group."""
+    a = tmp_path / HOSTILE / "A [x]"
+    a.mkdir(parents=True)
+    tif = a / "scan 吾妻 (1).tif"
+    with tifffile.TiffWriter(str(tif)) as w:
+        w.write(np.full((64, 96, 3), 20000, np.uint16), photometric="rgb")
+        w.write(np.full((16, 24, 3), 30000, np.uint16), photometric="rgb", subfiletype=1)
+        w.write(np.full((64, 96, 3), 40000, np.uint16), photometric="rgb")
+    _run("jxl_tiff_encoder.py", a, "--mode", "1", "--distance", "0", "--effort", "3",
+         "--thumbnail-mode", "exclude", "--no-preflight")
+    b = tmp_path / HOSTILE / "B 吾妻 (2)"
+    a.rename(b)
+    out = b / enc.CONVERTED_JXL_FOLDER
+    p0, p2 = out / "scan 吾妻 (1).jxl", out / "scan 吾妻 (1)_page2.jxl"
+    old = _group_ids([p0, p2])[p0.name]
+    _run("jxl_tiff_encoder.py", b, "--mode", "1", "--distance", "0", "--effort", "3",
+         "--thumbnail-mode", "include", "--no-preflight")
+    thumb = out / "scan 吾妻 (1)_page1_thumbnail.jxl"
+    assert thumb.exists()
+    ids = _group_ids([p0, p2, thumb])
+    assert ids[p0.name] == ids[p2.name] == old, ids
+    assert ids[thumb.name] != old, (
+        "the new page took the id of a group with another page count")
+
+
 # ===========================================================================
 # E-E (#584)
 # ===========================================================================
