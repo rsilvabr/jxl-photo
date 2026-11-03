@@ -43,6 +43,10 @@ import pytest
 # scripts (that folder had grown to ~25 700 files, synced by OneDrive).
 _TEST_LOG_DIR = tempfile.mkdtemp(prefix="jxlphoto_test_logs_")
 os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
+# No script settings overlay: a real one on this PC (next to the scripts or
+# in the home folder) must never change what the suite runs. Empty = off;
+# the overlay tests set their own file.
+os.environ["JXLPHOTO_SETTINGS"] = ""
 
 # A wide console for rich: it wraps at the terminal width, so a phrase the
 # tests look for could be split by the wrap — and under pytest-xdist

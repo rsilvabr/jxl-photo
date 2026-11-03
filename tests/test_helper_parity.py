@@ -84,6 +84,14 @@ SHARED_HELPERS = [
     "_other_tool_output_folders",
     "_skip_other_tool_output",
     "_log_other_tool_skips",
+    # Phase 4: the script settings overlay. The four copies must find the
+    # same file, refuse the same values and keep the same safety settings out
+    # (each script's own _OVERLAY_SETTINGS table differs, the rules must not).
+    "_settings_overlay_path",
+    "_settings_overlay_section",
+    "_overlay_value",
+    "_apply_settings_overlay",
+    "_log_settings_overlay",
     # W-A: progress between planning-time batches. A copy drifting is one
     # backend silent for an hour again, and the wrapper stopping it as hung.
     "_batch_read_state",

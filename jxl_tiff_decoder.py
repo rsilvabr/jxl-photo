@@ -1734,6 +1734,195 @@ EXPORT_JXL_SUBFOLDER = ""
 # SAFETY SETTINGS
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# SCRIPT SETTINGS OVERLAY (JXLPHOTO_SETTINGS)
+# ─────────────────────────────────────────────
+# The settings above can also be changed WITHOUT editing this file, in a JSON
+# file the wrapper writes (Settings -> Script settings):
+#     {"jxl_tiff_encoder": {"EXPLORER_THUMBNAIL_SIZE": 512}, ...}
+# Where: the path in the JXLPHOTO_SETTINGS environment variable (set but
+# empty = no overlay), else .jxl_script_settings.json next to the scripts (a
+# portable install), else in the home folder (%USERPROFILE% on Windows).
+# Only the names in _OVERLAY_SETTINGS are taken, each checked against its
+# type and range; the safety settings (deletion, confirmations, guards,
+# verification thresholds, overwrite) never are. A value it takes IS this
+# script's setting for the run (the per-run reset restores it), and every
+# run's log names the file and the settings it changed.
+_SETTINGS_OVERLAY_FILE = ".jxl_script_settings.json"
+_SETTINGS_OVERLAY_ENV = "JXLPHOTO_SETTINGS"
+_OVERLAY_SAFETY_SETTINGS = frozenset({
+    "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
+    "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
+    "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
+    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD"})
+
+
+def _settings_overlay_path():
+    """The overlay file to read (it may not exist), or None when
+    JXLPHOTO_SETTINGS is set but empty. Same places as the wrapper's own
+    config (ConfigManager._get_config_path): next to the scripts first."""
+    env = os.environ.get(_SETTINGS_OVERLAY_ENV)
+    if env is not None:
+        return Path(env) if env.strip() else None
+    portable = Path(__file__).resolve().parent / _SETTINGS_OVERLAY_FILE
+    if portable.exists():
+        return portable
+    if os.name == "nt":
+        home = Path(os.environ.get("USERPROFILE") or Path.home())
+    else:
+        home = Path.home()
+    return home / _SETTINGS_OVERLAY_FILE
+
+
+def _settings_overlay_section(path, module: str):
+    """{name: value} of `module`'s section of the overlay file at `path`, or
+    None (no path, no file, no section). Raises ValueError/OSError on a file
+    that cannot be read or is not a JSON object of objects."""
+    if path is None or not path.is_file():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    section = data.get(module)
+    if section is not None and not isinstance(section, dict):
+        raise ValueError(f"the '{module}' entry is not an object")
+    return section
+
+
+def _overlay_value(spec, value):
+    """`value` (from JSON) checked against an _OVERLAY_SETTINGS spec:
+    (True, the value to use) or (False, what it should have been)."""
+    kind = spec[0]
+    if kind == "choice":
+        for c in spec[1:]:
+            if value == c and type(value) is type(c):
+                return True, c
+        return False, "one of " + ", ".join(json.dumps(c) for c in spec[1:])
+    if kind == "bool":
+        return (True, value) if isinstance(value, bool) else (False, "true or false")
+    if kind in ("int?", "float?"):
+        if value is None:
+            return True, None
+        spec = (kind[:-1],) + tuple(spec[1:])
+        kind = spec[0]
+    if kind in ("int", "float"):
+        lo, hi = spec[1], spec[2]
+        number = (isinstance(value, int) if kind == "int"
+                  else isinstance(value, (int, float))) and not isinstance(value, bool)
+        if number and (lo is None or value >= lo) and (hi is None or value <= hi):
+            return True, (float(value) if kind == "float" else value)
+        what = "a whole number" if kind == "int" else "a number"
+        if lo is not None and hi is not None:
+            what += f" from {lo} to {hi}"
+        elif lo is not None:
+            what += f" of at least {lo}"
+        return False, what
+    if kind in ("name", "name?"):
+        if isinstance(value, str):
+            v = value.strip()
+            if not v and kind == "name?":
+                return True, v
+            if v and v not in (".", "..") and not any(ch in v for ch in '/\\:*?"<>|'):
+                return True, v
+        return False, "a folder or file name (no path separators)"
+    if kind == "path?":
+        if value is None:
+            return True, None
+        if isinstance(value, str) and value.strip():
+            return True, value.strip()
+        return False, "a folder path, or null"
+    if kind == "strs":
+        if isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value):
+            return True, tuple(v.strip() for v in value)
+        return False, "a list of names"
+    return False, "a setting the overlay cannot change"
+
+
+def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
+                            derived: dict) -> dict:
+    """Apply `module`'s section of the overlay file to `namespace` (this
+    script's globals(), right after the settings block): only the names in
+    `specs`, each checked by _overlay_value. A `derived` setting
+    ({"EXIFTOOL_TIMEOUT": "CJXL_TIMEOUT"}) follows its source when the
+    overlay changes the source and the script had it equal. Returns
+    {"path", "applied", "warnings"} for _log_settings_overlay. Never raises:
+    an overlay that cannot be read changes nothing."""
+    result = {"path": None, "applied": [], "warnings": []}
+    try:
+        result["path"] = _settings_overlay_path()
+        section = _settings_overlay_section(result["path"], module)
+    except Exception as e:
+        result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
+        return result
+    if not section:
+        return result
+    before = {name: namespace.get(name) for name in specs}
+    for name, value in section.items():
+        if name in _OVERLAY_SAFETY_SETTINGS:
+            result["warnings"].append(
+                f"{name} is a safety setting: it is chosen per run (or in the "
+                f"script itself), never by the overlay; ignored")
+            continue
+        spec = specs.get(name)
+        if spec is None:
+            result["warnings"].append(f"{name} is not a setting the overlay can "
+                                      f"change in {module}; ignored")
+            continue
+        ok, checked = _overlay_value(spec, value)
+        if not ok:
+            result["warnings"].append(f"{name} = {json.dumps(value)} is not "
+                                      f"{checked}; the script's value is kept")
+            continue
+        namespace[name] = checked
+        result["applied"].append(name)
+    for name, source in derived.items():
+        if (source in result["applied"] and name not in section
+                and before.get(name) == before.get(source)):
+            namespace[name] = namespace[source]
+    return result
+
+
+def _log_settings_overlay() -> None:
+    """The overlay's audit lines (setup_logger calls it): which file and which
+    settings it changed, and every entry it refused."""
+    result = globals().get("_SETTINGS_OVERLAY") or {}
+    if result.get("applied"):
+        logger.info(f"Script settings overlay: {result['path']}: "
+                    f"{len(result['applied'])} value(s): {', '.join(result['applied'])}")
+    for warning in result.get("warnings", ()):
+        logger.warning(f"Script settings overlay: {warning}")
+
+# What the overlay may change in this script: name -> (kind, ...) checked by
+# _overlay_value. A setting that is not here keeps the script's value.
+_OVERLAY_SETTINGS = {
+    "DJXL_OUTPUT_DEPTH": ("choice", 8, 16),
+    "TIFF_COMPRESSION": ("choice", "uncompressed", "lzw", "zip"),
+    "ADD_JPEG_PREVIEW": ("bool",),
+    "JPEG_PREVIEW_SIZE": ("int", 16, 4096),
+    "THUMBNAIL_HANDLING": ("choice", "ignore", "include", "generate"),
+    "THUMBNAIL_SUFFIX": ("name",),
+    "RECONSTRUCT_MULTIPAGE": ("bool",),
+    "DEPTH_POLICY": ("choice", "force16", "preserve_thumbnails", "preserve_original"),
+    "DJXL_TIMEOUT": ("int", 1, None),
+    "EXIFTOOL_TIMEOUT": ("int", 1, None),
+    "EXIFTOOL_BATCH_STALL": ("int", 1, None),
+    "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
+    "TEMP_DIR": ("path?",),
+    "TEMP2_DIR": ("path?",),
+    "CLEANUP_XMP_ICC_MARKER": ("bool",),
+    "CONVERTED_TIFF_FOLDER": ("name",),
+    "TIFF_FOLDER_NAME": ("name",),
+    "JXL_SUFFIX_TO_REPLACE": ("name",),
+    "TIFF_SUFFIX_REPLACE": ("name",),
+    "EXPORT_MARKER": ("name",),
+    "EXPORT_TIFF_FOLDER": ("name",),
+    "EXPORT_JXL_SUBFOLDER": ("name?",),
+}
+# Settings computed from another one: they follow it (see _apply_settings_overlay).
+_OVERLAY_DERIVED = {"EXIFTOOL_TIMEOUT": "DJXL_TIMEOUT"}
+_SETTINGS_OVERLAY = _apply_settings_overlay(globals(), "jxl_tiff_decoder", _OVERLAY_SETTINGS,
+                                            _OVERLAY_DERIVED)
+
 SCRIPT_DIR = Path(__file__).parent
 # JXLPHOTO_LOG_DIR (environment variable) moves the log folders elsewhere —
 # the test suite and the real-photo battery set it so their runs never
@@ -1791,6 +1980,7 @@ def setup_logger():
     logger.addHandler(fh)
     logger.addHandler(ch)
     logger.info(f"{TOOLKIT_NAME} {TOOLKIT_VERSION} | {Path(__file__).name}")
+    _log_settings_overlay()
     logger.info(f"Log saved to: {log_file}")
     return log_file
 
@@ -4643,6 +4833,17 @@ def _sibling_str_settings(script_name: str, names) -> dict:
                     and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
                 out[node.targets[0].id] = node.value.value.strip()
+    except Exception:
+        pass
+    # The script settings overlay changes the sibling's value too: what it
+    # sets for that script is the setting its run uses.
+    try:
+        section = _settings_overlay_section(_settings_overlay_path(),
+                                            Path(script_name).stem) or {}
+        for name in names:
+            ok, value = _overlay_value(("name",), section.get(name))
+            if ok:
+                out[name] = value
     except Exception:
         pass
     return out

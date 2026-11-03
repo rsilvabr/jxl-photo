@@ -1621,6 +1621,16 @@ def _thumb_box(path):
     return rec[0], f"{len(stream)}:{h:016x}", rec[1]
 
 
+def _effective_setting(script, name):
+    """A script's setting as its runs see it (the overlay in JXLPHOTO_SETTINGS
+    included): imported in a child Python, never a literal copy here."""
+    r = subprocess.run([PY, "-c", f"import sys; sys.path.insert(0, {str(REPO)!r}); "
+                        f"import {script} as m; print(repr(m.{name}))"],
+                       capture_output=True, text=True, encoding="utf-8", env=os.environ)
+    import ast
+    return ast.literal_eval(r.stdout.strip().splitlines()[-1])
+
+
 def explorer_thumbnail_checks(A1, pool_jxl):
     """Explorer thumbnails on a real photo: stored in a lossless master, its
     own box keeps djxl's JPEG output working (an EXIF one would not fit a
@@ -1636,9 +1646,10 @@ def explorer_thumbnail_checks(A1, pool_jxl):
     jxl = t / "converted_jxl" / A1.with_suffix(".jxl").name
     tb = _thumb_box(jxl) if jxl.exists() else None
     size = Image.open(io.BytesIO(tb[2])).size if tb else None
-    check("encoder: a lossless master carries a 768 px thumbnail whose fingerprint "
+    want = _effective_setting("jxl_tiff_encoder", "EXPLORER_THUMBNAIL_SIZE")
+    check(f"encoder: a lossless master carries a {want} px thumbnail whose fingerprint "
           "names its codestream",
-          rc == 0 and tb is not None and tb[0] == tb[1] and max(size) == 768,
+          rc == 0 and tb is not None and tb[0] == tb[1] and max(size) == want,
           f"rc={rc} box={tb[:2] if tb else None} size={size}")
     if jxl.exists():
         r = djxl(jxl, B / "t_djxl.jpg")
@@ -1823,7 +1834,12 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the scratch folder")
     ap.add_argument("--ascii-paths", action="store_true",
                     help="run in a plain ASCII folder instead of the hostile one")
+    ap.add_argument("--settings-overlay", type=Path, default=None,
+                    help="run with this script settings overlay (JXLPHOTO_SETTINGS); "
+                         "default: none, whatever this PC has")
     args = ap.parse_args()
+    # A real overlay on this PC must not change what the battery checks.
+    os.environ["JXLPHOTO_SETTINGS"] = str(args.settings_overlay or "")
     if args.fixtures is None or not args.fixtures.is_dir():
         ap.error("pass --fixtures <folder> or set JXLPHOTO_FIXTURES "
                  "(see the module docstring for the layout)")

@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager, nullcontext, redirect_stderr
 from dataclasses import asdict, dataclass, field
@@ -3302,6 +3303,101 @@ def _extra_options_summary(workflow: Dict) -> List[str]:
 # === END OF SCREENS ==========================================================
 
 
+# === SCRIPT SETTINGS OVERLAY (menu S) ========================================
+#
+# The four scripts take their settings from the top of each file, and from a
+# JSON overlay (JXLPHOTO_SETTINGS / .jxl_script_settings.json, see the block
+# "SCRIPT SETTINGS OVERLAY" in each script). The editor below writes that
+# file. What can be changed, with which type and range, is each script's own
+# _OVERLAY_SETTINGS table (imported, never copied here); the help text is the
+# comment under the setting in the script.
+
+_OVERLAY_SCRIPTS = (("jxl_tiff_encoder", "TIFF -> JXL (encoder)"),
+                    ("jxl_tiff_decoder", "JXL -> TIFF (decoder)"),
+                    ("jxl_jpeg_transcoder", "JPEG <-> JXL, JXL -> JPEG/PNG (transcoder)"),
+                    ("jxl_recompressor", "JXL -> JXL (recompressor)"))
+
+
+def _script_setting_literals(module: str) -> Dict[str, Tuple[Any, str]]:
+    """{NAME: (value as the script file has it, help)} of the module-level
+    settings, read with `ast` (the overlay never shows up here). A value
+    computed from another setting (EXIFTOOL_TIMEOUT = CJXL_TIMEOUT) is
+    returned as the text '= CJXL_TIMEOUT'."""
+    import ast as _ast
+    try:
+        src = (SCRIPT_DIR / f"{module}.py").read_text(encoding="utf-8")
+        tree = _ast.parse(src)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    lines = src.splitlines()
+    out = {}
+    for node in tree.body:
+        if not (isinstance(node, _ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], _ast.Name)):
+            continue
+        name = node.targets[0].id
+        try:
+            value = _ast.literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            value = "= " + _ast.unparse(node.value)
+        help_lines = []
+        for line in lines[node.end_lineno:node.end_lineno + 3]:
+            text = line.strip()
+            if not text.startswith("#"):
+                break
+            help_lines.append(text.lstrip("#").strip())
+        out[name] = (value, " ".join(h for h in help_lines if h))
+    return out
+
+
+def _overlay_json(value):
+    """A setting's value as the overlay file stores it (a tuple is a list)."""
+    return list(value) if isinstance(value, tuple) else value
+
+
+def _parse_setting_text(spec, text: str):
+    """What the user typed for a setting of this spec, as a JSON value, or
+    raise ValueError. The script's own _overlay_value checks it afterwards."""
+    kind = spec[0]
+    t = text.strip()
+    if kind.endswith("?") and kind != "name?" and t.lower() in ("none", "null"):
+        return None
+    if kind == "bool":
+        if t.lower() in ("y", "yes", "true", "on", "1"):
+            return True
+        if t.lower() in ("n", "no", "false", "off", "0"):
+            return False
+        raise ValueError("answer yes or no")
+    if kind in ("int", "int?"):
+        return int(t)
+    if kind in ("float", "float?"):
+        return float(t)
+    if kind == "strs":
+        return [part.strip() for part in re.split(r"[;,]", t) if part.strip()]
+    return t
+
+
+def _write_overlay_file(path: Path, data: Dict) -> None:
+    """The overlay file, written whole through a temp file + os.replace (a
+    run starting meanwhile reads the old file or the new one, never half)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".jxl_script_settings_", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+# === END OF SCRIPT SETTINGS OVERLAY ==========================================
+
+
 class InteractiveMenu:
     def __init__(self, config_manager: ConfigManager,
                  dependency_checker: DependencyChecker):
@@ -3380,6 +3476,7 @@ class InteractiveMenu:
             ("9", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
             ("R", "Renamed or moved folders: fix the masters' path records", True),
             ("C", "Reset the encoder's ICC test cache", True),
+            ("S", "Script settings: the scripts' own defaults, without editing them", True),
             ("0", "Exit", True),
         ])
 
@@ -3607,6 +3704,130 @@ class InteractiveMenu:
                 "lossy run test each profile again. Nothing else is touched.")
         if ui.confirm("icccache.confirm", "Clear the cache now?", False):
             self._stream_child([sys.executable, str(script), "--clear-icc-cache"])
+
+    def script_settings_flow(self) -> None:
+        """Menu S: the four scripts' settings, changed in the overlay file
+        instead of the .py files (the scripts check every value again when
+        they start, and never take a safety setting from it)."""
+        ui = self.ui
+        ui.section("Script settings (the scripts' own defaults, without editing them)")
+        try:
+            probe = importlib.import_module(_OVERLAY_SCRIPTS[0][0])
+            path = probe._settings_overlay_path()
+        except Exception as e:
+            self._print_error(f"The scripts could not be loaded ({e}).")
+            return
+        if path is None:
+            ui.line("JXLPHOTO_SETTINGS is set and empty: the overlay is OFF for every "
+                    "run started from here. Unset it to use one.")
+            return
+        ui.line(f"File: {path}")
+        ui.line("Every script run uses a change at once; the wizard's own defaults "
+                "show it from the next start of this program. Deletion, "
+                "confirmations, guards and verification stay per-run choices.")
+        while True:
+            key = ui.choose("settings.script", "Script (0 = back)",
+                            [("0", "back")] + [(str(i + 1), label) for i, (_m, label)
+                                               in enumerate(_OVERLAY_SCRIPTS)], "0")
+            if key == "0":
+                return
+            module = _OVERLAY_SCRIPTS[int(key) - 1][0]
+            try:
+                mod = importlib.import_module(module)
+            except Exception as e:
+                self._print_error(f"{module} could not be loaded ({e}).")
+                continue
+            self._edit_script_settings(mod, module, path)
+
+    def _edit_script_settings(self, mod, module: str, path: Path) -> None:
+        ui = self.ui
+        specs = mod._OVERLAY_SETTINGS
+        literals = _script_setting_literals(module)
+        flt = ""
+        while True:
+            data, problem = {}, None
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+                if not isinstance(data, dict):
+                    problem, data = "it is not a JSON object", {}
+            except (OSError, ValueError) as e:
+                problem = str(e)
+            if problem:
+                ui.warn(f"{path} cannot be read ({problem}). Fix or delete it first; "
+                        f"the scripts ignore it meanwhile.")
+                return
+            section = data.get(module) if isinstance(data.get(module), dict) else {}
+            ui.section(f"{module}" + (f" (filter: {flt})" if flt else ""))
+            numbered = {}
+            for name in specs:
+                script_value, help_text = literals.get(name, (getattr(mod, name, None), ""))
+                if flt and flt not in f"{name} {help_text}".lower():
+                    continue
+                n = str(len(numbered) + 1)
+                numbered[n] = name
+                if name in section:
+                    ok, _v = mod._overlay_value(specs[name], section[name])
+                    shown = (f"{json.dumps(section[name], ensure_ascii=False)}  (overlay"
+                             + ("" if ok else ", REFUSED by the script") + ")")
+                else:
+                    shown = f"{json.dumps(_overlay_json(script_value), ensure_ascii=False)}"
+                ui.line(f"  [{n:>2}] {name} = {shown}")
+            answer = ui.ask_text("settings.pick", "Number to change, /text to filter, "
+                                 "Enter to go back", "").strip()
+            if not answer:
+                return
+            if answer.startswith("/"):
+                flt = answer[1:].strip().lower()
+                continue
+            name = numbered.get(answer)
+            if name is None:
+                ui.warn(f"No setting {answer!r}.")
+                continue
+            spec = specs[name]
+            script_value, help_text = literals.get(name, (getattr(mod, name, None), ""))
+            if help_text:
+                ui.line(f"{name}: {help_text}")
+            ui.line(f"In the script: {json.dumps(_overlay_json(script_value), ensure_ascii=False)}")
+            if spec[0] == "choice":
+                opts = [("0", "the script's value (remove from the overlay)")] + [
+                    (str(i + 1), json.dumps(c)) for i, c in enumerate(spec[1:])]
+                pick = ui.choose("settings.choice", "Value", opts, "0")
+                new = _KEEP if pick == "0" else spec[int(pick)]
+                remove = pick == "0"
+            else:
+                text = ui.ask_text("settings.value", "New value ('-' = the script's "
+                                   "value, Enter = keep)", "")
+                if not text.strip():
+                    continue
+                remove = text.strip() == "-"
+                new = _KEEP
+                if not remove:
+                    try:
+                        new = _parse_setting_text(spec, text)
+                    except ValueError as e:
+                        ui.warn(f"Not changed: {e}.")
+                        continue
+                    ok, checked = mod._overlay_value(spec, new)
+                    if not ok:
+                        ui.warn(f"Not changed: {name} must be {checked}.")
+                        continue
+                    new = _overlay_json(checked)
+            sect = dict(section)
+            if remove:
+                sect.pop(name, None)
+            else:
+                sect[name] = new
+            if sect:
+                data[module] = sect
+            else:
+                data.pop(module, None)
+            try:
+                _write_overlay_file(path, data)
+            except OSError as e:
+                self._print_error(f"Could not write {path}: {e}")
+                return
+            ui.line(f"{name}: " + ("back to the script's value" if remove
+                                   else f"{json.dumps(new, ensure_ascii=False)} (overlay)"))
 
     def repair_jbrd_flow(self, status) -> None:
         """Menu option 8: audit/repair jbrd JXLs whose JPEG recovery broke.
@@ -10620,6 +10841,9 @@ def _main():
 
         elif choice == "C":
             menu.clear_icc_cache_flow(status)
+
+        elif choice == "S":
+            menu.script_settings_flow()
 
         elif choice == "3":
             status = checker.check_dependencies(force=True)

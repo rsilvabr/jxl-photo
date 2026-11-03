@@ -36,6 +36,9 @@ docs/RELEASE_v*.md
 # Guias pessoais — locais, nunca publicados
 docs/GUIA_*.md
 
+# Overlay de settings dos scripts no modo portátil (SCRIPT_DIR) — local
+.jxl_script_settings.json
+
 # Manifests gerados pela ferramenta (SCRIPT_DIR/manifests) — dados locais
 manifests/
 
