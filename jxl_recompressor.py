@@ -7095,8 +7095,16 @@ def main():
     # manifest row sends, since an empty Destination cell falls back to the
     # Source. Refusing it made every mode-0 manifest entry exit 2.
     def _same_dir(a, b) -> bool:
-        return (os.path.normcase(os.path.abspath(str(a)))
-                == os.path.normcase(os.path.abspath(str(b))))
+        # The same file or folder by another name too (#577): a junction,
+        # subst drive, UNC share or 8.3 name of the input is still the input.
+        # A path that does not exist yet is never "the same".
+        if (os.path.normcase(os.path.abspath(str(a)))
+                == os.path.normcase(os.path.abspath(str(b)))):
+            return True
+        try:
+            return os.path.samefile(str(a), str(b))
+        except OSError:
+            return False
 
     if (not single_file and args.output is not None and args.mode == 2
             and _same_dir(args.output, args.input)):
