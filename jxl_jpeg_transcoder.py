@@ -1203,11 +1203,23 @@ def _long_codec_paths(cmd):
     out = [cmd[0]]
     for a in cmd[1:]:
         s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
-                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
             out.append(a)
             continue
+        if not os.path.isabs(s):
+            # A relative path is long by its ABSOLUTE form (#575: an input
+            # given relative to a deep working folder). The codecs' other
+            # positional values are numbers (-d 0.1, --effort 7): never paths.
+            try:
+                float(s)
+                out.append(a)
+                continue
+            except ValueError:
+                pass
         s = os.path.abspath(s)
+        if len(s) < _LONG_PATH_THRESHOLD:
+            out.append(a)
+            continue
         out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
     return out
 
