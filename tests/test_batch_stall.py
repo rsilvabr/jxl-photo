@@ -46,8 +46,9 @@ EXTRA_BATCH_FUNCS = {"_read_mpg_markers"}
 # Encoder: + _read_page_markers_batch (v2.18.0, the leftover split pages, #551).
 # Transcoder: + _read_thumb_markers_batch (v2.18.0, no derivative of a thumbnail
 # page, #555).
+# The recompressor's fifth: _read_mpg_pages_batch (#574).
 EXPECTED_SITES = {"jxl_tiff_encoder": 3, "jxl_tiff_decoder": 3,
-                  "jxl_jpeg_transcoder": 3, "jxl_recompressor": 4}
+                  "jxl_jpeg_transcoder": 3, "jxl_recompressor": 5}
 
 _REAL = all(shutil.which(t) for t in ("cjxl", "exiftool"))
 real = pytest.mark.skipif(not _REAL, reason="needs cjxl and exiftool on PATH")

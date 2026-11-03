@@ -95,3 +95,41 @@ def test_ra_damaged_copy_out_of_staging_never_replaces_the_source(tmp_path, monk
     assert not list(src_dir.glob("*.tmp")), "a temp was left beside the source"
 
 
+# ===========================================================================
+# R-B (#574)
+# ===========================================================================
+
+def _split(tmp_path):
+    a = tmp_path / HOSTILE / "scan [x] 吾妻"
+    a.mkdir(parents=True)
+    tif = a / "scan 0001 (1).tif"
+    with tifffile.TiffWriter(str(tif)) as w:
+        w.write(np.full((64, 96, 3), 20000, np.uint16), photometric="rgb")
+        w.write(np.full((64, 96, 3), 40000, np.uint16), photometric="rgb")
+    _run("jxl_tiff_encoder.py", a, "--mode", "1", "--distance", "0", "--effort", "3",
+         "--no-preflight")
+    out = a / "converted_jxl"
+    return out / "scan 0001 (1).jxl", out / "scan 0001 (1)_page1.jxl"
+
+
+@real
+def test_rb_lone_page_of_a_split_is_kept(tmp_path, monkeypatch):
+    p0, p1 = _split(tmp_path)
+    dest = tmp_path / HOSTILE / "small 5%"
+    _main([p0, dest, "--mode", "0", "--distance", "1", "--delete-source",
+           "--delete-confirm-off"], monkeypatch)
+    assert (dest / p0.name).exists(), "fixture: page 0 was not recompressed"
+    assert p0.exists(), "a lone page of a two-page document was deleted"
+    assert p1.exists()
+
+
+@real
+def test_rb_control_whole_group_is_deleted(tmp_path, monkeypatch):
+    p0, p1 = _split(tmp_path)
+    dest = tmp_path / HOSTILE / "small (2)"
+    _main([p0.parent, dest, "--mode", "0", "--distance", "1", "--delete-source",
+           "--delete-confirm-off"], monkeypatch)
+    assert (dest / p0.name).exists() and (dest / p1.name).exists()
+    assert not p0.exists() and not p1.exists(), "the whole group should be deleted"
+
+
