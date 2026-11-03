@@ -3448,6 +3448,7 @@ def reorder_jxl_boxes(jxl_path: Path):
 
     CODESTREAM = {b"jxlc", b"jxlp"}
     meta_order_boxes, meta_extra_boxes, codestream_boxes, other_boxes = [], [], [], []
+    pre_codestream_boxes = []
 
     for name, h, p in boxes:
         if name in {b"JXL ", b"ftyp", b"jxll"}:
@@ -3456,15 +3457,22 @@ def reorder_jxl_boxes(jxl_path: Path):
             meta_extra_boxes.append((name, h, p))
         elif name in CODESTREAM:
             codestream_boxes.append((name, h, p))
-        else:
+        elif codestream_boxes:
             other_boxes.append((name, h, p))
+        else:
+            # E-G (2026-11-03 audit): an unknown box that sat BEFORE the
+            # codestream stays before it — the Explorer thumbnail (uuid) box is
+            # put there so a reader finds it without crossing the image data,
+            # and moving it to the end made every restamp/adopt hide it.
+            pre_codestream_boxes.append((name, h, p))
 
     # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
     # first (#561). Stable sort: every other box keeps its order.
     meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
-    ordered = meta_order_boxes + meta_extra_boxes + codestream_boxes + other_boxes
+    ordered = (meta_order_boxes + meta_extra_boxes + pre_codestream_boxes
+               + codestream_boxes + other_boxes)
 
     # A box that declared size 0 ("extends to EOF") is only valid as the LAST
     # box in the file. If regrouping moved it earlier, rewrite its header with
@@ -3807,6 +3815,55 @@ def _thumbnail_box_fingerprint(jxl_path):
     except (OSError, struct.error):
         return None
     return ""
+
+
+def _thumbnail_box_misplaced(jxl_path):
+    """True when the file's thumbnail box sits AFTER the first codestream box,
+    where a reader that stops at the image data never finds it — what
+    reorder_jxl_boxes did to it before E-G (2026-11-03 audit) on every
+    --restamp-moved / adopt stamp; False otherwise; None when the file cannot
+    be read. Only the recompressor's refresh needs it (not parity-pinned)."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            seen_codestream = False
+            for typ, pos, hdr, size in _jxl_boxes(f, end):
+                if typ in (b"jxlc", b"jxlp"):
+                    seen_codestream = True
+                elif (typ == b"uuid" and seen_codestream
+                      and size - hdr >= 16 + len(THUMB_BOX_MARKER)):
+                    f.seek(pos + hdr)
+                    head = f.read(16 + len(THUMB_BOX_MARKER))
+                    if (head[:16] == THUMB_BOX_UUID
+                            and head[16:] == THUMB_BOX_MARKER):
+                        return True
+    except (OSError, struct.error):
+        return None
+    return False
+
+
+def _move_thumbnail_before_codestream(jxl_path) -> None:
+    """Put the file's existing thumbnail box back right before the codestream,
+    its bytes unchanged (same JPEG, same fingerprint), through
+    _write_thumbnail_box. Raises ValueError when there is none."""
+    jpeg = fingerprint = None
+    with open(jxl_path, "rb") as f:
+        end = f.seek(0, 2)
+        for typ, pos, hdr, size in _jxl_boxes(f, end):
+            if typ == b"uuid" and size - hdr >= 16 + len(THUMB_BOX_MARKER):
+                f.seek(pos + hdr)
+                payload = f.read(size - hdr)
+                if (payload[:16] == THUMB_BOX_UUID
+                        and payload[16:16 + len(THUMB_BOX_MARKER)] == THUMB_BOX_MARKER):
+                    rest = payload[16 + len(THUMB_BOX_MARKER):]
+                    if b"\n" not in rest:
+                        raise ValueError("malformed thumbnail box")
+                    fp_bytes, jpeg = rest.split(b"\n", 1)
+                    fingerprint = fp_bytes.decode("ascii")
+                    break
+    if jpeg is None:
+        raise ValueError("no thumbnail box to move")
+    _write_thumbnail_box(jxl_path, jpeg, fingerprint)
 
 
 def _write_thumbnail_box(jxl_path, jpeg, fingerprint) -> None:
@@ -5994,10 +6051,12 @@ def _wrap_bare_codestream(path: Path) -> None:
 
 def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
     """(status, detail) for one existing JXL. status: written / removed /
-    reordered / current / skipped / error. "reordered": only the Exif box
-    was moved before the XMP (#561, files written by v2.17.0-v2.19.0 —
-    IrfanView shows no EXIF otherwise); written/removed do that too when
-    needed and say so in the detail. The file is edited only through a temp
+    reordered / current / skipped / error. "reordered": only boxes were
+    moved — the Exif box before the XMP (#561, files written by
+    v2.17.0-v2.19.0 — IrfanView shows no EXIF otherwise) and/or the existing
+    thumbnail box back before the codestream (E-G: a restamp or adopt stamp
+    had moved it to the end, where jxl-thumb does not look); written/removed
+    do the Exif move too when needed and say so in the detail. The file is edited only through a temp
     copy beside it: the box rewrites, the integrity check and the WHOLE
     codestream compared byte for byte (SHA-256); then its own modified date
     goes back on and it replaces the file with an atomic same-folder
@@ -6008,7 +6067,8 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
     fp = _codestream_fingerprint(jxl_path)
     current = _thumbnail_box_fingerprint(jxl_path)
     misordered = _exif_after_xml(jxl_path)
-    if fp is None or current is None or misordered is None:
+    misplaced = _thumbnail_box_misplaced(jxl_path)
+    if fp is None or current is None or misordered is None or misplaced is None:
         return "error", "not a JPEG XL file"
     action, why_not = None, ""      # action: "write" / "remove" / None
     if EXPLORER_THUMBNAIL == "off":
@@ -6026,9 +6086,14 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
                            "installed: lossless only)")
         if not why_not and current != fp:
             action = "write"
-    if action is None and not misordered:
+    # A box rewrite (write/remove) places the thumbnail itself; only a file
+    # left otherwise alone needs its misplaced box moved.
+    relocate = bool(misplaced) and action is None
+    if action is None and not misordered and not relocate:
         return ("skipped", why_not) if why_not else ("current", "")
-    moved = "EXIF box moved before the XMP" if misordered else ""
+    moved = "; ".join(m for m, on in (
+        ("EXIF box moved before the XMP", misordered),
+        ("thumbnail box moved before the codestream", relocate)) if on)
     status = {"write": "written", "remove": "removed", None: "reordered"}[action]
     if dry_run:
         return status, "dry run" + (f"; {moved}" if moved else "")
@@ -6043,6 +6108,8 @@ def _refresh_one_thumbnail(jxl_path: Path, dry_run: bool):
             _wrap_bare_codestream(tmp)
             if misordered:
                 _move_exif_first(tmp)
+            if relocate:
+                _move_thumbnail_before_codestream(tmp)
             if action == "write":
                 added = _add_explorer_thumbnail(tmp, ttmp)
                 if added == "small" and not misordered:
