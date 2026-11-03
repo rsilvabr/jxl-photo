@@ -988,7 +988,9 @@ against about **1.3 GB/worker** at d=0.05 e=9. The run estimates this from the
 largest page and the settings and **caps `--workers` automatically** so the jobs
 fit in the smaller of the commit limit and the free physical RAM
 (`WORKER_MEMORY_LIMIT`) × `WORKER_MEMORY_FRACTION`; it logs `Memory: ...` and
-warns `--workers N reduced to K`. Use `--buffering 1` to force streaming when
+warns `--workers N reduced to K`. The estimate includes what the encoder's own
+process holds per worker — the page and the PNG it hands to cjxl, about
+0.7 GB at 45 MP (`incl. ~X GB in Python` in that line). Use `--buffering 1` to force streaming when
 you need the lower peak: at effort 7 the files come out ~1.5 % larger with the
 same quality, but at effort 8–9 streaming gives effort 7's result — measured in
 [Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured)

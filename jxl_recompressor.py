@@ -1387,16 +1387,21 @@ def _available_memory_bytes():
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,
-                           buffering=None, modular=False):
+                           buffering=None, modular=False,
+                           extra_bytes_per_pixel=0):
     """--workers lowered so `requested` parallel cjxl processes fit in memory.
-    Logs the estimate; warns when it had to lower the count."""
+    Logs the estimate; warns when it had to lower the count.
+
+    extra_bytes_per_pixel: what each worker holds on the CALLER's side on top
+    of its cjxl (the encoder's page array and PNG, #569)."""
     if WORKER_MEMORY_FRACTION <= 0:
         return requested
     if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
         logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
                        f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    per_job = pixels * (_cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+                        + extra_bytes_per_pixel)
     avail, budget = _available_memory_bytes()
     if avail is None:
         logger.info("Memory: could not read the available memory — "
@@ -1410,8 +1415,10 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
         kind = "whole-image"
     else:
         kind = "streaming"
+    _extra = (f", incl. ~{pixels * extra_bytes_per_pixel / 2**30:.1f} GB in Python"
+              if extra_bytes_per_pixel > 0 else "")
     logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}{_extra}) | "
                 f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
     if cap < requested:
         hint = ""
