@@ -550,8 +550,11 @@ Options:
                   the source page. --distance 0: the pixels must match exactly.
                   Lossy: a brightness + PSNR sanity check that catches a black or
                   scrambled encode -- NOT a quality check, since quality loss is
-                  what you asked for. Roughly doubles the run. Needs djxl and
-                  imagecodecs. Only affects --delete-source. ON by default
+                  what you asked for. A lossy master that stores its profile
+                  as an ICC blob (ICC_PNG_STRATEGY always/heuristic) cannot be
+                  compared — djxl returns it in linear sRGB — so its TIFF is
+                  kept, and the log says why. Roughly doubles the run. Needs
+                  djxl and imagecodecs. Only affects --delete-source. ON by default
                   since v2.18.0 (VERIFY_ROUNDTRIP = True): a run that deletes
                   TIFFs always verifies; set VERIFY_ROUNDTRIP = False at the
                   top of the script for the old structure-only gate
