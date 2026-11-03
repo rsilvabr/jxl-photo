@@ -35,6 +35,8 @@ import json
 import re
 import struct
 import uuid
+import zlib
+import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -46,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.20.0"
+TOOLKIT_VERSION = "2.21.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -279,9 +281,11 @@ def _verify_file_integrity(file_path: Path) -> bool:
             # TIFF: signature, then force a real read of the last page's last
             # pixel — tifffile is lazy and a truncated file can pass a
             # header-only check.
-            if header[0:2] not in (b'II', b'MM'):
-                return False
-            if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+            # Classic (42) or BigTIFF (43), in the byte order the first two
+            # bytes name (#585).
+            if (header[0:2], header[2:4]) not in {
+                    (b"II", b"\x2a\x00"), (b"II", b"\x2b\x00"),
+                    (b"MM", b"\x00\x2a"), (b"MM", b"\x00\x2b")}:
                 return False
             try:
                 import tifffile
@@ -682,6 +686,153 @@ def _report_staging_leftovers(staging_dir):
                    "Pass --clean-staging on a later run to sweep the older ones.")
 
 
+# --clean-staging of one run must not sweep the outputs ANOTHER run left
+# waiting in a shared staging folder for their destination folder to finish
+# (#578). Every run that writes into staging holds a locked
+# `.jxlphoto-live-<id>` file there while it does; the sweep does nothing while
+# a live process holds one. The name starts with a dot, so it never matches
+# _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
+_STAGING_LIVE_PREFIX = ".jxlphoto-live-"
+_STAGING_HOLDS = {}
+# A live file this young counts as held even when it is not locked: its run
+# may be between creating and locking it (261104 review, S3).
+_STAGING_LIVE_GRACE_SECONDS = 60
+
+
+def _try_lock_nb(fh) -> bool:
+    """Lock an open file without waiting. False when another holder has it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_nb(fh) -> None:
+    """Release a lock _try_lock_nb took (closing the file releases it too)."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _staging_hold(staging_dir):
+    """Mark `staging_dir` as in use by this run while the block runs (#578).
+    Reentrant; a no-op without a staging folder."""
+    if not staging_dir:
+        yield
+        return
+    key = os.path.normcase(os.path.abspath(str(staging_dir)))
+    entry = _STAGING_HOLDS.get(key)
+    if entry is None:
+        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
+        fh = None
+        try:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w+b")
+            fh.write(str(os.getpid()).encode("ascii"))
+            fh.flush()
+            if not _try_lock_nb(fh):
+                raise OSError("the lock could not be taken")
+            entry = [path, fh, 0]
+        except OSError as e:
+            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
+                           f"— a --clean-staging run started meanwhile may sweep "
+                           f"this run's waiting outputs")
+            if fh is not None:
+                fh.close()
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            entry = [None, None, 0]
+        _STAGING_HOLDS[key] = entry
+    entry[2] += 1
+    try:
+        yield
+    finally:
+        entry[2] -= 1
+        if entry[2] <= 0:
+            _STAGING_HOLDS.pop(key, None)
+            if entry[1] is not None:
+                _unlock_nb(entry[1])
+                entry[1].close()
+                try:
+                    entry[0].unlink()
+                except OSError:
+                    pass
+
+
+def _holds_staging(fn):
+    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
+    outputs wait in staging until their destination folder is complete."""
+    def wrapper(*args, **kwargs):
+        with _staging_hold(TEMP2_DIR):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+def _staging_used_by_another_run(staging_dir) -> bool:
+    """True while another live process holds a `.jxlphoto-live-*` file in
+    `staging_dir`. One nobody holds is from a run that died: it is removed."""
+    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
+           if e[0] is not None}
+    try:
+        marks = [f for f in Path(staging_dir).iterdir()
+                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
+    except OSError:
+        return False
+    busy = False
+    for f in marks:
+        if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True
+            continue
+        if fresh:
+            busy = True             # just created: maybe not locked yet
+            continue
+        try:
+            fh = open(f, "r+b")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True             # cannot even open it: a live holder (fail closed)
+            continue
+        try:
+            if not _try_lock_nb(fh):
+                busy = True
+                continue
+            _unlock_nb(fh)
+        finally:
+            fh.close()
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return busy
+
+
 def _clean_staging(staging_dir):
     """Delete leftovers that have been idle long enough to be nobody's.
 
@@ -690,6 +841,10 @@ def _clean_staging(staging_dir):
     to preserve. Sweeping first clears the previous runs' orphans instead.
     """
     if not staging_dir:
+        return 0, 0
+    if _staging_used_by_another_run(staging_dir):
+        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
+                       f"(its outputs may be waiting there for their folder to finish)")
         return 0, 0
     found, _ = _staging_leftovers(staging_dir)
     if not found:
@@ -1202,11 +1357,31 @@ def _long_codec_paths(cmd):
     out = [cmd[0]]
     for a in cmd[1:]:
         s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
-                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
             out.append(a)
             continue
+        if not os.path.isabs(s):
+            # A relative path is long by its ABSOLUTE form (#575: an input
+            # given relative to a deep working folder). Only a token that
+            # looks like a path counts: a separator or an extension, no '='
+            # and not a number — option values (-d 0.1, --effort 7,
+            # -x strip=xmp) are never paths (261104 review, M1).
+            looks_like_path = (
+                "=" not in s
+                and (os.sep in s or (os.altsep and os.altsep in s)
+                     or bool(os.path.splitext(s)[1])))
+            try:
+                float(s)
+                looks_like_path = False
+            except ValueError:
+                pass
+            if not looks_like_path:
+                out.append(a)
+                continue
         s = os.path.abspath(s)
+        if len(s) < _LONG_PATH_THRESHOLD:
+            out.append(a)
+            continue
         out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
     return out
 
@@ -1820,7 +1995,11 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
 
     Used for lossy convert paths where cjxl/djxl may not preserve metadata.
-    Failures are ignored so the conversion itself always succeeds.
+    Raises RuntimeError when exiftool fails (#571): the caller turns that into
+    an ERROR for the file, so a --delete-source run keeps the source instead
+    of deleting it behind an output that lost its IPTC or its markers — the
+    verdict the encoder and the decoder already give. "No writable tags"
+    (a source without that metadata) is exit 0, a success.
     Also strips the ICC copy the TIFF encoder writes for TIFF round-trips —
     the jxlphoto-iccprofile token in dc:Relation, and the 'ICC:<base64>' blob
     in XMP CreatorTool of files written up to v2.18.x: it bloats delivered
@@ -1832,54 +2011,58 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         # A '%' in the source's name is expanded by -tagsfromfile and the
         # output got no metadata (#550): copy from a container instead.
         with tempfile.TemporaryDirectory(prefix="jxltr_meta_", dir=TEMP_DIR) as _mt:
-            _run_exiftool_argfile(
+            r_copy = _run_exiftool_argfile(
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
                  "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
+        if r_copy.returncode != 0:
+            raise RuntimeError(f"metadata copy failed (exiftool rc={r_copy.returncode}): "
+                               f"{(r_copy.stderr or r_copy.stdout or '').strip()[:200]}")
         # Strip the ICC copy: jxlphoto-iccprofile tokens from dc:Relation,
         # ICC:<base64> segments from CreatorTool (same logic as the TIFF
-        # decoder's cleanup_xmp_icc) — one read, one write.
-        try:
-            try:
-                content, _toks = _read_creator_and_relation(dst_path)
-            except Exception:
-                content, _toks = "", []
-            strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
-                     for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
-            if "ICC:" in content:
-                content = content.strip()
-                # Blob is bounded: base64 chars only up to the next pipe or EOL,
-                # so a trailing " | Real App" segment is never eaten.
-                clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
-                if 'ICC:' in clean and '|' not in content:
-                    # No pipe separators: the lookahead could not fire, but a
-                    # long base64 blob is unambiguous (real words are never
-                    # 64+ base64 chars).
-                    clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
-                clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
-                clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
-                clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
-                # When the blob was the WHOLE CreatorTool (the common case:
-                # encoder writes bare "ICC:<b64>" when the source had no
-                # CreatorTool of its own), rewriting is still required —
-                # otherwise the blob survives intact.
-                if not clean:
-                    clean = "jxl_jpeg_transcoder"
-                # _argfile_safe like every other CreatorTool write in the
-                # toolkit: an argfile is one argument per LINE, so a
-                # multi-line CreatorTool copied from another program would
-                # split into several bogus arguments here.
-                strip.append(f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}")
-            if strip:
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + strip + [str(dst_path)],
-                    timeout=EXIFTOOL_TIMEOUT
-                )
-        except Exception:
-            pass
-    except Exception:
-        pass
+        # decoder's cleanup_xmp_icc) — one read, one write. A read that
+        # fails raises: the token would stay in the delivered file.
+        content, _toks = _read_creator_and_relation(dst_path)
+        strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
+                 for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
+        if "ICC:" in content:
+            content = content.strip()
+            # Blob is bounded: base64 chars only up to the next pipe or EOL,
+            # so a trailing " | Real App" segment is never eaten.
+            clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
+            if 'ICC:' in clean and '|' not in content:
+                # No pipe separators: the lookahead could not fire, but a
+                # long base64 blob is unambiguous (real words are never
+                # 64+ base64 chars).
+                clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
+            clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
+            clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
+            clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
+            # When the blob was the WHOLE CreatorTool (the common case:
+            # encoder writes bare "ICC:<b64>" when the source had no
+            # CreatorTool of its own), rewriting is still required —
+            # otherwise the blob survives intact.
+            if not clean:
+                clean = "jxl_jpeg_transcoder"
+            # _argfile_safe like every other CreatorTool write in the
+            # toolkit: an argfile is one argument per LINE, so a
+            # multi-line CreatorTool copied from another program would
+            # split into several bogus arguments here.
+            strip.append(f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}")
+        if strip:
+            r_strip = _run_exiftool_argfile(
+                ["-overwrite_original"] + strip + [str(dst_path)],
+                timeout=EXIFTOOL_TIMEOUT
+            )
+            if r_strip.returncode != 0:
+                raise RuntimeError(
+                    f"ICC-copy cleanup failed (exiftool rc={r_strip.returncode}): "
+                    f"{(r_strip.stderr or r_strip.stdout or '').strip()[:200]}")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"metadata copy failed: {e}") from e
 
 # --------------------------------------------─
 # USER SETTINGS - TRANSCODE MODE CONFIGURATION
@@ -2146,16 +2329,17 @@ def _append_checksum_line(db_path: Path, entry: str):
                     logger.warning(f"checksums.md5 stayed locked for "
                                    f"{_MD5_LOCK_TIMEOUT_S:.0f}s — provenance line for "
                                    f"{db_path.parent.name} NOT recorded (fail closed)")
-                return
+                return False
             time.sleep(0.05)
         except OSError as e:
             logger.warning(f"Could not lock {lock_path} ({e}) — provenance line "
                            f"NOT recorded (fail closed)")
-            return
+            return False
     try:
         with _md5_db_lock:
             with open(db_path, "a", encoding="utf-8") as f:
                 f.write(entry)
+        return True
     finally:
         try:
             os.unlink(lock_path)
@@ -2165,7 +2349,7 @@ def _append_checksum_line(db_path: Path, entry: str):
 def store_md5_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}\n"
-    _append_checksum_line(db_path, entry)
+    return _append_checksum_line(db_path, entry)
 
 def read_md5_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
@@ -2207,7 +2391,7 @@ JXL_SELF_HASH_SUFFIX = ".jxl-md5"
 def store_jxl_self_hash_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}{JXL_SELF_HASH_SUFFIX}\n"
-    _append_checksum_line(db_path, entry)
+    return _append_checksum_line(db_path, entry)
 
 def _file_checksum_lines(jxl_path: Path, src_md5: str, jxl_md5: Optional[str]) -> bool:
     """An output's lines (source md5, JXL self-hash) in its own folder's db.
@@ -2217,9 +2401,13 @@ def _file_checksum_lines(jxl_path: Path, src_md5: str, jxl_md5: Optional[str]) -
     gate reads as "not proven" (fail closed), and the next deleting run
     settles it by reconstruction (#556)."""
     try:
-        store_md5_db(jxl_path, src_md5)
-        if jxl_md5:
-            store_jxl_self_hash_db(jxl_path, jxl_md5)
+        # A lock that timed out returns False (#579): reporting it as filed
+        # skipped the retry at the end of the run. `is False`, not falsiness:
+        # None is a write that raised nothing.
+        if store_md5_db(jxl_path, src_md5) is False:
+            return False
+        if jxl_md5 and store_jxl_self_hash_db(jxl_path, jxl_md5) is False:
+            return False
         return True
     except OSError as e:
         logger.warning(f"  checksum of {jxl_path.name} NOT recorded ({e}) — fail closed")
@@ -2315,6 +2503,10 @@ def reorder_jxl_boxes(jxl_path):
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
     Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
+    # Payloads are views into `data`, never copies (#583): the file is held
+    # in memory once, and the output is written box by box.
+    # (A stand-in that only slices -- the tests' 4 GiB file -- is used as is.)
+    view = memoryview(data) if isinstance(data, (bytes, bytearray)) else data
     file_size = len(data)
     
     # Sanity check: reasonable file size (prevent OOM on malformed files)
@@ -2361,18 +2553,18 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
             if i + ext_size > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            header, payload = data[i:i+16], view[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
-            header, payload = data[i:i+8], data[i+8:]
+            header, payload = data[i:i+8], view[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             if i + size > file_size:
                 raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+8], data[i+8:i+size]
+            header, payload = data[i:i+8], view[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
@@ -2423,7 +2615,7 @@ def reorder_jxl_boxes(jxl_path):
     # box in the file. If regrouping moved it earlier, rewrite its header with
     # the real computed size, otherwise everything after it becomes payload
     # and the file is corrupt.
-    out = b""
+    parts = []
     for idx, (name, h, p) in enumerate(ordered):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
@@ -2438,9 +2630,14 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
-        out += h + p
+        parts.append((h, p))
 
-    jxl_path.write_bytes(out)
+    # Every header is settled before the file is opened: a box that cannot
+    # be re-headered above raises with the file untouched.
+    with open(jxl_path, "wb") as f:
+        for h, p in parts:
+            f.write(h)
+            f.write(p)
 
 # --------------------------------------------─
 # FILE FINDERS
@@ -3442,6 +3639,10 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
         if _changed_since(jxl_path, st):
             return "broken", ("the file changed while it was being repaired (another "
                               "run?) — left untouched; run --repair-jbrd again")
+        # The archive keeps its date, like the relayout (#580): exiftool
+        # stamped the copy with "now", and a sync run compares this mtime
+        # with its source's.
+        os.utime(str(tmp), ns=(st.st_atime_ns, st.st_mtime_ns))
         os.replace(str(tmp), str(jxl_path))
         if (read_md5_db(jxl_path) is not None
                 or read_jxl_self_hash_db(jxl_path) is not None):
@@ -3779,6 +3980,7 @@ def cmd_repair_jbrd(args) -> int:
     return 1 if still_broken else 0
 
 
+@_holds_staging
 def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                             verify: bool, mode: int, reconvert_val: bool, smart: bool, effort: int = 7) -> list:
     """Transcode every pair in parallel.
@@ -3998,9 +4200,23 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                             f" KEEP (already archived, but no checksum to prove it came "
                             f"from this file) | {src_path.name}")
                         continue
-                    logger.warning(
-                        f" DELETING an already-archived source with NO provenance check "
-                        f"(no checksum stored) | {src_path.name}")
+                    if decode:
+                        # #581: deleting the JXL on the strength of ANY
+                        # same-named JPEG needs a real proof without the
+                        # checksum — the reconstruction (the encode side has
+                        # its own reconstruction gate below).
+                        if not (_tool_at_least("djxl", 0, 12)
+                                and _jxl_reconstructs_to(src_path, final_file)):
+                            _delete_stats["kept"] += 1
+                            logger.warning(
+                                f" KEEP (already archived, no checksum, and the JXL "
+                                f"does not reconstruct this JPEG) | {src_path.name}")
+                            continue
+                        logger.debug(f" provenance OK (reconstruction) | {src_path.name}")
+                    else:
+                        logger.warning(
+                            f" DELETING an already-archived source with NO provenance check "
+                            f"(no checksum stored) | {src_path.name}")
                 else:
                     try:
                         actual = md5_of_file(src_path if not decode else final_file)
@@ -4942,17 +5158,22 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # at d>0 there is no jbrd and the copy runs as before.
         # Provenance markers live under the same guard: the appended XMP
         # breaks reconstruction the same way (see encode_one_transcode).
-        try:
-            if not has_jbrd_box(write_path):
-                _copy_metadata(src_path, write_path)
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
-                    + _provenance_marker_args(src_path)
-                    + _origin_marker_lines(src_path)
-                    + _history_args("converted", src_path, write_path)
-                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
-        except Exception as _e_prov:
-            logger.debug(f"Provenance marker skipped: {_e_prov}")
+        # A failure here is an ERROR for the file (#571): the except below
+        # removes the output and the source stays. It used to be logged at
+        # DEBUG, and --delete-source then deleted a source whose output had
+        # lost its IPTC or its provenance markers.
+        if not has_jbrd_box(write_path):
+            _copy_metadata(src_path, write_path)
+            r_prov = _run_exiftool_argfile(
+                ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
+                + _provenance_marker_args(src_path)
+                + _origin_marker_lines(src_path)
+                + _history_args("converted", src_path, write_path)
+                + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
+            if r_prov.returncode != 0:
+                raise RuntimeError(
+                    f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
+                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
 
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
@@ -5281,6 +5502,184 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
         return (["+profile", "*", "-profile", str(path)], Path(path))
     raise RuntimeError("cannot tell the source colour space (no XMP ICC, no iCCP, "
                        "no sRGB chunk) — refusing to guess")
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Chunks that describe a PNG's colour space; an iCCP replaces all of them.
+# cICP too: PNG 3rd edition gives it precedence over iCCP, so a reader that
+# knows it would keep showing the old space (djxl 0.12 writes sRGB/gAMA/cHRM
+# for the SDR masters measured on 2026-11-04, not cICP; 261104 review, S2).
+_PNG_COLOUR_CHUNKS = (b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP")
+_JPEG_ICC_HEADER = b"ICC_PROFILE\x00"
+_JPEG_ICC_CHUNK = 65519        # 65535 - 2 (length) - 14 (header + seq + count)
+
+
+def _png_chunk(name: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + name + data
+            + struct.pack(">I", zlib.crc32(name + data) & 0xFFFFFFFF))
+
+
+def _png_replace_icc(path: Path, icc: bytes) -> bool:
+    """Make `icc` the colour profile of the PNG at `path`, pixels untouched:
+    its iCCP/sRGB/gAMA/cHRM chunks go, one iCCP goes right after the IHDR.
+    Streamed through a temp beside the file + os.replace. False (file left
+    alone) when it already carries exactly that profile."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        if f.read(8) != _PNG_SIGNATURE:
+            raise RuntimeError(f"not a PNG: {path.name}")
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+            if name == b"iCCP":
+                data = f.read(n)
+                try:
+                    if zlib.decompress(data[data.index(b"\x00") + 2:]) == icc:
+                        return False
+                except (ValueError, zlib.error):
+                    pass
+                break
+            if name == b"IDAT":
+                break
+            f.seek(n + 4, 1)
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            dst.write(src.read(8))
+            while True:
+                head = src.read(8)
+                if len(head) < 8:
+                    break
+                n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+                if name in _PNG_COLOUR_CHUNKS:
+                    src.seek(n + 4, 1)
+                    continue
+                dst.write(head)
+                shutil.copyfileobj(_LimitedReader(src, n + 4), dst)
+                if name == b"IHDR":
+                    dst.write(_png_chunk(b"iCCP", b"ICC Profile\x00\x00"
+                                         + zlib.compress(icc)))
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+class _LimitedReader:
+    """read() at most `n` bytes from `f` (for shutil.copyfileobj)."""
+
+    def __init__(self, f, n):
+        self.f, self.left = f, n
+
+    def read(self, size=-1):
+        if self.left <= 0:
+            return b""
+        size = self.left if size is None or size < 0 else min(size, self.left)
+        data = self.f.read(size)
+        self.left -= len(data)
+        return data
+
+
+def _jpeg_header_segments(f):
+    """[(marker, payload)] of a JPEG's segments up to (not including) SOS, the
+    file positioned at the SOS marker. Raises on anything but a JPEG."""
+    if f.read(2) != b"\xff\xd8":
+        raise RuntimeError("not a JPEG")
+    segs = []
+    while True:
+        m = f.read(2)
+        if len(m) < 2 or m[0] != 0xFF:
+            raise RuntimeError("malformed JPEG marker")
+        while m[1] == 0xFF:                       # fill bytes
+            m = m[:1] + f.read(1)
+        if m[1] == 0xDA:                          # SOS: entropy data follows
+            f.seek(-2, 1)
+            return segs
+        if m[1] in (0x01,) or 0xD0 <= m[1] <= 0xD7:
+            segs.append((m[1], b""))
+            continue
+        ln = struct.unpack(">H", f.read(2))[0]
+        segs.append((m[1], f.read(ln - 2)))
+
+
+def _jpeg_components(path: Path):
+    """Number of colour components of a JPEG (from its SOFn), or None."""
+    try:
+        with open(path, "rb") as f:
+            for marker, payload in _jpeg_header_segments(f):
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    return payload[5] if len(payload) > 5 else None
+    except (OSError, RuntimeError, struct.error):
+        return None
+    return None
+
+
+def _jpeg_replace_icc(path: Path, icc: bytes) -> bool:
+    """Make `icc` the colour profile of the JPEG at `path`, the image data
+    untouched: its APP2 ICC_PROFILE segments go, new ones go right after the
+    leading APP0/APP1 segments. Temp beside the file + os.replace. False (file
+    left alone) when it already carries exactly that profile."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        segs = _jpeg_header_segments(f)
+    old = sorted((p[12], p[14:]) for m, p in segs
+                 if m == 0xE2 and p[:12] == _JPEG_ICC_HEADER and len(p) >= 14)
+    if old and b"".join(d for _s, d in old) == icc:
+        return False
+    pieces = [icc[i:i + _JPEG_ICC_CHUNK] for i in range(0, len(icc), _JPEG_ICC_CHUNK)]
+    if len(pieces) > 255:
+        raise RuntimeError("ICC profile too large for a JPEG")
+    app2 = [b"\xff\xe2" + struct.pack(">H", 2 + 14 + len(d)) + _JPEG_ICC_HEADER
+            + bytes((i + 1, len(pieces))) + d for i, d in enumerate(pieces)]
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            segs = _jpeg_header_segments(src)        # src now at the SOS
+            dst.write(b"\xff\xd8")
+            placed = False
+            for marker, payload in segs:
+                if marker == 0xE2 and payload[:12] == _JPEG_ICC_HEADER:
+                    continue
+                if not placed and marker not in (0xE0, 0xE1):
+                    dst.write(b"".join(app2))
+                    placed = True
+                if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                    dst.write(bytes((0xFF, marker)))
+                else:
+                    dst.write(bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2)
+                              + payload)
+            if not placed:
+                dst.write(b"".join(app2))
+            shutil.copyfileobj(src, dst)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def _relabel_with_carried_icc(jxl_path: Path, out_path: Path, is_png: bool) -> bool:
+    """Give a direct djxl JPEG/PNG the profile the master carries in XMP
+    (_carried_icc), pixels untouched (#568). Only when djxl decoded in the
+    file's own space — the caller checks — and when the profile fits the
+    output's channels (an RGB profile on a grey file is invalid). True when
+    the output was relabelled."""
+    creator, tokens = _read_creator_and_relation(jxl_path)
+    icc = _carried_icc(creator, tokens)
+    if not icc or len(icc) < 20:
+        return False
+    grey = (_png_is_grayscale(out_path) if is_png
+            else _jpeg_components(out_path) == 1)
+    if icc[16:20] != (b"GRAY" if grey else b"RGB "):
+        return False
+    return (_png_replace_icc if is_png else _jpeg_replace_icc)(out_path, icc)
 
 
 def _verify_profile_in_output(path: Path, is_png: bool) -> None:
@@ -5817,7 +6216,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # decoded at 16 bits whenever the pixels will be resized or sharpened —
         # the final --bit-depth is applied at the end of the chain.
         size = None
-        if (output_icc and MAGICK_AVAILABLE) or derivative:
+
+        def _via_magick():
+            """The ImageMagick pipeline (colour conversion, derivative, and
+            the lossy ICC-blob decode of #568); returns the derivative size."""
+            size = None
             with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                 tmp_png = Path(tmp) / "tmp.png"
                 _decode_bits = 16 if derivative else bit_depth
@@ -5882,18 +6285,52 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
                 if not grey:
                     _verify_profile_in_output(actual_out, is_png=is_png)
-        elif is_png:
-            # Direct djxl to PNG (explicit format: the temp may end in .tmp)
-            r = _run_captured(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], CODEC_TIMEOUT)
-            if r.returncode != 0:
-                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+            return size
+
+        if (output_icc and MAGICK_AVAILABLE) or derivative:
+            size = _via_magick()
         else:
-            # Direct djxl to JPG (preserves embedded ICC; explicit format:
-            # the temp may end in .tmp)
-            quality_flag = f"--jpeg_quality={quality}"
-            r = _run_captured(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], CODEC_TIMEOUT)
-            if r.returncode != 0:
-                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+            # Direct djxl to PNG/JPG (explicit format: the temp may end in
+            # .tmp). The same call reports which colour space djxl decoded to
+            # and what the file's own is (#568).
+            with tempfile.TemporaryDirectory(dir=TEMP_DIR) as _itmp:
+                icc_args, out_icc, orig_icc = _djxl_icc_args(Path(_itmp))
+                if is_png:
+                    cmd = (["djxl", _fmt_flag] + icc_args
+                           + [str(jxl_path), str(actual_out),
+                              f"--bits_per_sample={bit_depth}"])
+                else:
+                    cmd = (["djxl", _fmt_flag, f"--jpeg_quality={quality}"] + icc_args
+                           + [str(jxl_path), str(actual_out)])
+                r = _run_captured(cmd, CODEC_TIMEOUT)
+                if r.returncode != 0:
+                    raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+                _space = _decoded_in_original_space(out_icc, orig_icc)
+            if _space is False:
+                # A lossy JXL carrying a whole ICC blob: djxl's direct output
+                # is not in the file's own space, and labelling it with the
+                # original profile would be wrong colour. Convert it back from
+                # the float decode, like an --icc-profile run does.
+                if not MAGICK_AVAILABLE:
+                    raise RuntimeError(
+                        "this lossy JXL stores an ICC blob: djxl's direct output is "
+                        "not in the file's own colour space, and the conversion "
+                        "needs ImageMagick (magick) in PATH")
+                logger.info(f"  >ICC blob in a lossy file: converting through "
+                            f"ImageMagick instead of djxl's direct output | "
+                            f"{jxl_path.name}")
+                size = _via_magick()
+            elif _space is True:
+                # The pixels are in the file's own space; the profile that
+                # describes them is the one the master carries in XMP. A
+                # master whose encode skipped the iCCP (cautious/heuristic/
+                # skip) has its pixels tagged sRGB in the codestream, and the
+                # output was labelled sRGB — wrong colour, and the token
+                # holding the real profile is stripped below.
+                _relabel_with_carried_icc(jxl_path, actual_out, is_png)
+            else:
+                logger.debug(f"djxl did not report the colour spaces — output "
+                             f"kept as decoded | {jxl_path.name}")
 
         # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop. A
         # derivative gets the provenance markers REMOVED in the same breath
@@ -5917,14 +6354,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             if r2.returncode != 0:
                 raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
         else:
-            try:
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
-                    + _provenance_marker_args(jxl_path)
-                    + _history_args("converted", jxl_path, actual_out)
-                    + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
-            except Exception as _e_prov:
-                logger.debug(f"Provenance marker skipped: {_e_prov}")
+            # An ERROR for the file when it fails (#571), like the copy above.
+            r_prov = _run_exiftool_argfile(
+                ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
+                + _provenance_marker_args(jxl_path)
+                + _history_args("converted", jxl_path, actual_out)
+                + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
+            if r_prov.returncode != 0:
+                raise RuntimeError(
+                    f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
+                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
 
         # Validate EVERY successful output (rc=0 does not guarantee a
         # well-formed file).
@@ -5963,6 +6402,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         _abort_if_disk_full(write_path.parent, _need)
         return (str(jxl_path), "error", str(e), None)
 
+@_holds_staging
 def process_group_convert(group_pairs: list, workers: int, direction: str,
                           quality: int, distance: float, fmt: str, bit_depth: int,
                           output_icc: str, use_ram: bool, effort: int, reconvert_val: bool,

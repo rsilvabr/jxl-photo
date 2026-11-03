@@ -15,6 +15,7 @@ import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys
 import math
 import re
 import functools
+import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -30,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.20.0"
+TOOLKIT_VERSION = "2.21.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -543,6 +544,153 @@ def _report_staging_leftovers(staging_dir):
                    "Pass --clean-staging on a later run to sweep the older ones.")
 
 
+# --clean-staging of one run must not sweep the outputs ANOTHER run left
+# waiting in a shared staging folder for their destination folder to finish
+# (#578). Every run that writes into staging holds a locked
+# `.jxlphoto-live-<id>` file there while it does; the sweep does nothing while
+# a live process holds one. The name starts with a dot, so it never matches
+# _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
+_STAGING_LIVE_PREFIX = ".jxlphoto-live-"
+_STAGING_HOLDS = {}
+# A live file this young counts as held even when it is not locked: its run
+# may be between creating and locking it (261104 review, S3).
+_STAGING_LIVE_GRACE_SECONDS = 60
+
+
+def _try_lock_nb(fh) -> bool:
+    """Lock an open file without waiting. False when another holder has it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_nb(fh) -> None:
+    """Release a lock _try_lock_nb took (closing the file releases it too)."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _staging_hold(staging_dir):
+    """Mark `staging_dir` as in use by this run while the block runs (#578).
+    Reentrant; a no-op without a staging folder."""
+    if not staging_dir:
+        yield
+        return
+    key = os.path.normcase(os.path.abspath(str(staging_dir)))
+    entry = _STAGING_HOLDS.get(key)
+    if entry is None:
+        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
+        fh = None
+        try:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w+b")
+            fh.write(str(os.getpid()).encode("ascii"))
+            fh.flush()
+            if not _try_lock_nb(fh):
+                raise OSError("the lock could not be taken")
+            entry = [path, fh, 0]
+        except OSError as e:
+            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
+                           f"— a --clean-staging run started meanwhile may sweep "
+                           f"this run's waiting outputs")
+            if fh is not None:
+                fh.close()
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            entry = [None, None, 0]
+        _STAGING_HOLDS[key] = entry
+    entry[2] += 1
+    try:
+        yield
+    finally:
+        entry[2] -= 1
+        if entry[2] <= 0:
+            _STAGING_HOLDS.pop(key, None)
+            if entry[1] is not None:
+                _unlock_nb(entry[1])
+                entry[1].close()
+                try:
+                    entry[0].unlink()
+                except OSError:
+                    pass
+
+
+def _holds_staging(fn):
+    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
+    outputs wait in staging until their destination folder is complete."""
+    def wrapper(*args, **kwargs):
+        with _staging_hold(TEMP2_DIR):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+def _staging_used_by_another_run(staging_dir) -> bool:
+    """True while another live process holds a `.jxlphoto-live-*` file in
+    `staging_dir`. One nobody holds is from a run that died: it is removed."""
+    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
+           if e[0] is not None}
+    try:
+        marks = [f for f in Path(staging_dir).iterdir()
+                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
+    except OSError:
+        return False
+    busy = False
+    for f in marks:
+        if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True
+            continue
+        if fresh:
+            busy = True             # just created: maybe not locked yet
+            continue
+        try:
+            fh = open(f, "r+b")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True             # cannot even open it: a live holder (fail closed)
+            continue
+        try:
+            if not _try_lock_nb(fh):
+                busy = True
+                continue
+            _unlock_nb(fh)
+        finally:
+            fh.close()
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return busy
+
+
 def _clean_staging(staging_dir):
     """Delete leftovers that have been idle long enough to be nobody's.
 
@@ -551,6 +699,10 @@ def _clean_staging(staging_dir):
     to preserve. Sweeping first clears the previous runs' orphans instead.
     """
     if not staging_dir:
+        return 0, 0
+    if _staging_used_by_another_run(staging_dir):
+        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
+                       f"(its outputs may be waiting there for their folder to finish)")
         return 0, 0
     found, _ = _staging_leftovers(staging_dir)
     if not found:
@@ -705,6 +857,12 @@ _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
 _MODULAR_LOSSY_BYTES_PER_PIXEL = 110
 _UNKNOWN_IMAGE_PIXELS = 60_000_000
+# What each worker holds in THIS process on top of its cjxl (#569): the page
+# array and the PNG handed to cjxl. Measured 2026-11-03 on 44.3 MP 16-bit RGB
+# exports (Z8), python.exe private bytes, 1 -> 4 workers: +0.74 GB per worker
+# at d=0 (16.8 B/px), +0.44 GB at d=0.1; +10% margin. Before the #569 fix it
+# was +0.96 / +1.12 GB.
+_PYTHON_BYTES_PER_PIXEL = 19
 
 
 def _cjxl_whole_image(distance, effort, buffering=None):
@@ -809,16 +967,21 @@ def _available_memory_bytes():
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,
-                           buffering=None, modular=False):
+                           buffering=None, modular=False,
+                           extra_bytes_per_pixel=0):
     """--workers lowered so `requested` parallel cjxl processes fit in memory.
-    Logs the estimate; warns when it had to lower the count."""
+    Logs the estimate; warns when it had to lower the count.
+
+    extra_bytes_per_pixel: what each worker holds on the CALLER's side on top
+    of its cjxl (the encoder's page array and PNG, #569)."""
     if WORKER_MEMORY_FRACTION <= 0:
         return requested
     if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
         logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
                        f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    per_job = pixels * (_cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+                        + extra_bytes_per_pixel)
     avail, budget = _available_memory_bytes()
     if avail is None:
         logger.info("Memory: could not read the available memory — "
@@ -832,8 +995,10 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
         kind = "whole-image"
     else:
         kind = "streaming"
+    _extra = (f", incl. ~{pixels * extra_bytes_per_pixel / 2**30:.1f} GB in Python"
+              if extra_bytes_per_pixel > 0 else "")
     logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}{_extra}) | "
                 f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
     if cap < requested:
         hint = ""
@@ -2179,11 +2344,31 @@ def _long_codec_paths(cmd):
     out = [cmd[0]]
     for a in cmd[1:]:
         s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
-                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
             out.append(a)
             continue
+        if not os.path.isabs(s):
+            # A relative path is long by its ABSOLUTE form (#575: an input
+            # given relative to a deep working folder). Only a token that
+            # looks like a path counts: a separator or an extension, no '='
+            # and not a number — option values (-d 0.1, --effort 7,
+            # -x strip=xmp) are never paths (261104 review, M1).
+            looks_like_path = (
+                "=" not in s
+                and (os.sep in s or (os.altsep and os.altsep in s)
+                     or bool(os.path.splitext(s)[1])))
+            try:
+                float(s)
+                looks_like_path = False
+            except ValueError:
+                pass
+            if not looks_like_path:
+                out.append(a)
+                continue
         s = os.path.abspath(s)
+        if len(s) < _LONG_PATH_THRESHOLD:
+            out.append(a)
+            continue
         out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
     return out
 
@@ -2867,8 +3052,13 @@ def _add_explorer_thumbnail(jxl_path, tmp_dir) -> str:
     return "written"
 
 
-def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
-    """Run one round-trip test at the given bit depth. Returns True if safe."""
+def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None) -> bool:
+    """Run one round-trip test at the given bit depth. Returns True if safe.
+
+    distance: the distance THIS file is encoded at (None = CJXL_DISTANCE). A
+    film scan under SCAN_DISTANCE is tested at its own distance (#573)."""
+    if distance is None:
+        distance = CJXL_DISTANCE
     img = _synthetic_image_for_icc(depth)
     if depth == 8:
         original_norm = float(img.mean()) / 255.0
@@ -2890,11 +3080,11 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
             _get_cjxl_cmd() or "cjxl",
             str(png_path),
             str(jxl_path),
-            "-d", str(CJXL_DISTANCE),
+            "-d", str(distance),
             "--effort", "1",
             "--container=1",
         ]
-        if CJXL_MODULAR and CJXL_DISTANCE > 0:
+        if CJXL_MODULAR and distance > 0:
             cmd.append("--modular=1")
 
         r = _run_captured(cmd, 120)
@@ -2909,7 +3099,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
             logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
             return False
 
-        if CJXL_DISTANCE > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
+        if distance > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
             # A table-curve profile (ROMM toe, eciRGB v2, scanner LUTs) has no
             # native JXL form, so a LOSSY cjxl stores the whole ICC blob and
             # djxl returns linear sRGB: a decoder that pastes the original ICC
@@ -2935,7 +3125,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
+def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path, distance=None) -> bool:
     """Test an ICC profile with a small round-trip before trusting it.
 
     The lock covers the cache's read-modify-write, NOT the probe. The probe is
@@ -2945,14 +3135,18 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
     probe it and reach the SAME verdict — the same benign race
     _content_id_cache already accepts — and the loser's store is a no-op.
     """
+    if distance is None:
+        distance = CJXL_DISTANCE
     key = hashlib.sha256(icc_bytes).hexdigest()
+    # The key names the distance the file is encoded at, not the global one
+    # (#573): a lossless verdict must never answer for a lossy scan.
     # Include the cjxl version in the key: an encoder upgrade can change
     # how a profile behaves, so stale verdicts from older cjxl builds
     # must not be trusted. ":t=2" is the test-format generation: t=2 added
     # the lossy-ICC-blob refusal, so a t=1 "embed" verdict for a table-curve
     # profile must be retested instead of trusted.
     cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
-    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
+    versioned_key = f"{key}:d={distance}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
 
     def _cached_verdict():
         cached = _load_icc_cache().get(versioned_key)
@@ -2972,7 +3166,7 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
 
     safe = True
     for depth in (8, 16):
-        if not _cautious_test_icc_depth(icc_bytes, depth):
+        if not _cautious_test_icc_depth(icc_bytes, depth, distance=distance):
             safe = False
             break
 
@@ -3005,7 +3199,7 @@ def _should_embed_icc_heuristic(icc_bytes: bytes) -> bool:
     return True
 
 
-def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None):
+def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None, distance=None):
     """Decide whether the ICC profile should be embedded in the PNG iCCP chunk.
 
     For lossless encoding the ICC is always embedded because the JXL stores the
@@ -3025,7 +3219,8 @@ def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None):
     if strategy == "skip":
         return False
     if strategy == "cautious":
-        return _cautious_should_embed_icc(icc_bytes, tiff_path or Path("unknown"))
+        return _cautious_should_embed_icc(icc_bytes, tiff_path or Path("unknown"),
+                                          distance=distance)
 
     if strategy == "heuristic":
         return _should_embed_icc_heuristic(icc_bytes)
@@ -3750,6 +3945,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Rows filtered and compressed at a time by make_png_bytes (#569).
+_PNG_BLOCK_ROWS = 256
+
+
 def make_png_bytes(img, icc_bytes=None):
     """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
     import numpy as np
@@ -3783,22 +3982,44 @@ def make_png_bytes(img, icc_bytes=None):
     # Write PNG at the input bit depth. The main encode path passes uint16 data;
     # the cautious ICC test passes uint8 data and needs a true 8-bit PNG to test
     # the 8-bit path.
-    if img.dtype == np.uint8:
-        bit_depth = 8
-        img_be = img
-        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
-    else:
-        bit_depth = 16
-        img_be = img.astype(">u2")
-        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
+    bit_depth = 8 if img.dtype == np.uint8 else 16
 
-    out = b"\x89PNG\r\n\x1a\n"
-    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))
+    # Streamed (#569): rows go through ONE zlib stream block by block, so
+    # neither the big-endian copy of the image nor the raw filtered buffer
+    # ever exists whole, and the file is assembled with a single join. The
+    # bytes are identical to zlib.compress(raw, 1) over the whole buffer —
+    # 45 MP used to cost ~1-1.4 GB of transient Python memory per worker.
+    # One compress() call per block, the filter byte (0) and the big-endian
+    # samples laid out by numpy: a Python loop per row held the GIL and made
+    # four parallel workers 2.5x slower than one (measured on 45 MP).
+    comp = zlib.compressobj(1)
+    idat = []
+    row_bytes = w * c * (2 if bit_depth == 16 else 1)
+    for y in range(0, h, _PNG_BLOCK_ROWS):
+        block = img[y:y + _PNG_BLOCK_ROWS]
+        n = block.shape[0]
+        filtered = np.empty((n, row_bytes + 1), dtype=np.uint8)
+        filtered[:, 0] = 0
+        samples = block.astype(">u2") if bit_depth == 16 else block
+        filtered[:, 1:] = np.ascontiguousarray(samples).reshape(n, -1).view(np.uint8)
+        piece = comp.compress(filtered)
+        if piece:
+            idat.append(piece)
+    idat.append(comp.flush())
+    idat_len = sum(len(p) for p in idat)
+    idat_crc = zlib.crc32(b"IDAT")
+    for piece in idat:
+        idat_crc = zlib.crc32(piece, idat_crc)
+
+    parts = [b"\x89PNG\r\n\x1a\n",
+             chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))]
     if icc_bytes:
-        out += chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes))
-    out += chunk(b"IDAT", zlib.compress(raw, 1))
-    out += chunk(b"IEND", b"")
-    return out
+        parts.append(chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes)))
+    parts.append(struct.pack(">I", idat_len) + b"IDAT")
+    parts.extend(idat)
+    parts.append(struct.pack(">I", idat_crc & 0xFFFFFFFF))
+    parts.append(chunk(b"IEND", b""))
+    return b"".join(parts)
 
 def _exif_box_rank(box) -> int:
     """Sort key of reorder_jxl_boxes: 0 for an Exif box (plain, or brob
@@ -3812,6 +4033,10 @@ def reorder_jxl_boxes(jxl_path):
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
     Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
+    # Payloads are views into `data`, never copies (#583): the file is held
+    # in memory once, and the output is written box by box.
+    # (A stand-in that only slices -- the tests' 4 GiB file -- is used as is.)
+    view = memoryview(data) if isinstance(data, (bytes, bytearray)) else data
     file_size = len(data)
     
     # Sanity check: reasonable file size (prevent OOM on malformed files)
@@ -3858,18 +4083,18 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
             if i + ext_size > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            header, payload = data[i:i+16], view[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
-            header, payload = data[i:i+8], data[i+8:]
+            header, payload = data[i:i+8], view[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             if i + size > file_size:
                 raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+8], data[i+8:i+size]
+            header, payload = data[i:i+8], view[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
@@ -3920,7 +4145,7 @@ def reorder_jxl_boxes(jxl_path):
     # box in the file. If regrouping moved it earlier, rewrite its header with
     # the real computed size, otherwise everything after it becomes payload
     # and the file is corrupt.
-    out = b""
+    parts = []
     for idx, (name, h, p) in enumerate(ordered):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
@@ -3935,9 +4160,14 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
-        out += h + p
+        parts.append((h, p))
 
-    jxl_path.write_bytes(out)
+    # Every header is settled before the file is opened: a box that cannot
+    # be re-headered above raises with the file untouched.
+    with open(jxl_path, "wb") as f:
+        for h, p in parts:
+            f.write(h)
+            f.write(p)
 
 def _is_thumbnail_page(page) -> bool:
     """Return True if the TIFF page is a thumbnail or pyramid level.
@@ -5168,13 +5398,25 @@ def _canon_for_compare(a: np.ndarray) -> np.ndarray:
     return a
 
 
-def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path) -> np.ndarray:
+def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path,
+                           require_original_space=False) -> np.ndarray:
     """Decode a JXL back to pixels. Raises on any failure — a verification that
-    cannot run must never read as a verification that passed."""
+    cannot run must never read as a verification that passed.
+
+    require_original_space: also raise when djxl did not return the pixels in
+    the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
+    a comparison against the SOURCE pixels says why it cannot run (#584)."""
     png_path = tmp_dir / "verify.png"
-    r = _run_captured(["djxl", str(jxl_path), str(png_path)], CJXL_TIMEOUT)
+    icc_args, out_icc, orig_icc = (_djxl_icc_args(tmp_dir) if require_original_space
+                                   else ([], None, None))
+    r = _run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, CJXL_TIMEOUT)
     if r.returncode != 0 or not png_path.exists():
         raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+    if require_original_space and _decoded_in_original_space(out_icc, orig_icc) is False:
+        raise RuntimeError(
+            "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
+            "cannot compare it with the source — source kept "
+            "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
@@ -5205,7 +5447,8 @@ def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
     """
     try:
         with tempfile.TemporaryDirectory(prefix="jxl_verify_", dir=TEMP_DIR) as tmp:
-            dec = _decode_jxl_for_verify(jxl_path, Path(tmp))
+            dec = _decode_jxl_for_verify(jxl_path, Path(tmp),
+                                         require_original_space=distance > 0)
         with tifffile.TiffFile(str(tiff_path)) as tif:
             if page_idx >= len(tif.pages):
                 return False, f"source page {page_idx} no longer exists"
@@ -5457,11 +5700,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
                 # Capture original bit depth before converting to 16-bit for the JXL pipeline.
                 original_depth = 8 if img.dtype == np.uint8 else 16
-                # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
+                # Convert 8-bit to 16-bit with proper scaling (multiply by 257).
+                # One array, never a copy of a page that already is uint16
+                # (#569: each copy is 270 MB per worker on a 45 MP page).
                 if img.dtype == np.uint8:
-                    img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
+                    img = np.multiply(img, 257, dtype=np.uint16)  # 0-255 -> 0-65535
                 else:
-                    img = img.astype(np.uint16)
+                    img = img.astype(np.uint16, copy=False)
             # Grayscale detection is driven ONLY by the ACTUAL array: a 2D
             # array or a single-channel 3D array is grayscale; a 2-channel
             # array is gray+alpha (LA). The planning-time samples-per-pixel is
@@ -5535,7 +5780,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if not lossy:
                 png_icc_bytes = icc_bytes  # lossless: always embed ICC natively
             else:
-                embed = should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=tiff_path)
+                embed = should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=tiff_path,
+                                                distance=_dist)
                 png_icc_bytes = icc_bytes if embed else None
                 if not embed and icc_bytes:
                     logger.info(f"  >Skipping ICC in PNG iCCP for {tiff_path.name} (page {page_idx}); profile will be preserved via XMP")
@@ -5823,11 +6069,13 @@ def _thumbnail_sync_guard(tiff_path: Path, output_dir: Path, real_pages: list,
 
 
 def _read_page_markers_batch(paths: list) -> dict:
-    """{path: {'src': id|None, 'group': id|None, 'thumb': bool}} from each
-    file's dc:Relation, in as few exiftool calls as possible. A file whose
-    markers cannot be read comes back all None/False: _clean_stale_split_pages
-    then leaves it alone."""
-    markers = {str(p): {"src": None, "group": None, "thumb": False} for p in paths}
+    """{path: {'src': id|None, 'group': id|None, 'thumb': bool, 'pages': int|None}}
+    from each file's dc:Relation, in as few exiftool calls as possible. A file
+    whose markers cannot be read comes back all None/False: the callers
+    (_clean_stale_split_pages, the moved-split adoption) then leave it alone.
+    'pages' is the split's jxlphoto-pages count (-1 when unparsable)."""
+    markers = {str(p): {"src": None, "group": None, "thumb": False, "pages": None}
+               for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return markers
@@ -5856,13 +6104,18 @@ def _read_page_markers_batch(paths: list) -> dict:
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
-                info = {"src": None, "group": None, "thumb": False}
+                info = {"src": None, "group": None, "thumb": False, "pages": None}
                 for token in (rel if isinstance(rel, list) else [str(rel)]):
                     token = str(token).strip()
                     if token.startswith(SRC_PREFIX):
                         info["src"] = token[len(SRC_PREFIX):]
                     elif token.startswith(MULTIPAGE_XMP_MARKER):
                         info["group"] = token[len(MULTIPAGE_XMP_MARKER):]
+                    elif token.startswith(PAGES_XMP_PREFIX):
+                        try:
+                            info["pages"] = int(token[len(PAGES_XMP_PREFIX):])
+                        except ValueError:
+                            info["pages"] = -1
                     elif token == THUMB_XMP_FLAG:
                         info["thumb"] = True
                 key = os.path.normcase(str(Path(src)))
@@ -6314,6 +6567,14 @@ def _read_group_markers_batch(outputs: list) -> dict:
     return markers
 
 
+def _split_group_id(key: str, pages) -> str:
+    """The group id of a split: its resolved source path + the page set it
+    produces (bug #303; see process_group's _make_group_id)."""
+    pages = sorted(pages)
+    blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
                             dir_per_tiff: Dict[str, Path],
                             pages_per_tiff: Dict[str, set]) -> Dict[str, str]:
@@ -6352,10 +6613,8 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
         return adopted
     marks = _read_group_markers_batch(
         [f for sibs in candidates.values() for f in sibs])
+    moved: Dict[str, tuple] = {}
     for key, sibs in candidates.items():
-        legacy = _legacy_group_id(split_tiffs[key])
-        if {marks.get(str(f)) for f in sibs} != {legacy}:
-            continue
         # Only heal when every on-disk page is part of THIS run's page set. A
         # page the run no longer produces is a leftover of a changed structure
         # (bug #303's own shape), and adopting the legacy id there would invite
@@ -6364,15 +6623,60 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
         if not all(_parse_output_page_suffix(f.stem)[1:] in
                    {(p, t) for p, t in planned} for f in sibs):
             continue
-        adopted[key] = legacy
-        logger.info(
-            f"Multi-page archive predates the v2.0.2 group-id change: the "
-            f"{len(sibs)} existing page(s) of {split_tiffs[key].name} all carry "
-            f"its legacy group id, so this run's page(s) are stamped with the "
-            f"SAME id and the archive heals into one group.")
+        ids = {marks.get(str(f)) for f in sibs}
+        legacy = _legacy_group_id(split_tiffs[key])
+        if ids == {legacy}:
+            adopted[key] = legacy
+            logger.info(
+                f"Multi-page archive predates the v2.0.2 group-id change: the "
+                f"{len(sibs)} existing page(s) of {split_tiffs[key].name} all carry "
+                f"its legacy group id, so this run's page(s) are stamped with the "
+                f"SAME id and the archive heals into one group.")
+        elif (len(ids) == 1 and None not in ids
+              and ids != {_split_group_id(key, planned)}):
+            moved[key] = (next(iter(ids)), sibs)
+    # #576: the id hashes the source's absolute PATH, so a split whose folder
+    # moved (another drive letter, a renamed event folder) and lost one page
+    # would get a new id on that page while its siblings keep the old one —
+    # two incomplete groups. Adopt the siblings' id when they unanimously
+    # carry it AND their jxlphoto-srcsum proves they were made from this
+    # TIFF's current bytes (an unreadable marker never adopts). When the id
+    # is already the one this run computes, adopting it changes nothing.
+    if moved:
+        _moved_files = [f for _gid, sibs in moved.values() for f in sibs]
+        src_marks = _read_source_markers_batch(_moved_files)
+        # The split must also be the SAME page set (261104 review, S1): an
+        # unchanged TIFF whose planned pages changed (a thumbnail now kept)
+        # must not lend the old group's id to the new page — the pages would
+        # then declare different counts and the decoder refuses the group.
+        page_marks = _read_page_markers_batch(_moved_files)
+        for key, (gid, sibs) in moved.items():
+            infos = [src_marks.get(str(f)) or {} for f in sibs]
+            if any(i.get("unread") or not i.get("srcsum") for i in infos):
+                continue
+            pages = [page_marks.get(str(f)) or {} for f in sibs]
+            if any(p.get("group") != gid for p in pages):
+                continue            # the page read failed or disagrees
+            n_planned = len(pages_per_tiff.get(key, ()))
+            if any(p.get("pages") is not None and p.get("pages") != n_planned
+                   for p in pages):
+                continue
+            try:
+                content = _file_content_id(split_tiffs[key])
+            except OSError:
+                continue
+            if any(i["srcsum"] != content for i in infos):
+                continue
+            adopted[key] = gid
+            logger.info(
+                f"Multi-page archive moved or renamed since it was split: the "
+                f"{len(sibs)} existing page(s) of {split_tiffs[key].name} carry "
+                f"group id {gid} and this TIFF's content, so this run's page(s) "
+                f"are stamped with the SAME id.")
     return adopted
 
 
+@_holds_staging
 def process_group(group_items: list, workers: int, mode: int = 0):
     """
     Converts (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples) items
@@ -6428,9 +6732,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
         I/O — the page list is already in hand.
         """
         key = str(tiff_path.resolve())
-        pages = sorted(pages_per_tiff.get(key, ()))
-        blob = key + "|" + ",".join(f"{p}{'t' if t else ''}" for p, t in pages)
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+        return _split_group_id(key, pages_per_tiff.get(key, ()))
 
     # The formula above is unconditional, which strands archives split by
     # v2.0.0/v2.0.1: they carry the LEGACY id, and re-encoding one lost page of
@@ -6518,7 +6820,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             max(_PAGE_PIXELS.get((os.path.normcase(str(t[0])), t[3]), 0)
                 for t in tasks),
             _budget_d, CJXL_EFFORT, CJXL_BUFFERING,
-            modular=bool(CJXL_MODULAR))
+            modular=bool(CJXL_MODULAR),
+            extra_bytes_per_pixel=_PYTHON_BYTES_PER_PIXEL)
     for _t in tasks:
         _record_source_identity(_t[0])      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:

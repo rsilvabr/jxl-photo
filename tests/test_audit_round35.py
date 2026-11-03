@@ -94,8 +94,10 @@ def test_encode_to_jxl_still_marks_jxl_without_jbrd(tmp_path, monkeypatch):
     monkeypatch.setattr(tr, "subprocess",
                         type("S", (), {"run": staticmethod(_fake_run)}))
     monkeypatch.setattr(tr, "has_jbrd_box", lambda p: False)  # lossy: no jbrd
+    # rc 0: the marker write is checked since #571.
     monkeypatch.setattr(tr, "_run_exiftool_argfile",
-                        lambda lines, **kw: writes.append(lines))
+                        lambda lines, **kw: writes.append(lines)
+                        or subprocess.CompletedProcess(lines, 0, "", ""))
     monkeypatch.setattr(tr, "_copy_metadata", lambda s, d: None)
     monkeypatch.setattr(tr, "reorder_jxl_boxes", lambda p: None)
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
@@ -390,6 +392,10 @@ def _mpg_run(tmp_path, monkeypatch, *, p1_ok, p2_ok):
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "_read_mpg_markers",
                         lambda paths: ({str(p): "group-1" for p in paths}, True))
+    # The stubs carry no jxlphoto-pages (#574 reads it): a whole group.
+    monkeypatch.setattr(rec, "_read_mpg_pages_batch",
+                        lambda paths: ({str(p): None for p in paths}, True),
+                        raising=False)
     monkeypatch.setattr(rec, "_verify_jxl_integrity",
                         lambda p: p1_ok if p.name == "p0.jxl" else p2_ok)
     items = [{"src": s, "final": f, "in_place": False, "action": "convert",

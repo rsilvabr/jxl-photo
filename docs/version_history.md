@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.20.0](#v2200)** | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
+| **[v2.21.0](#v2210)** | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
+| [v2.20.0](#v2200) | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
 | [v2.19.2](#v2192) | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
 | [v2.19.1](#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
 | [v2.19.0](#v2190) | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
@@ -80,9 +81,66 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.21.0
+
+**Released 2026-11-04.** Supersedes v2.20.0. The rest of the 2026-11-03 audit.
+Most fixes close rare combinations; three of them are things you may notice —
+see [Upgrading](upgrading.md#v2210-lossy-jxl--jpegpng-keeps-the-masters-profile-metadata-failures-keep-the-source).
+
+- **JPEG/PNG from some lossy masters carry their real colour profile (#568).**
+  A master whose encode kept its profile only in XMP — the cautious ICC
+  strategy does this for scanner and table-curve profiles (ROMM with a linear
+  toe, eciRGB v2) — came out of a JXL → JPEG/PNG conversion without
+  `--icc-profile` labelled sRGB, its numbers still in the other space. The
+  output now gets the master's own profile, with djxl's pixels and JPEG bytes
+  unchanged. A lossy master that stores its profile as an ICC blob is
+  converted back to it through ImageMagick, which that path now needs. If you
+  delivered JPEGs from such masters, convert them again.
+- **Less memory per worker (#569, #570).** The encoder builds the PNG it hands
+  to cjxl in blocks (the same bytes) and no longer copies a 16-bit page; its
+  worker cap now also counts that memory, so a machine with little free memory
+  may run fewer workers. The decoder's 256 px preview no longer converts the
+  whole image to floating point (the same preview).
+- **A failed metadata copy keeps the source (#571).** In the transcoder's lossy
+  conversions, a metadata copy or marker write that exiftool fails is an error
+  for that file: the output is removed and `--delete-source` keeps the source,
+  as the encoder and the decoder already did.
+- Smaller fixes, each for an unusual setup:
+  - in place with a staging folder, the copy out of staging is checked before
+    it replaces the source (#572);
+  - the cautious ICC test runs at a film scan's own distance
+    (`--scan-distance`), not the run's (#573);
+  - the recompressor keeps a page of a split whose other pages are not in the
+    run (#574);
+  - a path given relative to a deep working folder reaches cjxl/djxl past 260
+    characters (#575);
+  - a split moved to another folder or drive that lost a page heals into one
+    group when the page set is the same (#576);
+  - an output folder that is the input under another name (a junction, a subst
+    drive, a UNC share) is treated as in place (#577);
+  - `--clean-staging` sweeps nothing while another run uses the same staging
+    folder (#578);
+  - a checksum line whose lock timed out is retried at the end of the run
+    (#579); `--repair-jbrd` keeps the archive's date (#580); with
+    `DELETE_SOURCE_REQUIRE_MD5 = False`, a JXL next to a JPEG it does not
+    rebuild is kept (#581);
+  - the decoder fails a file whose dc:Relation could not be read or cleared
+    (#582); the box reorder holds a file once (#583); the TIFF check before a
+    delete accepts BigTIFF (#585); the pixel check of a lossy ICC-blob master
+    names the real reason it cannot compare (#584).
+
+Measured 2026-11-03 on 44.3 MP 16-bit exports (python.exe private bytes, same
+run times): the encoder's Python side per worker went from +1.12 to +0.74 GB at
+d=0 and from +0.96 to +0.44 GB at d=0.1 (the cap adds 19 bytes per pixel); the
+decoder with its preview, 4 workers on 45 MP masters, from 9.73 to 4.28 GB, and
+one 84 MP master from 5.47 to 2.41 GB. New tests for each fix fail on v2.20.0,
+real-codec and real-exiftool ones included, in folders with Japanese
+characters, `[ ]`, a space and `%`. 3147 tests; the real-photo battery
+passes (132 checks, all optional fixture folders).
+
 ## v2.20.0
 
-**Released 2026-11-03.** Supersedes v2.19.2. Hardening from a full read of
+**Released 2026-11-03.** Superseded by v2.21.0. Supersedes v2.19.2. Hardening from a full read of
 the five scripts; most fixes close rare combinations. Two command lines
 behave differently — see
 [Upgrading](upgrading.md#v2200-unreadable-provenance-records-are-refused-modes-67-skip-other-scripts-folders).

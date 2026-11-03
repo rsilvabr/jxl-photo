@@ -19,6 +19,7 @@ Requirements:
 """
 
 import subprocess, os, tempfile, threading, logging, sys, shutil, re, base64, struct, uuid, io, json, hashlib
+import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -39,7 +40,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.20.0"
+TOOLKIT_VERSION = "2.21.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -468,6 +469,153 @@ def _report_staging_leftovers(staging_dir):
                    "Pass --clean-staging on a later run to sweep the older ones.")
 
 
+# --clean-staging of one run must not sweep the outputs ANOTHER run left
+# waiting in a shared staging folder for their destination folder to finish
+# (#578). Every run that writes into staging holds a locked
+# `.jxlphoto-live-<id>` file there while it does; the sweep does nothing while
+# a live process holds one. The name starts with a dot, so it never matches
+# _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
+_STAGING_LIVE_PREFIX = ".jxlphoto-live-"
+_STAGING_HOLDS = {}
+# A live file this young counts as held even when it is not locked: its run
+# may be between creating and locking it (261104 review, S3).
+_STAGING_LIVE_GRACE_SECONDS = 60
+
+
+def _try_lock_nb(fh) -> bool:
+    """Lock an open file without waiting. False when another holder has it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_nb(fh) -> None:
+    """Release a lock _try_lock_nb took (closing the file releases it too)."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _staging_hold(staging_dir):
+    """Mark `staging_dir` as in use by this run while the block runs (#578).
+    Reentrant; a no-op without a staging folder."""
+    if not staging_dir:
+        yield
+        return
+    key = os.path.normcase(os.path.abspath(str(staging_dir)))
+    entry = _STAGING_HOLDS.get(key)
+    if entry is None:
+        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
+        fh = None
+        try:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w+b")
+            fh.write(str(os.getpid()).encode("ascii"))
+            fh.flush()
+            if not _try_lock_nb(fh):
+                raise OSError("the lock could not be taken")
+            entry = [path, fh, 0]
+        except OSError as e:
+            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
+                           f"— a --clean-staging run started meanwhile may sweep "
+                           f"this run's waiting outputs")
+            if fh is not None:
+                fh.close()
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            entry = [None, None, 0]
+        _STAGING_HOLDS[key] = entry
+    entry[2] += 1
+    try:
+        yield
+    finally:
+        entry[2] -= 1
+        if entry[2] <= 0:
+            _STAGING_HOLDS.pop(key, None)
+            if entry[1] is not None:
+                _unlock_nb(entry[1])
+                entry[1].close()
+                try:
+                    entry[0].unlink()
+                except OSError:
+                    pass
+
+
+def _holds_staging(fn):
+    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
+    outputs wait in staging until their destination folder is complete."""
+    def wrapper(*args, **kwargs):
+        with _staging_hold(TEMP2_DIR):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+def _staging_used_by_another_run(staging_dir) -> bool:
+    """True while another live process holds a `.jxlphoto-live-*` file in
+    `staging_dir`. One nobody holds is from a run that died: it is removed."""
+    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
+           if e[0] is not None}
+    try:
+        marks = [f for f in Path(staging_dir).iterdir()
+                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
+    except OSError:
+        return False
+    busy = False
+    for f in marks:
+        if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True
+            continue
+        if fresh:
+            busy = True             # just created: maybe not locked yet
+            continue
+        try:
+            fh = open(f, "r+b")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True             # cannot even open it: a live holder (fail closed)
+            continue
+        try:
+            if not _try_lock_nb(fh):
+                busy = True
+                continue
+            _unlock_nb(fh)
+        finally:
+            fh.close()
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return busy
+
+
 def _clean_staging(staging_dir):
     """Delete leftovers that have been idle long enough to be nobody's.
 
@@ -476,6 +624,10 @@ def _clean_staging(staging_dir):
     to preserve. Sweeping first clears the previous runs' orphans instead.
     """
     if not staging_dir:
+        return 0, 0
+    if _staging_used_by_another_run(staging_dir):
+        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
+                       f"(its outputs may be waiting there for their folder to finish)")
         return 0, 0
     found, _ = _staging_leftovers(staging_dir)
     if not found:
@@ -645,11 +797,31 @@ def _long_codec_paths(cmd):
     out = [cmd[0]]
     for a in cmd[1:]:
         s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
-                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
             out.append(a)
             continue
+        if not os.path.isabs(s):
+            # A relative path is long by its ABSOLUTE form (#575: an input
+            # given relative to a deep working folder). Only a token that
+            # looks like a path counts: a separator or an extension, no '='
+            # and not a number — option values (-d 0.1, --effort 7,
+            # -x strip=xmp) are never paths (261104 review, M1).
+            looks_like_path = (
+                "=" not in s
+                and (os.sep in s or (os.altsep and os.altsep in s)
+                     or bool(os.path.splitext(s)[1])))
+            try:
+                float(s)
+                looks_like_path = False
+            except ValueError:
+                pass
+            if not looks_like_path:
+                out.append(a)
+                continue
         s = os.path.abspath(s)
+        if len(s) < _LONG_PATH_THRESHOLD:
+            out.append(a)
+            continue
         out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
     return out
 
@@ -1144,6 +1316,10 @@ def _provenance_marker_args(src_paths):
     return lines
 
 
+_TIFF_SIGNATURES = {(b"II", b"\x2a\x00"), (b"II", b"\x2b\x00"),
+                    (b"MM", b"\x00\x2a"), (b"MM", b"\x00\x2b")}
+
+
 def _verify_tiff_integrity(tiff_path: Path) -> bool:
     """Verify TIFF file integrity before deleting source JXL.
 
@@ -1167,10 +1343,10 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
         if len(header) < 4:
             return False
 
-        # TIFF signature: II (little-endian) or MM (big-endian) followed by 42 (0x002A)
-        if header[0:2] not in (b'II', b'MM'):
-            return False
-        if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+        # TIFF signature: II (little-endian) or MM (big-endian) followed by
+        # 42 (classic) or 43 (BigTIFF), in THAT byte order (#585: BigTIFF
+        # was refused, and II with a big-endian 42 passed).
+        if (header[0:2], header[2:4]) not in _TIFF_SIGNATURES:
             return False
 
         # Try to open with tifffile to verify structure
@@ -2663,6 +2839,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
             kept = []
+            # #582: a read that fails cannot tell which internal markers were
+            # copied from the JXL, so they would stay in the TIFF.
+            _relation_read_ok = rr.returncode == 0 and bool(rr.stdout)
             if rr.returncode == 0 and rr.stdout:
                 import json as _json
                 try:
@@ -2670,6 +2849,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                     _rel = _data[0].get("Relation") if _data else None
                 except Exception:
                     _rel = None
+                    _relation_read_ok = False
                 if _rel is not None:
                     _values = _rel if isinstance(_rel, list) else [str(_rel)]
                     def _is_internal_marker(token: str) -> bool:
@@ -2719,10 +2899,23 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             # clear-then-append for a list tag, and the stale internal markers
             # copied from the JXL survive (caught by
             # test_decoder_markers_do_not_leak_into_the_tiff).
+            if not _relation_read_ok:
+                # Same verdict as any other failed metadata step (#582): the
+                # TIFF may carry the JXL's internal tokens next to its own.
+                copied = False
+                logger.warning(
+                    f"  RELATION READ FAILED (exiftool rc={rr.returncode}) | "
+                    f"{tiff_path.name} — the JXL's internal markers may stay in the TIFF")
             if has_internal:
-                _run_exiftool_argfile(
+                r_clear = _run_exiftool_argfile(
                     ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
                 )
+                if r_clear.returncode != 0:
+                    copied = False
+                    logger.warning(
+                        f"  RELATION CLEAR FAILED (exiftool rc={r_clear.returncode}) | "
+                        f"{tiff_path.name} | "
+                        f"{(r_clear.stderr or r_clear.stdout or 'no output').strip()[:200]}")
             # ...but everything that gets ADDED fits in one call: the user's own
             # Relation values and the provenance markers together. Two calls
             # instead of three, and one instead of two when there was nothing to
@@ -2807,6 +3000,10 @@ def cleanup_xmp_icc(tiff_path):
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
+# Rows converted to 8 bits at a time for the preview (#570).
+_PREVIEW_BLOCK_ROWS = 256
+
+
 def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
     """Add JPEG preview as second page of TIFF with proper thumbnail structure.
 
@@ -2885,19 +3082,31 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
             new_w = max(1, int(w * max_dim / h))
 
         # Convert to 8-bit for JPEG preview (rounded, like the rest of the
-        # pipeline — not a bit-shift truncation)
-        if img_data.dtype == np.uint16:
-            img_8bit = np.rint(img_data / 257).astype(np.uint8)
-        elif img_data.dtype == np.uint8:
+        # pipeline — not a bit-shift truncation). In blocks of rows (#570):
+        # the float of the WHOLE image was ~2.2 GB per worker on a 45 MP
+        # master (4 GB at 84 MP) for a 256 px preview. Same formula per
+        # block, so the preview is byte-identical.
+        if img_data.dtype == np.uint8:
             img_8bit = img_data
         else:
-            mx = img_data.max()
-            # Handle NaN, Inf, or zero max values safely
-            if np.isnan(mx) or np.isinf(mx) or mx <= 0:
-                logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
-                img_8bit = np.clip(img_data, 0, 255).astype(np.uint8)
+            img_8bit = np.empty(img_data.shape, dtype=np.uint8)
+            if img_data.dtype == np.uint16:
+                def _to8(block):
+                    return np.rint(block / 257).astype(np.uint8)
             else:
-                img_8bit = ((img_data.astype(np.float32) / mx) * 255).astype(np.uint8)
+                mx = img_data.max()
+                # Handle NaN, Inf, or zero max values safely
+                if np.isnan(mx) or np.isinf(mx) or mx <= 0:
+                    logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
+
+                    def _to8(block):
+                        return np.clip(block, 0, 255).astype(np.uint8)
+                else:
+                    def _to8(block):
+                        return ((block.astype(np.float32) / mx) * 255).astype(np.uint8)
+            for _y in range(0, img_data.shape[0], _PREVIEW_BLOCK_ROWS):
+                img_8bit[_y:_y + _PREVIEW_BLOCK_ROWS] = _to8(
+                    img_data[_y:_y + _PREVIEW_BLOCK_ROWS])
 
         # Resize using high-quality resampling
         pil_img = Image.fromarray(img_8bit)
@@ -3925,6 +4134,7 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             logger.error(f"[{n}/{total}] ERROR | {main_jxl.name} | {e}")
             return str(main_jxl), "error", str(e)
 
+@_holds_staging
 def process_group(group_tasks, workers, target_icc=None):
     """Process a group of tasks in parallel.
 

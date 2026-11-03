@@ -496,7 +496,9 @@ Options:
                   wrote, never subfolders, and nothing touched in the last hour
                   (a concurrent run may still own it). Sweeps the EFFECTIVE
                   staging dir, so it works with TEMP2_DIR set in the script and
-                  no --staging flag. Never runs under --dry-run
+                  no --staging flag. Never runs under --dry-run. Sweeps nothing
+                  while another run is using the same staging folder (its
+                  finished outputs may be waiting there for their folder)
   --effort 1-10      cjxl effort (default: 7)
   --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)
@@ -587,7 +589,13 @@ Without a stored checksum, the lossless directions refuse by default
 (`DELETE_SOURCE_REQUIRE_MD5 = True`) rather than fall back to the structural
 check — except a JPEG → JXL archive that `djxl --reconstruct_jpeg` proves, as
 above. Setting it to `False` allows the delete and logs the missing provenance
-per file.
+per file — except a JXL → JPEG recovery, which still needs
+`djxl --reconstruct_jpeg` to reproduce the JPEG on disk before the JXL goes.
+
+A lossy conversion whose metadata copy or marker write fails (exiftool exits
+with an error) is an ERROR for that file: the output is removed and the
+source kept, as the encoder and the decoder do. A source with nothing to copy
+("No writable tags") is not a failure.
 
 > ### Bit-exact recovery is proven, not assumed
 >
@@ -729,6 +737,14 @@ py jxl_jpeg_transcoder.py photo.jxl
 # ICC: preserving embedded from JXL
 # Output has same color space as input (ProPhoto, AdobeRGB, etc.)
 ```
+
+The profile is the master's own. When a lossy master keeps its real profile
+only in XMP (the `jxlphoto-iccprofile` copy; the encoder's cautious ICC
+strategy does this for scanner and table-curve profiles), that profile becomes
+the JPEG/PNG's ICC, and the pixels stay as djxl decoded them. A lossy master
+that stores its whole profile as an ICC blob is decoded by djxl in linear
+sRGB: it is converted back to its own profile through ImageMagick, which is
+then required.
 
 **2. Converting to sRGB (web/standard delivery)**
 

@@ -27,6 +27,7 @@ import struct, base64, atexit
 import math
 import re
 import functools
+import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -41,7 +42,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.20.0"
+TOOLKIT_VERSION = "2.21.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -579,6 +580,153 @@ def _report_staging_leftovers(staging_dir):
                    "Pass --clean-staging on a later run to sweep the older ones.")
 
 
+# --clean-staging of one run must not sweep the outputs ANOTHER run left
+# waiting in a shared staging folder for their destination folder to finish
+# (#578). Every run that writes into staging holds a locked
+# `.jxlphoto-live-<id>` file there while it does; the sweep does nothing while
+# a live process holds one. The name starts with a dot, so it never matches
+# _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
+_STAGING_LIVE_PREFIX = ".jxlphoto-live-"
+_STAGING_HOLDS = {}
+# A live file this young counts as held even when it is not locked: its run
+# may be between creating and locking it (261104 review, S3).
+_STAGING_LIVE_GRACE_SECONDS = 60
+
+
+def _try_lock_nb(fh) -> bool:
+    """Lock an open file without waiting. False when another holder has it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_nb(fh) -> None:
+    """Release a lock _try_lock_nb took (closing the file releases it too)."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _staging_hold(staging_dir):
+    """Mark `staging_dir` as in use by this run while the block runs (#578).
+    Reentrant; a no-op without a staging folder."""
+    if not staging_dir:
+        yield
+        return
+    key = os.path.normcase(os.path.abspath(str(staging_dir)))
+    entry = _STAGING_HOLDS.get(key)
+    if entry is None:
+        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
+        fh = None
+        try:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w+b")
+            fh.write(str(os.getpid()).encode("ascii"))
+            fh.flush()
+            if not _try_lock_nb(fh):
+                raise OSError("the lock could not be taken")
+            entry = [path, fh, 0]
+        except OSError as e:
+            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
+                           f"— a --clean-staging run started meanwhile may sweep "
+                           f"this run's waiting outputs")
+            if fh is not None:
+                fh.close()
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            entry = [None, None, 0]
+        _STAGING_HOLDS[key] = entry
+    entry[2] += 1
+    try:
+        yield
+    finally:
+        entry[2] -= 1
+        if entry[2] <= 0:
+            _STAGING_HOLDS.pop(key, None)
+            if entry[1] is not None:
+                _unlock_nb(entry[1])
+                entry[1].close()
+                try:
+                    entry[0].unlink()
+                except OSError:
+                    pass
+
+
+def _holds_staging(fn):
+    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
+    outputs wait in staging until their destination folder is complete."""
+    def wrapper(*args, **kwargs):
+        with _staging_hold(TEMP2_DIR):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+def _staging_used_by_another_run(staging_dir) -> bool:
+    """True while another live process holds a `.jxlphoto-live-*` file in
+    `staging_dir`. One nobody holds is from a run that died: it is removed."""
+    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
+           if e[0] is not None}
+    try:
+        marks = [f for f in Path(staging_dir).iterdir()
+                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
+    except OSError:
+        return False
+    busy = False
+    for f in marks:
+        if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True
+            continue
+        if fresh:
+            busy = True             # just created: maybe not locked yet
+            continue
+        try:
+            fh = open(f, "r+b")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True             # cannot even open it: a live holder (fail closed)
+            continue
+        try:
+            if not _try_lock_nb(fh):
+                busy = True
+                continue
+            _unlock_nb(fh)
+        finally:
+            fh.close()
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return busy
+
+
 def _clean_staging(staging_dir):
     """Delete leftovers that have been idle long enough to be nobody's.
 
@@ -587,6 +735,10 @@ def _clean_staging(staging_dir):
     to preserve. Sweeping first clears the previous runs' orphans instead.
     """
     if not staging_dir:
+        return 0, 0
+    if _staging_used_by_another_run(staging_dir):
+        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
+                       f"(its outputs may be waiting there for their folder to finish)")
         return 0, 0
     found, _ = _staging_leftovers(staging_dir)
     if not found:
@@ -1144,6 +1296,9 @@ _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 # the whole group or nothing (a half-deleted group is spread across two
 # folders with a dangling master page).
 MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
+MULTIPAGE_PAGES_PREFIX = "jxlphoto-pages:"
+# The encoder's PAGES_XMP_PREFIX: how many JXLs the split produced. The delete
+# gate keeps a group whose pages are not all in the run (#574).
 
 DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # dc:Relation token on every --output-icc output: "<prefix><label>", label =
@@ -1387,16 +1542,21 @@ def _available_memory_bytes():
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,
-                           buffering=None, modular=False):
+                           buffering=None, modular=False,
+                           extra_bytes_per_pixel=0):
     """--workers lowered so `requested` parallel cjxl processes fit in memory.
-    Logs the estimate; warns when it had to lower the count."""
+    Logs the estimate; warns when it had to lower the count.
+
+    extra_bytes_per_pixel: what each worker holds on the CALLER's side on top
+    of its cjxl (the encoder's page array and PNG, #569)."""
     if WORKER_MEMORY_FRACTION <= 0:
         return requested
     if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
         logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
                        f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    per_job = pixels * (_cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+                        + extra_bytes_per_pixel)
     avail, budget = _available_memory_bytes()
     if avail is None:
         logger.info("Memory: could not read the available memory — "
@@ -1410,8 +1570,10 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
         kind = "whole-image"
     else:
         kind = "streaming"
+    _extra = (f", incl. ~{pixels * extra_bytes_per_pixel / 2**30:.1f} GB in Python"
+              if extra_bytes_per_pixel > 0 else "")
     logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}{_extra}) | "
                 f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
     if cap < requested:
         hint = ""
@@ -2220,11 +2382,31 @@ def _long_codec_paths(cmd):
     out = [cmd[0]]
     for a in cmd[1:]:
         s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if (s is None or len(s) < _LONG_PATH_THRESHOLD or s.startswith("-")
-                or s.startswith("\\\\?\\") or not os.path.isabs(s)):
+        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
             out.append(a)
             continue
+        if not os.path.isabs(s):
+            # A relative path is long by its ABSOLUTE form (#575: an input
+            # given relative to a deep working folder). Only a token that
+            # looks like a path counts: a separator or an extension, no '='
+            # and not a number — option values (-d 0.1, --effort 7,
+            # -x strip=xmp) are never paths (261104 review, M1).
+            looks_like_path = (
+                "=" not in s
+                and (os.sep in s or (os.altsep and os.altsep in s)
+                     or bool(os.path.splitext(s)[1])))
+            try:
+                float(s)
+                looks_like_path = False
+            except ValueError:
+                pass
+            if not looks_like_path:
+                out.append(a)
+                continue
         s = os.path.abspath(s)
+        if len(s) < _LONG_PATH_THRESHOLD:
+            out.append(a)
+            continue
         out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
     return out
 
@@ -3017,13 +3199,25 @@ def _canon_for_compare(a):
     return a
 
 
-def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path):
+def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path,
+                           require_original_space=False):
     """Decode a JXL back to pixels. Raises on any failure — a verification that
-    cannot run must never read as a verification that passed."""
+    cannot run must never read as a verification that passed.
+
+    require_original_space: also raise when djxl did not return the pixels in
+    the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
+    a comparison against the SOURCE pixels says why it cannot run (#584)."""
     png_path = tmp_dir / "verify.png"
-    r = _run_captured(["djxl", str(jxl_path), str(png_path)], CJXL_TIMEOUT)
+    icc_args, out_icc, orig_icc = (_djxl_icc_args(tmp_dir) if require_original_space
+                                   else ([], None, None))
+    r = _run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, CJXL_TIMEOUT)
     if r.returncode != 0 or not png_path.exists():
         raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+    if require_original_space and _decoded_in_original_space(out_icc, orig_icc) is False:
+        raise RuntimeError(
+            "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
+            "cannot compare it with the source — source kept "
+            "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
@@ -3535,6 +3729,10 @@ def reorder_jxl_boxes(jxl_path):
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
     Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
+    # Payloads are views into `data`, never copies (#583): the file is held
+    # in memory once, and the output is written box by box.
+    # (A stand-in that only slices -- the tests' 4 GiB file -- is used as is.)
+    view = memoryview(data) if isinstance(data, (bytes, bytearray)) else data
     file_size = len(data)
     
     # Sanity check: reasonable file size (prevent OOM on malformed files)
@@ -3581,18 +3779,18 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
             if i + ext_size > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            header, payload = data[i:i+16], view[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
-            header, payload = data[i:i+8], data[i+8:]
+            header, payload = data[i:i+8], view[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             if i + size > file_size:
                 raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+8], data[i+8:i+size]
+            header, payload = data[i:i+8], view[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
@@ -3643,7 +3841,7 @@ def reorder_jxl_boxes(jxl_path):
     # box in the file. If regrouping moved it earlier, rewrite its header with
     # the real computed size, otherwise everything after it becomes payload
     # and the file is corrupt.
-    out = b""
+    parts = []
     for idx, (name, h, p) in enumerate(ordered):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
@@ -3658,9 +3856,14 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
-        out += h + p
+        parts.append((h, p))
 
-    jxl_path.write_bytes(out)
+    # Every header is settled before the file is opened: a box that cannot
+    # be re-headered above raises with the file untouched.
+    with open(jxl_path, "wb") as f:
+        for h, p in parts:
+            f.write(h)
+            f.write(p)
 
 
 def _capture_output_identity(write_path: Path, final_path: Path):
@@ -5365,6 +5568,7 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
         return (str(jxl_path), "error", str(final_path))
 
 
+@_holds_staging
 def process_group(items, workers: int):
     """Convert/copy all planned items in parallel, promote out of staging (or
     replace in place), then run the delete gate. `items` is a list of dicts
@@ -5438,6 +5642,18 @@ def process_group(items, workers: int):
             # not be adoptable as a NEW input.
             dest_tmp = (final_path.parent
                         / f"{uuid.uuid4().hex}_{final_path.stem}.tmp")
+            # #572: the copy out of staging is checked BEFORE it replaces the
+            # only copy — a cross-volume move that damages bytes without an
+            # error (antivirus, a flaky USB bridge) used to be caught only
+            # after the original was gone.
+            try:
+                _staged_size = it["write"].stat().st_size
+                _staged_md5 = md5_of_file(it["write"])
+            except OSError as e:
+                logger.error(f"  REPLACE FAILED, original kept | "
+                             f"{final_path.name} | staged re-encode unreadable: {e}")
+                results[src_str] = ("error", str(final_path))
+                return
             try:
                 shutil.move(str(it["write"]), str(dest_tmp))
             except OSError as e:
@@ -5450,6 +5666,22 @@ def process_group(items, workers: int):
                     pass
                 moved = False
             else:
+                try:
+                    _copy_ok = (dest_tmp.stat().st_size == _staged_size
+                                and md5_of_file(dest_tmp) == _staged_md5
+                                and _verify_jxl_integrity(dest_tmp))
+                except OSError:
+                    _copy_ok = False
+                if not _copy_ok:
+                    logger.error(f"  REPLACE REFUSED, original kept | {final_path.name} | "
+                                 f"the copy out of staging is not the verified "
+                                 f"re-encode (size/MD5/integrity)")
+                    try:
+                        dest_tmp.unlink()
+                    except OSError:
+                        pass
+                    results[src_str] = ("error", str(final_path))
+                    return
                 try:
                     os.replace(str(dest_tmp), str(final_path))
                     moved = True
@@ -5699,6 +5931,67 @@ def _read_mpg_markers(paths: list):
                 except OSError:
                     pass
     return mpg, complete
+
+
+def _read_mpg_pages_batch(paths: list):
+    """({path str: declared page count | None}, complete) — the
+    jxlphoto-pages:<N> the encoder writes on every page of a split.
+
+    Read only for the sources the delete gate found in a group (#574), in the
+    same batches as _read_mpg_markers. `complete` False when any batch could
+    not be read: the gate then keeps those groups (fail closed)."""
+    totals = {str(p): None for p in paths}
+    index = {os.path.normcase(str(p)): str(p) for p in paths}
+    if not paths:
+        return totals, True
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    complete = True
+    _prog = _batch_read_state("Multipage page counts", len(paths))
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        _batch_read_tick(_prog, i)
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
+            if r.returncode != 0 or not r.stdout:
+                complete = False
+                continue
+            for entry in json.loads(r.stdout):
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                key = os.path.normcase(str(Path(src)))
+                if key not in index:
+                    continue
+                for token in (rel if isinstance(rel, list) else [str(rel)]):
+                    token = str(token).strip()
+                    if token.startswith(MULTIPAGE_PAGES_PREFIX):
+                        try:
+                            totals[index[key]] = int(token[len(MULTIPAGE_PAGES_PREFIX):])
+                        except ValueError:
+                            totals[index[key]] = -1     # unreadable: fail closed
+                        break
+        except Exception:
+            complete = False
+            continue
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return totals, complete
 
 
 def _reconstructed_jpeg_md5(jxl_path: Path) -> Optional[str]:
@@ -6031,18 +6324,46 @@ def _delete_gate(items, results, promoted):
             # the source TIFF, so two copies of one split in two folders share
             # it without being the same document.
             by_group.setdefault((str(dec[0]["src"].parent), _g), []).append(dec)
+    # A group is only whole when every page the split produced is in this run
+    # (#574): a single-file input, or a sibling filtered out by the mode or a
+    # rename, made one page look like a lone group, and it was deleted while
+    # its siblings stayed — the document split across two folders. Read only
+    # for grouped sources that would otherwise be deleted.
+    _short = {}             # group key -> (pages here, pages declared)
+    _grouped = [m[0]["src"] for members in by_group.values()
+                if all(x[3] for x in members) for m in members]
+    if _grouped:
+        _totals, _totals_complete = _read_mpg_pages_batch(_grouped)
+        for _g, members in by_group.items():
+            if not all(m[3] for m in members):
+                continue
+            declared = [_totals.get(str(m[0]["src"])) for m in members]
+            if not _totals_complete or any(d == -1 for d in declared):
+                _short[_g] = (len(members), None)
+            elif any(d is not None and d > len(members) for d in declared):
+                _short[_g] = (len(members), max(d for d in declared if d is not None))
     for _g, members in by_group.items():
-        if all(m[3] for m in members):
+        if all(m[3] for m in members) and _g not in _short:
             continue        # whole group passed (or a lone page): decide alone
         for m in members:
             if m[3]:
                 vetoed.add(str(m[0]["src"]))
+    _short_reason = {str(m[0]["src"]): _short[_g]
+                     for _g, members in by_group.items() if _g in _short
+                     for m in members}
 
     # Pass 3: apply.
     for it, status, final_path, ok, reason, settled in decisions:
         if not settled:
             continue
-        if ok and str(it["src"]) in vetoed:
+        if ok and str(it["src"]) in _short_reason:
+            _k, _n = _short_reason[str(it["src"])]
+            ok, reason = False, (
+                f"only {_k} of the {_n} pages of its multi-page document are in "
+                f"this run — the group is kept together" if _n else
+                "the page count of its multi-page document could not be read — "
+                "the group is kept together")
+        elif ok and str(it["src"]) in vetoed:
             ok, reason = False, ("sibling page of the same multi-page document "
                                  "did not pass its gates — the group is kept "
                                  "together")
@@ -6956,8 +7277,16 @@ def main():
     # manifest row sends, since an empty Destination cell falls back to the
     # Source. Refusing it made every mode-0 manifest entry exit 2.
     def _same_dir(a, b) -> bool:
-        return (os.path.normcase(os.path.abspath(str(a)))
-                == os.path.normcase(os.path.abspath(str(b))))
+        # The same file or folder by another name too (#577): a junction,
+        # subst drive, UNC share or 8.3 name of the input is still the input.
+        # A path that does not exist yet is never "the same".
+        if (os.path.normcase(os.path.abspath(str(a)))
+                == os.path.normcase(os.path.abspath(str(b)))):
+            return True
+        try:
+            return os.path.samefile(str(a), str(b))
+        except OSError:
+            return False
 
     if (not single_file and args.output is not None and args.mode == 2
             and _same_dir(args.output, args.input)):

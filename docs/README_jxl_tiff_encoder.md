@@ -550,8 +550,11 @@ Options:
                   the source page. --distance 0: the pixels must match exactly.
                   Lossy: a brightness + PSNR sanity check that catches a black or
                   scrambled encode -- NOT a quality check, since quality loss is
-                  what you asked for. Roughly doubles the run. Needs djxl and
-                  imagecodecs. Only affects --delete-source. ON by default
+                  what you asked for. A lossy master that stores its profile
+                  as an ICC blob (ICC_PNG_STRATEGY always/heuristic) cannot be
+                  compared — djxl returns it in linear sRGB — so its TIFF is
+                  kept, and the log says why. Roughly doubles the run. Needs
+                  djxl and imagecodecs. Only affects --delete-source. ON by default
                   since v2.18.0 (VERIFY_ROUNDTRIP = True): a run that deletes
                   TIFFs always verifies; set VERIFY_ROUNDTRIP = False at the
                   top of the script for the old structure-only gate
@@ -636,7 +639,9 @@ Options:
                   wrote, never subfolders, and nothing touched in the last hour
                   (a concurrent run may still own it). Sweeps the EFFECTIVE
                   staging dir, so it works with TEMP2_DIR set in the script and
-                  no --staging flag. Never runs under --dry-run
+                  no --staging flag. Never runs under --dry-run. Sweeps nothing
+                  while another run is using the same staging folder (its
+                  finished outputs may be waiting there for their folder)
 ```
 
 ### Exit codes
@@ -988,7 +993,9 @@ against about **1.3 GB/worker** at d=0.05 e=9. The run estimates this from the
 largest page and the settings and **caps `--workers` automatically** so the jobs
 fit in the smaller of the commit limit and the free physical RAM
 (`WORKER_MEMORY_LIMIT`) × `WORKER_MEMORY_FRACTION`; it logs `Memory: ...` and
-warns `--workers N reduced to K`. Use `--buffering 1` to force streaming when
+warns `--workers N reduced to K`. The estimate includes what the encoder's own
+process holds per worker — the page and the PNG it hands to cjxl, about
+0.7 GB at 45 MP (`incl. ~X GB in Python` in that line). Use `--buffering 1` to force streaming when
 you need the lower peak: at effort 7 the files come out ~1.5 % larger with the
 same quality, but at effort 8–9 streaming gives effort 7's result — measured in
 [Streaming vs whole-image](README_jxl_recompressor.md#streaming-vs-whole-image-what---buffering-1-costs-measured)

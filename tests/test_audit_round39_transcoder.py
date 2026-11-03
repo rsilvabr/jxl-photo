@@ -548,7 +548,8 @@ def test_beside_final_temps_end_in_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr(tr.subprocess, "run", fake_run)
     monkeypatch.setattr(tr, "_tool_version", lambda exe: (0, 12, 0))
     monkeypatch.setattr(tr, "_copy_metadata", lambda *a, **k: None)
-    monkeypatch.setattr(tr, "_run_exiftool_argfile", lambda *a, **k: None)
+    # rc 0: the marker write is checked since #571.
+    monkeypatch.setattr(tr, "_run_exiftool_argfile", lambda *a, **k: _FakeRun())
     monkeypatch.setattr(tr, "reorder_jxl_boxes", lambda p: None)
     monkeypatch.setattr(tr, "has_jbrd_box", lambda p: True)
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)

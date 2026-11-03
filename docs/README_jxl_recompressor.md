@@ -326,7 +326,7 @@ Same semantics as the other scripts in the toolkit:
 
 | Mode | What it does |
 |---|---|
-| 0 | Flat: file→file/folder. **Without an output argument — or with the source's own folder as output (what a manifest row sends) — replaces the source in place** (confirmation required) |
+| 0 | Flat: file→file/folder. **Without an output argument — or with the source's own folder as output (what a manifest row sends; also under another name: a junction, a subst drive, a UNC share) — replaces the source in place** (confirmation required) |
 | 1 | Flat folder → `recompressed_jxl/` subfolder inside it |
 | 2 | Flat folder → explicit output folder (default: `<input>/recompressed_jxl`) |
 | 3 | Recursive → mirror tree, `JXL_recompressed/` inside each source folder |
@@ -416,7 +416,10 @@ Multi-page documents delete as a **group**: every page sharing a
 page of the group is deleted — a half-deleted group would be spread across
 two folders with a dangling master page. A page that did not make it this run
 at all (its conversion failed, a policy skipped it, provenance refused it)
-counts as a failed page: it keeps its siblings too.
+counts as a failed page: it keeps its siblings too. So does a page that is
+not in the run at all: each page records how many the split produced
+(`jxlphoto-pages:`), and a group with fewer pages in the run than that — a
+single file given as input, a sibling left out — is kept whole.
 
 In-place runs (mode 0/8, and staging promotions) replace the source only
 after the re-encode passed every gate, via a temp file in the destination
@@ -866,6 +869,7 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       overwrite guard" in behavior_and_limitations.md
 --staging DIR         Staging directory on a fast SSD (overrides TEMP2_DIR)
 --clean-staging       Sweep staging leftovers older than 1h before the run
+                      (nothing while another run uses the same staging folder)
 --no-preflight        Skip the advisory free-space check (it counts only the
                       files this run writes: up-to-date outputs in a sync
                       and policy skips are left out)
