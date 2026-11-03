@@ -9,13 +9,19 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #605.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #608.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
 v1.9.0_beta2 row) and were renumbered on 2026-10-07 — each of those sections
 says so. #586–#599 were set aside for round 70, which was worked on in
 parallel with round 71, and stay unused.
+
+**Bugs that never shipped are here too.** A bug introduced by a commit and
+caught before the next release (by the suite, the real-photo battery or a
+review) gets its own number like any other; its row says "never
+released". A review fix that only completes the fix of a numbered bug
+stays under that number ("review M1, E-C #575").
 
 **Rounds are not releases.** A round is one audit or fix batch; the *Shipped
 in* column says which release carried it. The version numbers some rounds
@@ -24,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | — | #600–#604 (5) |
+| [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | — | #600–#607 (8) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |
 | [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | v2.20.0 | #563–#567 (5) |
 | [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |
@@ -100,6 +106,9 @@ before its fix).
 | 602 | **A derivative next to its master stopped modes 6/7 on a duplicate output.** The decoder, the recompressor and the transcoder's JPEG/PNG conversion skip the other tools' folders by the names in their settings (#565), so a derivative folder named only on a command line (`--export-jxl-folder 16B_JXL_sRGB`) was still taken: same file names as the masters, same output, the run aborted. They now leave out every file carrying `jxlphoto-derived` in mode 6 and in mode 7 without an explicit subfolder (`_drop_derivative_inputs`, `_drop_derivative_pairs`, the decoder's marker read); a marker that cannot be read keeps the file. The wrapper's manifest collision walk re-checks the files that collide. | jxl_tiff_decoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py, jxl_photo.py | Fixed |
 | 603 | **A `--mode` in the expert flags ran behind checks made for another mode.** The flags are appended last and win in the child's argparse, while the wrapper's in-place and delete confirmations, collision checks and counts had judged the wizard's mode. The wrapper now refuses the run (`_flags_set_mode`). | jxl_photo.py | Fixed |
 | 604 | **A typo in the expert flags stopped the run after the HHMM confirmation.** The child's argparse exited 2 only once it started. The wrapper now parses the flags with the child's own parser (`build_parser()`, moved out of `main()` in the encoder, decoder and recompressor; `--help` unchanged) before the run and names the problem (`_expert_flags_problem`); a child that cannot be imported leaves the check to the child, as before. | jxl_photo.py, jxl_tiff_encoder.py, jxl_tiff_decoder.py, jxl_recompressor.py | Fixed |
+| 605 | **Menu C ended in a Python traceback for a user name outside the ANSI code page.** The encoder's `--clear-icc-cache` printed the cache folder before `setup_logger` set the console to UTF-8; through a pipe (the wrapper's menu C, a scheduled task) stdout is the ANSI code page, so a folder under a Japanese user name raised `UnicodeEncodeError` — after the cache had been cleared. Found by the delivery B review on Windows (the test was written where stdout is UTF-8). | jxl_tiff_encoder.py | Fixed |
+| 606 | **Typing 1 for `--buffering 1` set level 0 (never released).** The Step 7 options screen and menu S listed every choice by position, 0 being the default: `--buffering 1` became 0 — the slowest, most memory-hungry level — and 3 became 2; menu S's `CJXL_BUFFERING` 1 wrote `null`, and `DJXL_OUTPUT_DEPTH` 16 could not be typed. A choice made of numbers is now typed as the number (`none` for None, `-` for the default; `_choice_keys`). | jxl_photo.py | Fixed |
+| 607 | **The script settings overlay could turn off the encoder's copy of the original profile (never released).** `EMBED_ICC_IN_JXL` was in the encoder's overlay table: `false` there writes lossy masters without the byte-exact ICC of their TIFF, and a deleting run still deletes the TIFF — a change to what is written and deleted, which the overlay keeps per run. It is a safety setting now (`_OVERLAY_SAFETY_SETTINGS`, the four scripts). | all four backends | Fixed |
 
 ## Round-70 — what the 261103 audit left open (2026-11-03)
 
