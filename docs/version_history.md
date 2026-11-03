@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.19.2](#v2192)** | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
+| **[v2.20.0](#v2200)** | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
+| [v2.19.2](#v2192) | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
 | [v2.19.1](#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
 | [v2.19.0](#v2190) | 2026-11-02 | The original ICC profile's copy moves out of XMP CreatorTool ("creator software") into a `jxlphoto-iccprofile` marker; files written by older versions are still read |
 | [v2.18.1](#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
@@ -78,6 +79,52 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.20.0
+
+**Released 2026-11-03.** Supersedes v2.19.2. Hardening from a full read of
+the five scripts; most fixes close rare combinations. Two command lines
+behave differently — see
+[Upgrading](upgrading.md#v2200-unreadable-provenance-records-are-refused-modes-67-skip-other-scripts-folders).
+
+- **An output whose provenance record could not be read is refused (#563).**
+  When the planning-time exiftool read failed or stalled (a very busy disk,
+  a file locked by another program), every script took that output for an
+  old archive without a record and overwrote it — and it may have been
+  another photo's only copy. It is refused now, with "its provenance markers
+  could not be read" (a warning with `--no-overwrite-guard`); the next run,
+  once exiftool reads the folder, goes ahead. The delete gates already kept
+  such sources.
+- **Modes 6/7 skip the other scripts' folders (#565).** Below `_EXPORT` the
+  decoder and the recompressor took the recompressor's derivatives
+  (`16B_JXL_small`, …) and the transcoder's JPEG archives (`JXL_jpeg`) for
+  masters; with the same file names as the masters, the run stopped on the
+  duplicate output, every time. Those folders are skipped (names read from
+  the other scripts' settings); a folder the encoder writes masters into is
+  never skipped, nor the subfolder mode 7 asks for. The wrapper's manifest
+  check follows. A folder named only on a command line (another run's
+  `--export-jxl-folder`) is not known yet: use mode 7 there.
+- **The planning phase reports progress (#566).** The exiftool reads before
+  the first file printed nothing until they finished, and on a large library
+  on a busy disk that could pass the wrapper's 60 minutes without output,
+  which stopped the run as hung. Each read now prints `N/M read` between
+  batches once it is slow, and the wrapper's limit is a setting
+  (`child_idle_timeout_minutes` in its config file).
+- **A restamp keeps the Explorer thumbnail before the image data (#564).**
+  `--restamp-moved`, `--restamp-then-sync` and the `--provenance adopt` stamp
+  moved a master's thumbnail box to the end of the file. jxl-thumb reads
+  every box, so Explorer kept showing it; menu option 9
+  (`--refresh-explorer-thumbnails`) now also moves such a box back, bytes
+  unchanged (`REORDERED`).
+- **One option registry in the wrapper.** The direct run and every manifest
+  entry build the script's command line through the same code, from one
+  list of options; the 25 recorded command lines and the owner's presets
+  come out identical. A direct JXL → JPEG/PNG run now says when it ignores a
+  rename left in its options (#567).
+
+New tests for each fix fail on v2.19.2 (real-exiftool and real-codec ones
+included, Japanese + `[ ]` + space + `%` paths). 3044 tests; the real-photo
+battery passes (132 checks, all optional fixture folders).
 
 ## v2.19.2
 

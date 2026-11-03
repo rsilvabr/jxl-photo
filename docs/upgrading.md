@@ -11,6 +11,26 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.20.0: unreadable provenance records are refused; modes 6/7 skip other scripts' folders
+
+Nothing to redo. Two things may look different:
+
+- **"its provenance markers could not be read"**: an existing output whose
+  record exiftool could not read (a very busy disk, a file locked by another
+  program) is no longer overwritten. Re-run when the disk is quiet; with
+  `--no-overwrite-guard` it is overwritten with a warning, as before.
+- **Modes 6/7 of the decoder and the recompressor skip the other scripts'
+  folders** below `_EXPORT` (`16B_JXL_small`, `recompressed_jxl`,
+  `JXL_recompressed`, `JXL_small`, `*_JXL_small`, `JXL_jpeg`, and the names
+  configured in those scripts), logged as `Ignored N JXL(s) in other tools'
+  output folders`. To decode or recompress such a folder on purpose, use
+  mode 7 with `--export-subfolder` set to it. Runs that used to stop with
+  "Duplicate output destination" because of those folders now go through.
+
+Optional: if you ran `--restamp-moved` or `--provenance adopt` on masters
+with an Explorer thumbnail, menu option 9 puts the thumbnail back in its
+documented place before the image data (Explorer showed it either way).
+
 ## v2.19.2: IrfanView shows the EXIF of JPEG → JXL files; repair older ones in place
 
 Lossless JPEG → JXL files written before v2.19.2 show no EXIF in IrfanView:
