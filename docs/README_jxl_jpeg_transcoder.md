@@ -312,7 +312,9 @@ session/_EXPORT/AdobeRGB/photo.jxl → ignored
 below the input folder**; only when there is none below it, the closest one
 above (a run pointed at a folder inside `_EXPORT`). A library stored under a
 folder whose name also matches the marker (`Lightroom_Export`, `C1_Export`)
-no longer anchors there instead of on the real `_EXPORT` below.
+no longer anchors there instead of on the real `_EXPORT` below. A run
+pointed AT such a folder still anchors on it (the input folder counts):
+point it at the year or event folder inside.
 
 **When decoding (JXL → JPEG/PNG), derivatives are left out** in mode 6, and in mode 7 without an explicit
 subfolder: a file carrying `jxlphoto-derived` (a colour-converted, resized or

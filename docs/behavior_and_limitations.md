@@ -83,7 +83,7 @@ A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has
 
 ## Modes 6/7: which `_EXPORT` counts, and what is left out
 
-The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.
+The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there — unless the run is pointed at that very folder, which then counts as the marker: point it at the year or event folder inside. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.
 
 ## The scripts' settings: in the file, or in the overlay
 

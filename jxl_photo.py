@@ -5244,7 +5244,7 @@ class InteractiveMenu:
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Step 4: Organization Mode[/bold cyan]")
             console.print("[dim]The export marker (e.g. '_EXPORT') is configurable in option 4 (Edit default settings)[/dim]")
-            console.print("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') require editing the scripts directly[/dim]")
+            console.print("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') are the scripts' settings: Script settings (menu S)[/dim]")
 
             # Highlight auto mode and manifest
             console.print()
@@ -5325,7 +5325,7 @@ class InteractiveMenu:
         note_lines = [
             "[bold yellow]Configurable items:[/bold yellow] the export marker (e.g. '_EXPORT') can be customized",
             "in [bold cyan]Edit default settings (option 4)[/bold cyan]. Folder names like 'converted_jxl'",
-            "are script settings (edit the scripts directly).",
+            "are the scripts' own settings: [bold cyan]Script settings (menu S)[/bold cyan].",
         ]
         if RICH_AVAILABLE and console:
             console.print()

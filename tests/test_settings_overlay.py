@@ -389,3 +389,12 @@ def test_worker_memory_fraction_above_one_is_taken(tmp_path, module):
     path = _overlay(tmp_path, {module: {"WORKER_MEMORY_FRACTION": 1.2}})
     r = _values(module, ["WORKER_MEMORY_FRACTION"], path, tmp_path)
     assert r["v"]["WORKER_MEMORY_FRACTION"] == 1.2, r["o"]["warnings"]
+
+
+def test_the_wizard_no_longer_sends_users_into_the_scripts():
+    """Step 4 told users that folder names like 'converted_jxl' "require
+    editing the scripts directly" — menu S changes them now."""
+    src = (SCRIPTS / "jxl_photo.py").read_text(encoding="utf-8")
+    assert "edit the scripts directly" not in src
+    assert "require editing the scripts directly" not in src
+    assert src.count("Script settings (menu S)") >= 2
