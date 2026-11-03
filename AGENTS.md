@@ -221,6 +221,17 @@
   by an integrity check plus (for JPEG recovery) `djxl --reconstruct_jpeg` or a
   same-run MD5 match. Keep those gates fail-CLOSED: an unverifiable output must
   block deletion, never be waved through.
+- **"Cannot tell" is not "no marker" (#563).** `_read_source_markers_batch`
+  (parity-pinned in the four backends) marks a file whose batch failed,
+  stalled or returned no entry with `unread: True`; its src/srcsum stay None.
+  Every overwrite guard refuses an unread output while `OVERWRITE_GUARD` is
+  on (warning when off) and the strict guards name the cause; the delete
+  gates already fail closed on it. A new consumer of that reader must not
+  read an unread file as a legacy markerless archive.
+- **Planning-time batch reads report progress (#566):** every `*_batch`
+  reader calls `_batch_read_tick` between batches (parity-pinned with
+  `_batch_read_state`). A new batch reader does the same, or a slow disk
+  makes the wrapper stop the child as hung (`child_idle_timeout_minutes`).
 - **Per-file exiftool calls use `EXIFTOOL_TIMEOUT`** (each script defines it
   as its codec timeout), never a literal: a 60/120 s limit turned twelve good
   45 MP files into errors under a 17-worker load on 2026-10-06. Only the
@@ -272,6 +283,24 @@
   match this exactly (it takes the root into account too) and follows the
   configured folder via `_with_child_marker`, which applies the global on the
   imported child module and restores it afterwards.
+- Below the export marker, modes 6/7 of the decoder and the recompressor skip
+  the OTHER tools' JXL output folders (#565: `_skip_other_tool_output`, names
+  from the siblings' settings via `ast` plus the shipped defaults, per-script
+  tables `_OTHER_TOOL_*`; helpers parity-pinned). Never the encoder's master
+  folder, never mode 7's requested subfolder; the transcoder's decode stays
+  unfiltered (it is how a JPEG archive comes back). The wrapper's
+  `_skip_check` mirrors it (`_other_tool_skip`).
+- **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION
+  REGISTRY ===`). Both the direct run and every manifest entry build the
+  child's argv through `build_child_cmd`; never add a flag to a builder by
+  hand. To pass a new child flag: one `Opt` (directions, kind, group, level,
+  label, help, where its value lives — `legacy_key` or `value(ctx)`), or a
+  `_policy_*` rule when it needs more than "emit when set"; the value comes
+  from the run or the child (`_workflow_or_child`), never a literal default.
+  A flag the wrapper deliberately does not pass goes in `NOT_OFFERED` with the
+  reason. `tests/test_wrapper_option_registry.py` fails on an undeclared child
+  flag; `tests/test_wrapper_argv_golden.py` pins the argv of 25 runs (regen
+  only from a known-good commit: `JXLPHOTO_REGEN_ARGV_GOLDEN=1`).
 
 ## Verification
 - **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").
