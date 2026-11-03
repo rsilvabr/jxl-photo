@@ -150,6 +150,45 @@ def test_ta_skip_master_carries_the_original_profile(tmp_path, fmt):
         # Pixels untouched by the relabel: still the TIFF's numbers.
         want = tifffile.imread(str(src)).astype(np.float64) / 257.0
         assert abs(_rgb8(produced).mean() - want.mean()) < 2.0
+    else:
+        # The iCCP is the only colour chunk left (261104 review, S2).
+        colour = [c for c in _png_chunks(produced)
+                  if c in (b"iCCP", b"sRGB", b"gAMA", b"cHRM", b"cICP")]
+        assert colour == [b"iCCP"], colour
+
+
+def _png_chunks(path: Path):
+    import struct
+    b, i, out = Path(path).read_bytes(), 8, []
+    while i + 8 <= len(b):
+        n, name = struct.unpack(">I", b[i:i + 4])[0], b[i + 4:i + 8]
+        out.append(name)
+        i += 12 + n
+    return out
+
+
+def test_ta_relabel_drops_a_cicp_chunk(tmp_path):
+    """261104 review S2: cICP takes precedence over iCCP (PNG 3rd edition); a
+    relabelled PNG must not keep one."""
+    import struct
+    import zlib
+
+    def chunk(name, data):
+        return (struct.pack(">I", len(data)) + name + data
+                + struct.pack(">I", zlib.crc32(name + data) & 0xFFFFFFFF))
+    raw = b"".join(b"\x00" + b"\x10\x20\x30" * 4 for _ in range(4))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+           + chunk(b"cICP", bytes([1, 13, 0, 1]))            # sRGB, full range
+           + chunk(b"sRGB", b"\x00")
+           + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    f = _hostile(tmp_path) / "DSC_0001 (2) 5%.png"
+    f.write_bytes(png)
+    icc = romm_toe_icc()
+    assert tra._png_replace_icc(f, icc) is True
+    kinds = _png_chunks(f)
+    assert b"cICP" not in kinds and b"sRGB" not in kinds, kinds
+    assert _icc_of(f) == icc
 
 
 @real_magick
