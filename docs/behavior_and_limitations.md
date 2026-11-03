@@ -87,7 +87,7 @@ The anchor is the first folder matching the marker at or below the input folder;
 
 ## The scripts' settings: in the file, or in the overlay
 
-Each script's settings are the variables at the top of the file. `jxl_photo.py`'s menu S changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA` — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-s)
+Each script's settings are the variables at the top of the file. `jxl_photo.py`'s menu S changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA`, the encoder's copy of the original profile (`EMBED_ICC_IN_JXL`) — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-s)
 
 ## Default re-run behavior differs per script
 

@@ -1745,7 +1745,8 @@ EXPORT_JXL_SUBFOLDER = ""
 # portable install), else in the home folder (%USERPROFILE% on Windows).
 # Only the names in _OVERLAY_SETTINGS are taken, each checked against its
 # type and range; the safety settings (deletion, confirmations, guards,
-# verification thresholds, overwrite) never are. A value it takes IS this
+# verification thresholds, overwrite, the encoder's copy of the original
+# ICC) never are. A value it takes IS this
 # script's setting for the run (the per-run reset restores it), and every
 # run's log names the file and the settings it changed.
 _SETTINGS_OVERLAY_FILE = ".jxl_script_settings.json"
@@ -1754,7 +1755,8 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "DELETE_SOURCE", "DELETE_CONFIRM", "DELETE_SKIPPED", "DELETE_SOURCE_REQUIRE_MD5",
     "STORE_MD5", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP", "VERIFY_LOSSY_MIN_MEAN_RATIO",
     "VERIFY_LOSSY_MIN_PSNR", "ALLOW_INCOMPLETE_GROUPS", "PROVENANCE_CHECK",
-    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD"})
+    "ADOPT_SCAN", "OVERWRITE", "STRIP_METADATA", "AUTO_REPAIR_JBRD",
+    "EMBED_ICC_IN_JXL"})
 
 
 def _settings_overlay_path():

@@ -124,7 +124,7 @@
   against the script's own value and every choice against its flag's.
   `_OVERLAY_SAFETY_SETTINGS` (identical in the four: deletion,
   confirmations, guards, provenance, verification thresholds, `OVERWRITE`,
-  `STRIP_METADATA`, `AUTO_REPAIR_JBRD`) is never taken; never list one of
+  `STRIP_METADATA`, `AUTO_REPAIR_JBRD`, `EMBED_ICC_IN_JXL`) is never taken; never list one of
   those, a marker constant (`*_PREFIX`, `*_FLAG`) or a value computed at
   import (`PIL_MAX_IMAGE_PIXELS` feeds `Image.MAX_IMAGE_PIXELS`). A setting
   computed from another (`EXIFTOOL_TIMEOUT = CJXL_TIMEOUT`) goes in

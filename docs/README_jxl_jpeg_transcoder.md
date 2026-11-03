@@ -592,7 +592,7 @@ empty = off), else `.jxl_script_settings.json` next to the scripts, else the
 same name in the user profile. Only the settings this script lists in
 `_OVERLAY_SETTINGS` are taken, each checked against its type, range or
 choices; the safety settings (deletion, confirmations, guards, verification
-thresholds, `OVERWRITE`, `STRIP_METADATA`) never are. The log names the file
+thresholds, `OVERWRITE`, `STRIP_METADATA`, `EMBED_ICC_IN_JXL`) never are. The log names the file
 and every setting it changed (`Script settings overlay: <file>: N value(s):
 ...`) and every entry it refused. A flag on the command line still wins over
 both.

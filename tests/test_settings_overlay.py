@@ -367,3 +367,15 @@ def test_menu_s_a_number_is_typed_as_itself(tmp_path, monkeypatch, module, key, 
     })
     menu.script_settings_flow()
     assert json.loads(path.read_text(encoding="utf-8")) == {key: {name: expected}}
+
+
+def test_the_original_icc_copy_is_a_safety_setting(tmp_path):
+    """#607: EMBED_ICC_IN_JXL = False makes a lossy master without the
+    byte-exact copy of its TIFF's profile, and a deleting run still deletes
+    the TIFF (the pixel check does not compare profiles). Such a choice may
+    be made in the script, never by a file the run does not show."""
+    path = _overlay(tmp_path, {"jxl_tiff_encoder": {"EMBED_ICC_IN_JXL": False}})
+    r = _values("jxl_tiff_encoder", ["EMBED_ICC_IN_JXL"], path, tmp_path)
+    assert r["v"]["EMBED_ICC_IN_JXL"] is True
+    assert r["o"]["applied"] == []
+    assert "EMBED_ICC_IN_JXL is a safety setting" in " ".join(r["o"]["warnings"])

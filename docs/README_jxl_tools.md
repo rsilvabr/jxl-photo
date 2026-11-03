@@ -992,7 +992,8 @@ log. Every run logs the file and the settings it changed, e.g.
 `DELETE_SKIPPED`, `DELETE_CONFIRM`, `DELETE_SOURCE_REQUIRE_MD5`,
 `STORE_MD5`), the guards and checks (`OVERWRITE_GUARD`, `PROVENANCE_CHECK`,
 `ADOPT_SCAN`, `ALLOW_INCOMPLETE_GROUPS`, `VERIFY_ROUNDTRIP` and its
-thresholds), `OVERWRITE`, `STRIP_METADATA` and `AUTO_REPAIR_JBRD`. Those stay
+thresholds), `OVERWRITE`, `STRIP_METADATA`, `AUTO_REPAIR_JBRD` and the
+encoder's copy of the original profile (`EMBED_ICC_IN_JXL`). Those stay
 per-run choices (the wizard, the flags) or a deliberate edit of the script.
 
 A change applies to every script run from then on; the wizard's own defaults
