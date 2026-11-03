@@ -133,3 +133,34 @@ def test_rb_control_whole_group_is_deleted(tmp_path, monkeypatch):
     assert not p0.exists() and not p1.exists(), "the whole group should be deleted"
 
 
+# ===========================================================================
+# R-C (#577)
+# ===========================================================================
+
+def _junction(target: Path, link: Path):
+    import _winapi
+    _winapi.CreateJunction(str(target), str(link))
+    return link
+
+
+@real
+@windows
+def test_rc_mode2_junction_output_is_the_input(tmp_path):
+    src = tmp_path / HOSTILE / "JXL [in] (1)"
+    _lossless_jxl(src / "DSC_0001 (2).jxl")
+    link = _junction(src, tmp_path / "リンク [j] 5%")
+    r = _run("jxl_recompressor.py", src, link, "--mode", "2", "--distance", "1",
+             "--dry-run", check=False)
+    assert r.returncode == 2, r.stdout[-2000:]
+    assert "equals the input folder" in " ".join((r.stdout + r.stderr).split())
+
+
+@real
+@windows
+def test_rc_mode0_junction_runs_in_place(tmp_path):
+    src = tmp_path / HOSTILE / "JXL [in] (2)"
+    _lossless_jxl(src / "DSC_0002 (2).jxl")
+    link = _junction(src, tmp_path / "リンク [k] 5%")
+    r = _run("jxl_recompressor.py", src, link, "--mode", "0", "--distance", "1",
+             "--overwrite", "--delete-confirm-off", check=False)
+    assert "REPLACED (in place)" in r.stdout + r.stderr, r.stdout[-3000:]

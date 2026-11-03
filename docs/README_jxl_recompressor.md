@@ -326,7 +326,7 @@ Same semantics as the other scripts in the toolkit:
 
 | Mode | What it does |
 |---|---|
-| 0 | Flat: file→file/folder. **Without an output argument — or with the source's own folder as output (what a manifest row sends) — replaces the source in place** (confirmation required) |
+| 0 | Flat: file→file/folder. **Without an output argument — or with the source's own folder as output (what a manifest row sends; also under another name: a junction, a subst drive, a UNC share) — replaces the source in place** (confirmation required) |
 | 1 | Flat folder → `recompressed_jxl/` subfolder inside it |
 | 2 | Flat folder → explicit output folder (default: `<input>/recompressed_jxl`) |
 | 3 | Recursive → mirror tree, `JXL_recompressed/` inside each source folder |
