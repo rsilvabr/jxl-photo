@@ -1920,7 +1920,7 @@ _OVERLAY_SETTINGS = {
     "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
     "TEMP_DIR": ("path?",),
     "TEMP2_DIR": ("path?",),
-    "WORKER_MEMORY_FRACTION": ("float", 0.0, 1.0),
+    "WORKER_MEMORY_FRACTION": ("float", 0.0, 2.0),   # 0 = no cap; above 1 trusts the estimate
     "WORKER_MEMORY_LIMIT": ("choice", "both", "commit", "physical"),
     "USE_RAM_FOR_PNG": ("bool",),
     "ENCODE_TAG_MODE": ("choice", "xmp", "software", "off"),

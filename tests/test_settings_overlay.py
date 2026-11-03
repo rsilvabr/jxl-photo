@@ -379,3 +379,13 @@ def test_the_original_icc_copy_is_a_safety_setting(tmp_path):
     assert r["v"]["EMBED_ICC_IN_JXL"] is True
     assert r["o"]["applied"] == []
     assert "EMBED_ICC_IN_JXL is a safety setting" in " ".join(r["o"]["warnings"])
+
+
+@pytest.mark.parametrize("module", ["jxl_tiff_encoder", "jxl_recompressor"])
+def test_worker_memory_fraction_above_one_is_taken(tmp_path, module):
+    """The scripts take any fraction (the owner's execution copy runs 1.2,
+    trusting the per-cjxl estimate's ~10% margin); the overlay refused
+    everything above 1.0, so that edit could not move into it."""
+    path = _overlay(tmp_path, {module: {"WORKER_MEMORY_FRACTION": 1.2}})
+    r = _values(module, ["WORKER_MEMORY_FRACTION"], path, tmp_path)
+    assert r["v"]["WORKER_MEMORY_FRACTION"] == 1.2, r["o"]["warnings"]

@@ -1386,7 +1386,7 @@ _OVERLAY_SETTINGS = {
     "EXIFTOOL_BATCH_TIMEOUT": ("int", 1, None),
     "TEMP_DIR": ("path?",),
     "TEMP2_DIR": ("path?",),
-    "WORKER_MEMORY_FRACTION": ("float", 0.0, 1.0),
+    "WORKER_MEMORY_FRACTION": ("float", 0.0, 2.0),   # 0 = no cap; above 1 trusts the estimate
     "WORKER_MEMORY_LIMIT": ("choice", "both", "commit", "physical"),
     "ON_DOWNGRADE": ("choice", "ask", "copy", "skip", "convert"),
     "ON_REGENERATION": ("choice", "ask", "copy", "skip", "convert"),
