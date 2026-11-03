@@ -59,7 +59,9 @@ software that made this file" printed the whole block.
 - The decoder reads it and then **removes** it from the TIFF it writes
   (`CLEANUP_XMP_ICC_MARKER`; `--no-icc-cleanup` keeps it).
 - The JPEG transcoder **removes** it from the JPEG/PNG it decodes: a delivered
-  file has its profile in the normal place.
+  file has its profile in the normal place. Without `--icc-profile`, that
+  profile is this copy when the file carries one — also for a master whose
+  pixels were encoded tagged sRGB, which used to come out labelled sRGB.
 - A recompressor derivative with `--output-icc` **replaces** it with the target
   profile, so it always names the colour space the pixels are in.
 

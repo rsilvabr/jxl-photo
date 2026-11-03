@@ -35,6 +35,7 @@ import json
 import re
 import struct
 import uuid
+import zlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -5283,6 +5284,181 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
                        "no sRGB chunk) — refusing to guess")
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Chunks that describe a PNG's colour space; an iCCP replaces all of them.
+_PNG_COLOUR_CHUNKS = (b"iCCP", b"sRGB", b"gAMA", b"cHRM")
+_JPEG_ICC_HEADER = b"ICC_PROFILE\x00"
+_JPEG_ICC_CHUNK = 65519        # 65535 - 2 (length) - 14 (header + seq + count)
+
+
+def _png_chunk(name: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + name + data
+            + struct.pack(">I", zlib.crc32(name + data) & 0xFFFFFFFF))
+
+
+def _png_replace_icc(path: Path, icc: bytes) -> bool:
+    """Make `icc` the colour profile of the PNG at `path`, pixels untouched:
+    its iCCP/sRGB/gAMA/cHRM chunks go, one iCCP goes right after the IHDR.
+    Streamed through a temp beside the file + os.replace. False (file left
+    alone) when it already carries exactly that profile."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        if f.read(8) != _PNG_SIGNATURE:
+            raise RuntimeError(f"not a PNG: {path.name}")
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+            if name == b"iCCP":
+                data = f.read(n)
+                try:
+                    if zlib.decompress(data[data.index(b"\x00") + 2:]) == icc:
+                        return False
+                except (ValueError, zlib.error):
+                    pass
+                break
+            if name == b"IDAT":
+                break
+            f.seek(n + 4, 1)
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            dst.write(src.read(8))
+            while True:
+                head = src.read(8)
+                if len(head) < 8:
+                    break
+                n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+                if name in _PNG_COLOUR_CHUNKS:
+                    src.seek(n + 4, 1)
+                    continue
+                dst.write(head)
+                shutil.copyfileobj(_LimitedReader(src, n + 4), dst)
+                if name == b"IHDR":
+                    dst.write(_png_chunk(b"iCCP", b"ICC Profile\x00\x00"
+                                         + zlib.compress(icc)))
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+class _LimitedReader:
+    """read() at most `n` bytes from `f` (for shutil.copyfileobj)."""
+
+    def __init__(self, f, n):
+        self.f, self.left = f, n
+
+    def read(self, size=-1):
+        if self.left <= 0:
+            return b""
+        size = self.left if size is None or size < 0 else min(size, self.left)
+        data = self.f.read(size)
+        self.left -= len(data)
+        return data
+
+
+def _jpeg_header_segments(f):
+    """[(marker, payload)] of a JPEG's segments up to (not including) SOS, the
+    file positioned at the SOS marker. Raises on anything but a JPEG."""
+    if f.read(2) != b"\xff\xd8":
+        raise RuntimeError("not a JPEG")
+    segs = []
+    while True:
+        m = f.read(2)
+        if len(m) < 2 or m[0] != 0xFF:
+            raise RuntimeError("malformed JPEG marker")
+        while m[1] == 0xFF:                       # fill bytes
+            m = m[:1] + f.read(1)
+        if m[1] == 0xDA:                          # SOS: entropy data follows
+            f.seek(-2, 1)
+            return segs
+        if m[1] in (0x01,) or 0xD0 <= m[1] <= 0xD7:
+            segs.append((m[1], b""))
+            continue
+        ln = struct.unpack(">H", f.read(2))[0]
+        segs.append((m[1], f.read(ln - 2)))
+
+
+def _jpeg_components(path: Path):
+    """Number of colour components of a JPEG (from its SOFn), or None."""
+    try:
+        with open(path, "rb") as f:
+            for marker, payload in _jpeg_header_segments(f):
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    return payload[5] if len(payload) > 5 else None
+    except (OSError, RuntimeError, struct.error):
+        return None
+    return None
+
+
+def _jpeg_replace_icc(path: Path, icc: bytes) -> bool:
+    """Make `icc` the colour profile of the JPEG at `path`, the image data
+    untouched: its APP2 ICC_PROFILE segments go, new ones go right after the
+    leading APP0/APP1 segments. Temp beside the file + os.replace. False (file
+    left alone) when it already carries exactly that profile."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        segs = _jpeg_header_segments(f)
+    old = sorted((p[12], p[14:]) for m, p in segs
+                 if m == 0xE2 and p[:12] == _JPEG_ICC_HEADER and len(p) >= 14)
+    if old and b"".join(d for _s, d in old) == icc:
+        return False
+    pieces = [icc[i:i + _JPEG_ICC_CHUNK] for i in range(0, len(icc), _JPEG_ICC_CHUNK)]
+    if len(pieces) > 255:
+        raise RuntimeError("ICC profile too large for a JPEG")
+    app2 = [b"\xff\xe2" + struct.pack(">H", 2 + 14 + len(d)) + _JPEG_ICC_HEADER
+            + bytes((i + 1, len(pieces))) + d for i, d in enumerate(pieces)]
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            segs = _jpeg_header_segments(src)        # src now at the SOS
+            dst.write(b"\xff\xd8")
+            placed = False
+            for marker, payload in segs:
+                if marker == 0xE2 and payload[:12] == _JPEG_ICC_HEADER:
+                    continue
+                if not placed and marker not in (0xE0, 0xE1):
+                    dst.write(b"".join(app2))
+                    placed = True
+                if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                    dst.write(bytes((0xFF, marker)))
+                else:
+                    dst.write(bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2)
+                              + payload)
+            if not placed:
+                dst.write(b"".join(app2))
+            shutil.copyfileobj(src, dst)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def _relabel_with_carried_icc(jxl_path: Path, out_path: Path, is_png: bool) -> bool:
+    """Give a direct djxl JPEG/PNG the profile the master carries in XMP
+    (_carried_icc), pixels untouched (#568). Only when djxl decoded in the
+    file's own space — the caller checks — and when the profile fits the
+    output's channels (an RGB profile on a grey file is invalid). True when
+    the output was relabelled."""
+    creator, tokens = _read_creator_and_relation(jxl_path)
+    icc = _carried_icc(creator, tokens)
+    if not icc or len(icc) < 20:
+        return False
+    grey = (_png_is_grayscale(out_path) if is_png
+            else _jpeg_components(out_path) == 1)
+    if icc[16:20] != (b"GRAY" if grey else b"RGB "):
+        return False
+    return (_png_replace_icc if is_png else _jpeg_replace_icc)(out_path, icc)
+
+
 def _verify_profile_in_output(path: Path, is_png: bool) -> None:
     """Fail closed when a colour-converted output lost its ICC profile.
 
@@ -5817,7 +5993,11 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # decoded at 16 bits whenever the pixels will be resized or sharpened —
         # the final --bit-depth is applied at the end of the chain.
         size = None
-        if (output_icc and MAGICK_AVAILABLE) or derivative:
+
+        def _via_magick():
+            """The ImageMagick pipeline (colour conversion, derivative, and
+            the lossy ICC-blob decode of #568); returns the derivative size."""
+            size = None
             with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                 tmp_png = Path(tmp) / "tmp.png"
                 _decode_bits = 16 if derivative else bit_depth
@@ -5882,18 +6062,52 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
                 if not grey:
                     _verify_profile_in_output(actual_out, is_png=is_png)
-        elif is_png:
-            # Direct djxl to PNG (explicit format: the temp may end in .tmp)
-            r = _run_captured(["djxl", _fmt_flag, str(jxl_path), str(actual_out), f"--bits_per_sample={bit_depth}"], CODEC_TIMEOUT)
-            if r.returncode != 0:
-                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+            return size
+
+        if (output_icc and MAGICK_AVAILABLE) or derivative:
+            size = _via_magick()
         else:
-            # Direct djxl to JPG (preserves embedded ICC; explicit format:
-            # the temp may end in .tmp)
-            quality_flag = f"--jpeg_quality={quality}"
-            r = _run_captured(["djxl", _fmt_flag, quality_flag, str(jxl_path), str(actual_out)], CODEC_TIMEOUT)
-            if r.returncode != 0:
-                raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+            # Direct djxl to PNG/JPG (explicit format: the temp may end in
+            # .tmp). The same call reports which colour space djxl decoded to
+            # and what the file's own is (#568).
+            with tempfile.TemporaryDirectory(dir=TEMP_DIR) as _itmp:
+                icc_args, out_icc, orig_icc = _djxl_icc_args(Path(_itmp))
+                if is_png:
+                    cmd = (["djxl", _fmt_flag] + icc_args
+                           + [str(jxl_path), str(actual_out),
+                              f"--bits_per_sample={bit_depth}"])
+                else:
+                    cmd = (["djxl", _fmt_flag, f"--jpeg_quality={quality}"] + icc_args
+                           + [str(jxl_path), str(actual_out)])
+                r = _run_captured(cmd, CODEC_TIMEOUT)
+                if r.returncode != 0:
+                    raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+                _space = _decoded_in_original_space(out_icc, orig_icc)
+            if _space is False:
+                # A lossy JXL carrying a whole ICC blob: djxl's direct output
+                # is not in the file's own space, and labelling it with the
+                # original profile would be wrong colour. Convert it back from
+                # the float decode, like an --icc-profile run does.
+                if not MAGICK_AVAILABLE:
+                    raise RuntimeError(
+                        "this lossy JXL stores an ICC blob: djxl's direct output is "
+                        "not in the file's own colour space, and the conversion "
+                        "needs ImageMagick (magick) in PATH")
+                logger.info(f"  >ICC blob in a lossy file: converting through "
+                            f"ImageMagick instead of djxl's direct output | "
+                            f"{jxl_path.name}")
+                size = _via_magick()
+            elif _space is True:
+                # The pixels are in the file's own space; the profile that
+                # describes them is the one the master carries in XMP. A
+                # master whose encode skipped the iCCP (cautious/heuristic/
+                # skip) has its pixels tagged sRGB in the codestream, and the
+                # output was labelled sRGB — wrong colour, and the token
+                # holding the real profile is stripped below.
+                _relabel_with_carried_icc(jxl_path, actual_out, is_png)
+            else:
+                logger.debug(f"djxl did not report the colour spaces — output "
+                             f"kept as decoded | {jxl_path.name}")
 
         # Preserve EXIF/XMP/IPTC metadata that djxl/ImageMagick may drop. A
         # derivative gets the provenance markers REMOVED in the same breath
