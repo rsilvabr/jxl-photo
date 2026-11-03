@@ -346,3 +346,24 @@ def test_main_menu_offers_s(tmp_path, monkeypatch):
     wp, menu = _menu(tmp_path, monkeypatch, {})
     with mock.patch("builtins.input", side_effect=["s"]):
         assert menu.show_main_menu(False) == "S"
+
+
+@pytest.mark.parametrize("module,key,name,typed,expected", [
+    ("2", "jxl_tiff_decoder", "DJXL_OUTPUT_DEPTH", "16", 16),
+    ("1", "jxl_tiff_encoder", "CJXL_BUFFERING", "1", 1),
+    ("1", "jxl_tiff_encoder", "CJXL_BUFFERING", "none", None),
+])
+def test_menu_s_a_number_is_typed_as_itself(tmp_path, monkeypatch, module, key, name,
+                                            typed, expected):
+    """#606: menu S listed number choices by position (DJXL_OUTPUT_DEPTH:
+    1 = 8, 2 = 16; CJXL_BUFFERING: 1 = null, 2 = 0), so the value a user
+    typed was not the value written."""
+    path = tmp_path / HOSTILE / ".jxl_script_settings.json"
+    monkeypatch.setenv("JXLPHOTO_SETTINGS", str(path))
+    wp, menu = _menu(tmp_path, monkeypatch, {
+        "settings.script": [module, "0"],
+        "settings.pick": [f"/{name.lower()}", "1", ""],
+        "settings.choice": [typed],
+    })
+    menu.script_settings_flow()
+    assert json.loads(path.read_text(encoding="utf-8")) == {key: {name: expected}}

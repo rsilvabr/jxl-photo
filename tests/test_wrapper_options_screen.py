@@ -144,7 +144,8 @@ def _setup_for(opt, direction, tmp_path):
     answers, expected = {}, True
     if opt.kind != "flag":
         if opt.choices:
-            answers[f"opt.{opt.id}"] = str(len(opt.choices))
+            # The last choice, by the key the prompt offers for it (#606).
+            answers[f"opt.{opt.id}"] = wp._choice_keys(opt.choices)[0][-1]
             expected = opt.choices[-1]
         elif opt.kind == "notnone":
             answers[f"opt.{opt.id}"] = "0.8"
@@ -194,7 +195,7 @@ def test_zero_is_a_value(tmp_path, monkeypatch):
     """--buffering 0 is the slowest, best-compressing level, not 'unset'."""
     opt = next(o for o in wp.REGISTRY if o.id == "buffering")
     wf = _workflow(tmp_path, "tiff2jxl")
-    key = str(opt.choices.index(0) + 1)
+    key = wp._choice_keys(opt.choices)[0][opt.choices.index(0)]   # "0" (#606)
     menu = _menu(tmp_path, monkeypatch, PickUI([opt], {"opt.buffering": key}))
     menu._all_options_screen(wf)
     assert wf["extra_options"]["buffering"] == 0
@@ -433,3 +434,25 @@ def test_main_dispatches_r_and_c(tmp_path, monkeypatch):
     except SystemExit:
         pass
     assert seen == ["R", "C"]
+
+
+@pytest.mark.parametrize("typed,expected", [("1", 1), ("0", 0), ("3", 3)])
+def test_a_number_is_typed_as_itself(tmp_path, monkeypatch, typed, expected):
+    """#606: --buffering's levels were listed by position (key 1 = level 0),
+    so typing 1 for "--buffering 1" set the slowest, most memory-hungry level.
+    A choice made of numbers is typed as the number; '-' is the default."""
+    opt = next(o for o in wp.REGISTRY if o.id == "buffering")
+    wf = _workflow(tmp_path, "tiff2jxl")
+    menu = _menu(tmp_path, monkeypatch, PickUI([opt], {"opt.buffering": typed}))
+    menu._all_options_screen(wf)
+    assert wf["extra_options"]["buffering"] == expected
+    assert _has_pair(_argv(menu, wf), "--buffering", str(expected))
+
+
+def test_a_number_choice_has_a_default_key(tmp_path, monkeypatch):
+    opt = next(o for o in wp.REGISTRY if o.id == "buffering")
+    wf = _workflow(tmp_path, "tiff2jxl", )
+    wf.setdefault("extra_options", {})["buffering"] = 1
+    menu = _menu(tmp_path, monkeypatch, PickUI([opt], {"opt.buffering": "-"}))
+    menu._all_options_screen(wf)
+    assert "buffering" not in wf["extra_options"]

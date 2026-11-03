@@ -3245,6 +3245,20 @@ class ScriptedUI(UI):
         return v
 
 
+def _choice_keys(values) -> Tuple[List[str], str]:
+    """The keys a choice prompt offers for `values`, and the key of "the
+    default" (#606). A choice made of numbers is typed as the number itself
+    ('none' for None) and '-' is the default: listed by position, typing 1
+    for "--buffering 1" set level 0 (the slowest, most memory-hungry one) and
+    a decoder depth of 16 could not be typed at all. Any other choice is
+    picked by position, 0 being the default."""
+    values = list(values)
+    numeric = [v for v in values if v is not None]
+    if numeric and all(isinstance(v, int) and not isinstance(v, bool) for v in numeric):
+        return ["none" if v is None else str(v) for v in values], "-"
+    return [str(i + 1) for i in range(len(values))], "0"
+
+
 def _slot_set(workflow: Dict, legacy_key: str, value) -> None:
     """Write a registry entry's value where the run keeps it (None = unset)."""
     where, _, key = legacy_key.partition('.')
@@ -3603,10 +3617,11 @@ class InteractiveMenu:
                                            ("3", "off")], "1")
             return {"1": None, "2": True, "3": False}[key]
         if o.choices:
-            opts = [("0", "script default")] + [(str(i + 1), str(c))
-                                                 for i, c in enumerate(o.choices)]
-            key = ui.choose(qid, "Value", opts, "0")
-            return None if key == "0" else o.choices[int(key) - 1]
+            keys, dflt = _choice_keys(o.choices)
+            opts = [(dflt, "script default")] + [(k, str(c))
+                                                 for k, c in zip(keys, o.choices)]
+            key = ui.choose(qid, "Value", opts, dflt)
+            return None if key == dflt else o.choices[keys.index(key)]
         text = ui.ask_text(qid, "Value (empty = script default)",
                            "" if current in (None, False) else str(current)).strip()
         if not text:
@@ -3789,11 +3804,13 @@ class InteractiveMenu:
                 ui.line(f"{name}: {help_text}")
             ui.line(f"In the script: {json.dumps(_overlay_json(script_value), ensure_ascii=False)}")
             if spec[0] == "choice":
-                opts = [("0", "the script's value (remove from the overlay)")] + [
-                    (str(i + 1), json.dumps(c)) for i, c in enumerate(spec[1:])]
-                pick = ui.choose("settings.choice", "Value", opts, "0")
-                new = _KEEP if pick == "0" else spec[int(pick)]
-                remove = pick == "0"
+                values = list(spec[1:])
+                keys, dflt = _choice_keys(values)
+                opts = [(dflt, "the script's value (remove from the overlay)")] + [
+                    (k, json.dumps(c)) for k, c in zip(keys, values)]
+                pick = ui.choose("settings.choice", "Value", opts, dflt)
+                remove = pick == dflt
+                new = _KEEP if remove else values[keys.index(pick)]
             else:
                 text = ui.ask_text("settings.value", "New value ('-' = the script's "
                                    "value, Enter = keep)", "")
