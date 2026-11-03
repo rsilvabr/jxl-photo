@@ -209,3 +209,37 @@ def test_ej_scan_distance_drives_the_cautious_probe(tmp_path):
     assert "Skipping ICC in PNG iCCP" in r.stdout + r.stderr
 
 
+# ===========================================================================
+# E-D (#576)
+# ===========================================================================
+
+def _group_ids(paths):
+    marks = enc._read_group_markers_batch(list(paths))
+    return {Path(p).name: marks.get(str(p)) for p in paths}
+
+
+@real
+def test_ed_moved_split_heals_into_one_group(tmp_path):
+    a = tmp_path / HOSTILE / "A [x]"
+    a.mkdir(parents=True)
+    tif = a / "scan 吾妻 (1).tif"
+    with tifffile.TiffWriter(str(tif)) as w:
+        w.write(np.full((64, 96, 3), 20000, np.uint16), photometric="rgb")
+        w.write(np.full((64, 96, 3), 40000, np.uint16), photometric="rgb")
+    _run("jxl_tiff_encoder.py", a, "--mode", "1", "--distance", "0", "--effort", "3",
+         "--no-preflight")
+    b = tmp_path / HOSTILE / "B 吾妻 (2)"
+    a.rename(b)                                   # the event folder was renamed
+    out = b / enc.CONVERTED_JXL_FOLDER
+    p0, p1 = out / "scan 吾妻 (1).jxl", out / "scan 吾妻 (1)_page1.jxl"
+    before = _group_ids([p0, p1])
+    assert before[p0.name] and before[p0.name] == before[p1.name], before
+    p1.unlink()                                   # one page lost (failed before)
+    _run("jxl_tiff_encoder.py", b, "--mode", "1", "--distance", "0", "--effort", "3",
+         "--no-preflight")
+    assert p1.exists()
+    after = _group_ids([p0, p1])
+    assert after[p0.name] == after[p1.name] == before[p0.name], (
+        f"the re-encoded page joined another group: {after}")
+
+
