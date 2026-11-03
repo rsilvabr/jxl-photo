@@ -734,6 +734,14 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
   [thumbnail tip](#explorer-thumbnail-tip-windows). Asked only while the tip
   applies (no JXL thumbnail handler on this PC) or after you turned it off.
 
+**Set in the file only (for now):** `child_idle_timeout_minutes` (default
+`60`, at least `5`) — how long a script may print nothing before the wrapper
+stops it as hung ("No output for N min"). The scripts print a line per
+finished file and, during planning, one per slow exiftool batch
+("Provenance markers: 1200/8000 read …"); raise it only for a single file or
+batch slower than that (a huge drum scan at effort 10, a very slow network
+share). Edit the value in the config file while the wrapper is closed.
+
 Alongside these defaults the config keeps the **last-run answers** the wizard
 offers back as defaults — among them `last_exclude_folders`, the raw
 `';'`-separated string of the last TIFF↔JXL run's folder-exclusion answer

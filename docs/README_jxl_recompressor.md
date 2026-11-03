@@ -303,6 +303,12 @@ every file that needs it, whatever `EXPLORER_THUMBNAIL` says, and logs
 `REORDERED` for a file where only that changed. Nothing else in the file
 moves.
 
+It also **puts a thumbnail back before the image data.** `--restamp-moved`
+and the `--provenance adopt` stamp of the encoder moved an existing
+thumbnail box to the end of the file, where jxl-thumb does not look for it
+(fixed now). The refresh moves such a box back, its bytes unchanged, and
+logs `REORDERED`.
+
 Each file is edited through a copy beside it: the thumbnail box rewritten,
 the integrity check, and the **whole image data compared byte for byte**
 (SHA-256) before the copy replaces the file. The file then gets its **own
@@ -336,6 +342,10 @@ the modes 6/7 output folder configured via `EXPORT_JXL_FOLDER` /
 `--export-jxl-folder` (e.g. a derivative folder such as `16B_JXL_sRGB`), so a
 re-run never eats its own output. Pointing the input **at** such a folder to
 compress it again is legitimate and works — only descendants are filtered.
+Modes 6/7 also skip the transcoder's JPEG archives below the marker
+(`JXL_jpeg`, `converted_jxl`, and its configured folders, read from its
+settings): they share the masters' names and would land on the same output.
+The encoder's master folder is never skipped, nor a folder mode 7 asks for.
 
 Mode 2 is recursive and writes **flat by name**: an output folder that
 equals the input folder is refused at startup (exit 2) — root files would be
@@ -551,7 +561,9 @@ Costs and notes:
   The run ends with a warning saying how many files got no derivative this
   way (since v2.15.2), so a folder left empty does not read as up to date.
 - To decode only the masters to TIFF later, use the decoder in mode 7 with
-  `--export-subfolder 16B_JXL` (mode 6 would also pick the derivative folder).
+  `--export-subfolder 16B_JXL`. The decoder's mode 6 skips the derivative
+  folder named in this script's settings (`EXPORT_JXL_FOLDER`), but not one
+  named only on the command line, like `16B_JXL_sRGB` here.
 
 ### Resize and sharpening
 

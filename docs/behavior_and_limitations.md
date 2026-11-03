@@ -73,6 +73,8 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 
 **Never with deletion:** `--no-overwrite-guard` together with `--delete-source` is refused (exit 2).
 
+**When the record cannot be read** (exiftool's planning read failed or stalled — a very busy disk, a file locked by another program): the existing output is refused too, with "its provenance markers could not be read", in every script. Re-run once the disk is quiet. With the guard off it is overwritten with a warning, like a record naming another path. (Until this fix such an output was taken for an old archive without a record, and overwritten.)
+
 **Still protected with the guard off:** a lossless JPEG archive (`jbrd`) of a different JPEG, an original TIFF master (the decoder never overwrites a TIFF it did not write) or an edited decode, and a file a derivative run did not write.
 
 ## Default re-run behavior differs per script
