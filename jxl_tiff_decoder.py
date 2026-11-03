@@ -2814,6 +2814,9 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                 ["-j", "-XMP-dc:Relation", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
             )
             kept = []
+            # #582: a read that fails cannot tell which internal markers were
+            # copied from the JXL, so they would stay in the TIFF.
+            _relation_read_ok = rr.returncode == 0 and bool(rr.stdout)
             if rr.returncode == 0 and rr.stdout:
                 import json as _json
                 try:
@@ -2821,6 +2824,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                     _rel = _data[0].get("Relation") if _data else None
                 except Exception:
                     _rel = None
+                    _relation_read_ok = False
                 if _rel is not None:
                     _values = _rel if isinstance(_rel, list) else [str(_rel)]
                     def _is_internal_marker(token: str) -> bool:
@@ -2870,10 +2874,23 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             # clear-then-append for a list tag, and the stale internal markers
             # copied from the JXL survive (caught by
             # test_decoder_markers_do_not_leak_into_the_tiff).
+            if not _relation_read_ok:
+                # Same verdict as any other failed metadata step (#582): the
+                # TIFF may carry the JXL's internal tokens next to its own.
+                copied = False
+                logger.warning(
+                    f"  RELATION READ FAILED (exiftool rc={rr.returncode}) | "
+                    f"{tiff_path.name} — the JXL's internal markers may stay in the TIFF")
             if has_internal:
-                _run_exiftool_argfile(
+                r_clear = _run_exiftool_argfile(
                     ["-overwrite_original", "-XMP-dc:Relation=", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
                 )
+                if r_clear.returncode != 0:
+                    copied = False
+                    logger.warning(
+                        f"  RELATION CLEAR FAILED (exiftool rc={r_clear.returncode}) | "
+                        f"{tiff_path.name} | "
+                        f"{(r_clear.stderr or r_clear.stdout or 'no output').strip()[:200]}")
             # ...but everything that gets ADDED fits in one call: the user's own
             # Relation values and the provenance markers together. Two calls
             # instead of three, and one instead of two when there was nothing to

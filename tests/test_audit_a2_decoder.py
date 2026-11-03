@@ -101,3 +101,44 @@ def test_db_no_full_image_float(tmp_path, monkeypatch):
         f"a float of {max(sizes)} samples: the whole image ({img.size})")
 
 
+# ===========================================================================
+# D-D (#582)
+# ===========================================================================
+
+@real
+@pytest.mark.parametrize("which", ["clear", "read"])
+def test_dd_failed_relation_step_is_an_error(tmp_path, monkeypatch, which):
+    src = _hostile(tmp_path, "TIFF16 [a]")
+    tifffile.imwrite(str(src / "DSC_0004 (2).tif"), _image(64, 96), photometric="rgb")
+    jxl_dir = tmp_path / HOSTILE / "16B_JXL 5%"
+    r = subprocess.run([sys.executable, str(_SCRIPTS / "jxl_tiff_encoder.py"), str(src),
+                        str(jxl_dir), "--mode", "0", "--distance", "0", "--effort", "3",
+                        "--no-preflight"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=600,
+                       stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, r.stdout[-2000:]
+    jxl = jxl_dir / "DSC_0004 (2).jxl"
+    assert jxl.exists()
+    real_call = dec._run_exiftool_argfile
+
+    def fake(lines, *a, **k):
+        lines = [str(x) for x in lines]
+        if which == "clear" and lines[:2] == ["-overwrite_original", "-XMP-dc:Relation="]:
+            return subprocess.CompletedProcess(lines, 1, "", "Error: simulated")
+        # The read of the TIFF being written (a temp name, never the .jxl).
+        if (which == "read" and lines[:2] == ["-j", "-XMP-dc:Relation"]
+                and len(lines) == 3 and not lines[-1].lower().endswith(".jxl")):
+            return subprocess.CompletedProcess(lines, 1, "", "Error: simulated")
+        return real_call(lines, *a, **k)
+    monkeypatch.setattr(dec, "_run_exiftool_argfile", fake)
+    out = tmp_path / HOSTILE / "16B_TIFF (1)"
+    monkeypatch.setattr(sys, "argv", ["jxl_tiff_decoder.py", str(jxl_dir), str(out),
+                                      "--mode", "0", "--delete-source",
+                                      "--delete-confirm-off"])
+    try:
+        dec.main()
+    except SystemExit:
+        pass
+    assert jxl.exists(), "the JXL was deleted although its TIFF kept internal tokens"
+
+
