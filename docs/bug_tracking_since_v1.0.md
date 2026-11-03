@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #568.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #586.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,6 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | — | #568–#585 (18) |
 | [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | v2.20.0 | #563–#567 (5) |
 | [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |
 | [Round-67 — EXIF hidden from IrfanView](#round-67--exif-hidden-from-irfanview-2026-11-02) | 2026-11-02 | v2.19.1 | #561 (1) |
@@ -78,6 +79,38 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-70 — what the 261103 audit left open (2026-11-03)
+
+The rest of the 261103 full-repo audit: eighteen findings, almost all rare
+combinations (a cross-volume copy that damages bytes without an error, a
+concurrent `--clean-staging`, a split whose folder moved and lost a page), plus
+the memory the encoder's Python side held per worker. Regression tests:
+`tests/test_audit_a2_transcoder.py`, `tests/test_audit_a2_encoder.py`,
+`tests/test_audit_a2_decoder.py`, `tests/test_audit_a2_recompressor.py`,
+`tests/test_audit_a2_shared.py` (every behaviour test fails at the base
+commit `488e8b6`; the byte-equivalence pins pass on both).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 568 | **A direct JXL → JPEG/PNG of some lossy masters came out with the wrong colour label.** Without `--icc-profile`, djxl writes the output itself. A master whose encode kept the real profile only in XMP (the cautious ICC strategy does this for table-curve and scanner profiles) has its pixels tagged sRGB in the codestream, so the JPEG/PNG was labelled sRGB while holding another space's numbers — and the `jxlphoto-iccprofile` copy was then stripped. Now the direct output gets the master's carried profile, pixels untouched (`_relabel_with_carried_icc`, `_png_replace_icc`, `_jpeg_replace_icc`); a lossy master storing its profile as a whole ICC blob, which djxl does not return in its own space, goes through the ImageMagick float path that `--icc-profile` already used (`_via_magick`). Masters with a native profile keep djxl's JPEG bytes. | jxl_jpeg_transcoder.py | Fixed |
+| 569 | **The encoder's worker cap ignored the memory its own process held per worker.** It budgeted cjxl only, while each worker's page array, a uint16 copy of a page that already was uint16, a big-endian copy, the raw PNG buffer and two concatenations added ~1–1.4 GB at 45 MP. `make_png_bytes` now streams the rows through one zlib stream (byte-identical PNG), the page is not copied, and the cap adds `_PYTHON_BYTES_PER_PIXEL` (measured) through a new last parameter of `_memory_capped_workers` (parity-pinned copy in the recompressor). `WORKER_MEMORY_FRACTION` is unchanged. | jxl_tiff_encoder.py, jxl_recompressor.py | Fixed |
+| 570 | **The decoder's 256 px preview cost two float64 copies of the whole image** (~2.2 GB per worker at 45 MP, 4 GB at 84 MP). `add_jpeg_preview` converts to 8 bits in blocks of rows with the same formula; the preview is byte-identical. | jxl_tiff_decoder.py | Fixed |
+| 571 | **A lossy conversion that lost its metadata still counted as done.** In the transcoder's JPEG/PNG → JXL and JXL → JPEG/PNG conversions, a failed `-tagsfromfile` copy or marker/History write was logged at DEBUG, the file reported OK and `--delete-source` deleted the source behind an output without its IPTC or its provenance markers. `_copy_metadata` now raises on an exiftool failure (exit 0 with "No writable tags" stays a success) and the marker write checks its exit code: the file is an ERROR, its partial output removed, the source kept — the encoder's and the decoder's verdict. | jxl_jpeg_transcoder.py | Fixed |
+| 572 | **In place with staging, the copy out of staging replaced the only copy before it was checked.** `_replace_in_place` moved the staged re-encode beside the source and swapped it in, then verified it. A cross-volume move that damages bytes without an error replaced the master. The copy's size, MD5 and integrity are now checked against the staged file before the swap; a mismatch keeps the original. | jxl_recompressor.py | Fixed |
+| 573 | **The cautious ICC probe ran at the run's distance, not the file's.** With `--distance 0 --scan-distance 1` a film scan was probed lossless, the lossy-blob refusal never fired, the "embed" verdict was cached under d=0 and the lossy scan stored its scanner profile as a blob. `should_embed_icc_in_png`, `_cautious_should_embed_icc` and `_cautious_test_icc_depth` take the file's distance (new last parameter, default = `CJXL_DISTANCE`), also in the cache key. | jxl_tiff_encoder.py | Fixed |
+| 574 | **A lone page of a split was deleted while its siblings stayed.** The recompressor's group veto only saw the pages in the run, so a single-file input (or a sibling filtered out) made one page look like a whole group. The gate now reads each page's `jxlphoto-pages:<N>` (`_read_mpg_pages_batch`) and keeps a group whose pages are not all in the run, or whose count cannot be read. | jxl_recompressor.py | Fixed |
+| 575 | **A relative input in a deep working folder reached cjxl/djxl past 260 characters.** `_long_codec_paths` (four copies) only prefixed absolute paths; a relative one is now judged by its absolute form (numeric option values are never paths). | all four backends | Fixed |
+| 576 | **A moved split that lost one page split into two groups.** The group id hashes the TIFF's absolute path, so after a drive-letter change or a renamed folder the re-encoded page got a new id while its siblings kept the old one, and the decoder refused both halves. `_adopt_legacy_group_ids` now also adopts the siblings' id when they carry it unanimously and their `jxlphoto-srcsum` proves they come from this TIFF's current bytes (`_split_group_id` holds the formula). | jxl_tiff_encoder.py | Fixed |
+| 577 | **An output folder that is the input under another name was not seen as in place.** `_same_dir` compared strings, so a junction, a subst drive, a UNC share or an 8.3 name of the input skipped the in-place path (group hold, source-changed check) and mode 2's refusal. It now also asks `os.path.samefile`. | jxl_recompressor.py | Fixed |
+| 578 | **`--clean-staging` could sweep another run's outputs.** Finished outputs wait in staging until their destination folder is complete — for hours in a large flat run — and only the one-hour age rule protected them from a concurrent sweep. A run writing into staging now holds a locked `.jxlphoto-live-<id>` file there (`_staging_hold` / `_holds_staging` on the processing functions); `_clean_staging` sweeps nothing while another live process holds one, and removes the lock files of runs that died. Parity-pinned in the four backends. | all four backends | Fixed |
+| 579 | **A checksum line that timed out on its lock counted as filed.** `_append_checksum_line` returned nothing either way, so `_file_checksum_lines` reported success and the retry at the end of a staging run was skipped (fail closed: the next deleting run adopted the archive by reconstruction). It now returns False, and the retry runs. | jxl_jpeg_transcoder.py | Fixed |
+| 580 | **`--repair-jbrd` gave the repaired archive a new date.** The swap kept exiftool's "now"; the relayout already restored the original mtime, and the repair now does too, so a sync run's decision does not flip. | jxl_jpeg_transcoder.py | Fixed |
+| 581 | **With `DELETE_SOURCE_REQUIRE_MD5 = False`, a JXL next to any same-named JPEG could be deleted.** A skipped JXL → JPEG recovery without a checksum line took the structural check of the JPEG on disk as proof. It now needs `djxl --reconstruct_jpeg` to reproduce that JPEG. (Off by default; the overwrite guard already refused the collapsing modes.) | jxl_jpeg_transcoder.py | Fixed |
+| 582 | **A failed read or clear of `dc:Relation` left the JXL's internal tokens in the TIFF.** `copy_metadata` ignored both exit codes; the file now fails like any other metadata step (the JXL is kept). | jxl_tiff_decoder.py | Fixed |
+| 583 | **The box reorder held the file twice in memory and built it quadratically.** `reorder_jxl_boxes` (three copies) now slices payloads as views and writes box by box; the output bytes are unchanged. | jxl_tiff_encoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
+| 584 | **The pixel check of a lossy ICC-blob master failed for a misleading reason.** With the `always`/`heuristic` strategies, djxl returns such a master in linear sRGB, so the comparison with the TIFF always failed as "brightness is not the source's" (the TIFF was kept — fail closed). `_decode_jxl_for_verify` (parity-pinned, new last parameter) now names the real cause. | jxl_tiff_encoder.py, jxl_recompressor.py | Fixed |
+| 585 | **The TIFF integrity check refused BigTIFF** and accepted a signature whose byte order contradicts its `II`/`MM`. Both checks now accept 42 and 43 in the right byte order only. | jxl_tiff_decoder.py, jxl_jpeg_transcoder.py | Fixed |
 
 ## Round-69 — the 261103 full-repo audit (2026-11-03)
 

@@ -11,6 +11,23 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## Unreleased: lossy JXL → JPEG/PNG keeps the master's profile; metadata failures keep the source
+
+- **A JXL → JPEG/PNG conversion without `--icc-profile` now gives the output
+  the master's own profile** when the master kept it only in XMP (the
+  encoder's cautious ICC strategy does this for scanner and table-curve
+  profiles). Those outputs used to be labelled sRGB: if you delivered JPEGs
+  from such masters, convert them again. A lossy master storing its profile
+  as an ICC blob now goes through ImageMagick on that path, so ImageMagick is
+  needed there.
+- **A failed metadata copy or marker write is an ERROR** in the transcoder's
+  lossy conversions, as in the encoder and the decoder: the output is
+  removed and, with `--delete-source`, the source is kept. Re-run once
+  exiftool works again.
+- With `DELETE_SOURCE_REQUIRE_MD5 = False` (not the default), a JXL → JPEG
+  recovery without a checksum line deletes the JXL only when
+  `djxl --reconstruct_jpeg` reproduces the JPEG on disk.
+
 ## v2.20.0: unreadable provenance records are refused; modes 6/7 skip other scripts' folders
 
 Nothing to redo. Two things may look different:
