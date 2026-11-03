@@ -333,3 +333,39 @@ def test_tg_repair_keeps_the_mtime(tmp_path):
     assert jxl.stat().st_mtime_ns == stamp, "the repaired archive lost its date"
 
 
+# ===========================================================================
+# T-E (#581)
+# ===========================================================================
+
+def _archive(tmp_path):
+    d = _hostile(tmp_path, "archive [JXL]")
+    jpg = _jpeg(d / "A (1) 5%.jpg", seed=3)
+    jxl = d / "A (1) 5%.jxl"
+    assert tra._run_captured(["cjxl", str(jpg), str(jxl), "--lossless_jpeg=1"],
+                             300).returncode == 0
+    jpg.unlink()
+    return jxl
+
+
+@real
+@pytest.mark.parametrize("same_jpeg", [False, True], ids=["other-jpeg", "its-jpeg"])
+def test_te_skipped_decode_without_md5_needs_a_reconstruction(tmp_path, monkeypatch,
+                                                              same_jpeg):
+    jxl = _archive(tmp_path)
+    # Mode 1 (beside the source): the planning-time overwrite guard of the
+    # collapsing modes refuses a checksum-less output before the gate runs.
+    out = jxl.parent / tra.RECOVERED_JPEG_FOLDER
+    out.mkdir(parents=True)
+    target = out / (jxl.stem + ".jpg")
+    if same_jpeg:
+        assert tra._run_captured(["djxl", str(jxl), str(target), "--reconstruct_jpeg"],
+                                 300).returncode == 0
+    else:
+        _jpeg(target, seed=99)              # another JPEG under the same name
+    monkeypatch.setattr(tra, "DELETE_SOURCE_REQUIRE_MD5", False)
+    _main([jxl.parent, "--mode", "1", "--decode", "--delete-source",
+           "--delete-skipped", "--delete-confirm-off"], monkeypatch)
+    if same_jpeg:
+        assert not jxl.exists(), "control: its own reconstruction proves the archive"
+    else:
+        assert jxl.exists(), "the JXL was deleted next to an unrelated JPEG"

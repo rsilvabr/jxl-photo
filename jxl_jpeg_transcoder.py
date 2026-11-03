@@ -4168,9 +4168,23 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                             f" KEEP (already archived, but no checksum to prove it came "
                             f"from this file) | {src_path.name}")
                         continue
-                    logger.warning(
-                        f" DELETING an already-archived source with NO provenance check "
-                        f"(no checksum stored) | {src_path.name}")
+                    if decode:
+                        # #581: deleting the JXL on the strength of ANY
+                        # same-named JPEG needs a real proof without the
+                        # checksum — the reconstruction (the encode side has
+                        # its own reconstruction gate below).
+                        if not (_tool_at_least("djxl", 0, 12)
+                                and _jxl_reconstructs_to(src_path, final_file)):
+                            _delete_stats["kept"] += 1
+                            logger.warning(
+                                f" KEEP (already archived, no checksum, and the JXL "
+                                f"does not reconstruct this JPEG) | {src_path.name}")
+                            continue
+                        logger.debug(f" provenance OK (reconstruction) | {src_path.name}")
+                    else:
+                        logger.warning(
+                            f" DELETING an already-archived source with NO provenance check "
+                            f"(no checksum stored) | {src_path.name}")
                 else:
                     try:
                         actual = md5_of_file(src_path if not decode else final_file)

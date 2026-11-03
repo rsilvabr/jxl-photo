@@ -589,7 +589,8 @@ Without a stored checksum, the lossless directions refuse by default
 (`DELETE_SOURCE_REQUIRE_MD5 = True`) rather than fall back to the structural
 check — except a JPEG → JXL archive that `djxl --reconstruct_jpeg` proves, as
 above. Setting it to `False` allows the delete and logs the missing provenance
-per file.
+per file — except a JXL → JPEG recovery, which still needs
+`djxl --reconstruct_jpeg` to reproduce the JPEG on disk before the JXL goes.
 
 A lossy conversion whose metadata copy or marker write fails (exiftool exits
 with an error) is an ERROR for that file: the output is removed and the
