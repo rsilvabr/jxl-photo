@@ -4012,6 +4012,10 @@ def reorder_jxl_boxes(jxl_path):
     IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
     Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
+    # Payloads are views into `data`, never copies (#583): the file is held
+    # in memory once, and the output is written box by box.
+    # (A stand-in that only slices -- the tests' 4 GiB file -- is used as is.)
+    view = memoryview(data) if isinstance(data, (bytes, bytearray)) else data
     file_size = len(data)
     
     # Sanity check: reasonable file size (prevent OOM on malformed files)
@@ -4058,18 +4062,18 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(f"Invalid JXL extended box size {ext_size}, minimum is 16")
             if i + ext_size > file_size:
                 raise RuntimeError(f"Truncated extended box at offset {i}: declared {ext_size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+16], data[i+16:i+ext_size]
+            header, payload = data[i:i+16], view[i+16:i+ext_size]
             size = ext_size
             boxes.append((name, header, payload))
         elif size == 0:
             # Box extends to end of file
-            header, payload = data[i:i+8], data[i+8:]
+            header, payload = data[i:i+8], view[i+8:]
             boxes.append((name, header, payload))
             break
         else:
             if i + size > file_size:
                 raise RuntimeError(f"Truncated box at offset {i}: declared {size} but only {file_size - i} bytes remain")
-            header, payload = data[i:i+8], data[i+8:i+size]
+            header, payload = data[i:i+8], view[i+8:i+size]
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
@@ -4120,7 +4124,7 @@ def reorder_jxl_boxes(jxl_path):
     # box in the file. If regrouping moved it earlier, rewrite its header with
     # the real computed size, otherwise everything after it becomes payload
     # and the file is corrupt.
-    out = b""
+    parts = []
     for idx, (name, h, p) in enumerate(ordered):
         declared = int.from_bytes(h[0:4], "big")
         if declared == 0 and idx < len(ordered) - 1:
@@ -4135,9 +4139,14 @@ def reorder_jxl_boxes(jxl_path):
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
-        out += h + p
+        parts.append((h, p))
 
-    jxl_path.write_bytes(out)
+    # Every header is settled before the file is opened: a box that cannot
+    # be re-headered above raises with the file untouched.
+    with open(jxl_path, "wb") as f:
+        for h, p in parts:
+            f.write(h)
+            f.write(p)
 
 def _is_thumbnail_page(page) -> bool:
     """Return True if the TIFF page is a thumbnail or pyramid level.
