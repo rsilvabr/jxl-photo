@@ -56,6 +56,9 @@ def _image(h, w):
 # ===========================================================================
 
 def _preview(tmp_path, monkeypatch, img):
+    # The preview rewrite needs imagecodecs: without it, skip rather than
+    # fail (261104 review, S4).
+    pytest.importorskip("imagecodecs")
     d = _hostile(tmp_path)
     tif = d / "DSC_0001 (2).tif"
     tifffile.imwrite(str(tif), img, photometric="rgb")
