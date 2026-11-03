@@ -5377,13 +5377,25 @@ def _canon_for_compare(a: np.ndarray) -> np.ndarray:
     return a
 
 
-def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path) -> np.ndarray:
+def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path,
+                           require_original_space=False) -> np.ndarray:
     """Decode a JXL back to pixels. Raises on any failure — a verification that
-    cannot run must never read as a verification that passed."""
+    cannot run must never read as a verification that passed.
+
+    require_original_space: also raise when djxl did not return the pixels in
+    the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
+    a comparison against the SOURCE pixels says why it cannot run (#584)."""
     png_path = tmp_dir / "verify.png"
-    r = _run_captured(["djxl", str(jxl_path), str(png_path)], CJXL_TIMEOUT)
+    icc_args, out_icc, orig_icc = (_djxl_icc_args(tmp_dir) if require_original_space
+                                   else ([], None, None))
+    r = _run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, CJXL_TIMEOUT)
     if r.returncode != 0 or not png_path.exists():
         raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
+    if require_original_space and _decoded_in_original_space(out_icc, orig_icc) is False:
+        raise RuntimeError(
+            "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
+            "cannot compare it with the source — source kept "
+            "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
     # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
     # 8-bit, which would make every lossless comparison fail for a reason that
     # has nothing to do with the encode. Checked up front in main().
@@ -5414,7 +5426,8 @@ def _verify_roundtrip_page(tiff_path: Path, page_idx: int, jxl_path: Path,
     """
     try:
         with tempfile.TemporaryDirectory(prefix="jxl_verify_", dir=TEMP_DIR) as tmp:
-            dec = _decode_jxl_for_verify(jxl_path, Path(tmp))
+            dec = _decode_jxl_for_verify(jxl_path, Path(tmp),
+                                         require_original_space=distance > 0)
         with tifffile.TiffFile(str(tiff_path)) as tif:
             if page_idx >= len(tif.pages):
                 return False, f"source page {page_idx} no longer exists"
