@@ -1295,6 +1295,10 @@ def _provenance_marker_args(src_paths):
     return lines
 
 
+_TIFF_SIGNATURES = {(b"II", b"\x2a\x00"), (b"II", b"\x2b\x00"),
+                    (b"MM", b"\x00\x2a"), (b"MM", b"\x00\x2b")}
+
+
 def _verify_tiff_integrity(tiff_path: Path) -> bool:
     """Verify TIFF file integrity before deleting source JXL.
 
@@ -1318,10 +1322,10 @@ def _verify_tiff_integrity(tiff_path: Path) -> bool:
         if len(header) < 4:
             return False
 
-        # TIFF signature: II (little-endian) or MM (big-endian) followed by 42 (0x002A)
-        if header[0:2] not in (b'II', b'MM'):
-            return False
-        if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+        # TIFF signature: II (little-endian) or MM (big-endian) followed by
+        # 42 (classic) or 43 (BigTIFF), in THAT byte order (#585: BigTIFF
+        # was refused, and II with a big-endian 42 passed).
+        if (header[0:2], header[2:4]) not in _TIFF_SIGNATURES:
             return False
 
         # Try to open with tifffile to verify structure

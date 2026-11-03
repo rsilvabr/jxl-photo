@@ -142,3 +142,26 @@ def test_dd_failed_relation_step_is_an_error(tmp_path, monkeypatch, which):
     assert jxl.exists(), "the JXL was deleted although its TIFF kept internal tokens"
 
 
+# ===========================================================================
+# D-E (#585)
+# ===========================================================================
+
+def test_de_bigtiff_passes_integrity(tmp_path):
+    d = _hostile(tmp_path)
+    big = d / "big [43] 5%.tif"
+    tifffile.imwrite(str(big), _image(32, 48), photometric="rgb", bigtiff=True)
+    assert big.read_bytes()[2:4] == b"\x2b\x00"
+    assert dec._verify_tiff_integrity(big) is True
+    assert tra._verify_file_integrity(big) is True
+
+
+def test_de_mixed_endianness_fails(tmp_path):
+    """Control (passes before too: tifffile cannot open it either)."""
+    d = _hostile(tmp_path)
+    ok = d / "ok.tif"
+    tifffile.imwrite(str(ok), _image(32, 48), photometric="rgb")
+    bad = d / "mixed (2).tif"
+    data = ok.read_bytes()
+    bad.write_bytes(b"II\x00\x2a" + data[4:])
+    assert dec._verify_tiff_integrity(bad) is False
+    assert tra._verify_file_integrity(bad) is False

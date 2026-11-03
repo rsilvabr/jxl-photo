@@ -281,9 +281,11 @@ def _verify_file_integrity(file_path: Path) -> bool:
             # TIFF: signature, then force a real read of the last page's last
             # pixel — tifffile is lazy and a truncated file can pass a
             # header-only check.
-            if header[0:2] not in (b'II', b'MM'):
-                return False
-            if header[2:4] not in (b'\x2a\x00', b'\x00\x2a'):
+            # Classic (42) or BigTIFF (43), in the byte order the first two
+            # bytes name (#585).
+            if (header[0:2], header[2:4]) not in {
+                    (b"II", b"\x2a\x00"), (b"II", b"\x2b\x00"),
+                    (b"MM", b"\x00\x2a"), (b"MM", b"\x00\x2b")}:
                 return False
             try:
                 import tifffile
