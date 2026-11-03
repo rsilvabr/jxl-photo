@@ -4837,7 +4837,7 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
     output which is unambiguous and easy to parse.
     """
     import json as _json
-    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None} for j in jxls}
+    markers: dict = {str(j): {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False} for j in jxls}
     # normcase -> the exact key the caller will look up by.
     index = {os.path.normcase(str(j)): str(j) for j in jxls}
     if not jxls:
@@ -4917,9 +4917,11 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
                 # and _read_source_markers_batch, which reads the same tag, has
                 # always used the whole string. The two must agree.
                 values = rel if isinstance(rel, list) else [str(rel)]
-                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None}
+                info = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False}
                 for token in values:
                     token = str(token).strip()
+                    if token.startswith(DERIVED_XMP_PREFIX):
+                        info['derived'] = True
                     if token.startswith(TIFFTAG_PREFIX):
                         _tt = _parse_tifftag(token)
                         if _tt:
@@ -5015,6 +5017,11 @@ _incomplete_groups = {}
 # mpg_complete=False from round 38). Cleared by collect_multipage_groups on
 # every run.
 _mpg_marker_failures: set = set()
+# Modes 6/7 without an explicit subfolder leave out the JXLs that carry a
+# jxlphoto-derived marker (set by main() on every run, read by
+# collect_multipage_groups): a derivative next to its master shares the
+# master's name and lands on the same TIFF, whatever its folder is called.
+_SKIP_DERIVED_INPUTS = False
 
 # JXLs (normcased) whose decode this run had to CONVERT from linear sRGB into
 # an A2B-only profile (a lossy ICC blob of a scanner profile): the TIFF is an
@@ -5222,6 +5229,12 @@ def collect_multipage_groups(jxls: list) -> dict:
     # Read markers first; they are needed even when reconstruction is disabled
     # so that per-file metadata (inheritance, grayscale, depth) is available.
     marker_map = _read_multipage_markers_batch(jxls)
+    if _SKIP_DERIVED_INPUTS:
+        _kept = [j for j in jxls if not (marker_map.get(str(j)) or {}).get('derived')]
+        _n = len(jxls) - len(_kept)
+        if _n:
+            logger.info(f"Ignored {_n} derivative JXL(s) below the export marker (they carry a jxlphoto-derived marker: copies made from a master, not masters) — to process them, run mode 7 with --export-subfolder set to their folder")
+        jxls = _kept
     for j in jxls:
         _es = (marker_map.get(str(j)) or {}).get('extrasamples')
         if _es:
@@ -5233,7 +5246,7 @@ def collect_multipage_groups(jxls: list) -> dict:
     # Must carry every key _read_multipage_markers_batch produces: the callers
     # read the others by index, and a missing one here is a KeyError waiting for
     # whoever follows that pattern.
-    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None}
+    _DEFAULT_INFO = {'group': None, 'inherited': False, 'subfiletype': 0, 'grayscale': False, 'depth': None, 'page': None, 'pages': None, 'thumb': False, 'srcsum': None, 'extrasamples': None, 'tifftags': None, 'derived': False}
 
     if not RECONSTRUCT_MULTIPAGE:
         for j in jxls:
@@ -5921,7 +5934,11 @@ Examples:
         )
         return
 
-    # Group JXLs into multi-page TIFF sets
+    # Group JXLs into multi-page TIFF sets. Modes 6/7 (no explicit subfolder)
+    # leave out the derivatives (jxlphoto-derived) while doing it.
+    global _SKIP_DERIVED_INPUTS
+    _SKIP_DERIVED_INPUTS = (not single_file and (
+        args.mode == 6 or (args.mode == 7 and not EXPORT_JXL_SUBFOLDER)))
     mp_groups = collect_multipage_groups(jxls)
 
     # Groups this run refused to merge (more members than the split recorded,

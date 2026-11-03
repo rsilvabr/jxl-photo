@@ -5959,6 +5959,29 @@ def _read_thumb_markers_batch(paths: list) -> set:
     return found
 
 
+_DERIVED_INPUT_LABELS: dict = {}
+
+
+def _drop_derivative_pairs(pairs, mode):
+    """The decode direction's pairs minus the JXL sources that carry a
+    jxlphoto-derived marker — modes 6/7 without an explicit subfolder (the
+    261103 review of delivery A, S2). A derivative next to its master shares
+    the master's name and lands on the same JPEG/PNG. A source whose marker
+    cannot be read is kept (the duplicate-output check still guards it).
+    The labels are remembered for the run: auto mode plans twice."""
+    if not (mode == 6 or (mode == 7 and not EXPORT_JPEG_SUBFOLDER)):
+        return pairs
+    srcs = [str(s) for s, _o in pairs if s.suffix.lower() in JXL_EXTS]
+    todo = [p for p in srcs if p not in _DERIVED_INPUT_LABELS]
+    if todo:
+        _DERIVED_INPUT_LABELS.update(_read_derived_markers_batch(todo))
+    kept = [(s, o) for s, o in pairs if not _DERIVED_INPUT_LABELS.get(str(s))]
+    _n = len(pairs) - len(kept)
+    if _n:
+        logger.info(f"Ignored {_n} derivative JXL(s) below the export marker (they carry a jxlphoto-derived marker: copies made from a master, not masters) — to process them, run mode 7 with --export-subfolder set to their folder")
+    return kept
+
+
 def _skip_thumbnail_pages(pairs, dry_run=False):
     """The pairs minus those whose source is the THUMBNAIL page of a split
     TIFF (<name>_page1_thumbnail.jxl, marked jxlphoto-thumb): a resized,
@@ -6774,6 +6797,8 @@ def cmd_convert(args, from_jxl: bool = True):
     # of a split TIFF's thumbnail page (#555).
     if direction == "from_jxl" and (_is_derivative() or args.icc_profile):
         pairs = _skip_thumbnail_pages(pairs, dry_run=args.dry_run)
+    if direction == "from_jxl" and not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode)
 
     # Progress total must reflect modes 6/7 filtering, not the raw scan
     _counter["total"] = len(pairs)
@@ -7362,6 +7387,9 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         if out:
             pairs.append((f, out))
 
+    if direction == "from_jxl" and not args.input.is_file():
+        pairs = _drop_derivative_pairs(pairs, args.mode)
+
     if collect_only is not None:
         # Pre-pass: only collect pairs for cross-group duplicate detection
         collect_only.extend(pairs)
@@ -7827,6 +7855,7 @@ def main():
     # file (EXPORT_MARKER, DELETE_CONFIRM, TEMP2_DIR, ...) stays in force.
     for _gname, _gvalue in _RUN_DEFAULTS.items():
         globals()[_gname] = _gvalue
+    _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
 
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
     global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD

@@ -8167,6 +8167,14 @@ class InteractiveMenu:
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
+        # (output folder, stem) -> [(file, output folder, derivative-skip
+        # applies)] — the children's modes 6/7 leave out the JXLs that carry a
+        # jxlphoto-derived marker (B2); the mirror re-checks only the files
+        # that collide, after the walk.
+        _members: Dict[Tuple[str, str], List[Tuple[Path, Path, bool]]] = {}
+        _derived_capable = _child is not None and (
+            _child.__name__ in ('jxl_tiff_decoder', 'jxl_recompressor')
+            or (_child.__name__ == 'jxl_jpeg_transcoder' and origin == 'jxl'))
 
         def _record_output(f: Path, out_folder, rf: str, rt: str) -> None:
             """Collision bookkeeping for one resolved source file."""
@@ -8259,6 +8267,15 @@ class InteractiveMenu:
                     # Legacy manifests carry no Mode cell: the child detects the mode
                     # per folder downstream, so the flat Destination scan is the best
                     # the wrapper can do there (the old behavior for every entry).
+                    # Modes 6/7 with no explicit subfolder: the child leaves out
+                    # the derivatives (B2). Read inside _with_child_marker, so
+                    # the row's own subfolder is the one seen here.
+                    _sub_now = (getattr(_child, 'EXPORT_JPEG_SUBFOLDER', '')
+                                if _child is not None
+                                and _child.__name__ == 'jxl_jpeg_transcoder'
+                                else getattr(_child, 'EXPORT_JXL_SUBFOLDER', ''))
+                    _derived_skip = bool(_derived_capable and mode is not None and (
+                        mode == 6 or (mode == 7 and not _sub_now)))
                     if resolver is None or mode is None:
                         try:
                             files = sorted(src_root.iterdir())
@@ -8335,11 +8352,16 @@ class InteractiveMenu:
                         # --rename-from renames that stem at planning time.
                         stem = (_stem_key(f, rf, rt) if _child is not None
                                 else os.path.normcase(f.stem))
+                        _members.setdefault((key, stem), []).append(
+                            (f, out_folder, _derived_skip))
                         prev = seen.get(stem)
                         if prev is None:
                             seen[stem] = f
                         elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
                             collisions.append((prev, f, out_folder))
+            if collisions and _derived_capable:
+                collisions = self._without_derivative_collisions(
+                    _child, collisions, _members)
             if _child is not None and _child.__name__ == 'jxl_tiff_encoder':
                 collisions.extend(self._split_page_collisions(
                     _child, by_dest, page_options or {}))
@@ -8347,6 +8369,42 @@ class InteractiveMenu:
             if _child is not None:
                 _child.logger.disabled = _child_logger_was_disabled
         return collisions
+
+    @staticmethod
+    def _without_derivative_collisions(child, collisions: List,
+                                       members: Dict) -> List:
+        """`collisions` with the derivatives the child leaves out (B2: modes
+        6/7, a jxlphoto-derived marker) taken out of each colliding group.
+        Only the files that collide are read; when the read fails, nothing is
+        taken out (the collision stays reported — the safe side)."""
+        groups = {k: ms for k, ms in members.items() if len(ms) > 1}
+        files = sorted({str(f) for ms in groups.values() for f, _o, el in ms if el})
+        if not files:
+            return collisions
+        try:
+            if child.__name__ == 'jxl_tiff_decoder':
+                marks = child._read_multipage_markers_batch([Path(f) for f in files])
+                derived = {f for f in files if (marks.get(f) or {}).get('derived')}
+            else:
+                labels = child._read_derived_markers_batch([Path(f) for f in files])
+                derived = {f for f in files if labels.get(f)}
+        except Exception:
+            return collisions
+        if not derived:
+            return collisions
+        affected = {k for k, ms in groups.items()
+                    if any(el and str(f) in derived for f, _o, el in ms)}
+        if not affected:
+            return collisions
+        keep = [c for c in collisions
+                if not any(os.path.normcase(str(c[1])) == os.path.normcase(str(f))
+                           for k in affected for f, _o, _el in groups[k])]
+        for k in sorted(affected):
+            live = [(f, o) for f, o, el in groups[k] if not (el and str(f) in derived)]
+            for f, o in live[1:]:
+                if os.path.normcase(str(live[0][0])) != os.path.normcase(str(f)):
+                    keep.append((live[0][0], f, o))
+        return keep
 
     @staticmethod
     def _split_page_collisions(enc, by_dest: Dict[str, Dict[str, Path]],

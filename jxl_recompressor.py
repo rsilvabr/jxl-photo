@@ -2202,6 +2202,24 @@ def _read_source_markers_batch(outputs: list) -> dict:
     return markers
 
 
+def _drop_derivative_inputs(files):
+    """`files` minus the JXLs that carry a jxlphoto-derived marker — modes 6/7
+    without an explicit subfolder (the 261103 review of delivery A, S1/S2). A
+    derivative next to its master shares the master's name and lands on the
+    same output, whatever its folder is called: even a name only the run that
+    made it knew (--export-jxl-folder 16B_JXL_sRGB), which the folder skip
+    (_skip_other_tool_output) cannot know. A file whose marker cannot be read
+    is kept: the duplicate-output check still guards it."""
+    if not files:
+        return files
+    labels = _read_derived_markers_batch(list(files))
+    kept = [f for f in files if not labels.get(str(f))]
+    _n = len(files) - len(kept)
+    if _n:
+        logger.info(f"Ignored {_n} derivative JXL(s) below the export marker (they carry a jxlphoto-derived marker: copies made from a master, not masters) — to process them, run mode 7 with --export-subfolder set to their folder")
+    return kept
+
+
 def _read_derived_markers_batch(paths: list) -> dict:
     """{path str: label | None | False}: the jxlphoto-derived label, None when
     the file has no such token (NOT a derivative), False when it could not be
@@ -7247,10 +7265,12 @@ def main():
         files = find_files_mode0(args.input)
         input_root = args.input
     elif args.mode == 6:
-        files = find_jxls_mode6(args.input)
+        files = _drop_derivative_inputs(find_jxls_mode6(args.input))
         input_root = args.input
     elif args.mode == 7:
         files = find_jxls_mode7(args.input)
+        if not EXPORT_JXL_SUBFOLDER:
+            files = _drop_derivative_inputs(files)
         input_root = args.input
     else:
         files = find_jxls_recursive(args.input)
