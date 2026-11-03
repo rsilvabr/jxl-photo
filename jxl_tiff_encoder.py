@@ -2880,8 +2880,13 @@ def _add_explorer_thumbnail(jxl_path, tmp_dir) -> str:
     return "written"
 
 
-def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
-    """Run one round-trip test at the given bit depth. Returns True if safe."""
+def _cautious_test_icc_depth(icc_bytes: bytes, depth: int, distance=None) -> bool:
+    """Run one round-trip test at the given bit depth. Returns True if safe.
+
+    distance: the distance THIS file is encoded at (None = CJXL_DISTANCE). A
+    film scan under SCAN_DISTANCE is tested at its own distance (#573)."""
+    if distance is None:
+        distance = CJXL_DISTANCE
     img = _synthetic_image_for_icc(depth)
     if depth == 8:
         original_norm = float(img.mean()) / 255.0
@@ -2903,11 +2908,11 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
             _get_cjxl_cmd() or "cjxl",
             str(png_path),
             str(jxl_path),
-            "-d", str(CJXL_DISTANCE),
+            "-d", str(distance),
             "--effort", "1",
             "--container=1",
         ]
-        if CJXL_MODULAR and CJXL_DISTANCE > 0:
+        if CJXL_MODULAR and distance > 0:
             cmd.append("--modular=1")
 
         r = _run_captured(cmd, 120)
@@ -2922,7 +2927,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
             logger.debug(f"Cautious ICC test decode failed at {depth}-bit: {_stderr_tail(r.stderr)}")
             return False
 
-        if CJXL_DISTANCE > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
+        if distance > 0 and _decoded_in_original_space(out_icc, orig_icc) is False:
             # A table-curve profile (ROMM toe, eciRGB v2, scanner LUTs) has no
             # native JXL form, so a LOSSY cjxl stores the whole ICC blob and
             # djxl returns linear sRGB: a decoder that pastes the original ICC
@@ -2948,7 +2953,7 @@ def _cautious_test_icc_depth(icc_bytes: bytes, depth: int) -> bool:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
+def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path, distance=None) -> bool:
     """Test an ICC profile with a small round-trip before trusting it.
 
     The lock covers the cache's read-modify-write, NOT the probe. The probe is
@@ -2958,14 +2963,18 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
     probe it and reach the SAME verdict — the same benign race
     _content_id_cache already accepts — and the loser's store is a no-op.
     """
+    if distance is None:
+        distance = CJXL_DISTANCE
     key = hashlib.sha256(icc_bytes).hexdigest()
+    # The key names the distance the file is encoded at, not the global one
+    # (#573): a lossless verdict must never answer for a lossy scan.
     # Include the cjxl version in the key: an encoder upgrade can change
     # how a profile behaves, so stale verdicts from older cjxl builds
     # must not be trusted. ":t=2" is the test-format generation: t=2 added
     # the lossy-ICC-blob refusal, so a t=1 "embed" verdict for a table-curve
     # profile must be retested instead of trusted.
     cjxl_ver = _tool_version(_get_cjxl_cmd() or "cjxl") or (0, 0, 0)
-    versioned_key = f"{key}:d={CJXL_DISTANCE}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
+    versioned_key = f"{key}:d={distance}:m={1 if CJXL_MODULAR else 0}:v={'.'.join(map(str, cjxl_ver))}:t=2"
 
     def _cached_verdict():
         cached = _load_icc_cache().get(versioned_key)
@@ -2985,7 +2994,7 @@ def _cautious_should_embed_icc(icc_bytes: bytes, tiff_path: Path) -> bool:
 
     safe = True
     for depth in (8, 16):
-        if not _cautious_test_icc_depth(icc_bytes, depth):
+        if not _cautious_test_icc_depth(icc_bytes, depth, distance=distance):
             safe = False
             break
 
@@ -3018,7 +3027,7 @@ def _should_embed_icc_heuristic(icc_bytes: bytes) -> bool:
     return True
 
 
-def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None):
+def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None, distance=None):
     """Decide whether the ICC profile should be embedded in the PNG iCCP chunk.
 
     For lossless encoding the ICC is always embedded because the JXL stores the
@@ -3038,7 +3047,8 @@ def should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=None):
     if strategy == "skip":
         return False
     if strategy == "cautious":
-        return _cautious_should_embed_icc(icc_bytes, tiff_path or Path("unknown"))
+        return _cautious_should_embed_icc(icc_bytes, tiff_path or Path("unknown"),
+                                          distance=distance)
 
     if strategy == "heuristic":
         return _should_embed_icc_heuristic(icc_bytes)
@@ -5576,7 +5586,8 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if not lossy:
                 png_icc_bytes = icc_bytes  # lossless: always embed ICC natively
             else:
-                embed = should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=tiff_path)
+                embed = should_embed_icc_in_png(icc_bytes, lossy=True, tiff_path=tiff_path,
+                                                distance=_dist)
                 png_icc_bytes = icc_bytes if embed else None
                 if not embed and icc_bytes:
                     logger.info(f"  >Skipping ICC in PNG iCCP for {tiff_path.name} (page {page_idx}); profile will be preserved via XMP")

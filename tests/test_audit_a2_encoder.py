@@ -181,3 +181,31 @@ def test_eb_uint16_page_not_copied(tmp_path, monkeypatch):
         "the uint16 page was copied before the PNG writer")
 
 
+# ===========================================================================
+# E-J (#573)
+# ===========================================================================
+
+@real
+def test_ej_scan_distance_drives_the_cautious_probe(tmp_path):
+    src = tmp_path / HOSTILE / "scans [SF] (1)"
+    src.mkdir(parents=True)
+    icc = romm_toe_icc()
+    tifffile.imwrite(str(src / "scan 0001 (2).tif"), _gradient(), photometric="rgb",
+                     software="SilverFast 9.2.0", metadata=None,
+                     extratags=[(34675, "B", len(icc), icc, False)])
+    out = tmp_path / HOSTILE / "16B_JXL scans"
+    r = _run("jxl_tiff_encoder.py", src, out, "--mode", "0", "--distance", "0",
+             "--scan-distance", "1", "--workers", "1", "--icc-png-strategy", "cautious",
+             "--icc-cache-dir", tmp_path / "icc cache [x]", "--no-preflight")
+    jxl = out / "scan 0001 (2).jxl"
+    assert jxl.exists(), r.stdout[-2000:]
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    o, oi = probe / "o.icc", probe / "oi.icc"
+    subprocess.run(["djxl", str(jxl), str(probe / "p.png"), f"--icc_out={o}",
+                    f"--orig_icc_out={oi}"], check=True, capture_output=True)
+    assert o.read_bytes() == oi.read_bytes(), (
+        "the lossy scan stores its scanner ICC as a blob: the probe ran lossless")
+    assert "Skipping ICC in PNG iCCP" in r.stdout + r.stderr
+
+
