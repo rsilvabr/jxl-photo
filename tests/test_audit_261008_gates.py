@@ -128,12 +128,22 @@ def test_t1_unrelated_same_named_jpeg_never_deletes_the_master(tmp_path):
 
 @requires_codecs
 def test_t1_own_lossy_output_still_certifies_the_skip(tmp_path):
-    """No regression: the transcoder's own JPEG of this JXL still proves it."""
+    """No regression: the transcoder's own 16-bit PNG of this JXL still
+    proves it. (A JPEG or an 8-bit PNG never deletes its JXL since T-B, #600:
+    the JPEG run below keeps it even with its own marker on the output.)"""
     jxl = _master(tmp_path, tmp_path / "f")
     r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert")
     assert r.returncode == 0, _out(r)
     assert jxl.with_suffix(".jpg").exists(), _out(r)
     r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert", "--delete-source",
+             "--delete-skipped", "--delete-confirm-off")
+    assert r.returncode == 0, _out(r)
+    assert jxl.exists(), "a lossy JPEG of the master deleted it (T-B, #600)"
+    png = ["--format", "png", "--bit-depth", "16"]
+    r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert", *png)
+    assert r.returncode == 0, _out(r)
+    assert jxl.with_suffix(".png").exists(), _out(r)
+    r = _run("jxl_jpeg_transcoder.py", jxl, "--force-convert", *png, "--delete-source",
              "--delete-skipped", "--delete-confirm-off")
     assert r.returncode == 0, _out(r)
     assert not jxl.exists(), _out(r)

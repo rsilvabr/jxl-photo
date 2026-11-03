@@ -152,19 +152,22 @@ def test_decoder_keeps_a_jxl_replaced_since_its_decode(tmp_path):
 
 @real
 def test_transcoder_lossy_keeps_a_jxl_replaced_since_its_jpeg(tmp_path):
+    # A 16-bit PNG: the one lossy-convert output that may still replace its
+    # JXL (a JPEG never does since T-B, #600), so the stale-archive gate is
+    # what decides here, as this test was written to show.
     src = tmp_path / "src"
     _jxl(src / "a.jxl", 1)
     _jxl(src / "b.jxl", 2)
-    r = _run(TRANSCODER, src, "--mode", "1", "--format", "jpeg",
-             "--delete-confirm-off")
+    png = ["--format", "png", "--bit-depth", "16"]
+    r = _run(TRANSCODER, src, "--mode", "1", *png, "--delete-confirm-off")
     assert r.returncode == 0, _log(r)
-    outs = {p.stem: p for p in src.rglob("*.jpg")}
+    outs = {p.stem: p for p in src.rglob("*.png")}
     assert set(outs) == {"a", "b"}, _log(r)
 
     _jxl(src / "a.jxl", 99)
     _age(src / "a.jxl", outs["a"])
     # --from-jxl: a deleting run decodes JXLs only when asked to (#542).
-    r = _run(TRANSCODER, src, "--mode", "1", "--format", "jpeg", "--from-jxl", *DELETE)
+    r = _run(TRANSCODER, src, "--mode", "1", *png, "--from-jxl", *DELETE)
     assert r.returncode == 0, _log(r)
     assert (src / "a.jxl").exists(), (
         "the replaced JXL was deleted on the strength of a JPEG made from its "
