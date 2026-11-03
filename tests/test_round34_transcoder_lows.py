@@ -143,7 +143,8 @@ def test_icc_intermediate_decode_requests_bit_depth(monkeypatch, tmp_path, fmt, 
     monkeypatch.setattr(tr, "MAGICK_AVAILABLE", True)
     monkeypatch.setattr(tr.subprocess, "run", fake_run)
     monkeypatch.setattr(tr, "_copy_metadata", lambda *a, **k: None)
-    monkeypatch.setattr(tr, "_run_exiftool_argfile", lambda *a, **k: None)
+    # rc 0: the marker write is checked since #571.
+    monkeypatch.setattr(tr, "_run_exiftool_argfile", lambda *a, **k: _FakeRun())
     monkeypatch.setattr(tr, "_verify_file_integrity", lambda p: True)
     # The stub PNG carries no iCCP/sRGB chunk, so the real source-profile
     # detection (B1 fix) would refuse it; the profile layer is exercised by
