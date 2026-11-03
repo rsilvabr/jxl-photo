@@ -6716,50 +6716,11 @@ def _refresh_explorer_thumbnails(files, workers: int, dry_run: bool) -> int:
 
 
 # ---------------------------------------------------------------------------
-def main():
-    global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
-    global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
-    global ON_DOWNGRADE, ON_UNKNOWN, ON_SCAN, SCAN_SCOPE, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
-    global OVERWRITE_GUARD
-    global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
-    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
-    global OUTPUT_ICC, EXPLORER_THUMBNAIL
-    global _gen_divergence_logged, _error_details
-    global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
-    global _FORCE_REDERIVE
-    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
-    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
-    global DERIVATIVE, _DERIVED_LABEL
-    _gen_divergence_logged = False
-    _error_details = {}
-    _OUTPUT_ICC_LABEL = None
-    _OUTPUT_ICC_BYTES = None
-    _OUTPUT_ICC_PATH = None
-    _SRGB_ICC_PATH = None
-    _FORCE_REDERIVE = set()
-    RESIZE_MODE = None
-    RESIZE_VALUE = None
-    ALLOW_UPSCALE = False
-    SHARPEN = "none"
-    SHARPEN_SIGMA = None
-    SHARPEN_GAIN = None
-    SHARPEN_THRESHOLD = None
-    DERIVATIVE = False
-    _DERIVED_LABEL = None
-
-    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here, before
-    # the flags are applied below. The assignments further down only fire when a
-    # flag was passed, so a second main() in the SAME process (the test suite,
-    # or anything importing this module) inherited the first run's armed state:
-    # a `--delete-source --delete-confirm-off` run left DELETE_SOURCE on with no
-    # confirmation for the next run, and `--staging` leaked TEMP2_DIR. The
-    # encoder got exactly this reset in round 34 (#431); this is the same fix.
-    # _RUN_DEFAULTS restores each global to its SCRIPT setting (captured at
-    # import), so a user-edited setting survives while cross-run leakage does
-    # not — in particular --staging must not erase a configured TEMP2_DIR.
-    for _gname, _gvalue in _RUN_DEFAULTS.items():
-        globals()[_gname] = _gvalue
-
+def build_parser():
+    """The command line (--flags only; main() validates and applies them).
+    Its own function so the wrapper can check an expert flag against it
+    (parse_known_args) before a run, and a test can compare it with the
+    documentation."""
     parser = argparse.ArgumentParser(
         description="Batch JXL -> JXL recompressor (smaller archives, same metadata)")
     parser.add_argument("--version", action="version",
@@ -6918,7 +6879,54 @@ def main():
                              "--explorer-thumbnail off: remove them). The modified date of "
                              "each file is kept, so sync runs are not fooled")
     parser.add_argument("--summary-json", action="store_true", help=argparse.SUPPRESS)
+    return parser
 
+
+def main():
+    global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
+    global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
+    global ON_DOWNGRADE, ON_UNKNOWN, ON_SCAN, SCAN_SCOPE, JBRD_POLICY, KEEP_SMALLER, PROVENANCE_CHECK
+    global OVERWRITE_GUARD
+    global REDERIVE_ON_ENCODE_CHANGE, REDERIVE_ON_LOWER_EFFORT
+    global ON_REGENERATION, EXPORT_MARKER, EXPORT_JXL_SUBFOLDER, EXPORT_JXL_FOLDER
+    global OUTPUT_ICC, EXPLORER_THUMBNAIL
+    global _gen_divergence_logged, _error_details
+    global _OUTPUT_ICC_LABEL, _OUTPUT_ICC_BYTES, _OUTPUT_ICC_PATH, _SRGB_ICC_PATH
+    global _FORCE_REDERIVE
+    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
+    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
+    global DERIVATIVE, _DERIVED_LABEL
+    _gen_divergence_logged = False
+    _error_details = {}
+    _OUTPUT_ICC_LABEL = None
+    _OUTPUT_ICC_BYTES = None
+    _OUTPUT_ICC_PATH = None
+    _SRGB_ICC_PATH = None
+    _FORCE_REDERIVE = set()
+    RESIZE_MODE = None
+    RESIZE_VALUE = None
+    ALLOW_UPSCALE = False
+    SHARPEN = "none"
+    SHARPEN_SIGMA = None
+    SHARPEN_GAIN = None
+    SHARPEN_THRESHOLD = None
+    DERIVATIVE = False
+    _DERIVED_LABEL = None
+
+    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here, before
+    # the flags are applied below. The assignments further down only fire when a
+    # flag was passed, so a second main() in the SAME process (the test suite,
+    # or anything importing this module) inherited the first run's armed state:
+    # a `--delete-source --delete-confirm-off` run left DELETE_SOURCE on with no
+    # confirmation for the next run, and `--staging` leaked TEMP2_DIR. The
+    # encoder got exactly this reset in round 34 (#431); this is the same fix.
+    # _RUN_DEFAULTS restores each global to its SCRIPT setting (captured at
+    # import), so a user-edited setting survives while cross-run leakage does
+    # not — in particular --staging must not erase a configured TEMP2_DIR.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
+
+    parser = build_parser()
     args = parser.parse_args()
 
     if args.input is None:

@@ -7274,7 +7274,11 @@ def find_tiffs_mode7(input_path: Path):
                     f"({', '.join(sorted(_DECODER_OUTPUT_FOLDERS))}) — use a different mode to re-encode them")
     return sorted(filtered)
 
-def main():
+def build_parser():
+    """The command line (--flags only; main() validates and applies them).
+    Its own function so the wrapper can check an expert flag against it
+    (parse_known_args) before a run, and a test can compare it with the
+    documentation."""
     parser = argparse.ArgumentParser(description="Batch TIFF 16-bit -> JPEG XL converter")
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}")
@@ -7457,6 +7461,11 @@ def main():
                              "by jxl-thumb in Windows Explorer: auto = lossless "
                              "outputs only (default), on = every output, off = none "
                              "(EXPLORER_THUMBNAIL)")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD

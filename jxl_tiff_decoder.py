@@ -5499,14 +5499,11 @@ def _plan_touches_sources(tasks) -> bool:
     return False
 
 
-def main():
-    # Every module global this function assigns (D-1). Declared as one block at
-    # the top so no assignment can ever textually precede its declaration when
-    # the validation order below changes.
-    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
-    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
-
+def build_parser():
+    """The command line (--flags only; main() validates and applies them).
+    Its own function so the wrapper can check an expert flag against it
+    (parse_known_args) before a run, and a test can compare it with the
+    documentation."""
     parser = argparse.ArgumentParser(
         description="JPEG XL to TIFF converter with ICC preservation",
         epilog="""
@@ -5652,7 +5649,18 @@ Examples:
                              "preserve_thumbnails = 8-bit only for thumbnails originally 8-bit (default); "
                              "preserve_original = keep each page's original bit depth. "
                              "Pages without a depth marker fall back to 16-bit.")
+    return parser
 
+
+def main():
+    # Every module global this function assigns (D-1). Declared as one block at
+    # the top so no assignment can ever textually precede its declaration when
+    # the validation order below changes.
+    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
+    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
+
+    parser = build_parser()
     args = parser.parse_args()
 
     # (Round 43, D-1 class fix) Restore whatever a PREVIOUS main() call in

@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -222,6 +222,37 @@ def _flags_set_mode(flags: Optional[str]) -> Optional[str]:
         tok = t.split('=', 1)[0]
         if tok.startswith('--') and len(tok) >= 4 and '--mode'.startswith(tok):
             return t
+    return None
+
+
+def _expert_flags_problem(origin: str, dest: str, flags: Optional[str]) -> Optional[str]:
+    """Why the expert flags cannot run on this direction's script, or None.
+
+    Checked against the child's own command line (its build_parser(), read
+    in-process with parse_known_args) BEFORE the run and before any HHMM
+    token: a typo, a flag of another script or a value outside its choices
+    used to reach the child, which exited 2 after the wrapper had asked for
+    the token. When the child cannot be imported nothing is checked here and
+    the child decides, as before."""
+    tokens = _split_expert_flags(flags or '')
+    if not tokens or not origin or not dest:
+        return None
+    module = _child_module(origin, dest)
+    try:
+        parser = importlib.import_module(module).build_parser()
+    except Exception:
+        return None
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err):
+            _ns, extras = parser.parse_known_args(["__jxlphoto_probe__"] + tokens)
+    except SystemExit:
+        last = [ln for ln in err.getvalue().strip().splitlines() if ln.strip()]
+        why = last[-1].split("error: ", 1)[-1] if last else "invalid"
+        return f"{module}.py rejects them: {why}"
+    unknown = [t for t in extras if t.startswith('-')]
+    if unknown:
+        return f"{' '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an option of {module}.py"
     return None
 
 
@@ -8978,6 +9009,13 @@ class InteractiveMenu:
                 f"an ambiguous abbreviation of --delete-source / --delete-skipped / "
                 f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
                 f"Spell the flag out in full, with no value.")
+            return False
+        _xprob = _expert_flags_problem(workflow.get('origin_format'),
+                                       workflow.get('dest_format'),
+                                       workflow.get('expert_flags'))
+        if _xprob:
+            self._print_error(f"Expert flags cannot run: {_xprob}. Nothing was started; "
+                              f"fix or remove them.")
             return False
         _mode_flag = _flags_set_mode(workflow.get('expert_flags'))
         if _mode_flag:
