@@ -176,3 +176,94 @@ def test_ef_hold_leaves_staging_clean(name, tmp_path):
         pass
 
 
+# ===========================================================================
+# E-I (#583)
+# ===========================================================================
+
+def _box(name: bytes, payload: bytes, size0=False) -> bytes:
+    size = 0 if size0 else 8 + len(payload)
+    return size.to_bytes(4, "big") + name + payload
+
+
+def _old_reorder(data: bytes, rank) -> bytes:
+    """reorder_jxl_boxes as it was at 488e8b6, on valid input (reference)."""
+    boxes, i, n = [], 0, len(data)
+    while i < n:
+        size = int.from_bytes(data[i:i + 4], "big")
+        name = data[i + 4:i + 8]
+        if size == 0:
+            boxes.append((name, data[i:i + 8], data[i + 8:]))
+            break
+        boxes.append((name, data[i:i + 8], data[i + 8:i + size]))
+        i += size
+    order, extra, cs, other, pre = [], [], [], [], []
+    for b in boxes:
+        if b[0] in {b"JXL ", b"ftyp", b"jxll"}:
+            order.append(b)
+        elif b[0] in {b"Exif", b"xml ", b"jbrd", b"brob"}:
+            extra.append(b)
+        elif b[0] in {b"jxlc", b"jxlp"}:
+            cs.append(b)
+        elif cs:
+            other.append(b)
+        else:
+            pre.append(b)
+    extra.sort(key=rank)
+    ordered = order + extra + pre + cs + other
+    out = b""
+    for idx, (name, h, p) in enumerate(ordered):
+        if int.from_bytes(h[0:4], "big") == 0 and idx < len(ordered) - 1:
+            h = (8 + len(p)).to_bytes(4, "big") + h[4:8]
+        out += h + p
+    return out
+
+
+_SIG = _box(b"JXL ", b"\r\n\x87\n")
+_FTYP = _box(b"ftyp", b"jxl \x00\x00\x00\x00jxl ")
+_LAYOUTS = {
+    "lossless": _SIG + _FTYP + _box(b"jxll", b"\x0a") + _box(b"jxlc", b"\xff\x0a" + b"c" * 300)
+                + _box(b"xml ", b"<x/>") + _box(b"Exif", b"\x00" * 4 + b"II*\x00"),
+    "lossy-jxlp": _SIG + _FTYP + b"".join(_box(b"jxlp", bytes([0, 0, 0, k]) + b"p" * 99)
+                                        for k in range(3))
+                  + _box(b"Exif", b"\x00" * 8) + _box(b"brob", b"xml " + b"z" * 20),
+    "size0-last": _SIG + _FTYP + _box(b"Exif", b"e" * 10) + _box(b"jxlc", b"c" * 500, size0=True),
+    "size0-moved": _SIG + _FTYP + _box(b"jxlc", b"c" * 400)
+                   + _box(b"Exif", b"e" * 30, size0=True),
+    "brob-exif": _SIG + _FTYP + _box(b"xml ", b"<x/>") + _box(b"jxlc", b"c" * 64)
+                 + _box(b"brob", b"Exif" + b"b" * 40),
+    "uuid-thumb": _SIG + _FTYP + _box(b"uuid", b"u" * 50) + _box(b"jxlc", b"c" * 64)
+                  + _box(b"Exif", b"e" * 12),
+}
+
+
+@pytest.mark.parametrize("layout", sorted(_LAYOUTS))
+@pytest.mark.parametrize("name", REORDERERS)
+def test_ei_reorder_bytes_unchanged(name, layout, tmp_path):
+    """Equivalence pin (no pre-fix proof)."""
+    mod = importlib.import_module(name)
+    data = _LAYOUTS[layout]
+    f = tmp_path / HOSTILE / f"{layout} (1).jxl"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(data)
+    mod.reorder_jxl_boxes(f)
+    assert f.read_bytes() == _old_reorder(data, mod._exif_box_rank)
+
+
+@pytest.mark.parametrize("name", REORDERERS)
+def test_ei_no_quadratic_concat(name, tmp_path):
+    mod = importlib.import_module(name)
+    payload = b"p" * 4096
+    data = (_SIG + _FTYP + b"".join(_box(b"jxlp", k.to_bytes(4, "big") + payload)
+                                   for k in range(2000))
+            + _box(b"Exif", b"\x00" * 8))
+    f = tmp_path / HOSTILE / "many boxes (1).jxl"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(data)
+    tracemalloc.start()
+    try:
+        mod.reorder_jxl_boxes(f)
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1.5 * len(data), (
+        f"peak {peak / 2**20:.1f} MiB for a {len(data) / 2**20:.1f} MiB file")
