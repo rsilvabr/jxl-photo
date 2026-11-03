@@ -966,6 +966,10 @@ class ToolConfig:
     # ';'-separated folder NAMES the last TIFF<->JXL run excluded from
     # discovery (--exclude-folders). Raw string, so a repeat re-splits it.
     last_exclude_folders: Optional[str] = None
+    # The run's extra_options ({registry id: value}): the options the wizard
+    # does not ask about, set on the Step 7 "all options" screen. One dict, not
+    # a last_* field per option; a preset saved before it simply has none.
+    last_extra_options: Optional[Dict] = None
 
     # Named snapshots of the last_* fields above ({name: {last_*: value}}), so
     # several recurring jobs can coexist instead of fighting over the single
@@ -1090,7 +1094,10 @@ class ConfigManager:
                           add_preview: Optional[bool] = None,
                           mode_config: Optional[Dict] = None,
                           manifest_path=_STAGING_UNSET,
-                          exclude_folders: Optional[str] = _STAGING_UNSET) -> None:
+                          exclude_folders: Optional[str] = _STAGING_UNSET,
+                          extra_options: Optional[Dict] = None) -> None:
+        if extra_options is not None:
+            self.config.last_extra_options = dict(extra_options)
         if input_dir is not None:
             self.config.last_input_dir = input_dir
         if output_mode is not None:
@@ -2621,8 +2628,10 @@ class Opt:
       policy  -> emitted by the named InteractiveMenu._policy_* rule, which
                  also emits extra_flags; the entry documents the flag
     The value is `value(ctx)` when given, else the dict slot `legacy_key`
-    names ("advanced.x", "workflow.x", "mode_config.x"). `when(ctx)` gates
-    the entry beyond its directions.
+    names ("advanced.x", "workflow.x", "mode_config.x", or "extra.x" — the
+    run's extra_options, the options the wizard does not ask about). `when(ctx)`
+    gates the entry beyond its directions; `requires`/`conflicts` name other
+    ids (_registry_rule_problem checks them before a run).
     """
     id: str
     flag: str
@@ -2640,6 +2649,8 @@ class Opt:
     policy: str = ""
     extra_flags: tuple = ()
     danger: bool = False
+    requires: tuple = ()        # ids that must be on with this one
+    conflicts: tuple = ()       # ids that must be off with this one
 
 
 class _CmdCtx:
@@ -2655,6 +2666,7 @@ class _CmdCtx:
         self.workflow = workflow
         self.advanced = advanced if advanced is not None else {}
         self.mode_config = workflow.get('mode_config', {}) or {}
+        self.extra = workflow.get('extra_options') or {}
         self.manifest = manifest
         self.config_marker = config_marker
         self.conv_type = workflow.get('conversion_type', '')
@@ -2667,7 +2679,7 @@ class _CmdCtx:
     def get(self, legacy_key: str):
         where, _, key = legacy_key.partition('.')
         source = {"advanced": self.advanced, "workflow": self.workflow,
-                  "mode_config": self.mode_config}[where]
+                  "mode_config": self.mode_config, "extra": self.extra}[where]
         return source.get(key)
 
 
@@ -2764,7 +2776,8 @@ REGISTRY: Tuple[Opt, ...] = (
         "essential", "Delete originals", "Delete each source once its output is "
         "verified. The wrapper charges the HHMM token, so the child's own "
         "confirmation is turned off.", policy="_policy_delete",
-        extra_flags=("--delete-confirm-off",), danger=True),
+        extra_flags=("--delete-confirm-off",), danger=True,
+        legacy_key="advanced.delete_source"),
     Opt("verify_roundtrip", "--verify-roundtrip", _D({"tiff2jxl", "jxl2jxl"}), "policy",
         "deletion", "advanced", "Round-trip check before deleting",
         "Decode each output and compare it with the source before the delete.",
@@ -2772,7 +2785,7 @@ REGISTRY: Tuple[Opt, ...] = (
     Opt("delete_skipped", "--delete-skipped", _ALL_DIRECTIONS, "policy", "deletion",
         "advanced", "Also delete skipped sources", "Delete sources whose output "
         "already existed (proved by provenance). Only with --delete-source.",
-        policy="_policy_delete", danger=True),
+        policy="_policy_delete", danger=True, legacy_key="advanced.delete_skipped"),
     # -- TIFF -> JXL -----------------------------------------------------------
     Opt("distance", "--distance", _D({"tiff2jxl", "jxl2jxl"}), "always", "essentials",
         "essential", "Distance", "cjxl distance (0 = lossless).",
@@ -2936,43 +2949,88 @@ REGISTRY: Tuple[Opt, ...] = (
     Opt("png_bit_depth", "--bit-depth", _D({"jxl2png"}), "value", "essentials",
         "essential", "PNG bit depth", "8 or 16 bits per sample.", choices=(8, 16),
         legacy_key="workflow.bit_depth", when=lambda c: c.dest == 'png'),
+    # -- the options the wizard does not ask about (run's extra_options; the
+    #    "all options" screen of the Step 7 summary sets them) ---------------
+    Opt("buffering", "--buffering", _D({"tiff2jxl", "jxl2jxl"}), "notnone",
+        "performance", "advanced", "cjxl buffering",
+        "libjxl >= 0.12 streaming level: 1 needs about a third of the memory per "
+        "worker; 0 compresses best and is much slower.", choices=(0, 1, 2, 3),
+        legacy_key="extra.buffering"),
+    Opt("no_preflight", "--no-preflight", _D({"tiff2jxl", "jxl2jxl"}), "flag",
+        "performance", "advanced", "Skip the disk-space check",
+        "Do not check the free space before the run.", legacy_key="extra.no_preflight"),
+    Opt("clean_staging", "--clean-staging", _ALL_DIRECTIONS, "flag", "performance",
+        "advanced", "Sweep old staging leftovers",
+        "Delete leftovers idle for over an hour from the staging folder before the "
+        "run (nothing while another run uses it).", legacy_key="extra.clean_staging",
+        when=lambda c: bool(c.workflow.get('staging'))),
+    Opt("icc_png_strategy", "--icc-png-strategy", _TIFF2JXL, "value", "colour",
+        "advanced", "ICC in the intermediate PNG",
+        "How a lossy encode hands the TIFF's profile to cjxl (cautious tests each "
+        "profile once).", choices=("heuristic", "always", "skip", "cautious"),
+        legacy_key="extra.icc_png_strategy"),
+    Opt("scan_scope", "--scan-scope", _D({"tiff2jxl", "jxl2jxl"}), "value", "colour",
+        "advanced", "Which scans keep their own distance",
+        "all = every film scan; raw = only raw scans (finished ones follow the run).",
+        choices=("all", "raw"), legacy_key="extra.scan_scope"),
+    Opt("warn_thumbnail_discard", "--warn-thumbnail-discard", _TIFF2JXL, "flag",
+        "multipage", "expert", "List dropped thumbnail pages",
+        "Name every file whose embedded thumbnail page was not encoded.",
+        legacy_key="extra.warn_thumbnail_discard"),
+    Opt("restamp_then_sync", "--restamp-then-sync", _TIFF2JXL, "flag", "existing",
+        "advanced", "Fix renamed folders, then sync",
+        "Rewrite the path record of masters whose TIFF is unchanged (renamed or moved "
+        "folders), then sync. Never with a delete or Overwrite.",
+        legacy_key="extra.restamp_then_sync",
+        conflicts=("delete_source", "delete_skipped", "overwrite")),
+    Opt("explorer_thumbnail", "--explorer-thumbnail", _D({"tiff2jxl", "jxl2jxl"}),
+        "value", "metadata", "advanced", "Explorer thumbnail",
+        "auto = lossless outputs (every output when jxl-thumb is installed); on; off.",
+        choices=("auto", "on", "off"), legacy_key="extra.explorer_thumbnail"),
+    Opt("recompress_encode_tag", "--encode-tag", _JXL2JXL, "value", "metadata",
+        "advanced", "Encode record", "Where the recompressor writes the cjxl d=/e= "
+        "record.", choices=('xmp', 'software', 'off'),
+        legacy_key="extra.recompress_encode_tag"),
+    Opt("allow_incomplete_groups", "--allow-incomplete-groups", _JXL2TIFF, "flag",
+        "deletion", "expert", "Delete incomplete multi-page groups",
+        "Let the delete remove the JXLs of a multi-page document with missing pages "
+        "(its TIFF has fewer pages). Only with Delete originals.",
+        legacy_key="extra.allow_incomplete_groups", requires=("delete_source",),
+        danger=True),
+    Opt("compress_metadata", "--compress-metadata", _D({"jpeg2jxl"}), "flag", "metadata",
+        "advanced", "Compress EXIF/XMP",
+        "Keep cjxl's compressed metadata boxes: a smaller file, but IrfanView shows "
+        "no EXIF.", legacy_key="extra.compress_metadata"),
+    Opt("output_name", "--output-name", _TRANSCODER_DIRECTIONS, "value", "files",
+        "advanced", "Output folder name", "Modes 1/3 of a lossy conversion: the "
+        "subfolder's name.", legacy_key="extra.output_name",
+        when=lambda c: c.mode in (1, 3)),
+    Opt("sharpen_sigma", "--sharpen-sigma", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}),
+        "notnone", "derivative", "expert", "Sharpening radius (sigma)",
+        "Overrides the preset's unsharp-mask sigma.", legacy_key="extra.sharpen_sigma",
+        when=lambda c: _shaping_applies(c)
+        and (c.advanced.get('sharpen') or 'none') != 'none'),
+    Opt("sharpen_gain", "--sharpen-gain", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}),
+        "notnone", "derivative", "expert", "Sharpening amount (gain)",
+        "Overrides the preset's unsharp-mask gain.", legacy_key="extra.sharpen_gain",
+        when=lambda c: _shaping_applies(c)
+        and (c.advanced.get('sharpen') or 'none') != 'none'),
+    Opt("sharpen_threshold", "--sharpen-threshold",
+        _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "notnone", "derivative", "expert",
+        "Sharpening threshold", "Overrides the preset's unsharp-mask threshold.",
+        legacy_key="extra.sharpen_threshold",
+        when=lambda c: _shaping_applies(c)
+        and (c.advanced.get('sharpen') or 'none') != 'none'),
 )
 
 # Child flags the job builder does not pass, and why. Phase 2 of the wrapper
 # redesign offers most of them (plan 261103, section 4).
 NOT_OFFERED: Dict[str, str] = {
-    "jxl_tiff_encoder:--buffering": "Phase 2 (Performance)",
-    "jxl_tiff_encoder:--no-preflight": "Phase 2 (Performance)",
-    "jxl_tiff_encoder:--clean-staging": "Phase 2 (Performance, with staging)",
-    "jxl_tiff_encoder:--icc-png-strategy": "Phase 2 (Colour & scans)",
-    "jxl_tiff_encoder:--scan-scope": "Phase 2 (Colour & scans)",
-    "jxl_tiff_encoder:--warn-thumbnail-discard": "Phase 2 (Multi-page, expert)",
-    "jxl_tiff_encoder:--restamp-then-sync": "Phase 2 (Existing outputs)",
-    "jxl_tiff_encoder:--restamp-moved": "Phase 2 (maintenance menu)",
-    "jxl_tiff_encoder:--clear-icc-cache": "Phase 2 (maintenance menu)",
     "jxl_tiff_encoder:--icc-cache-dir": "Phase 4 (machine setting)",
-    "jxl_tiff_encoder:--explorer-thumbnail": "Phase 2 (Metadata)",
     "jxl_tiff_encoder:--embed-thumbnail": "deprecated",
-    "jxl_tiff_decoder:--allow-incomplete-groups": "Phase 2 (Deletion, dangerous)",
-    "jxl_tiff_decoder:--clean-staging": "Phase 2 (Performance, with staging)",
-    "jxl_jpeg_transcoder:--compress-metadata": "Phase 2 (Metadata, JPEG -> JXL)",
-    "jxl_jpeg_transcoder:--output-name": "Phase 2 (Files & folders)",
-    "jxl_jpeg_transcoder:--sharpen-sigma": "Phase 2 (Derivative, expert)",
-    "jxl_jpeg_transcoder:--sharpen-gain": "Phase 2 (Derivative, expert)",
-    "jxl_jpeg_transcoder:--sharpen-threshold": "Phase 2 (Derivative, expert)",
-    "jxl_jpeg_transcoder:--clean-staging": "Phase 2 (Performance, with staging)",
-    "jxl_jpeg_transcoder:--ram": "Phase 2 (Performance)",
-    "jxl_jpeg_transcoder:--no-ram": "Phase 2 (Performance)",
+    "jxl_jpeg_transcoder:--ram": "no effect: accepted for compatibility (decode uses temp files)",
+    "jxl_jpeg_transcoder:--no-ram": "no effect: accepted for compatibility (decode uses temp files)",
     "jxl_jpeg_transcoder:--to-srgb": "alias of --icc-profile sRGB, which the wrapper uses",
-    "jxl_recompressor:--buffering": "Phase 2 (Performance)",
-    "jxl_recompressor:--no-preflight": "Phase 2 (Performance)",
-    "jxl_recompressor:--clean-staging": "Phase 2 (Performance, with staging)",
-    "jxl_recompressor:--scan-scope": "Phase 2 (Colour & scans)",
-    "jxl_recompressor:--encode-tag": "Phase 2 (Metadata)",
-    "jxl_recompressor:--explorer-thumbnail": "Phase 2 (Metadata); the refresh flow passes it",
-    "jxl_recompressor:--sharpen-sigma": "Phase 2 (Derivative, expert)",
-    "jxl_recompressor:--sharpen-gain": "Phase 2 (Derivative, expert)",
-    "jxl_recompressor:--sharpen-threshold": "Phase 2 (Derivative, expert)",
     # Never passed: the run's own answer is given another way.
     "jxl_tiff_encoder:--version": "not a run option",
     "jxl_tiff_decoder:--version": "not a run option",
@@ -2984,6 +3042,8 @@ NOT_OFFERED: Dict[str, str] = {
 MAINTENANCE_FLAGS: Dict[str, str] = {
     "jxl_jpeg_transcoder:--repair-jbrd": "repair_jbrd_flow",
     "jxl_recompressor:--refresh-explorer-thumbnails": "explorer_thumbnail_flow",
+    "jxl_tiff_encoder:--restamp-moved": "restamp_flow (menu R)",
+    "jxl_tiff_encoder:--clear-icc-cache": "clear_icc_cache_flow (menu C)",
 }
 
 
@@ -2998,6 +3058,41 @@ def _registry_flags(direction: str) -> Set[str]:
                 out.add(opt.neg_flag)
             out.update(opt.extra_flags)
     return out
+
+
+def _opt_is_on(opt: "Opt", ctx: "_CmdCtx") -> bool:
+    """Is this entry set for the run (applicable, and with a value)?"""
+    if ctx.direction not in opt.directions or not (opt.legacy_key or opt.value):
+        return False
+    if opt.when is not None and not opt.when(ctx):
+        return False
+    v = _opt_value(opt, ctx)
+    return v is not None if opt.kind == "notnone" else bool(v)
+
+
+def _registry_rule_problem(workflow: Dict) -> Optional[str]:
+    """Why the run's options cannot go together (an entry's `conflicts` or
+    `requires`), or None. Checked before a run and before the HHMM token, so
+    the child does not exit 2 after the token (e.g. --restamp-then-sync with
+    a delete)."""
+    origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
+    if not origin or not dest:
+        return None
+    ctx = _CmdCtx(origin, dest, workflow.get('input_dir'), None, workflow.get('mode'),
+                  workflow.get('workers'), workflow,
+                  workflow.get('advanced_options') or {}, False, None)
+    on = {o.id for o in REGISTRY if _opt_is_on(o, ctx)}
+    label = {o.id: o.label for o in REGISTRY}
+    for o in REGISTRY:
+        if o.id not in on:
+            continue
+        bad = [label.get(c, c) for c in o.conflicts if c in on]
+        if bad:
+            return f"'{o.label}' ({o.flag}) cannot run with: {', '.join(bad)}"
+        missing = [label.get(r, r) for r in o.requires if r not in on]
+        if missing:
+            return f"'{o.label}' ({o.flag}) needs: {', '.join(missing)}"
+    return None
 
 
 def _dest_is_source_file(source, dest_path, mode) -> bool:
@@ -3017,6 +3112,194 @@ def _dest_is_source_file(source, dest_path, mode) -> bool:
     return False
 
 # === END OF OPTION REGISTRY ==================================================
+
+
+# === SCREENS BUILT ON THE REGISTRY ===========================================
+#
+# One question API for the screens added with the option registry (the Step 7
+# "all options" screen, the restamp and ICC-cache maintenance flows). Each
+# question carries a stable id (qid): ScriptedUI answers by id in the tests, so
+# re-ordering a question never breaks a test that checks a rule. The rest of
+# the wizard still asks through Rich/input() directly (phase 3 of the plan).
+
+
+_KEEP = object()      # _ask_option_value: leave the option as it is
+
+
+class UI:
+    """The question/message interface. Subclasses render it."""
+
+    def section(self, title: str) -> None:
+        raise NotImplementedError
+
+    def line(self, text: str = "") -> None:
+        raise NotImplementedError
+
+    def warn(self, text: str) -> None:
+        self.line(f"WARNING: {text}")
+
+    def ask_text(self, qid: str, prompt: str, default: str = "") -> str:
+        raise NotImplementedError
+
+    def confirm(self, qid: str, prompt: str, default: bool = False) -> bool:
+        raise NotImplementedError
+
+    def choose(self, qid: str, prompt: str, options: List[Tuple[str, str]],
+               default: Optional[str] = None) -> str:
+        """One key of `options` [(key, label)]."""
+        raise NotImplementedError
+
+
+class PlainUI(UI):
+    def section(self, title):
+        print(f"\n--- {title} ---")
+
+    def line(self, text=""):
+        print(text)
+
+    def ask_text(self, qid, prompt, default=""):
+        shown = f" [{default}]" if default else ""
+        answer = input(f"{prompt}{shown}: ").strip()
+        return answer if answer else default
+
+    def confirm(self, qid, prompt, default=False):
+        answer = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+        return default if not answer else answer.startswith('y')
+
+    def choose(self, qid, prompt, options, default=None):
+        keys = [k for k, _l in options]
+        for k, label in options:
+            print(f"  [{k}] {label}")
+        while True:
+            answer = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
+            if not answer and default is not None:
+                return default
+            if answer in keys:
+                return answer
+            print(f"Choose one of: {', '.join(keys)}")
+
+
+class RichUI(UI):
+    def section(self, title):
+        console.print(f"\n[bold cyan]{_rich_safe(title)}[/bold cyan]")
+
+    def line(self, text=""):
+        console.print(_rich_safe(text))
+
+    def warn(self, text):
+        console.print(f"[yellow]{_rich_safe(text)}[/yellow]")
+
+    def ask_text(self, qid, prompt, default=""):
+        return Prompt.ask(_rich_safe(prompt), default=default or "").strip()
+
+    def confirm(self, qid, prompt, default=False):
+        return Confirm.ask(_rich_safe(prompt), default=default)
+
+    def choose(self, qid, prompt, options, default=None):
+        for k, label in options:
+            console.print(f"  [bold cyan]{_rich_safe(k)}[/bold cyan]  {_rich_safe(label)}")
+        return Prompt.ask(_rich_safe(prompt), choices=[k for k, _l in options],
+                          default=default)
+
+
+class ScriptedUI(UI):
+    """For tests: answers = {qid: value or [values, consumed in order]}. A
+    question with no answer left is an error, never a silent default."""
+
+    def __init__(self, answers: Dict[str, Any]):
+        self.answers = {k: (list(v) if isinstance(v, list) else [v])
+                        for k, v in answers.items()}
+        self.output: List[str] = []
+        self.asked: List[str] = []
+
+    def _next(self, qid):
+        self.asked.append(qid)
+        left = self.answers.get(qid)
+        if not left:
+            raise AssertionError(f"ScriptedUI: no answer for {qid!r}")
+        return left.pop(0)
+
+    def section(self, title):
+        self.output.append(f"== {title}")
+
+    def line(self, text=""):
+        self.output.append(text)
+
+    def warn(self, text):
+        self.output.append(f"WARNING: {text}")
+
+    def ask_text(self, qid, prompt, default=""):
+        v = self._next(qid)
+        return default if v is None else str(v)
+
+    def confirm(self, qid, prompt, default=False):
+        v = self._next(qid)
+        return default if v is None else bool(v)
+
+    def choose(self, qid, prompt, options, default=None):
+        v = self._next(qid)
+        v = default if v is None else str(v)
+        if v not in [k for k, _l in options]:
+            raise AssertionError(f"ScriptedUI: {v!r} is not an option of {qid!r}")
+        return v
+
+
+def _slot_set(workflow: Dict, legacy_key: str, value) -> None:
+    """Write a registry entry's value where the run keeps it (None = unset)."""
+    where, _, key = legacy_key.partition('.')
+    bucket = {"advanced": "advanced_options", "mode_config": "mode_config",
+              "extra": "extra_options"}.get(where)
+    target = workflow if bucket is None else workflow.setdefault(bucket, {})
+    if target is None:
+        target = workflow[bucket] = {}
+    if value is None:
+        if bucket is None:
+            workflow[key] = None
+        else:
+            target.pop(key, None)
+    else:
+        target[key] = value
+
+
+def _screen_editable(opt: "Opt") -> bool:
+    """What the options screen may change: a plain entry with a slot of its
+    own. The rules (delete, provenance, conversion type) and the essentials
+    (dry run, overwrite/sync, distance, bit depth) stay in the wizard, where
+    their gates and questions are."""
+    return (opt.kind in ("flag", "value", "notnone", "tri") and bool(opt.legacy_key)
+            and opt.level not in ("internal", "essential") and opt.value is None
+            and not opt.legacy_key.startswith("advanced.delete"))
+
+
+def _display_value(opt: "Opt", ctx: "_CmdCtx") -> str:
+    v = _opt_value(opt, ctx) if (opt.legacy_key or opt.value) else None
+    if opt.kind == "flag":
+        return "on" if v else "—"
+    if opt.kind == "tri":
+        return "on" if v is True else ("off" if v is False else "—")
+    if v is None or v == "" or v is False:
+        return "—"
+    return str(v)
+
+
+def _extra_options_summary(workflow: Dict) -> List[str]:
+    """'--flag value' of every extra option set for this run's direction
+    (the Step 7 summary lists them before YES)."""
+    origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
+    if not origin or not dest:
+        return []
+    ctx = _CmdCtx(origin, dest, workflow.get('input_dir'), None, workflow.get('mode'),
+                  workflow.get('workers'), workflow,
+                  workflow.get('advanced_options') or {}, False, None)
+    out = []
+    for o in REGISTRY:
+        if o.legacy_key.startswith("extra.") and _opt_is_on(o, ctx):
+            tokens = _emit_opt(o, ctx)
+            if tokens:
+                out.append(" ".join(tokens))
+    return out
+
+# === END OF SCREENS ==========================================================
 
 
 class InteractiveMenu:
@@ -3095,6 +3378,8 @@ class InteractiveMenu:
             ("7", preset_label, True),
             ("8", "Repair JPEG->JXL files (jbrd recovery, EXIF for IrfanView)", True),
             ("9", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
+            ("R", "Renamed or moved folders: fix the masters' path records", True),
+            ("C", "Reset the encoder's ICC test cache", True),
             ("0", "Exit", True),
         ])
 
@@ -3110,10 +3395,14 @@ class InteractiveMenu:
 
             console.print(Panel(table, title="Main Menu", border_style="green"))
 
+            valid_choices = [o[0] for o in options if o[2]]
             while True:
-                choice = Prompt.ask("Select option", choices=[o[0] for o in options if o[2]])
-                if choice:
+                # R and C are letters: either case is taken (Rich's own
+                # choices= check would refuse a lower-case 'r').
+                choice = Prompt.ask("Select option").strip().upper()
+                if choice in valid_choices:
                     return choice
+                console.print(f"[red]Choose one of: {', '.join(valid_choices)}[/red]")
         else:
             print("\n--- Main Menu ---")
             for key, desc, available in options:
@@ -3122,10 +3411,202 @@ class InteractiveMenu:
 
             valid_choices = [o[0] for o in options if o[2]]
             while True:
-                choice = input("\nSelect option: ").strip()
+                choice = input("\nSelect option: ").strip().upper()
                 if choice in valid_choices:
                     return choice
                 print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
+
+    @property
+    def ui(self) -> "UI":
+        """The question API of the registry screens (tests set `_ui`)."""
+        ui = self.__dict__.get('_ui')
+        if ui is None:
+            ui = RichUI() if (RICH_AVAILABLE and console) else PlainUI()
+            self.__dict__['_ui'] = ui
+        return ui
+
+    def _all_options_screen(self, workflow: Dict) -> None:
+        """Step 7's "all options for this job": every registry entry of this
+        run's direction, grouped, with its value; the plain ones can be
+        changed here (written to their slot, so the command builder and the
+        saved session see them), the rules stay in the wizard. `/text`
+        filters; Enter goes back to the summary."""
+        ui = self.ui
+        origin, dest = workflow.get('origin_format'), workflow.get('dest_format')
+        if not origin or not dest:
+            return
+        workflow.setdefault('extra_options', {})
+        flt = ""
+        while True:
+            ctx = _CmdCtx(origin, dest, workflow.get('input_dir'), None,
+                          workflow.get('mode'), workflow.get('workers'), workflow,
+                          workflow.get('advanced_options') or {}, False,
+                          self.config.config.export_marker)
+            rows = []
+            for o in REGISTRY:
+                if ctx.direction not in o.directions or o.level == "internal":
+                    continue
+                if o.when is not None and not o.when(ctx):
+                    continue
+                if flt and flt not in f"{o.label} {o.flag} {o.help}".lower():
+                    continue
+                rows.append(o)
+            ui.section(f"All options — {origin.upper()} -> {dest.upper()}"
+                       + (f" (filter: {flt})" if flt else ""))
+            numbered = {}
+            for gid, title in GROUPS:
+                mine = [o for o in rows if o.group == gid]
+                if not mine:
+                    continue
+                ui.line(title)
+                for o in mine:
+                    n = str(len(numbered) + 1)
+                    numbered[n] = o
+                    tag = "" if _screen_editable(o) else "  (set in the wizard)"
+                    mark = " (!)" if o.danger else ""
+                    ui.line(f"  [{n:>2}] {o.label}{mark}: {_display_value(o, ctx)}"
+                            f"   {o.flag}{tag}")
+            answer = ui.ask_text("opt.screen", "Number to change, /text to filter, "
+                                 "Enter to go back", "").strip()
+            if not answer:
+                return
+            if answer.startswith("/"):
+                flt = answer[1:].strip().lower()
+                continue
+            o = numbered.get(answer)
+            if o is None:
+                ui.warn(f"No option {answer!r}.")
+                continue
+            if not _screen_editable(o):
+                ui.warn(f"'{o.label}' is set in the wizard's own steps.")
+                continue
+            before = _opt_value(o, ctx)
+            new = self._ask_option_value(o, before)
+            if new is _KEEP:
+                continue
+            if o.danger and new is not None and new is not False and not ui.confirm(
+                    "opt.danger", f"'{o.label}' relaxes a safety check. Turn it on?",
+                    False):
+                continue
+            _slot_set(workflow, o.legacy_key, new)
+            problem = _registry_rule_problem(workflow)
+            if problem:
+                _slot_set(workflow, o.legacy_key, before)
+                ui.warn(f"Not changed: {problem}.")
+
+    def _ask_option_value(self, o: "Opt", current):
+        """The new value of one entry (None = unset), or _KEEP."""
+        ui = self.ui
+        qid = f"opt.{o.id}"
+        ui.line(f"{o.label} ({o.flag}): {o.help}")
+        if o.kind == "flag":
+            return None if current else True
+        if o.kind == "tri":
+            key = ui.choose(qid, "Value", [("1", "script default"), ("2", "on"),
+                                           ("3", "off")], "1")
+            return {"1": None, "2": True, "3": False}[key]
+        if o.choices:
+            opts = [("0", "script default")] + [(str(i + 1), str(c))
+                                                 for i, c in enumerate(o.choices)]
+            key = ui.choose(qid, "Value", opts, "0")
+            return None if key == "0" else o.choices[int(key) - 1]
+        text = ui.ask_text(qid, "Value (empty = script default)",
+                           "" if current in (None, False) else str(current)).strip()
+        if not text:
+            return None
+        if o.kind == "notnone":
+            try:
+                return float(text)
+            except ValueError:
+                ui.warn(f"{text!r} is not a number.")
+                return _KEEP
+        return text
+
+    def restamp_flow(self, status) -> None:
+        """Menu R: `jxl_tiff_encoder.py <folder> --mode N --restamp-moved`.
+
+        After a folder of TIFFs was renamed or moved, the masters' path record
+        names the old place, and the overwrite guard refuses to re-encode
+        them. The restamp rewrites the record of every master whose TIFF is
+        unchanged, without re-encoding (dates kept). Dry run first."""
+        ui = self.ui
+        script = SCRIPT_DIR / 'jxl_tiff_encoder.py'
+        if not script.exists():
+            self._print_error(f"Script not found: {script}")
+            return
+        if not status.get('exiftool'):
+            self._print_error("exiftool is required.")
+            return
+        ui.section("Renamed or moved folders: fix the masters' path records")
+        ui.line("Each master records the path of the TIFF it was made from. After a "
+                "folder was renamed or moved, this rewrites that record for every "
+                "master whose TIFF is unchanged — nothing is re-encoded, file dates "
+                "are kept. Masters whose TIFF changed since are listed and left alone.")
+        cfg = self.config.config
+        default_dir = cfg.last_input_dir or str(Path.home())
+        folder = _strip_surrounding_quotes(
+            ui.ask_text("restamp.folder", "TIFF folder (the renamed one, or above it)",
+                        default_dir))
+        if not folder or not Path(folder).is_dir():
+            self._print_error(f"Not a folder: {folder}")
+            return
+        last_mode = cfg.last_output_mode if cfg.last_origin_format == 'tiff' else None
+        mode = ui.choose("restamp.mode", "Mode the masters were written with",
+                         [(str(m), name) for m, name in (
+                             (0, "next to the TIFFs, this folder only (or an output folder)"),
+                             (1, "a subfolder next to the TIFFs, this folder only"),
+                             (2, "one flat output folder"),
+                             (3, "a subfolder inside each TIFF folder"),
+                             (4, "a renamed copy of each TIFF folder"),
+                             (5, "a sibling folder of each TIFF folder"),
+                             (6, "below the export marker"),
+                             (7, "below the export marker, one subfolder"),
+                             (8, "next to the TIFFs, every subfolder"))],
+                         last_mode if last_mode in [str(m) for m in range(9)] else "8")
+        cmd = [sys.executable, str(script), folder]
+        if mode in ("0", "2"):
+            out = _strip_surrounding_quotes(ui.ask_text(
+                "restamp.output", "Folder the masters are in (empty = the same folder)",
+                ""))
+            if out:
+                cmd.append(out)
+        cmd += ["--mode", mode, "--export-marker",
+                cfg.export_marker or ToolConfig.export_marker]
+        if mode == "7":
+            sub = ui.ask_text("restamp.subfolder",
+                              "Export subfolder (empty = the script setting)", "").strip()
+            if sub:
+                cmd += ["--export-subfolder", sub]
+        if mode in ("6", "7"):
+            jf = ui.ask_text("restamp.jxl_folder",
+                             "Masters' folder below the marker (empty = the script "
+                             "setting)", "").strip()
+            if jf:
+                cmd += ["--export-jxl-folder", jf]
+        cmd.append("--restamp-moved")
+        dry = ui.confirm("restamp.dry_run", "Dry run first (shows what would change)?",
+                         True)
+        rc = self._stream_child(cmd + (["--dry-run"] if dry else []))
+        if dry and rc == 0 and ui.confirm("restamp.run", "Rewrite those records now?",
+                                          False):
+            self._stream_child(cmd)
+
+    def clear_icc_cache_flow(self, status) -> None:
+        """Menu C: `jxl_tiff_encoder.py --clear-icc-cache`. The cautious ICC
+        strategy remembers, per profile and cjxl version, whether a profile
+        survives a lossy encode; clearing makes the next lossy run test each
+        profile again (after a libjxl update, or to re-check a profile)."""
+        ui = self.ui
+        script = SCRIPT_DIR / 'jxl_tiff_encoder.py'
+        if not script.exists():
+            self._print_error(f"Script not found: {script}")
+            return
+        ui.section("Reset the ICC test cache")
+        ui.line("The encoder's cautious ICC strategy remembers which colour profiles "
+                "survive a lossy encode (per cjxl version). Clearing it makes the next "
+                "lossy run test each profile again. Nothing else is touched.")
+        if ui.confirm("icccache.confirm", "Clear the cache now?", False):
+            self._stream_child([sys.executable, str(script), "--clear-icc-cache"])
 
     def repair_jbrd_flow(self, status) -> None:
         """Menu option 8: audit/repair jbrd JXLs whose JPEG recovery broke.
@@ -6576,6 +7057,9 @@ class InteractiveMenu:
         # coexist with a delete (the child refuses that combination).
         if _adv.get('overwrite_guard') is False:
             extra_info.append("Overwrite guard: off")
+        _extras = _extra_options_summary(workflow)
+        if _extras:
+            extra_info.append("Options: " + ", ".join(_extras))
         if workflow.get('expert_flags'):
             extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
         if workflow.get('exclude_folders'):
@@ -6612,8 +7096,11 @@ class InteractiveMenu:
                 if extra_info:
                     table.add_row("Config:", _rich_safe(", ".join(extra_info)))
                 console.print(Panel(table, border_style="green"))
-                console.print("\n[yellow]Type YES to confirm[/yellow]")
+                console.print("\n[yellow]Type YES to confirm[/yellow] [dim](O = all options for this job)[/dim]")
                 confirm = Prompt.ask("Confirm")
+                if confirm.strip().upper() == "O":
+                    self._all_options_screen(workflow)
+                    return self._wizard_confirm(workflow)
                 if confirm.upper() != "YES":
                     console.print("[dim]Cancelling...[/dim]\n")
                     return False
@@ -6632,8 +7119,11 @@ class InteractiveMenu:
                 # manifest that deletes originals without saying so.
                 if extra_info:
                     print(f"Config: {', '.join(extra_info)}")
-                print("\nType YES to confirm:")
+                print("\nType YES to confirm (O = all options for this job):")
                 confirm = input("> ").strip()
+                if confirm.upper() == "O":
+                    self._all_options_screen(workflow)
+                    return self._wizard_confirm(workflow)
                 if confirm.upper() != "YES":
                     print("Cancelling...\n")
                     return False
@@ -6723,8 +7213,11 @@ class InteractiveMenu:
                 table.add_row("Config:", _rich_safe(", ".join(extra_info)))
             console.print(Panel(table, border_style="green"))
 
-            console.print("\n[yellow]Type YES to confirm[/yellow]")
+            console.print("\n[yellow]Type YES to confirm[/yellow] [dim](O = all options for this job)[/dim]")
             confirm = Prompt.ask("Confirm")
+            if confirm.strip().upper() == "O":
+                self._all_options_screen(workflow)
+                return self._wizard_confirm(workflow)
             if confirm.upper() != "YES":
                 console.print("[dim]Cancelling...[/dim]\n")
                 return False
@@ -6804,8 +7297,11 @@ class InteractiveMenu:
 
             if extra_info:
                 print(f"Config: {', '.join(extra_info)}")
-            print("\nType YES to confirm:")
+            print("\nType YES to confirm (O = all options for this job):")
             confirm = input("> ").strip()
+            if confirm.upper() == "O":
+                self._all_options_screen(workflow)
+                return self._wizard_confirm(workflow)
             if confirm.upper() != "YES":
                 print("Cancelling...\n")
                 return False
@@ -9017,6 +9513,11 @@ class InteractiveMenu:
             self._print_error(f"Expert flags cannot run: {_xprob}. Nothing was started; "
                               f"fix or remove them.")
             return False
+        _rule = _registry_rule_problem(workflow)
+        if _rule:
+            self._print_error(f"These options cannot run together: {_rule}. Nothing was "
+                              f"started; change them on the summary's options screen.")
+            return False
         _mode_flag = _flags_set_mode(workflow.get('expert_flags'))
         if _mode_flag:
             self._print_error(
@@ -9779,6 +10280,7 @@ class InteractiveMenu:
             'no_icc_cleanup': False,
         }
         workflow['advanced_options'] = dict(session.get('last_advanced_options') or fallback_advanced)
+        workflow['extra_options'] = dict(session.get('last_extra_options') or {})
         # Ensure overwrite/sync reflect the choice just made in this dialog,
         # not a stale value from a previous session's last_advanced_options.
         workflow['advanced_options']['overwrite'] = overwrite
@@ -10055,6 +10557,7 @@ def _main():
                     mode_config=workflow.get('mode_config'),
                     # None on a normal run: clears any previously stored CSV.
                     manifest_path=workflow.get('manifest_path'),
+                    extra_options=workflow.get('extra_options') or {},
                     # The wizard stages the answer only in the TIFF<->JXL
                     # directions (same gate the replay honors): for every
                     # other direction the run never asked, so the saved
@@ -10111,6 +10614,12 @@ def _main():
 
         elif choice == "9":
             menu.explorer_thumbnail_flow(status)
+
+        elif choice == "R":
+            menu.restamp_flow(status)
+
+        elif choice == "C":
+            menu.clear_icc_cache_flow(status)
 
         elif choice == "3":
             status = checker.check_dependencies(force=True)

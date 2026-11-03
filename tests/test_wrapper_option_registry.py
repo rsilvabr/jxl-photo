@@ -151,7 +151,9 @@ def test_entries_are_well_formed(wp):
             assert o.legacy_key or o.value is not None, o.id
             if o.legacy_key:
                 assert o.legacy_key.split(".", 1)[0] in (
-                    "advanced", "workflow", "mode_config"), o.id
+                    "advanced", "workflow", "mode_config", "extra"), o.id
+        for ref in o.requires + o.conflicts:
+            assert ref in ids, (o.id, ref)
 
 
 def test_not_offered_entries_are_real_and_unused(wp):
