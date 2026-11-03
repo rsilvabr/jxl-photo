@@ -228,7 +228,8 @@ def test_cmd_transcode_returns_error_tuple(monkeypatch, tmp_path):
 
 def test_icc_cache_concurrent_writes(monkeypatch, tmp_path):
     monkeypatch.setattr(enc, "ICC_CACHE_DIR_OVERRIDE", tmp_path)
-    monkeypatch.setattr(enc, "_cautious_test_icc_depth", lambda icc, depth: True)
+    monkeypatch.setattr(enc, "_cautious_test_icc_depth",
+                        lambda icc, depth, distance=None: True)
     monkeypatch.setattr(enc.shutil, "which", lambda x: x)
     enc.setup_logger()
 
