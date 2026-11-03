@@ -104,12 +104,26 @@ def test_master_folder_is_never_skipped(tmp_path, monkeypatch):
     another tool's name keeps them visible."""
     fake_enc = tmp_path / "fake_encoder.py"
     fake_enc.write_text(f'EXPORT_JXL_FOLDER = "{tra.EXPORT_JXL_FOLDER}"\n', encoding="utf-8")
-    monkeypatch.setattr(dec, "_MASTER_FOLDER_SOURCE",
-                        (str(fake_enc), "EXPORT_JXL_FOLDER", "16B_JXL"))
-    names, _suffixes, master = dec._other_tool_output_folders()
-    assert master == tra.EXPORT_JXL_FOLDER.lower()
-    assert master not in names
+    monkeypatch.setattr(dec, "_MASTER_FOLDER_SOURCES",
+                        ((str(fake_enc), "EXPORT_JXL_FOLDER", "16B_JXL"),))
+    names, _suffixes, masters = dec._other_tool_output_folders()
+    master = tra.EXPORT_JXL_FOLDER.lower()
+    assert master in masters and master not in names
     assert not dec._skip_other_tool_output([master], honor_requested_subfolder=False)
+
+
+@pytest.mark.parametrize("module", [dec, rec], ids=["decoder", "recompressor"])
+@pytest.mark.parametrize("finder", ["find_jxls_mode6", "find_jxls_mode7"])
+def test_encoder_mode1_masters_below_the_marker_are_found(tmp_path, monkeypatch,
+                                                          module, finder):
+    """M1 of the 261103 review: the encoder's mode 1 writes its masters into
+    converted_jxl — the transcoder's CONVERTED_JXL_FOLDER has the same name.
+    A folder the encoder writes masters into must never be skipped."""
+    exp = tmp_path / EVENT / "01_Z7" / enc.EXPORT_MARKER
+    mode1 = _stub(exp / "TIFF16 (2)" / enc.CONVERTED_JXL_FOLDER / NAME)
+    mode3 = _stub(exp / "TIFF16 [b]" / enc.JXL_FOLDER_NAME / NAME)
+    monkeypatch.setattr(module, "EXPORT_JXL_SUBFOLDER", "")
+    assert _found(getattr(module, finder), tmp_path) == sorted([str(mode1), str(mode3)])
 
 
 def test_configured_sibling_setting_is_skipped_too(tmp_path, monkeypatch):
@@ -128,15 +142,19 @@ def test_tables_follow_the_siblings():
     """The decoder's copy of the recompressor's fixed names, and every real
     sibling setting, are in the skip set."""
     assert dec._OTHER_TOOL_FIXED_FOLDERS == rec._RECOMPRESSOR_OUTPUT_FOLDERS
-    dnames, dsuffixes, dmaster = dec._other_tool_output_folders()
-    rnames, _rs, rmaster = rec._other_tool_output_folders()
-    for v in (rec.EXPORT_JXL_FOLDER, tra.EXPORT_JXL_FOLDER, tra.JXL_SIBLING_FOLDER,
-              tra.CONVERTED_JXL_FOLDER):
+    dnames, dsuffixes, dmasters = dec._other_tool_output_folders()
+    rnames, _rs, rmasters = rec._other_tool_output_folders()
+    for v in (rec.EXPORT_JXL_FOLDER, tra.EXPORT_JXL_FOLDER, tra.JXL_SIBLING_FOLDER):
         assert v.lower() in dnames, v
-    for v in (tra.EXPORT_JXL_FOLDER, tra.JXL_SIBLING_FOLDER, tra.CONVERTED_JXL_FOLDER):
+    for v in (tra.EXPORT_JXL_FOLDER, tra.JXL_SIBLING_FOLDER):
         assert v.lower() in rnames, v
     assert "_" + rec.JXL_SUFFIX_REPLACE.lower() in dsuffixes
-    assert dmaster == rmaster == enc.EXPORT_JXL_FOLDER.lower()
+    # Every encoder master folder is exempt — and removed from the skip set
+    # even when another tool uses the same name (converted_jxl).
+    for v in (enc.EXPORT_JXL_FOLDER, enc.CONVERTED_JXL_FOLDER, enc.JXL_FOLDER_NAME):
+        assert v.lower() in dmasters and v.lower() in rmasters, v
+        assert v.lower() not in dnames and v.lower() not in rnames, v
+    assert dmasters == rmasters
 
 
 def test_flat_and_recursive_finders_stay_unfiltered(tmp_path):

@@ -3900,14 +3900,16 @@ def reorder_jxl_boxes(jxl_path):
         else:
             # E-G (2026-11-03 audit): an unknown box that sat BEFORE the
             # codestream stays before it — the Explorer thumbnail (uuid) box is
-            # put there so a reader finds it without crossing the image data,
-            # and moving it to the end made every restamp/adopt hide it.
+            # put there so a reader finds it without crossing the image data.
+            # (jxl-thumb reads every box, so Explorer showed it either way; a
+            # reader that stops at the codestream would not.)
             pre_codestream_boxes.append((name, h, p))
 
     # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
     # first. Since v2.17.0 the encoder writes the source's XMP block in its
     # own exiftool call BEFORE the EXIF (_preload_xmp_block), so the Exif box
-    # arrived second (#561). Stable sort: every other box keeps its order.
+    # arrived second (#561). Stable sort: every other box keeps its order
+    # (jbrd reconstruction pairs boxes by type, never across types).
     meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others

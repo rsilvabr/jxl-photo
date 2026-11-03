@@ -130,6 +130,10 @@ SHARED_HELPERS = [
     # Exif box before the XMP box in every output (#561): IrfanView shows no
     # EXIF otherwise.
     "_exif_box_rank",
+    # The box reorder itself (encoder, recompressor, transcoder). Not pinned
+    # until the 261103 review (S3): the copies differed only cosmetically, and
+    # the E-G fix had to be applied three times by hand.
+    "reorder_jxl_boxes",
     # A '%' in a source name (#550): a copy drifting is one script writing an
     # output with none of its source's metadata.
     "_exiftool_source",

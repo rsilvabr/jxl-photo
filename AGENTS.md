@@ -286,8 +286,11 @@
 - Below the export marker, modes 6/7 of the decoder and the recompressor skip
   the OTHER tools' JXL output folders (#565: `_skip_other_tool_output`, names
   from the siblings' settings via `ast` plus the shipped defaults, per-script
-  tables `_OTHER_TOOL_*`; helpers parity-pinned). Never the encoder's master
-  folder, never mode 7's requested subfolder; the transcoder's decode stays
+  tables `_OTHER_TOOL_*`; helpers parity-pinned). Never a folder the encoder
+  writes masters into (`_MASTER_FOLDER_SOURCES`: `EXPORT_JXL_FOLDER`,
+  `CONVERTED_JXL_FOLDER`, `JXL_FOLDER_NAME` — `converted_jxl` is the
+  transcoder's name too, M1 of the 261103 review), never mode 7's requested
+  subfolder; the transcoder's decode stays
   unfiltered (it is how a JPEG archive comes back). The wrapper's
   `_skip_check` mirrors it (`_other_tool_skip`).
 - **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION

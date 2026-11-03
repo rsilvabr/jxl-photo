@@ -465,11 +465,13 @@ session/_EXPORT/sRGB/photo.jxl     → ignored
 recompressor's derivatives (`16B_JXL_small`, `recompressed_jxl`,
 `JXL_recompressed`, `JXL_small`, any folder ending in `_JXL_small`, and its
 configured `EXPORT_JXL_FOLDER`) and the transcoder's JPEG archives
-(`JXL_jpeg`, `converted_jxl`, and its configured folders). They carry the
-masters' file names, so they landed on the same TIFF and the run stopped on
-the duplicate. The names come from those scripts' settings (configured value
-and shipped default); the encoder's master folder (`EXPORT_JXL_FOLDER`) is
-never skipped, and neither is a folder mode 7 asks for by name. The log says
+(`JXL_jpeg` and its configured folders). They carry the masters' file names,
+so they landed on the same TIFF and the run stopped on the duplicate. The
+names come from those scripts' settings (configured value and shipped
+default). A folder the encoder writes masters into is never skipped
+(`EXPORT_JXL_FOLDER`, `CONVERTED_JXL_FOLDER`, `JXL_FOLDER_NAME`) — so
+`converted_jxl`, which the transcoder uses too, keeps being decoded — and
+neither is a folder mode 7 asks for by name. The log says
 `Ignored N JXL(s) in other tools' output folders`. A folder named only on a
 command line (another run's `--export-jxl-folder`, e.g. `16B_JXL_sRGB`) is not
 known here: use mode 7 with `--export-subfolder` set to the masters' folder.

@@ -4379,7 +4379,14 @@ _OTHER_TOOL_FIXED_FOLDERS = frozenset(
     {"recompressed_jxl", "jxl_recompressed", "jxl_small", "16b_jxl_small"})
 # Mode 4's fallback folder of the recompressor: <name>_JXL_small.
 _OTHER_TOOL_SUFFIX_SOURCES = (("jxl_recompressor.py", "JXL_SUFFIX_REPLACE", "JXL_small"),)
-_MASTER_FOLDER_SOURCE = ("jxl_tiff_encoder.py", "EXPORT_JXL_FOLDER", "16B_JXL")
+# Every folder the ENCODER writes masters into (modes 6/7, 1, 3/5): never
+# skipped, even where another tool uses the same name — the transcoder's
+# converted_jxl is also the encoder's mode 1 folder (M1 of the 261103 review).
+_MASTER_FOLDER_SOURCES = (
+    ("jxl_tiff_encoder.py", "EXPORT_JXL_FOLDER", "16B_JXL"),
+    ("jxl_tiff_encoder.py", "CONVERTED_JXL_FOLDER", "converted_jxl"),
+    ("jxl_tiff_encoder.py", "JXL_FOLDER_NAME", "JXL_16bits"),
+)
 _other_tool_folders_cache = None
 def _sibling_str_settings(script_name: str, names) -> dict:
     """{name: value} of the plain string settings `names` at the top of the
@@ -4403,19 +4410,21 @@ def _sibling_str_settings(script_name: str, names) -> dict:
 
 
 def _other_tool_output_folders() -> tuple:
-    """(names, suffixes, master), lowercased: the JXL OUTPUT folders of the
+    """(names, suffixes, masters), lowercased: the JXL OUTPUT folders of the
     OTHER tools (_OTHER_TOOL_FOLDER_SOURCES, _OTHER_TOOL_FIXED_FOLDERS,
     _OTHER_TOOL_SUFFIX_SOURCES) — each configured value AND its shipped
-    default — and the encoder's master folder, which is never among them: it
-    is what modes 6/7 are for. Read from the siblings' settings once (X-B of
-    the 2026-11-03 audit; the encoder's _decoder_output_folders is the
-    mirror), then cached."""
+    default — and the folders the encoder writes masters into
+    (_MASTER_FOLDER_SOURCES, same rule), which are never among them: masters
+    are what these modes are for, and a name both tools use (converted_jxl)
+    must keep its masters. Read from the siblings' settings once (X-B of the
+    2026-11-03 audit; the encoder's _decoder_output_folders is the mirror),
+    then cached."""
     global _other_tool_folders_cache
     if _other_tool_folders_cache is None:
         wanted = {}
         for script, setting, _default in (_OTHER_TOOL_FOLDER_SOURCES
                                           + _OTHER_TOOL_SUFFIX_SOURCES
-                                          + (_MASTER_FOLDER_SOURCE,)):
+                                          + _MASTER_FOLDER_SOURCES):
             wanted.setdefault(script, set()).add(setting)
         read = {s: _sibling_str_settings(s, n) for s, n in wanted.items()}
 
@@ -4423,38 +4432,40 @@ def _other_tool_output_folders() -> tuple:
             got = (read.get(script) or {}).get(setting) or ""
             return {v.strip().lower() for v in (got, default) if v.strip()}
 
-        master = ((read.get(_MASTER_FOLDER_SOURCE[0]) or {}).get(_MASTER_FOLDER_SOURCE[1])
-                  or _MASTER_FOLDER_SOURCE[2]).strip().lower()
+        masters = set()
+        for src in _MASTER_FOLDER_SOURCES:
+            masters |= _values(*src)
         names = {n.lower() for n in _OTHER_TOOL_FIXED_FOLDERS}
         for src in _OTHER_TOOL_FOLDER_SOURCES:
             names |= _values(*src)
         suffixes = set()
         for src in _OTHER_TOOL_SUFFIX_SOURCES:
             suffixes |= {"_" + v for v in _values(*src)}
-        names.discard(master)
-        _other_tool_folders_cache = (frozenset(names), frozenset(suffixes), master)
+        names -= masters
+        _other_tool_folders_cache = (frozenset(names), frozenset(suffixes),
+                                     frozenset(masters))
     return _other_tool_folders_cache
 
 
 def _skip_other_tool_output(parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
     """True if a folder below the export marker is another tool's JXL output
-    folder (_other_tool_output_folders) — never the encoder's master folder,
-    and, in mode 7, never the EXPORT_JXL_SUBFOLDER explicitly requested (an
+    folder (_other_tool_output_folders) — never a folder the encoder writes
+    masters into, and, in mode 7, never the EXPORT_JXL_SUBFOLDER explicitly requested (an
     explicit request wins over this heuristic; mode 6 has none and passes
     honor_requested_subfolder=False). Without it a derivative or a JPEG
     archive next to the master resolved to the master's output: the run
     aborted on the duplicate, or decoded/recompressed the derivative as a
     master."""
-    names, suffixes, master = _other_tool_output_folders()
+    names, suffixes, masters = _other_tool_output_folders()
     requested = EXPORT_JXL_SUBFOLDER.lower() if honor_requested_subfolder else ""
-    return any(p != requested and p != master
+    return any(p != requested and p not in masters
                and (p in names or any(p.endswith(s) for s in suffixes))
                for p in parts_below_marker)
 
 
 def _log_other_tool_skips(count: int) -> None:
     if count:
-        names, suffixes, _master = _other_tool_output_folders()
+        names, suffixes, _masters = _other_tool_output_folders()
         logger.info(f"Ignored {count} JXL(s) in other tools' output folders "
                     f"({', '.join(sorted(names))}"
                     + (f", or any folder ending in {', '.join(sorted(suffixes))}"

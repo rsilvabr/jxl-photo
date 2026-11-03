@@ -2310,8 +2310,10 @@ def _exif_box_rank(box) -> int:
     return 0 if name == b"Exif" or (name == b"brob" and payload[:4] == b"Exif") else 1
 
 
-def reorder_jxl_boxes(jxl_path: Path):
-    """Reorder boxes so Exif comes BEFORE codestream (IrfanView compatibility)."""
+def reorder_jxl_boxes(jxl_path):
+    """Reorders ISOBMFF boxes so Exif comes BEFORE the codestream.
+    IrfanView reads JXL boxes linearly and stops at the codestream — Exif must come first.
+    Supports both lossless (single jxlc) and lossy (multiple jxlp) JXL."""
     data = jxl_path.read_bytes()
     file_size = len(data)
     
@@ -2335,8 +2337,8 @@ def reorder_jxl_boxes(jxl_path: Path):
         if i + 8 > file_size:
             # Do NOT rewrite the file with only the parsed boxes — that would
             # silently drop the trailing bytes and turn a file that fails the
-            # integrity gate into one that passes it (same rule as the extended
-            # box branch below, and as the encoder).
+            # integrity gate into one that passes it (this runs BEFORE
+            # _verify_jxl_integrity, and mode 8 deletes the source on pass).
             raise RuntimeError(f"Truncated box header at offset {i}: {file_size - i} trailing byte(s)")
 
         size = int.from_bytes(data[i:i+4], "big")
@@ -2351,8 +2353,6 @@ def reorder_jxl_boxes(jxl_path: Path):
         if size == 1:
             # Extended size (64-bit)
             if i + 16 > file_size:
-                # Do NOT rewrite the file with only the parsed boxes — that
-                # would silently discard the rest (same rule as the encoder).
                 raise RuntimeError(f"Truncated extended box at offset {i}: file too short for 16-byte header")
             ext_size = int.from_bytes(data[i+8:i+16], "big")
             if ext_size > MAX_JXL_SIZE:
@@ -2376,14 +2376,25 @@ def reorder_jxl_boxes(jxl_path: Path):
             boxes.append((name, header, payload))
         i += size if size != 0 else file_size
 
+    # Split boxes into groups: metadata (before codestream) and codestream
     CODESTREAM = {b"jxlc", b"jxlp"}
-    meta_order_boxes, meta_extra_boxes, codestream_boxes, other_boxes = [], [], [], []
+    META_ORDER = {b"JXL ", b"ftyp", b"jxll"}       # required structure first
+    META_EXTRA = {b"Exif", b"xml ", b"jbrd", b"brob"}  # metadata before codestream
+    # brob is the Brotli-compressed metadata box libjxl/exiftool may write;
+    # leaving it after the codestream is exactly the bug this function exists
+    # to fix (IrfanView stops reading at the codestream).
+
+    # Group by type preserving appearance order (important for multiple jxlp)
+    meta_order_boxes  = []
+    meta_extra_boxes  = []
+    codestream_boxes  = []
+    other_boxes       = []
     pre_codestream_boxes = []
 
     for name, h, p in boxes:
-        if name in {b"JXL ", b"ftyp", b"jxll"}:
+        if name in META_ORDER:
             meta_order_boxes.append((name, h, p))
-        elif name in {b"Exif", b"xml ", b"jbrd", b"brob"}:
+        elif name in META_EXTRA:
             meta_extra_boxes.append((name, h, p))
         elif name in CODESTREAM:
             codestream_boxes.append((name, h, p))
@@ -2392,13 +2403,16 @@ def reorder_jxl_boxes(jxl_path: Path):
         else:
             # E-G (2026-11-03 audit): an unknown box that sat BEFORE the
             # codestream stays before it — the Explorer thumbnail (uuid) box is
-            # put there so a reader finds it without crossing the image data,
-            # and moving it to the end made every restamp/adopt hide it.
+            # put there so a reader finds it without crossing the image data.
+            # (jxl-thumb reads every box, so Explorer showed it either way; a
+            # reader that stops at the codestream would not.)
             pre_codestream_boxes.append((name, h, p))
 
     # Exif before the XMP: IrfanView shows no EXIF when the xml box comes
-    # first (#561). Stable sort: every other box keeps its order (jbrd
-    # reconstruction pairs boxes by type, never across types).
+    # first. Since v2.17.0 the encoder writes the source's XMP block in its
+    # own exiftool call BEFORE the EXIF (_preload_xmp_block), so the Exif box
+    # arrived second (#561). Stable sort: every other box keeps its order
+    # (jbrd reconstruction pairs boxes by type, never across types).
     meta_extra_boxes.sort(key=_exif_box_rank)
 
     # Final order: structure -> metadata -> codestream -> others
@@ -2417,14 +2431,15 @@ def reorder_jxl_boxes(jxl_path: Path):
             try:
                 h = real_size.to_bytes(4, "big") + h[4:8]
             except OverflowError:
-                # A file just under 4 GiB whose trailing size-0 box spans most
-                # of it computes a real_size that no longer fits the 32-bit
-                # field — report it like the truncation guards above, not as
-                # an uncaught traceback.
+                # A file just under 4 GiB whose trailing size-0 box spans
+                # most of it computes a real_size that no longer fits the
+                # 32-bit field — report it like the truncation guards above,
+                # not as an uncaught traceback.
                 raise RuntimeError(
                     f"Cannot re-header size-0 box {name!r}: real size {real_size} "
                     f"exceeds the 32-bit box size field") from None
         out += h + p
+
     jxl_path.write_bytes(out)
 
 # --------------------------------------------─

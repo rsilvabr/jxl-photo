@@ -299,10 +299,10 @@ shows it in **~2 ms** instead of decoding the photo.
 `uuid` box, the format's way to carry a program's private data — right
 before the image data. Other programs skip a box they do not know: viewers,
 djxl, exiftool edits (which keep it), Lightroom-style metadata writers.
-The toolkit's own box reorder keeps it there too; before this fix
+The toolkit's own box reorder keeps it there too. Before this fix
 `--restamp-moved` and the `--provenance adopt` stamp moved it to the end of
-the file, where jxl-thumb does not find it — `--refresh-explorer-thumbnails`
-(menu option 9) moves it back.
+the file; jxl-thumb reads every box, so Explorer kept showing it, and
+`--refresh-explorer-thumbnails` (menu option 9) puts it back in place.
 It is not in the EXIF on purpose: a 768 px JPEG does not fit the 64 KB EXIF
 segment of a JPEG, and djxl, which copies a JXL's EXIF into the JPEG it
 writes, fails on such a file ("Bogus marker length").
