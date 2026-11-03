@@ -4685,7 +4685,11 @@ def _read_source_markers_batch(outputs: list) -> dict:
     calls as possible — one per file would be minutes on a large library.
 
     A file whose markers cannot be read comes back with both None, which the
-    caller treats as "cannot prove anything": fail closed.
+    caller treats as "cannot prove anything": fail closed. It ALSO carries
+    'unread': True — "cannot tell" is not "no marker" (X-A of the 2026-11-03
+    audit): an overwrite guard that took a failed batch for a legacy,
+    markerless archive let the overwrite through. Unread = the batch failed
+    or stalled, or exiftool returned no entry (or an Error) for that file.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
     # normcase -> the exact key the caller will look up by.
@@ -4697,6 +4701,7 @@ def _read_source_markers_batch(outputs: list) -> dict:
     BATCH = 400
     for i in range(0, len(outputs), BATCH):
         chunk = outputs[i:i + BATCH]
+        answered = set()
         argfile = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -4717,6 +4722,10 @@ def _read_source_markers_batch(outputs: list) -> dict:
             data = json.loads(r.stdout)
             for entry in data:
                 src = entry.get("SourceFile")
+                if src is not None and not entry.get("Error"):
+                    # Answered, with or without a Relation: a file with no
+                    # Relation at all is a real "no marker", not an unread one.
+                    answered.add(os.path.normcase(str(Path(src))))
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
@@ -4746,6 +4755,9 @@ def _read_source_markers_batch(outputs: list) -> dict:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
         finally:
+            for o in chunk:
+                if os.path.normcase(str(o)) not in answered:
+                    markers[str(o)]["unread"] = True
             if argfile:
                 try:
                     os.unlink(argfile)
@@ -4868,7 +4880,7 @@ def _restamp_moved(all_items, dry_run):
     if outs:
         logger.info(f"Restamp: reading the provenance record of {len(outs)} existing output(s)...")
     marks = _read_source_markers_batch(outs)
-    restamped = already = differs = unmarked = failed = 0
+    restamped = already = differs = unmarked = unread = failed = 0
     restamped_map, failures = {}, []
     _differs_list = []
     _seen = set()
@@ -4880,6 +4892,10 @@ def _restamp_moved(all_items, dry_run):
         new = _source_path_id(t)
         if info.get("src") == new:
             already += 1
+            continue
+        if info.get("unread"):
+            # X-A: not "without a record" — nothing was read, nothing is touched.
+            unread += 1
             continue
         if not (info.get("src") or info.get("srcsum")):
             unmarked += 1
@@ -4927,7 +4943,9 @@ def _restamp_moved(all_items, dry_run):
                 f"{'would be rewritten' if dry_run else 'rewritten'}, "
                 f"{already} already correct, {differs} content differs (not touched), "
                 f"{unmarked} without a record (see --provenance adopt), "
-                f"{not_encoded} not encoded yet, {failed} failed")
+                + (f"{unread} unreadable (exiftool could not read the record; "
+                   f"not touched), " if unread else "")
+                + f"{not_encoded} not encoded yet, {failed} failed")
     return (1 if failed else 0), restamped_map, failures
 
 
@@ -5033,6 +5051,8 @@ def _foreign_overwrite_reason(info: dict, src_paths, out_path) -> Optional[str]:
     the transcoder's lossless JPEG archive, which this encoder never writes.
     A markerless output keeps the old behaviour: there is no proof either way,
     and refusing would block every archive written before the markers existed.
+    An UNREADABLE one (`unread`: the batch failed) is refused while the guard
+    is on — "cannot tell" is not "markerless" (X-A).
     """
     if info.get("src") or info.get("srcsum"):
         if _provenance_ok(info, src_paths, PROVENANCE_CHECK):
@@ -5043,6 +5063,19 @@ def _foreign_overwrite_reason(info: dict, src_paths, out_path) -> Optional[str]:
                            f"(renamed/moved folder, or a different photo)")
             return None
         return "it was made from a different source (its provenance marker names another file)"
+    if info.get("unread"):
+        # X-A (2026-11-03 audit): the batch that should have read this file's
+        # markers failed or stalled. "Cannot tell" used to read as "no
+        # marker" and the overwrite went ahead — onto what may be the only
+        # copy of another photo. With the guard off the worst case is a
+        # foreign marker, which the guard-off run overwrites anyway.
+        if not OVERWRITE_GUARD:
+            logger.warning(f"  OVERWRITE (overwrite guard off) | {Path(out_path).name}: "
+                           f"its provenance markers could not be read")
+        else:
+            return ("its provenance markers could not be read (the exiftool batch "
+                    "failed or stalled), so nothing proves it is not another photo's "
+                    "archive — re-run once exiftool reads the folder again")
     if has_jbrd_box(out_path):
         return ("it is a lossless JPEG archive (jbrd) written by the JPEG "
                 "transcoder — the only copy of that JPEG")
@@ -7701,12 +7734,22 @@ def main():
                 # Rewritten (or, in a dry run, about to be) by --restamp-then-sync:
                 # the preview must judge the record the real run will see.
                 info = dict(info, src=_restamped[j])
+                info.pop("unread", None)    # the restamp itself read and wrote it
             if not _strict_guard:
                 _why_x = _foreign_overwrite_reason(info, t, j)
                 if _why_x:
                     _bad_sources.setdefault(str(t), (j, _why_x))
                 continue
             if _provenance_ok(info, t, PROVENANCE_CHECK):
+                continue
+            if info.get("unread"):
+                # X-A: "cannot tell" is not "no marker" — adopt must not stamp
+                # (or the strict guard wave through) an output whose markers
+                # were never read; OVERWRITE_GUARD never relaxes this guard.
+                _bad_sources.setdefault(
+                    str(t), (j, "its provenance markers could not be read (the "
+                                "exiftool batch failed or stalled) — re-run once "
+                                "exiftool reads the folder again"))
                 continue
             _unmarked = not (info.get("src") or info.get("srcsum"))
             # An archive built before these markers existed carries none.

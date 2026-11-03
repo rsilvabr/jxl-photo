@@ -980,7 +980,11 @@ def _read_source_markers_batch(outputs: list) -> dict:
     calls as possible — one per file would be minutes on a large library.
 
     A file whose markers cannot be read comes back with both None, which the
-    caller treats as "cannot prove anything": fail closed.
+    caller treats as "cannot prove anything": fail closed. It ALSO carries
+    'unread': True — "cannot tell" is not "no marker" (X-A of the 2026-11-03
+    audit): an overwrite guard that took a failed batch for a legacy,
+    markerless archive let the overwrite through. Unread = the batch failed
+    or stalled, or exiftool returned no entry (or an Error) for that file.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
     # normcase -> the exact key the caller will look up by.
@@ -992,6 +996,7 @@ def _read_source_markers_batch(outputs: list) -> dict:
     BATCH = 400
     for i in range(0, len(outputs), BATCH):
         chunk = outputs[i:i + BATCH]
+        answered = set()
         argfile = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -1012,6 +1017,10 @@ def _read_source_markers_batch(outputs: list) -> dict:
             data = json.loads(r.stdout)
             for entry in data:
                 src = entry.get("SourceFile")
+                if src is not None and not entry.get("Error"):
+                    # Answered, with or without a Relation: a file with no
+                    # Relation at all is a real "no marker", not an unread one.
+                    answered.add(os.path.normcase(str(Path(src))))
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
@@ -1041,6 +1050,9 @@ def _read_source_markers_batch(outputs: list) -> dict:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
         finally:
+            for o in chunk:
+                if os.path.normcase(str(o)) not in answered:
+                    markers[str(o)]["unread"] = True
             if argfile:
                 try:
                     os.unlink(argfile)
@@ -5623,6 +5635,20 @@ Examples:
             _info = _marks.get(str(_out)) or {"src": None, "srcsum": None}
             _srcs = [e[0] for e in _t["entries"]]
             if _provenance_ok(_info, _srcs, PROVENANCE_CHECK):
+                continue
+            if _info.get("unread"):
+                # X-A: "cannot tell" is not "no marker" — a TIFF whose markers
+                # were never read may be the decode of other JXLs (the only
+                # copy, once an earlier run deleted them). Refuse it, unless
+                # the guard is off (never with --delete-source, which exits 2).
+                if not _strict_guard and not OVERWRITE_GUARD:
+                    logger.warning(f"  OVERWRITE (overwrite guard off) | "
+                                   f"{_t['final_tiff'].name}: its provenance markers "
+                                   f"could not be read")
+                    continue
+                _blocked.append((_t, "its provenance markers could not be read (the "
+                                     "exiftool batch failed or stalled) — re-run once "
+                                     "exiftool reads the folder again"))
                 continue
             _unmarked = not (_info.get("src") or _info.get("srcsum"))
             if _unmarked and not _strict_guard:

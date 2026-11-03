@@ -1491,7 +1491,11 @@ def _read_source_markers_batch(outputs: list) -> dict:
     calls as possible — one per file would be minutes on a large library.
 
     A file whose markers cannot be read comes back with both None, which the
-    caller treats as "cannot prove anything": fail closed.
+    caller treats as "cannot prove anything": fail closed. It ALSO carries
+    'unread': True — "cannot tell" is not "no marker" (X-A of the 2026-11-03
+    audit): an overwrite guard that took a failed batch for a legacy,
+    markerless archive let the overwrite through. Unread = the batch failed
+    or stalled, or exiftool returned no entry (or an Error) for that file.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
     # normcase -> the exact key the caller will look up by.
@@ -1503,6 +1507,7 @@ def _read_source_markers_batch(outputs: list) -> dict:
     BATCH = 400
     for i in range(0, len(outputs), BATCH):
         chunk = outputs[i:i + BATCH]
+        answered = set()
         argfile = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -1523,6 +1528,10 @@ def _read_source_markers_batch(outputs: list) -> dict:
             data = json.loads(r.stdout)
             for entry in data:
                 src = entry.get("SourceFile")
+                if src is not None and not entry.get("Error"):
+                    # Answered, with or without a Relation: a file with no
+                    # Relation at all is a real "no marker", not an unread one.
+                    answered.add(os.path.normcase(str(Path(src))))
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
@@ -1552,6 +1561,9 @@ def _read_source_markers_batch(outputs: list) -> dict:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
         finally:
+            for o in chunk:
+                if os.path.normcase(str(o)) not in answered:
+                    markers[str(o)]["unread"] = True
             if argfile:
                 try:
                     os.unlink(argfile)
@@ -4165,6 +4177,17 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
                     why = f"could not hash the source ({e})"
             else:
                 lineless.append((src, out, out, src, False))
+        elif info.get("unread"):
+            # X-A: a lossy output whose markers were never read is "cannot
+            # tell", not "markerless" — it may name another photo, and once an
+            # earlier run deleted that photo it is the only copy.
+            if OVERWRITE_GUARD:
+                why = ("its provenance markers could not be read (the exiftool batch "
+                       "failed or stalled) — re-run once exiftool reads the folder "
+                       "again")
+            else:
+                logger.warning(f"  OVERWRITE (overwrite guard off) | {out.name}: "
+                               f"its provenance markers could not be read")
         if why:
             refused.append((src, out, why))
     if lineless and dry_run:
@@ -4299,9 +4322,14 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
                 if _provenance_ok(info, src, PROVENANCE_CHECK):
                     kept.append((src, out))
                     continue
-                why = ("no provenance marker (written by an older version)"
-                       if not (info.get("src") or info.get("srcsum"))
-                       else "it was made from a different source")
+                if info.get("unread"):
+                    why = ("its provenance markers could not be read (the exiftool "
+                           "batch failed or stalled) — re-run once exiftool reads "
+                           "the folder again")
+                else:
+                    why = ("no provenance marker (written by an older version)"
+                           if not (info.get("src") or info.get("srcsum"))
+                           else "it was made from a different source")
         refused.append((src, out, why))
     if refused:
         logger.error(
