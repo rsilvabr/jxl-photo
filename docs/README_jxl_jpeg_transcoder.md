@@ -730,6 +730,14 @@ py jxl_jpeg_transcoder.py photo.jxl
 # Output has same color space as input (ProPhoto, AdobeRGB, etc.)
 ```
 
+The profile is the master's own. When a lossy master keeps its real profile
+only in XMP (the `jxlphoto-iccprofile` copy; the encoder's cautious ICC
+strategy does this for scanner and table-curve profiles), that profile becomes
+the JPEG/PNG's ICC, and the pixels stay as djxl decoded them. A lossy master
+that stores its whole profile as an ICC blob is decoded by djxl in linear
+sRGB: it is converted back to its own profile through ImageMagick, which is
+then required.
+
 **2. Converting to sRGB (web/standard delivery)**
 
 ```powershell
