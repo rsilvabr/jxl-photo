@@ -7706,6 +7706,15 @@ def main():
         ICC_CACHE_DIR_OVERRIDE = Path(args.icc_cache_dir)
     if args.clear_icc_cache:
         cleared = _clear_icc_cache()
+        # UTF-8 like setup_logger's console (which this early exit never
+        # reaches): through a pipe (the wrapper's menu C) stdout is the ANSI
+        # code page, and a cache folder under a Japanese user name raised
+        # UnicodeEncodeError after the cache was cleared (#605).
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
         print(f"ICC cache {'cleared' if cleared else 'was already empty'}: {_icc_cache_dir()}")
         return
 
