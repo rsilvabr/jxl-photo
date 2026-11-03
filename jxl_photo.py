@@ -20,7 +20,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # Who wrote a file: recorded in every output's xmpMM:History and printed by
 # --version. NOT a user setting. Bumped in ALL FIVE scripts on every release,
@@ -2484,6 +2484,473 @@ def _bit_depth_or_default(workflow: Dict, dest: str) -> int:
     the decoder's for TIFF, the transcoder's for PNG (one key, two children)."""
     module = 'jxl_tiff_decoder' if dest == 'tiff' else 'jxl_jpeg_transcoder'
     return workflow.get('bit_depth') or _child_default(module, 'bit_depth')
+
+
+# === OPTION REGISTRY =========================================================
+#
+# One entry per flag this wrapper passes to a child script, and the single
+# command builder (InteractiveMenu.build_child_cmd) that turns a run into a
+# child's argv from it — the direct run and every manifest entry alike. Before
+# this, the two builders were near-copies that had already drifted in what
+# they emitted for the same run.
+#
+# Adding a flag the wrapper should pass: one Opt here (a policy entry when its
+# rule needs more than "emit it when set"), the value in the workflow /
+# advanced_options dict the wizard fills, and nothing else in the builder.
+# tests/test_wrapper_option_registry.py fails when a child gains a flag that is
+# neither here nor in NOT_OFFERED / MAINTENANCE_FLAGS, and when this registry
+# names a flag a child does not accept. Defaults are never repeated here: the
+# value comes from the run, else from the child (_workflow_or_child,
+# _child_default), exactly as before.
+
+DIRECTIONS = ("tiff2jxl", "jxl2tiff", "jxl2jxl", "jpeg2jxl", "jxl2jpeg", "jxl2png")
+DIRECTION_MODULE = {
+    "tiff2jxl": "jxl_tiff_encoder",
+    "jxl2tiff": "jxl_tiff_decoder",
+    "jxl2jxl": "jxl_recompressor",
+    "jpeg2jxl": "jxl_jpeg_transcoder",
+    "jxl2jpeg": "jxl_jpeg_transcoder",
+    "jxl2png": "jxl_jpeg_transcoder",
+}
+_ALL_DIRECTIONS = frozenset(DIRECTIONS)
+_TRANSCODER_DIRECTIONS = frozenset({"jpeg2jxl", "jxl2jpeg", "jxl2png"})
+_DECODE_LOSSY_CONVERSIONS = ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
+
+
+def _direction(origin: str, dest: str) -> str:
+    """The registry's name for a run's direction (the child is
+    DIRECTION_MODULE[...]). Everything that is not TIFF/JXL<->JXL runs on the
+    transcoder, as in _child_module."""
+    if origin == 'tiff' and dest == 'jxl':
+        return "tiff2jxl"
+    if origin == 'jxl' and dest == 'tiff':
+        return "jxl2tiff"
+    if origin == 'jxl' and dest == 'jxl':
+        return "jxl2jxl"
+    if origin == 'jxl':
+        return "jxl2png" if dest == 'png' else "jxl2jpeg"
+    return "jpeg2jxl"
+
+
+GROUPS = (("essentials", "ESSENTIALS"), ("existing", "EXISTING OUTPUTS"),
+          ("deletion", "DELETION & IN-PLACE"), ("multipage", "MULTI-PAGE & SCANS"),
+          ("colour", "COLOUR & SCANS"), ("metadata", "METADATA"),
+          ("derivative", "DERIVATIVE (resize/colour/sharpen)"),
+          ("files", "FILES & FOLDERS"), ("performance", "PERFORMANCE"),
+          ("internal", "SET BY THE WRAPPER"))
+LEVELS = ("essential", "advanced", "expert", "internal")
+
+
+@dataclass(frozen=True)
+class Opt:
+    """One child flag the wrapper emits.
+
+    kind decides how build_child_cmd emits it from its value:
+      flag    -> [flag] when the value is truthy
+      value   -> [flag, str(value)] when the value is truthy
+      notnone -> [flag, str(value)] when the value is not None (0 is a value)
+      always  -> [flag, str(value)] every time
+      tri     -> [flag] for True, [neg_flag] for False, nothing for None
+      switch  -> [flag] when truthy, else [neg_flag]
+      policy  -> emitted by the named InteractiveMenu._policy_* rule, which
+                 also emits extra_flags; the entry documents the flag
+    The value is `value(ctx)` when given, else the dict slot `legacy_key`
+    names ("advanced.x", "workflow.x", "mode_config.x"). `when(ctx)` gates
+    the entry beyond its directions.
+    """
+    id: str
+    flag: str
+    directions: frozenset
+    kind: str
+    group: str
+    level: str
+    label: str
+    help: str
+    legacy_key: str = ""
+    neg_flag: str = ""
+    choices: tuple = ()
+    when: Optional[Callable] = None
+    value: Optional[Callable] = None
+    policy: str = ""
+    extra_flags: tuple = ()
+    danger: bool = False
+
+
+class _CmdCtx:
+    """What build_child_cmd's rules look at, computed once per command."""
+
+    def __init__(self, origin, dest, source, dest_path, mode, workers,
+                 workflow, advanced, manifest, config_marker):
+        self.origin, self.dest = origin, dest
+        self.direction = _direction(origin, dest)
+        self.module = DIRECTION_MODULE[self.direction]
+        self.source, self.dest_path = source, dest_path
+        self.mode, self.workers = mode, workers
+        self.workflow = workflow
+        self.advanced = advanced if advanced is not None else {}
+        self.mode_config = workflow.get('mode_config', {}) or {}
+        self.manifest = manifest
+        self.config_marker = config_marker
+        self.conv_type = workflow.get('conversion_type', '')
+        self.derivative = _has_derivative_options(self.advanced)
+        # The transcoder's decode conversions that shape pixels (resize,
+        # sharpening, rename apply); the lossless recovery cannot.
+        self.decode_lossy = (origin == 'jxl' and dest in ('jpeg', 'png')
+                             and self.conv_type in _DECODE_LOSSY_CONVERSIONS)
+
+    def get(self, legacy_key: str):
+        where, _, key = legacy_key.partition('.')
+        source = {"advanced": self.advanced, "workflow": self.workflow,
+                  "mode_config": self.mode_config}[where]
+        return source.get(key)
+
+
+def _opt_value(opt: "Opt", ctx: _CmdCtx):
+    return opt.value(ctx) if opt.value is not None else ctx.get(opt.legacy_key)
+
+
+def _emit_opt(opt: "Opt", ctx: _CmdCtx) -> List[str]:
+    """The argv tokens one non-policy entry contributes (see Opt.kind)."""
+    v = _opt_value(opt, ctx)
+    if opt.kind == "flag":
+        return [opt.flag] if v else []
+    if opt.kind == "value":
+        return [opt.flag, str(v)] if v else []
+    if opt.kind == "notnone":
+        return [opt.flag, str(v)] if v is not None else []
+    if opt.kind == "always":
+        return [opt.flag, str(v)]
+    if opt.kind == "tri":
+        return [opt.flag] if v is True else ([opt.neg_flag] if v is False else [])
+    if opt.kind == "switch":
+        return [opt.flag] if v else [opt.neg_flag]
+    raise ValueError(f"{opt.id}: kind {opt.kind!r} is not emitted generically")
+
+
+def _resize_value(mode: str):
+    """value() of a --resize-* entry: the size when that resize mode is set."""
+    def _v(ctx):
+        a = ctx.advanced
+        return a.get('resize_value') if a.get('resize_mode') == mode else None
+    return _v
+
+
+def _shaping_applies(ctx) -> bool:
+    """Resize/sharpening/upscale: always on the recompressor, only on the
+    transcoder's lossy decode (the bit-exact recovery cannot take them)."""
+    return ctx.direction == "jxl2jxl" or ctx.decode_lossy
+
+
+_D = frozenset
+_TIFF2JXL, _JXL2TIFF, _JXL2JXL = _D({"tiff2jxl"}), _D({"jxl2tiff"}), _D({"jxl2jxl"})
+_JPEG_OUT = _D({"jxl2jpeg"})
+
+REGISTRY: Tuple[Opt, ...] = (
+    # -- set by the wrapper on every run --------------------------------------
+    Opt("mode", "--mode", _ALL_DIRECTIONS, "always", "internal", "internal",
+        "Mode", "Output layout (0-8), from the wizard's mode step.",
+        value=lambda c: c.mode, choices=tuple(range(9))),
+    Opt("workers", "--workers", _ALL_DIRECTIONS, "always", "performance", "essential",
+        "Workers", "Files converted in parallel.", value=lambda c: c.workers),
+    Opt("summary_json", "--summary-json", _ALL_DIRECTIONS, "flag", "internal", "internal",
+        "Summary line", "Machine-readable totals, summed by the manifest recap "
+        "(manifest entries only).", value=lambda c: c.manifest),
+    Opt("export_marker", "--export-marker", _ALL_DIRECTIONS, "value", "files", "advanced",
+        "Export marker", "Folder name that anchors modes 6/7. Always passed, the "
+        "default included, so the child anchors on the marker the wrapper used.",
+        value=lambda c: c.mode_config.get('export_marker') or c.config_marker),
+    Opt("export_subfolder", "--export-subfolder", _ALL_DIRECTIONS, "value", "files",
+        "advanced", "Export subfolder", "Mode 7: the subfolder below the marker.",
+        legacy_key="mode_config.export_subfolder"),
+    Opt("export_jxl_folder", "--export-jxl-folder", _D({"tiff2jxl", "jxl2jxl"}), "value",
+        "files", "advanced", "Modes 6/7 output folder",
+        "Name of the JXL folder modes 6/7 write next to the marker.",
+        legacy_key="mode_config.export_jxl_folder"),
+    Opt("exclude_folders", "--exclude-folders", _D({"tiff2jxl", "jxl2tiff"}), "policy",
+        "files", "advanced", "Exclude folders",
+        "';'-separated folder names skipped below the input root. Other "
+        "directions warn that it is ignored.", policy="_policy_exclude_folders"),
+    Opt("dry_run", "--dry-run", _ALL_DIRECTIONS, "flag", "essentials", "essential",
+        "Dry run", "Simulate: report what would happen, write nothing.",
+        legacy_key="workflow.dry_run"),
+    Opt("staging", "--staging", _ALL_DIRECTIONS, "value", "performance", "advanced",
+        "Staging folder", "Write outputs to a fast local folder first, then move them.",
+        legacy_key="workflow.staging"),
+    # -- existing outputs ------------------------------------------------------
+    Opt("overwrite", "--overwrite", _ALL_DIRECTIONS, "flag", "existing", "essential",
+        "Overwrite", "Always rewrite existing outputs.", legacy_key="advanced.overwrite"),
+    Opt("sync", "--sync", _ALL_DIRECTIONS, "flag", "existing", "essential",
+        "Sync", "Only rewrite outputs older than their source.",
+        legacy_key="advanced.sync"),
+    Opt("provenance", "--provenance", _ALL_DIRECTIONS, "policy", "existing", "advanced",
+        "Provenance check", "How an existing output is matched to its source "
+        "(adopt: TIFF -> JXL only; elsewhere downgraded to path).",
+        choices=('path', 'content', 'adopt'), policy="_append_provenance_flags"),
+    Opt("adopt_scan", "--no-adopt-scan", _TIFF2JXL, "policy", "existing", "expert",
+        "Adopt without the scan", "With --provenance adopt: stamp legacy archives "
+        "without decoding them first.", policy="_append_provenance_flags", danger=True),
+    Opt("overwrite_guard", "--no-overwrite-guard", _ALL_DIRECTIONS, "policy", "existing",
+        "advanced", "Overwrite guard off", "Allow overwriting an output whose marker "
+        "names another source (renamed folders). Never with a delete.",
+        policy="_append_overwrite_guard_flag", danger=True),
+    # -- deletion & in-place ---------------------------------------------------
+    Opt("delete_source", "--delete-source", _ALL_DIRECTIONS, "policy", "deletion",
+        "essential", "Delete originals", "Delete each source once its output is "
+        "verified. The wrapper charges the HHMM token, so the child's own "
+        "confirmation is turned off.", policy="_policy_delete",
+        extra_flags=("--delete-confirm-off",), danger=True),
+    Opt("verify_roundtrip", "--verify-roundtrip", _D({"tiff2jxl", "jxl2jxl"}), "policy",
+        "deletion", "advanced", "Round-trip check before deleting",
+        "Decode each output and compare it with the source before the delete.",
+        policy="_policy_delete"),
+    Opt("delete_skipped", "--delete-skipped", _ALL_DIRECTIONS, "policy", "deletion",
+        "advanced", "Also delete skipped sources", "Delete sources whose output "
+        "already existed (proved by provenance). Only with --delete-source.",
+        policy="_policy_delete", danger=True),
+    # -- TIFF -> JXL -----------------------------------------------------------
+    Opt("distance", "--distance", _D({"tiff2jxl", "jxl2jxl"}), "always", "essentials",
+        "essential", "Distance", "cjxl distance (0 = lossless).",
+        value=lambda c: _workflow_or_child(c.workflow, 'distance', c.module)),
+    Opt("effort", "--effort", _ALL_DIRECTIONS - _JXL2TIFF, "always", "essentials",
+        "essential", "Effort", "cjxl effort 1-10.", choices=tuple(range(1, 11)),
+        value=lambda c: _workflow_or_child(c.workflow, 'effort', c.module)),
+    Opt("use_ram", "--ram", _TIFF2JXL, "switch", "performance", "advanced",
+        "PNG in RAM", "Hand cjxl the intermediate PNG through memory.",
+        neg_flag="--no-ram", legacy_key="workflow.use_ram"),
+    Opt("strip", "--strip", _TIFF2JXL, "flag", "metadata", "advanced",
+        "Strip metadata", "Write no EXIF/XMP into the JXL.", legacy_key="advanced.strip"),
+    Opt("d50_patch", "--d50-patch", _TIFF2JXL, "value", "colour", "expert",
+        "D50 patch", "ICC D50 white-point patch.", choices=('on', 'off', 'auto'),
+        legacy_key="advanced.d50_patch"),
+    Opt("modular", "--modular", _TIFF2JXL, "value", "performance", "expert",
+        "Modular mode", "Force cjxl's modular mode (only 'on' is passed).",
+        choices=('on', 'off'),
+        value=lambda c: 'on' if c.advanced.get('modular') == 'on' else None),
+    Opt("encode_tag", "--encode-tag", _TIFF2JXL, "value", "metadata", "advanced",
+        "Encode record", "Where the cjxl d=/e= record is written.",
+        choices=('xmp', 'software', 'off'), legacy_key="advanced.encode_tag"),
+    Opt("multipage_mode", "--multipage-mode", _TIFF2JXL, "value", "multipage", "advanced",
+        "Multi-page TIFFs", "What happens to the pages after the first.",
+        choices=('ignore', 'skip', 'split', 'split_all'),
+        legacy_key="advanced.multipage_mode"),
+    Opt("thumbnail_mode", "--thumbnail-mode", _TIFF2JXL, "value", "multipage", "advanced",
+        "Thumbnail pages", "Which embedded thumbnail pages are encoded.",
+        choices=tuple(_THUMBNAIL_MODES), legacy_key="advanced.thumbnail_mode"),
+    Opt("thumbnail_suffix", "--thumbnail-suffix", _D({"tiff2jxl", "jxl2tiff"}), "value",
+        "multipage", "expert", "Thumbnail suffix", "File-name suffix of a thumbnail page.",
+        legacy_key="advanced.thumbnail_suffix"),
+    Opt("scan_distance", "--scan-distance", _TIFF2JXL, "value", "colour", "advanced",
+        "Film-scan distance", "Distance for film scans ('same' = the run's).",
+        legacy_key="advanced.scan_distance"),
+    # -- JXL -> TIFF -----------------------------------------------------------
+    Opt("compression", "--compression", _JXL2TIFF, "always", "essentials", "advanced",
+        "TIFF compression", "Compression of the decoded TIFF.",
+        choices=('zip', 'lzw', 'none', 'uncompressed'),
+        value=lambda c: (c.workflow.get('compression')
+                         or _child_default('jxl_tiff_decoder', 'compression'))),
+    Opt("tiff_depth", "--depth", _JXL2TIFF, "always", "essentials", "essential",
+        "TIFF bit depth", "8 or 16 bits per sample.", choices=(8, 16),
+        value=lambda c: _bit_depth_or_default(c.workflow, 'tiff')),
+    Opt("no_preview", "--no-preview", _JXL2TIFF, "flag", "metadata", "advanced",
+        "No JPEG preview", "Do not embed the JPEG preview in the TIFF.",
+        value=lambda c: c.workflow.get('add_preview') is False),
+    Opt("matrix", "--matrix", _JXL2TIFF, "flag", "colour", "expert",
+        "Matrix decode", "Decode through a matrix profile.", legacy_key="advanced.matrix"),
+    Opt("none", "--none", _JXL2TIFF, "flag", "colour", "expert",
+        "No colour management", "Write no profile (degraded copy: never deletes).",
+        legacy_key="advanced.none", when=lambda c: not c.advanced.get('matrix')),
+    Opt("basic", "--basic", _JXL2TIFF, "flag", "colour", "expert",
+        "Basic decode", "Decode without the XMP profile.", legacy_key="advanced.basic",
+        when=lambda c: not (c.advanced.get('matrix') or c.advanced.get('none'))),
+    Opt("target_icc", "--target-icc", _JXL2TIFF, "value", "colour", "expert",
+        "Target ICC", "Convert the decode to this profile.",
+        legacy_key="advanced.target_icc"),
+    Opt("no_icc_cleanup", "--no-icc-cleanup", _JXL2TIFF, "flag", "colour", "expert",
+        "Keep the carried ICC", "Leave the jxlphoto-iccprofile token in the TIFF.",
+        legacy_key="advanced.no_icc_cleanup"),
+    Opt("thumbnail_handling", "--thumbnail-handling", _JXL2TIFF, "value", "multipage",
+        "advanced", "Thumbnail pages", "What happens to thumbnail pages on decode.",
+        choices=('ignore', 'include', 'generate'),
+        legacy_key="advanced.thumbnail_handling"),
+    Opt("no_reconstruct_multipage", "--no-reconstruct-multipage", _JXL2TIFF, "flag",
+        "multipage", "advanced", "Keep pages apart",
+        "Decode split pages as single TIFFs.", legacy_key="advanced.no_reconstruct_multipage"),
+    Opt("depth_policy", "--depth-policy", _JXL2TIFF, "value", "multipage", "expert",
+        "Page depth policy", "Bit depth of reconstructed pages.",
+        choices=('force16', 'preserve_thumbnails', 'preserve_original'),
+        legacy_key="advanced.depth_policy"),
+    # -- JXL -> JXL ------------------------------------------------------------
+    Opt("on_downgrade", "--on-downgrade", _JXL2JXL, "value", "existing", "advanced",
+        "Counterproductive re-encode", "What to do when the request is no better "
+        "than the file.", choices=('ask', 'copy', 'skip', 'convert'),
+        legacy_key="advanced.on_downgrade"),
+    Opt("on_regeneration", "--on-regeneration", _JXL2JXL, "value", "existing",
+        "advanced", "Repeat lossy generation", "What to do with a gen >= 2 lossy "
+        "request.", choices=('ask', 'copy', 'skip', 'convert'),
+        legacy_key="advanced.on_regeneration"),
+    Opt("on_unknown", "--on-unknown", _JXL2JXL, "value", "existing", "advanced",
+        "Unknown origin", "What to do with a JXL without an encode record.",
+        choices=('ask', 'copy', 'skip', 'convert'), legacy_key="advanced.on_unknown"),
+    Opt("on_scan", "--on-scan", _JXL2JXL, "value", "existing", "advanced",
+        "Film scans", "What to do with a film scan.",
+        choices=('ask', 'copy', 'skip', 'convert'), legacy_key="advanced.on_scan"),
+    Opt("jbrd_policy", "--jbrd-policy", _JXL2JXL, "value", "existing", "advanced",
+        "JPEG archives", "What to do with a lossless JPEG archive (jbrd).",
+        choices=('copy', 'skip', 'convert'), legacy_key="advanced.jbrd_policy"),
+    Opt("no_keep_smaller", "--no-keep-smaller", _JXL2JXL, "flag", "existing", "expert",
+        "Keep a larger result", "Keep the re-encode even when it is larger.",
+        legacy_key="advanced.no_keep_smaller"),
+    Opt("rederive_on_encode_change", "--rederive-on-encode-change", _JXL2JXL, "tri",
+        "derivative", "expert", "Re-derive on d/e change",
+        "Re-derive a derivative whose recorded distance/effort differs.",
+        neg_flag="--no-rederive-on-encode-change", when=lambda c: c.derivative,
+        legacy_key="advanced.rederive_on_encode_change"),
+    Opt("rederive_on_lower_effort", "--rederive-on-lower-effort", _JXL2JXL, "tri",
+        "derivative", "expert", "Re-derive on lower effort",
+        "Re-derive when only the effort is lower.",
+        neg_flag="--no-rederive-on-lower-effort", when=lambda c: c.derivative,
+        legacy_key="advanced.rederive_on_lower_effort"),
+    Opt("output_icc", "--output-icc", _JXL2JXL, "value", "derivative", "advanced",
+        "Output profile", "16-bit colour conversion to this profile (a derivative).",
+        legacy_key="advanced.output_icc"),
+    # -- derivative shaping (recompressor; transcoder's lossy decode) ----------
+    Opt("resize_long", "--resize-long", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "value",
+        "derivative", "advanced", "Resize: long side", "Long side in pixels.",
+        value=_resize_value('long'), when=_shaping_applies),
+    Opt("resize_short", "--resize-short", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "value",
+        "derivative", "advanced", "Resize: short side", "Short side in pixels.",
+        value=_resize_value('short'), when=_shaping_applies),
+    Opt("resize_percent", "--resize-percent", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}),
+        "value", "derivative", "advanced", "Resize: percent", "Scale in percent.",
+        value=_resize_value('percent'), when=_shaping_applies),
+    Opt("allow_upscale", "--allow-upscale", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "flag",
+        "derivative", "expert", "Allow upscaling", "Let a resize enlarge a smaller file.",
+        legacy_key="advanced.allow_upscale", when=_shaping_applies),
+    Opt("sharpen", "--sharpen", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "value",
+        "derivative", "advanced", "Sharpening", "Output sharpening preset.",
+        choices=('none', 'screen', 'print'), when=_shaping_applies,
+        value=lambda c: (c.advanced['sharpen']
+                         if (c.advanced.get('sharpen') or 'none') != 'none' else None)),
+    Opt("rename_from", "--rename-from", _D({"jxl2jxl", "jxl2jpeg", "jxl2png"}), "policy",
+        "files", "advanced", "Rename outputs", "Replace a token in each output name "
+        "(planned up front; never in place).", policy="_policy_rename",
+        extra_flags=("--rename-to",)),
+    # -- transcoder ------------------------------------------------------------
+    Opt("conversion", "--force-transcode", _TRANSCODER_DIRECTIONS, "policy",
+        "essentials", "internal", "Conversion type",
+        "The wizard's conversion type, as --force-transcode / --force-convert / "
+        "--from-jpeg / --from-jxl / --decode.", policy="_policy_conversion",
+        extra_flags=("--force-convert", "--from-jpeg", "--from-jxl", "--decode")),
+    Opt("jpeg_distance", "--distance", _D({"jpeg2jxl"}), "notnone", "essentials",
+        "essential", "Distance", "cjxl distance of a lossy JPEG -> JXL.",
+        legacy_key="workflow.distance", when=lambda c: c.conv_type == 'convert_lossy'),
+    Opt("quality", "--quality", _JPEG_OUT, "always", "essentials", "essential",
+        "JPEG quality", "Quality of a JPEG output.",
+        when=lambda c: c.origin == 'jxl' and c.dest == 'jpeg',
+        value=lambda c: _workflow_or_child(c.workflow, 'quality', 'jxl_jpeg_transcoder')),
+    Opt("icc_profile", "--icc-profile", _TRANSCODER_DIRECTIONS, "value", "colour",
+        "advanced", "Output profile", "Convert to this profile (a derivative: never "
+        "deletes).", legacy_key="workflow.icc_profile"),
+    Opt("no_md5", "--no-md5", _TRANSCODER_DIRECTIONS, "flag", "metadata", "expert",
+        "No checksums", "Do not record checksums.md5 lines.", legacy_key="advanced.no_md5",
+        danger=True),
+    Opt("no_verify", "--no-verify", _TRANSCODER_DIRECTIONS, "flag", "deletion", "expert",
+        "Skip verification", "Do not verify outputs.", legacy_key="advanced.no_verify",
+        danger=True),
+    Opt("auto_repair_jbrd", "--auto-repair-jbrd", _TRANSCODER_DIRECTIONS, "flag",
+        "existing", "advanced", "Repair jbrd archives",
+        "Repair archives written by affected versions while converting.",
+        legacy_key="advanced.auto_repair_jbrd"),
+    Opt("output_suffix", "--output-suffix", _TRANSCODER_DIRECTIONS, "value", "files",
+        "advanced", "Output folder suffix", "Mode 2's folder suffix.",
+        legacy_key="advanced.output_suffix"),
+    Opt("format", "--format", _D({"jxl2jpeg", "jxl2png"}), "policy", "essentials",
+        "internal", "Output format", "jpeg or png, from the destination.",
+        choices=('jpeg', 'png'), policy="_policy_format"),
+    Opt("png_bit_depth", "--bit-depth", _D({"jxl2png"}), "value", "essentials",
+        "essential", "PNG bit depth", "8 or 16 bits per sample.", choices=(8, 16),
+        legacy_key="workflow.bit_depth", when=lambda c: c.dest == 'png'),
+)
+
+# Child flags the job builder does not pass, and why. Phase 2 of the wrapper
+# redesign offers most of them (plan 261103, section 4).
+NOT_OFFERED: Dict[str, str] = {
+    "jxl_tiff_encoder:--buffering": "Phase 2 (Performance)",
+    "jxl_tiff_encoder:--no-preflight": "Phase 2 (Performance)",
+    "jxl_tiff_encoder:--clean-staging": "Phase 2 (Performance, with staging)",
+    "jxl_tiff_encoder:--icc-png-strategy": "Phase 2 (Colour & scans)",
+    "jxl_tiff_encoder:--scan-scope": "Phase 2 (Colour & scans)",
+    "jxl_tiff_encoder:--warn-thumbnail-discard": "Phase 2 (Multi-page, expert)",
+    "jxl_tiff_encoder:--restamp-then-sync": "Phase 2 (Existing outputs)",
+    "jxl_tiff_encoder:--restamp-moved": "Phase 2 (maintenance menu)",
+    "jxl_tiff_encoder:--clear-icc-cache": "Phase 2 (maintenance menu)",
+    "jxl_tiff_encoder:--icc-cache-dir": "Phase 4 (machine setting)",
+    "jxl_tiff_encoder:--explorer-thumbnail": "Phase 2 (Metadata)",
+    "jxl_tiff_encoder:--embed-thumbnail": "deprecated",
+    "jxl_tiff_decoder:--allow-incomplete-groups": "Phase 2 (Deletion, dangerous)",
+    "jxl_tiff_decoder:--clean-staging": "Phase 2 (Performance, with staging)",
+    "jxl_jpeg_transcoder:--compress-metadata": "Phase 2 (Metadata, JPEG -> JXL)",
+    "jxl_jpeg_transcoder:--output-name": "Phase 2 (Files & folders)",
+    "jxl_jpeg_transcoder:--sharpen-sigma": "Phase 2 (Derivative, expert)",
+    "jxl_jpeg_transcoder:--sharpen-gain": "Phase 2 (Derivative, expert)",
+    "jxl_jpeg_transcoder:--sharpen-threshold": "Phase 2 (Derivative, expert)",
+    "jxl_jpeg_transcoder:--clean-staging": "Phase 2 (Performance, with staging)",
+    "jxl_jpeg_transcoder:--ram": "Phase 2 (Performance)",
+    "jxl_jpeg_transcoder:--no-ram": "Phase 2 (Performance)",
+    "jxl_jpeg_transcoder:--to-srgb": "alias of --icc-profile sRGB, which the wrapper uses",
+    "jxl_recompressor:--buffering": "Phase 2 (Performance)",
+    "jxl_recompressor:--no-preflight": "Phase 2 (Performance)",
+    "jxl_recompressor:--clean-staging": "Phase 2 (Performance, with staging)",
+    "jxl_recompressor:--scan-scope": "Phase 2 (Colour & scans)",
+    "jxl_recompressor:--encode-tag": "Phase 2 (Metadata)",
+    "jxl_recompressor:--explorer-thumbnail": "Phase 2 (Metadata); the refresh flow passes it",
+    "jxl_recompressor:--sharpen-sigma": "Phase 2 (Derivative, expert)",
+    "jxl_recompressor:--sharpen-gain": "Phase 2 (Derivative, expert)",
+    "jxl_recompressor:--sharpen-threshold": "Phase 2 (Derivative, expert)",
+    # Never passed: the run's own answer is given another way.
+    "jxl_tiff_encoder:--version": "not a run option",
+    "jxl_tiff_decoder:--version": "not a run option",
+    "jxl_jpeg_transcoder:--version": "not a run option",
+    "jxl_recompressor:--version": "not a run option",
+}
+
+# Flags the maintenance screens pass (their own small commands, not jobs).
+MAINTENANCE_FLAGS: Dict[str, str] = {
+    "jxl_jpeg_transcoder:--repair-jbrd": "repair_jbrd_flow",
+    "jxl_recompressor:--refresh-explorer-thumbnails": "explorer_thumbnail_flow",
+}
+
+
+def _registry_flags(direction: str) -> Set[str]:
+    """Every flag the registry can emit for one direction (policy extras and
+    negative forms included)."""
+    out = set()
+    for opt in REGISTRY:
+        if direction in opt.directions:
+            out.add(opt.flag)
+            if opt.neg_flag:
+                out.add(opt.neg_flag)
+            out.update(opt.extra_flags)
+    return out
+
+
+def _dest_is_source_file(source, dest_path, mode) -> bool:
+    """A file Source whose Destination cell is the file itself (how the
+    manifest loader normalizes an empty cell): it must NOT be sent as the
+    output positional, or the child reads it as an output DIRECTORY named
+    after the file. Only mode 0 can carry it."""
+    if not dest_path or mode != 0:
+        return False
+    try:
+        src_p = Path(source)
+        if src_p.is_file():
+            return (os.path.normcase(os.path.abspath(str(dest_path)))
+                    == os.path.normcase(os.path.abspath(str(src_p))))
+    except (OSError, ValueError):
+        return False
+    return False
+
+# === END OF OPTION REGISTRY ==================================================
 
 
 class InteractiveMenu:
@@ -8050,328 +8517,136 @@ class InteractiveMenu:
         else:
             print(f"WARNING: {_msg}")
 
-    def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
-                                   origin: str, dest: str, workers: int,
-                                   workflow: Dict, advanced: Dict) -> Optional[List]:
-        """Build command line for a single manifest entry."""
+    def build_child_cmd(self, script: str, origin: str, dest: str, source: str,
+                        dest_path: Optional[str], mode: int, workers: int,
+                        workflow: Dict, advanced: Dict, *, manifest: bool) -> List:
+        """The child's argv for one run — the direct run (execute_workflow)
+        and every manifest entry (_build_manifest_entry_cmd) alike.
+
+        Every flag comes from REGISTRY: the simple ones through _emit_opt, the
+        ones with a rule through the _policy_* methods (and the two older
+        _append_* helpers), in a fixed order; the expert flags go LAST. The
+        output positional sits right after the input: appending it after the
+        flags breaks argparse on Python < 3.12.7 (gh-59317). `manifest`
+        selects the manifest-only rules: --summary-json, the at-most-once
+        exclude warning, the derivative row's suppressed delete and the
+        transcoder's rename on its lossy decode (the direct wizard refuses
+        those combinations before it gets here)."""
+        ctx = _CmdCtx(origin, dest, source, dest_path, mode, workers, workflow,
+                      advanced, manifest, self.config.config.export_marker)
         cmd = [sys.executable, script, source]
-        # Only append the output positional when it is non-empty — an empty
-        # Destination would become Path('.') (the wrapper's CWD) downstream.
-        # A file Source whose Destination cell is the file itself (how the
-        # loader normalizes an empty cell) must NOT be sent either: the child
-        # would read it as an output DIRECTORY named after the file.
-        _dest_is_source_file = False
-        if dest_path and mode == 0:
-            try:
-                _src_p = Path(source)
-                if _src_p.is_file():
-                    _dest_is_source_file = (
-                        os.path.normcase(os.path.abspath(str(dest_path)))
-                        == os.path.normcase(os.path.abspath(str(_src_p))))
-            except (OSError, ValueError):
-                _dest_is_source_file = False
-        if dest_path and not _dest_is_source_file:
+        if dest_path and not _dest_is_source_file(source, dest_path, mode):
             cmd.append(dest_path)
-        cmd.extend(['--mode', str(mode), '--workers', str(workers)])
-        # Every manifest child reports machine-readable totals so the run can be
-        # summed at the end (all three scripts accept this flag).
-        cmd.append('--summary-json')
+        for opt in REGISTRY:
+            if opt.kind == "policy" or ctx.direction not in opt.directions:
+                continue
+            if opt.when is not None and not opt.when(ctx):
+                continue
+            cmd.extend(_emit_opt(opt, ctx))
+        self._policy_exclude_folders(cmd, ctx)
+        self._policy_conversion(cmd, ctx)
+        self._policy_rename(cmd, ctx)
+        self._policy_delete(cmd, ctx)
+        self._append_provenance_flags(cmd, ctx.advanced, origin, dest)
+        self._append_overwrite_guard_flag(cmd, ctx.advanced)
+        self._policy_format(cmd, ctx)
+        _append_expert_flags(cmd, workflow.get('expert_flags'))
+        return cmd
 
-        # Pass configured export marker so scripts match the wrapper's detection.
-        # ALWAYS passed, the default included: omitting it when it equalled
-        # "_EXPORT" let a child whose EXPORT_MARKER setting was edited at the
-        # top of its script anchor on a DIFFERENT marker than the one the
-        # wrapper detected modes and counted files with (round 43).
-        export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-        if export_marker:
-            cmd.extend(['--export-marker', export_marker])
-        export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
-        if export_subfolder:
-            cmd.extend(['--export-subfolder', export_subfolder])
-        # Only the TIFF->JXL and JXL->JXL children accept --export-jxl-folder;
-        # emitting it for the decoder or the transcoder is argparse exit 2.
-        if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'jxl')):
-            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
-            if export_jxl_folder:
-                cmd.extend(['--export-jxl-folder', export_jxl_folder])
-
-        # --exclude-folders exists in the TIFF encoder and decoder only. A
-        # manifest of an unsupported direction carries its exclusion as the
-        # run-level value, so this builder (once per entry) warns at most
-        # once per run instead of once per entry.
-        _excl = workflow.get('exclude_folders')
-        if _excl:
-            if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff')):
-                cmd.extend(['--exclude-folders', _excl])
-            else:
-                # Once per run (see the method): this builder runs per entry.
-                self._warn_exclude_folders_unsupported(origin, dest, _excl,
-                                                       at_most_once=True)
-
-        if origin == 'tiff' and dest == 'jxl':
-            distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
-            cmd.extend(['--distance', str(distance)])
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_tiff_encoder'))])
-
-            if workflow.get('use_ram'):
-                cmd.append('--ram')
-            else:
-                cmd.append('--no-ram')
-
-            if advanced.get('strip'):
-                cmd.append('--strip')
-            if advanced.get('d50_patch'):
-                cmd.extend(['--d50-patch', advanced['d50_patch']])
-            if advanced.get('modular') == 'on':
-                cmd.extend(['--modular', 'on'])
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('encode_tag'):
-                cmd.extend(['--encode-tag', advanced['encode_tag']])
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                # Wrapper already confirmed deletion (HHMM in step 4); without
-                # this the child would ask again on an invisible stdin prompt
-                # and the run would appear to hang.
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source (it is the gate in
-                # front of the unlink), so it is emitted inside this branch.
-                if advanced.get('verify_roundtrip'):
-                    cmd.append('--verify-roundtrip')
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if advanced.get('multipage_mode'):
-                cmd.extend(['--multipage-mode', advanced['multipage_mode']])
-            if advanced.get('thumbnail_mode'):
-                cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
-            if advanced.get('thumbnail_suffix'):
-                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
-            if advanced.get('scan_distance'):
-                cmd.extend(['--scan-distance', str(advanced['scan_distance'])])
-
-        elif origin == 'jxl' and dest == 'tiff':
-            cmd.extend(['--compression', workflow.get('compression')
-                        or _child_default('jxl_tiff_decoder', 'compression')])
-            cmd.extend(['--depth', str(_bit_depth_or_default(workflow, 'tiff'))])
-
-            if advanced.get('matrix'):
-                cmd.append('--matrix')
-            elif advanced.get('none'):
-                cmd.append('--none')
-            elif advanced.get('basic'):
-                cmd.append('--basic')
-
-            if advanced.get('target_icc'):
-                cmd.extend(['--target-icc', advanced['target_icc']])
-            if advanced.get('no_icc_cleanup'):
-                cmd.append('--no-icc-cleanup')
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source: it widens which
-                # sources the deletion covers, it does not enable one.
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if workflow.get('add_preview') is False:
-                cmd.append('--no-preview')
-            if advanced.get('thumbnail_handling'):
-                cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
-            if advanced.get('thumbnail_suffix'):
-                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
-            if advanced.get('no_reconstruct_multipage'):
-                cmd.append('--no-reconstruct-multipage')
-            if advanced.get('depth_policy'):
-                cmd.extend(['--depth-policy', advanced['depth_policy']])
-
-        elif origin == 'jxl' and dest == 'jxl':
-            # JXL -> JXL recompressor
-            cmd.extend(['--distance', str(_workflow_or_child(workflow, 'distance', 'jxl_recompressor'))])
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_recompressor'))])
-
-            if _recompress_entry_in_place(source, dest_path, mode):
-                # In-place entry: replaces the sources. The wrapper charged
-                # the HHMM token in _execute_manifest_workflow; without this
-                # the child would re-ask MID-STREAM on an invisible stdin
-                # prompt — headless, exit 3 after doing nothing.
-                cmd.append('--delete-confirm-off')
-            if advanced.get('on_downgrade'):
-                cmd.extend(['--on-downgrade', advanced['on_downgrade']])
-            if advanced.get('on_regeneration'):
-                cmd.extend(['--on-regeneration', advanced['on_regeneration']])
-            if advanced.get('on_unknown'):
-                cmd.extend(['--on-unknown', advanced['on_unknown']])
-            if advanced.get('on_scan'):
-                cmd.extend(['--on-scan', advanced['on_scan']])
-            if advanced.get('jbrd_policy'):
-                cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
-            if advanced.get('no_keep_smaller'):
-                cmd.append('--no-keep-smaller')
-            # Derivatives only: on a plain recompression the child would
-            # ignore the flag with a warning on every run.
-            _rd = (advanced.get('rederive_on_encode_change')
-                   if _has_derivative_options(advanced) else None)
-            if _rd is True:
-                cmd.append('--rederive-on-encode-change')
-            elif _rd is False:
-                cmd.append('--no-rederive-on-encode-change')
-            _rl = (advanced.get('rederive_on_lower_effort')
-                   if _has_derivative_options(advanced) else None)
-            if _rl is True:
-                cmd.append('--rederive-on-lower-effort')
-            elif _rl is False:
-                cmd.append('--no-rederive-on-lower-effort')
-            if advanced.get('output_icc'):
-                cmd.extend(['--output-icc', advanced['output_icc']])
-            # resize/sharpening: the recompressor's other derivative recipes
-            _append_derivative_flags(cmd, advanced)
-            if advanced.get('rename_from'):
-                cmd.extend(['--rename-from', advanced['rename_from'],
-                            '--rename-to', advanced.get('rename_to') or ''])
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                # Wrapper already confirmed deletion (HHMM in step 4); without
-                # this the child would ask again on an invisible stdin prompt
-                # and the run would appear to hang.
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source (it is the gate in
-                # front of the unlink), so it is emitted inside this branch.
-                if advanced.get('verify_roundtrip'):
-                    cmd.append('--verify-roundtrip')
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-
+    def _policy_exclude_folders(self, cmd: List, ctx: "_CmdCtx") -> None:
+        """--exclude-folders exists in the TIFF encoder and decoder only; any
+        other direction warns that the setting is ignored — at most once per
+        run for a manifest, whose builder runs once per entry."""
+        excl = ctx.workflow.get('exclude_folders')
+        if not excl:
+            return
+        if ctx.direction in ("tiff2jxl", "jxl2tiff"):
+            cmd.extend(['--exclude-folders', excl])
         else:
-            # JPEG/JXL/PNG transcoder
-            conv_type = workflow.get('conversion_type', '')
+            self._warn_exclude_folders_unsupported(ctx.origin, ctx.dest, excl,
+                                                   at_most_once=ctx.manifest)
 
-            if conv_type == 'transcode_lossless':
-                # JPEG->JXL lossless
-                cmd.append('--force-transcode')
-            elif conv_type == 'convert_lossy':
-                # JPEG->JXL lossy (--from-jpeg keeps PNGs in the folder safe;
-                # see the wizard path for why)
-                cmd.append('--force-convert')
-                cmd.append('--from-jpeg')
-                if workflow.get('distance') is not None:
-                    cmd.extend(['--distance', str(workflow['distance'])])
-            elif conv_type == 'jxl_to_jpeg_auto':
-                # JXL->JPEG: auto-detect per-file, restricted to .jxl inputs
-                # (see the wizard path for why --from-jxl is required).
-                cmd.append('--from-jxl')
-            elif conv_type == 'jxl_to_jpeg_lossless':
-                # JXL->JPEG: force lossless transcode (requires jbrd)
-                cmd.append('--force-transcode')
-                cmd.append('--decode')
-            elif conv_type == 'jxl_to_jpeg_force':
-                # JXL->JPEG: force lossy
-                cmd.append('--force-convert')
-                cmd.append('--decode')
-            elif conv_type == 'jxl_to_png':
-                # JXL->PNG: force convert (don't transcode even if jbrd present)
-                cmd.append('--force-convert')
-                cmd.append('--decode')
+    def _policy_conversion(self, cmd: List, ctx: "_CmdCtx") -> None:
+        """The transcoder's conversion type. --from-jpeg keeps a lossy
+        JPEG -> JXL run off the PNGs in the folder (in mode 8 it would delete
+        them); --from-jxl keeps the auto JXL -> JPEG run from transcoding the
+        folder's JPEGs INTO JXL; the PNG output never transcodes even when a
+        jbrd box is present."""
+        if ctx.direction not in _TRANSCODER_DIRECTIONS:
+            return
+        cmd.extend({
+            'transcode_lossless': ['--force-transcode'],
+            'convert_lossy': ['--force-convert', '--from-jpeg'],
+            'jxl_to_jpeg_auto': ['--from-jxl'],
+            'jxl_to_jpeg_lossless': ['--force-transcode', '--decode'],
+            'jxl_to_jpeg_force': ['--force-convert', '--decode'],
+            'jxl_to_png': ['--force-convert', '--decode'],
+        }.get(ctx.conv_type, []))
 
-            # Quality for JXL->JPEG (a PNG output has none: the transcoder
-            # ignores it there)
-            if origin == 'jxl' and dest == 'jpeg':
-                cmd.extend(['--quality', str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))])
+    def _policy_rename(self, cmd: List, ctx: "_CmdCtx") -> None:
+        """--rename-from/--rename-to, always as a pair. The recompressor plans
+        the rename up front; the transcoder applies it on its lossy decode
+        only (the bit-exact recovery keeps the original name), and only the
+        manifest route passes it there."""
+        rf = ctx.advanced.get('rename_from')
+        if not rf:
+            return
+        if ctx.direction == "jxl2jxl" or (ctx.manifest and ctx.decode_lossy):
+            cmd.extend(['--rename-from', rf, '--rename-to',
+                        ctx.advanced.get('rename_to') or ''])
 
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_jpeg_transcoder'))])
+    def _policy_delete(self, cmd: List, ctx: "_CmdCtx") -> None:
+        """--delete-source and what rides on it. The wrapper has charged the
+        HHMM token, so --delete-confirm-off goes with it: without it the
+        child would ask again on an invisible stdin prompt and the run would
+        appear to hang. A recompressor run that replaces its sources in
+        place gets --delete-confirm-off as well, for the same reason (a
+        headless run would exit 3 after doing nothing). --verify-roundtrip
+        and --delete-skipped only mean something alongside --delete-source.
 
-            if workflow.get('icc_profile'):
-                cmd.extend(['--icc-profile', workflow['icc_profile']])
-            if (origin == 'jxl' and dest in ('jpeg', 'png')
-                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                      'jxl_to_png')):
-                # resize/sharpening shape decoded pixels: the lossless recovery
-                # reproduces the original JPEG byte-for-byte and cannot take them.
-                _append_derivative_flags(cmd, advanced)
-                # The transcoder only applies --rename-from/--rename-to on the
-                # conversion path (and warns about it itself); the lossless
-                # jbrd recovery keeps the original name.
-                if advanced.get('rename_from'):
-                    cmd.extend(['--rename-from', advanced['rename_from'],
-                                '--rename-to', advanced.get('rename_to') or ''])
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('no_md5'):
-                cmd.append('--no-md5')
-            if advanced.get('no_verify'):
-                cmd.append('--no-verify')
-            if advanced.get('auto_repair_jbrd'):
-                cmd.append('--auto-repair-jbrd')
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if (advanced.get('delete_source') and workflow.get('icc_profile')
-                    and not _has_derivative_options(advanced)):
-                # W6 (2026-10-08 audit): "Convert to sRGB?" makes a colour-
-                # converted DERIVATIVE, exactly like the manifest's OutputICC
-                # column, which already never received --delete-source. The
-                # direct route used to send it, and the transcoder deleted the
-                # 16-bit master after writing an 8-bit sRGB JPEG. The child
-                # refuses the pair now, so it is dropped here, said out loud.
+        Manifest transcoder rows: a derivative row (colour conversion,
+        resize, sharpening) never deletes its source, so the flag is
+        suppressed for THAT row (W6 of the 2026-10-08 audit: an sRGB JPEG
+        must not delete the 16-bit master), said out loud for --icc-profile."""
+        adv = ctx.advanced
+        if ctx.direction == "jxl2jxl" and _recompress_entry_in_place(
+                ctx.source, ctx.dest_path, ctx.mode):
+            cmd.append('--delete-confirm-off')
+        delete = bool(adv.get('delete_source'))
+        if delete and ctx.manifest and ctx.direction in _TRANSCODER_DIRECTIONS:
+            if ctx.workflow.get('icc_profile') and not ctx.derivative:
                 _note = ("Colour conversion (--icc-profile) writes a DERIVATIVE: the "
                          "originals are NOT deleted on this run.")
                 if RICH_AVAILABLE and console:
                     console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
                 else:
                     print(_note)
-            if (advanced.get('delete_source') and not _has_derivative_options(advanced)
-                    and not workflow.get('icc_profile')):
-                # A derivative row (a manifest option column: colour
-                # conversion, resize, sharpening) never deletes its source —
-                # the flag is suppressed for THIS row; the plain rows of the
-                # same manifest keep it.
-                cmd.append('--delete-source')
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source: it widens which
-                # sources the deletion covers, it does not enable one.
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if advanced.get('output_suffix'):
-                cmd.extend(['--output-suffix', advanced['output_suffix']])
+            delete = not ctx.derivative and not ctx.workflow.get('icc_profile')
+        if not delete:
+            return
+        cmd.extend(['--delete-source', '--delete-confirm-off'])
+        if ctx.direction in ("tiff2jxl", "jxl2jxl") and adv.get('verify_roundtrip'):
+            cmd.append('--verify-roundtrip')
+        if adv.get('delete_skipped'):
+            cmd.append('--delete-skipped')
 
-            if dest == 'png':
-                cmd.extend(['--format', 'png'])
-            elif dest in ['jpeg', 'jpg']:
-                cmd.extend(['--format', 'jpeg'])
+    def _policy_format(self, cmd: List, ctx: "_CmdCtx") -> None:
+        """The transcoder's output format, from the destination."""
+        if ctx.direction not in _TRANSCODER_DIRECTIONS:
+            return
+        if ctx.dest == 'png':
+            cmd.extend(['--format', 'png'])
+        elif ctx.dest in ('jpeg', 'jpg'):
+            cmd.extend(['--format', 'jpeg'])
 
-            if dest == 'png' and workflow.get('bit_depth'):
-                cmd.extend(['--bit-depth', str(workflow['bit_depth'])])
-
-
-        if workflow.get('dry_run'):
-            cmd.append('--dry-run')
-
-        _append_expert_flags(cmd, workflow.get('expert_flags'))
-
-        return cmd
+    def _build_manifest_entry_cmd(self, script: str, source: str, dest_path: str, mode: int,
+                                   origin: str, dest: str, workers: int,
+                                   workflow: Dict, advanced: Dict) -> Optional[List]:
+        """Build command line for a single manifest entry (build_child_cmd).
+        An empty Destination is not sent: it would become Path('.') — the
+        wrapper's CWD — downstream."""
+        return self.build_child_cmd(script, origin, dest, source, dest_path, mode,
+                                    workers, workflow, advanced, manifest=True)
 
     def _print_child_line(self, line: str) -> None:
         """Colorize one line of child-script output."""
@@ -8756,398 +9031,21 @@ class InteractiveMenu:
         input_dir = workflow['input_dir']
         workers = workflow['workers']
         advanced = workflow.get('advanced_options', {})
-        expert_flags = workflow.get('expert_flags', '')
 
         # `script`, `origin` and `dest` were resolved up front, before the gates.
-        if origin == 'tiff' and dest == 'jxl':
-            cmd = [
-                sys.executable, script,
-                input_dir,
-                '--mode', str(mode),
-                '--workers', str(workers)
-            ]
-
-            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker:
-                cmd.extend(['--export-marker', export_marker])
-            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
-            if export_subfolder:
-                cmd.extend(['--export-subfolder', export_subfolder])
-            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
-            if export_jxl_folder:
-                cmd.extend(['--export-jxl-folder', export_jxl_folder])
-            _excl = workflow.get('exclude_folders')
-            if _excl:
-                cmd.extend(['--exclude-folders', _excl])
-
-            # Mode 2: flat output folder
-            if mode == 2:
-                output_dir = workflow.get('mode_config', {}).get('output_dir')
-                if output_dir:
-                    # The child creates the dir itself; only pre-create for real
-                    # runs so a dry-run leaves no trace on disk.
-                    if not workflow.get('dry_run'):
-                        try:
-                            Path(output_dir).mkdir(parents=True, exist_ok=True)
-                        except OSError as e:
-                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
-                            return False
-                    # Insert right after the input positional: appending the output
-                    # positional after flags breaks argparse on Python < 3.12.7
-                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
-                    cmd.insert(3, output_dir)
-
-            distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
-            cmd.extend(['--distance', str(distance)])
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_tiff_encoder'))])
-
-            if workflow.get('use_ram'):
-                cmd.append('--ram')
-            else:
-                cmd.append('--no-ram')
-
-            if advanced.get('strip'):
-                cmd.append('--strip')
-            if advanced.get('d50_patch'):
-                cmd.extend(['--d50-patch', advanced['d50_patch']])
-            if advanced.get('modular') == 'on':
-                cmd.extend(['--modular', 'on'])
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                # Wrapper already confirmed deletion (HHMM in step 4); without
-                # this the child would ask again on an invisible stdin prompt
-                # and the run would appear to hang.
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source (it is the gate in
-                # front of the unlink), so it is emitted inside this branch.
-                if advanced.get('verify_roundtrip'):
-                    cmd.append('--verify-roundtrip')
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('encode_tag'):
-                cmd.extend(['--encode-tag', advanced['encode_tag']])
-            if advanced.get('multipage_mode'):
-                cmd.extend(['--multipage-mode', advanced['multipage_mode']])
-            if advanced.get('thumbnail_mode'):
-                cmd.extend(['--thumbnail-mode', advanced['thumbnail_mode']])
-            if advanced.get('thumbnail_suffix'):
-                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
-            if advanced.get('scan_distance'):
-                cmd.extend(['--scan-distance', str(advanced['scan_distance'])])
-
-        elif origin == 'jxl' and dest == 'tiff':
-            cmd = [
-                sys.executable, script,
-                input_dir,
-                '--mode', str(mode),
-                '--workers', str(workers)
-            ]
-
-            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker:
-                cmd.extend(['--export-marker', export_marker])
-            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
-            if export_subfolder:
-                cmd.extend(['--export-subfolder', export_subfolder])
-            _excl = workflow.get('exclude_folders')
-            if _excl:
-                cmd.extend(['--exclude-folders', _excl])
-
-            # Mode 2: flat output folder
-            if mode == 2:
-                output_dir = workflow.get('mode_config', {}).get('output_dir')
-                if output_dir:
-                    # The child creates the dir itself; only pre-create for real
-                    # runs so a dry-run leaves no trace on disk.
-                    if not workflow.get('dry_run'):
-                        try:
-                            Path(output_dir).mkdir(parents=True, exist_ok=True)
-                        except OSError as e:
-                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
-                            return False
-                    # Insert right after the input positional: appending the output
-                    # positional after flags breaks argparse on Python < 3.12.7
-                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
-                    cmd.insert(3, output_dir)
-
-            cmd.extend(['--compression', workflow.get('compression')
-                        or _child_default('jxl_tiff_decoder', 'compression')])
-            cmd.extend(['--depth', str(_bit_depth_or_default(workflow, 'tiff'))])
-            
-            # Preview option
-            if workflow.get('add_preview') is False:
-                cmd.append('--no-preview')
-
-            if advanced.get('matrix'):
-                cmd.append('--matrix')
-            elif advanced.get('none'):
-                cmd.append('--none')
-            elif advanced.get('basic'):
-                cmd.append('--basic')
-
-            if advanced.get('target_icc'):
-                cmd.extend(['--target-icc', advanced['target_icc']])
-            if advanced.get('no_icc_cleanup'):
-                cmd.append('--no-icc-cleanup')
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source: it widens which
-                # sources the deletion covers, it does not enable one.
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('thumbnail_handling'):
-                cmd.extend(['--thumbnail-handling', advanced['thumbnail_handling']])
-            if advanced.get('thumbnail_suffix'):
-                cmd.extend(['--thumbnail-suffix', advanced['thumbnail_suffix']])
-            if advanced.get('no_reconstruct_multipage'):
-                cmd.append('--no-reconstruct-multipage')
-            if advanced.get('depth_policy'):
-                cmd.extend(['--depth-policy', advanced['depth_policy']])
-
-        elif origin == 'jxl' and dest == 'jxl':
-            # JXL -> JXL recompressor
-            cmd = [
-                sys.executable, script,
-                input_dir,
-                '--mode', str(mode),
-                '--workers', str(workers)
-            ]
-
-            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker:
-                cmd.extend(['--export-marker', export_marker])
-            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
-            if export_subfolder:
-                cmd.extend(['--export-subfolder', export_subfolder])
-            export_jxl_folder = workflow.get('mode_config', {}).get('export_jxl_folder')
-            if export_jxl_folder:
-                cmd.extend(['--export-jxl-folder', export_jxl_folder])
-            _excl = workflow.get('exclude_folders')
-            if _excl:
-                self._warn_exclude_folders_unsupported(origin, dest, _excl)
-
-            # Mode 2: flat output folder
-            if mode == 2:
-                output_dir = workflow.get('mode_config', {}).get('output_dir')
-                if output_dir:
-                    # The child creates the dir itself; only pre-create for real
-                    # runs so a dry-run leaves no trace on disk.
-                    if not workflow.get('dry_run'):
-                        try:
-                            Path(output_dir).mkdir(parents=True, exist_ok=True)
-                        except OSError as e:
-                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
-                            return False
-                    # Insert right after the input positional: appending the output
-                    # positional after flags breaks argparse on Python < 3.12.7
-                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
-                    cmd.insert(3, output_dir)
-
-            cmd.extend(['--distance', str(_workflow_or_child(workflow, 'distance', 'jxl_recompressor'))])
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_recompressor'))])
-
-            if advanced.get('on_downgrade'):
-                cmd.extend(['--on-downgrade', advanced['on_downgrade']])
-            if advanced.get('on_regeneration'):
-                cmd.extend(['--on-regeneration', advanced['on_regeneration']])
-            if advanced.get('on_unknown'):
-                cmd.extend(['--on-unknown', advanced['on_unknown']])
-            if advanced.get('on_scan'):
-                cmd.extend(['--on-scan', advanced['on_scan']])
-            if advanced.get('jbrd_policy'):
-                cmd.extend(['--jbrd-policy', advanced['jbrd_policy']])
-            if advanced.get('no_keep_smaller'):
-                cmd.append('--no-keep-smaller')
-            # Derivatives only: on a plain recompression the child would
-            # ignore the flag with a warning on every run.
-            _rd = (advanced.get('rederive_on_encode_change')
-                   if _has_derivative_options(advanced) else None)
-            if _rd is True:
-                cmd.append('--rederive-on-encode-change')
-            elif _rd is False:
-                cmd.append('--no-rederive-on-encode-change')
-            _rl = (advanced.get('rederive_on_lower_effort')
-                   if _has_derivative_options(advanced) else None)
-            if _rl is True:
-                cmd.append('--rederive-on-lower-effort')
-            elif _rl is False:
-                cmd.append('--no-rederive-on-lower-effort')
-            if advanced.get('output_icc'):
-                cmd.extend(['--output-icc', advanced['output_icc']])
-            # resize/sharpening: the recompressor's other derivative recipes
-            _append_derivative_flags(cmd, advanced)
-            if advanced.get('rename_from'):
-                cmd.extend(['--rename-from', advanced['rename_from'],
-                            '--rename-to', advanced.get('rename_to') or ''])
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if _in_place_recompress:
-                # The wrapper already charged the HHMM token above; without
-                # this the recompressor would ask its own confirmation again
-                # MID-STREAM on an invisible stdin prompt — and a headless run
-                # would exit 3 right there, after doing nothing.
-                cmd.append('--delete-confirm-off')
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                # Wrapper already confirmed deletion (HHMM above); without
-                # this the child would ask again on an invisible stdin prompt
-                # and the run would appear to hang.
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source: it widens which
-                # sources the deletion covers, it does not enable one.
-                if advanced.get('verify_roundtrip'):
-                    cmd.append('--verify-roundtrip')
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-
-        else:
-            conv_type = workflow.get('conversion_type', '')
-            
-            cmd = [
-                sys.executable, script,
-                input_dir,
-                '--mode', str(mode),
-                '--workers', str(workers)
-            ]
-
-            export_marker = workflow.get('mode_config', {}).get('export_marker') or self.config.config.export_marker
-            if export_marker:
-                cmd.extend(['--export-marker', export_marker])
-            export_subfolder = workflow.get('mode_config', {}).get('export_subfolder')
-            if export_subfolder:
-                cmd.extend(['--export-subfolder', export_subfolder])
-            _excl = workflow.get('exclude_folders')
-            if _excl:
-                self._warn_exclude_folders_unsupported(origin, dest, _excl)
-
-            # Mode 2: flat output folder
-            if mode == 2:
-                output_dir = workflow.get('mode_config', {}).get('output_dir')
-                if output_dir:
-                    # The child creates the dir itself; only pre-create for real
-                    # runs so a dry-run leaves no trace on disk.
-                    if not workflow.get('dry_run'):
-                        try:
-                            Path(output_dir).mkdir(parents=True, exist_ok=True)
-                        except OSError as e:
-                            self._print_error(f"Cannot create output folder {output_dir}: {e}")
-                            return False
-                    # Insert right after the input positional: appending the output
-                    # positional after flags breaks argparse on Python < 3.12.7
-                    # ("unrecognized arguments", gh-59317). Same order as the manifest path.
-                    cmd.insert(3, output_dir)
-
-            # Handle conversion type flags
-            # Note: transcoder auto-detects direction based on file extensions
-            if conv_type == 'transcode_lossless':
-                # JPEG->JXL lossless
-                cmd.append('--force-transcode')
-            elif conv_type == 'convert_lossy':
-                # JPEG->JXL lossy. --from-jpeg restricts to .jpg inputs:
-                # otherwise cmd_convert would also convert (and in mode 8,
-                # delete) PNG files found in the folder.
-                cmd.append('--force-convert')
-                cmd.append('--from-jpeg')
-                if workflow.get('distance') is not None:
-                    cmd.extend(['--distance', str(workflow['distance'])])
-            elif conv_type == 'jxl_to_jpeg_auto':
-                # JXL->JPEG: auto-detect per-file. MUST pass --from-jxl so the
-                # transcoder's auto mode only processes .jxl files — otherwise
-                # it would also transcode JPEGs/PNGs in the folder INTO JXL
-                # (wrong direction for a "JXL -> JPEG" workflow).
-                cmd.append('--from-jxl')
-            elif conv_type == 'jxl_to_jpeg_lossless':
-                # JXL->JPEG: force lossless transcode (requires jbrd)
-                cmd.append('--force-transcode')
-                cmd.append('--decode')
-            elif conv_type == 'jxl_to_jpeg_force':
-                # JXL->JPEG: force lossy
-                cmd.append('--force-convert')
-                cmd.append('--decode')
-            elif conv_type == 'jxl_to_png':
-                # JXL->PNG: force convert (don't transcode even if jbrd present)
-                # User explicitly chose PNG, respect that choice
-                cmd.append('--force-convert')
-                cmd.append('--decode')
-            # Note: --format is added later based on dest, no need to duplicate here
-            
-            # Quality for JXL->JPEG (a PNG output has none: the transcoder
-            # ignores it there)
-            if origin == 'jxl' and dest == 'jpeg':
-                cmd.extend(['--quality', str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))])
-
-            cmd.extend(['--effort', str(_workflow_or_child(workflow, 'effort', 'jxl_jpeg_transcoder'))])
-
-            if workflow.get('icc_profile'):
-                cmd.extend(['--icc-profile', workflow['icc_profile']])
-
-            if (origin == 'jxl' and dest in ('jpeg', 'png')
-                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                      'jxl_to_png')):
-                # resize/sharpening shape decoded pixels: the lossless recovery
-                # reproduces the original JPEG byte-for-byte and cannot take them.
-                _append_derivative_flags(cmd, advanced)
-
-            if workflow.get('staging'):
-                cmd.extend(['--staging', workflow['staging']])
-
-            if advanced.get('no_md5'):
-                cmd.append('--no-md5')
-            if advanced.get('no_verify'):
-                cmd.append('--no-verify')
-            if advanced.get('auto_repair_jbrd'):
-                cmd.append('--auto-repair-jbrd')
-            if advanced.get('overwrite'):
-                cmd.append('--overwrite')
-            if advanced.get('sync'):
-                cmd.append('--sync')
-            if advanced.get('delete_source'):
-                cmd.append('--delete-source')
-                cmd.append('--delete-confirm-off')
-                # Only meaningful alongside --delete-source: it widens which
-                # sources the deletion covers, it does not enable one.
-                if advanced.get('delete_skipped'):
-                    cmd.append('--delete-skipped')
-            self._append_provenance_flags(cmd, advanced, origin, dest)
-            self._append_overwrite_guard_flag(cmd, advanced)
-            if advanced.get('output_suffix'):
-                cmd.extend(['--output-suffix', advanced['output_suffix']])
-
-            if dest == 'png':
-                cmd.extend(['--format', 'png'])
-            elif dest in ['jpeg', 'jpg']:
-                cmd.extend(['--format', 'jpeg'])
-
-            if dest == 'png' and workflow.get('bit_depth'):
-                cmd.extend(['--bit-depth', str(workflow['bit_depth'])])
-
-        if workflow.get('dry_run'):
-            cmd.append('--dry-run')
-
-        _append_expert_flags(cmd, expert_flags)
+        # Mode 2: flat output folder. The child creates it itself; it is only
+        # pre-created for a real run, so a dry run leaves no trace on disk.
+        output_dir = None
+        if mode == 2:
+            output_dir = workflow.get('mode_config', {}).get('output_dir') or None
+            if output_dir and not workflow.get('dry_run'):
+                try:
+                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                except OSError as e:
+                    self._print_error(f"Cannot create output folder {output_dir}: {e}")
+                    return False
+        cmd = self.build_child_cmd(script, origin, dest, input_dir, output_dir, mode,
+                                   workers, workflow, advanced, manifest=False)
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing:[/bold cyan]")
