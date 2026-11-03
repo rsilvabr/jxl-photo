@@ -2306,16 +2306,17 @@ def _append_checksum_line(db_path: Path, entry: str):
                     logger.warning(f"checksums.md5 stayed locked for "
                                    f"{_MD5_LOCK_TIMEOUT_S:.0f}s — provenance line for "
                                    f"{db_path.parent.name} NOT recorded (fail closed)")
-                return
+                return False
             time.sleep(0.05)
         except OSError as e:
             logger.warning(f"Could not lock {lock_path} ({e}) — provenance line "
                            f"NOT recorded (fail closed)")
-            return
+            return False
     try:
         with _md5_db_lock:
             with open(db_path, "a", encoding="utf-8") as f:
                 f.write(entry)
+        return True
     finally:
         try:
             os.unlink(lock_path)
@@ -2325,7 +2326,7 @@ def _append_checksum_line(db_path: Path, entry: str):
 def store_md5_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}\n"
-    _append_checksum_line(db_path, entry)
+    return _append_checksum_line(db_path, entry)
 
 def read_md5_db(jxl_path: Path) -> Optional[str]:
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
@@ -2367,7 +2368,7 @@ JXL_SELF_HASH_SUFFIX = ".jxl-md5"
 def store_jxl_self_hash_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME
     entry = f"{md5}  {jxl_path.name}{JXL_SELF_HASH_SUFFIX}\n"
-    _append_checksum_line(db_path, entry)
+    return _append_checksum_line(db_path, entry)
 
 def _file_checksum_lines(jxl_path: Path, src_md5: str, jxl_md5: Optional[str]) -> bool:
     """An output's lines (source md5, JXL self-hash) in its own folder's db.
@@ -2377,9 +2378,13 @@ def _file_checksum_lines(jxl_path: Path, src_md5: str, jxl_md5: Optional[str]) -
     gate reads as "not proven" (fail closed), and the next deleting run
     settles it by reconstruction (#556)."""
     try:
-        store_md5_db(jxl_path, src_md5)
-        if jxl_md5:
-            store_jxl_self_hash_db(jxl_path, jxl_md5)
+        # A lock that timed out returns False (#579): reporting it as filed
+        # skipped the retry at the end of the run. `is False`, not falsiness:
+        # None is a write that raised nothing.
+        if store_md5_db(jxl_path, src_md5) is False:
+            return False
+        if jxl_md5 and store_jxl_self_hash_db(jxl_path, jxl_md5) is False:
+            return False
         return True
     except OSError as e:
         logger.warning(f"  checksum of {jxl_path.name} NOT recorded ({e}) — fail closed")

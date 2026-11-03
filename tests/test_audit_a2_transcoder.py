@@ -260,3 +260,47 @@ def test_tf_control_plain_jpeg_converts(tmp_path, monkeypatch):
     assert (out / "plain (3).jxl").exists()
 
 
+# ===========================================================================
+# T-C (#579)
+# ===========================================================================
+
+def test_tc_lock_timeout_is_not_filed(tmp_path, monkeypatch):
+    d = _hostile(tmp_path)
+    jxl = d / "DSC_0001 (2).jxl"
+    jxl.write_bytes(b"x")
+    (d / (tra.CHECKSUMS_FILENAME + ".lock")).write_bytes(b"")   # held, fresh
+    monkeypatch.setattr(tra, "_MD5_LOCK_TIMEOUT_S", 0.2)
+    tra.setup_logger()
+    assert tra._file_checksum_lines(jxl, "a" * 32, "b" * 32) is False
+    assert not (d / tra.CHECKSUMS_FILENAME).exists()
+
+
+@real
+def test_tc_retry_happens_at_the_end(tmp_path, monkeypatch):
+    """d=0 --force-convert with staging: the first filing at the move fails
+    (lock timed out); the retry at the end of the run must write the line."""
+    d = _hostile(tmp_path)
+    jpg = _jpeg(d / "DSC_0003 (2).jpg")
+    out = tmp_path / HOSTILE / "JXL [d0]"
+    staging = tmp_path / "ステージング [s] 5%"
+    real_store = tra.store_md5_db
+    calls = {"n": 0}
+
+    def flaky(jxl_path, md5):
+        # The first filing in the DESTINATION folder (the staging db gets its
+        # own line first) times out on the lock.
+        if Path(jxl_path).parent == out:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return False        # what a lock timeout returns
+        return real_store(jxl_path, md5)
+    monkeypatch.setattr(tra, "store_md5_db", flaky)
+    _main([jpg.parent, out, "--mode", "0", "--force-convert", "--distance", "0",
+           "--staging", staging], monkeypatch)
+    final = out / "DSC_0003 (2).jxl"
+    assert final.exists()
+    monkeypatch.setattr(tra, "store_md5_db", real_store)
+    assert tra.read_md5_db(final) == tra.md5_of_file(jpg), (
+        "the checksum line was never retried after the failed filing")
+
+
