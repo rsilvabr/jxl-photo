@@ -705,6 +705,12 @@ _WHOLE_IMAGE_E7_BYTES_PER_PIXEL = 90
 _WHOLE_IMAGE_E8_BYTES_PER_PIXEL = 320
 _MODULAR_LOSSY_BYTES_PER_PIXEL = 110
 _UNKNOWN_IMAGE_PIXELS = 60_000_000
+# What each worker holds in THIS process on top of its cjxl (#569): the page
+# array and the PNG handed to cjxl. Measured 2026-11-03 on 44.3 MP 16-bit RGB
+# exports (Z8), python.exe private bytes, 1 -> 4 workers: +0.74 GB per worker
+# at d=0 (16.8 B/px), +0.44 GB at d=0.1; +10% margin. Before the #569 fix it
+# was +0.96 / +1.12 GB.
+_PYTHON_BYTES_PER_PIXEL = 19
 
 
 def _cjxl_whole_image(distance, effort, buffering=None):
@@ -809,16 +815,21 @@ def _available_memory_bytes():
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,
-                           buffering=None, modular=False):
+                           buffering=None, modular=False,
+                           extra_bytes_per_pixel=0):
     """--workers lowered so `requested` parallel cjxl processes fit in memory.
-    Logs the estimate; warns when it had to lower the count."""
+    Logs the estimate; warns when it had to lower the count.
+
+    extra_bytes_per_pixel: what each worker holds on the CALLER's side on top
+    of its cjxl (the encoder's page array and PNG, #569)."""
     if WORKER_MEMORY_FRACTION <= 0:
         return requested
     if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
         logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
                        f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
     pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_job = pixels * _cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+    per_job = pixels * (_cjxl_bytes_per_pixel(distance, effort, buffering, modular)
+                        + extra_bytes_per_pixel)
     avail, budget = _available_memory_bytes()
     if avail is None:
         logger.info("Memory: could not read the available memory — "
@@ -832,8 +843,10 @@ def _memory_capped_workers(requested, max_pixels, distance, effort,
         kind = "whole-image"
     else:
         kind = "streaming"
+    _extra = (f", incl. ~{pixels * extra_bytes_per_pixel / 2**30:.1f} GB in Python"
+              if extra_bytes_per_pixel > 0 else "")
     logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}) | "
+                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}{_extra}) | "
                 f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
     if cap < requested:
         hint = ""
@@ -3750,6 +3763,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
 
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Rows filtered and compressed at a time by make_png_bytes (#569).
+_PNG_BLOCK_ROWS = 256
+
+
 def make_png_bytes(img, icc_bytes=None):
     """Encodes a 16-bit numpy array as PNG in memory (pure Python, no temp file)."""
     import numpy as np
@@ -3783,22 +3800,44 @@ def make_png_bytes(img, icc_bytes=None):
     # Write PNG at the input bit depth. The main encode path passes uint16 data;
     # the cautious ICC test passes uint8 data and needs a true 8-bit PNG to test
     # the 8-bit path.
-    if img.dtype == np.uint8:
-        bit_depth = 8
-        img_be = img
-        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
-    else:
-        bit_depth = 16
-        img_be = img.astype(">u2")
-        raw = b"".join(b"\x00" + row.tobytes() for row in img_be)
+    bit_depth = 8 if img.dtype == np.uint8 else 16
 
-    out = b"\x89PNG\r\n\x1a\n"
-    out += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))
+    # Streamed (#569): rows go through ONE zlib stream block by block, so
+    # neither the big-endian copy of the image nor the raw filtered buffer
+    # ever exists whole, and the file is assembled with a single join. The
+    # bytes are identical to zlib.compress(raw, 1) over the whole buffer —
+    # 45 MP used to cost ~1-1.4 GB of transient Python memory per worker.
+    # One compress() call per block, the filter byte (0) and the big-endian
+    # samples laid out by numpy: a Python loop per row held the GIL and made
+    # four parallel workers 2.5x slower than one (measured on 45 MP).
+    comp = zlib.compressobj(1)
+    idat = []
+    row_bytes = w * c * (2 if bit_depth == 16 else 1)
+    for y in range(0, h, _PNG_BLOCK_ROWS):
+        block = img[y:y + _PNG_BLOCK_ROWS]
+        n = block.shape[0]
+        filtered = np.empty((n, row_bytes + 1), dtype=np.uint8)
+        filtered[:, 0] = 0
+        samples = block.astype(">u2") if bit_depth == 16 else block
+        filtered[:, 1:] = np.ascontiguousarray(samples).reshape(n, -1).view(np.uint8)
+        piece = comp.compress(filtered)
+        if piece:
+            idat.append(piece)
+    idat.append(comp.flush())
+    idat_len = sum(len(p) for p in idat)
+    idat_crc = zlib.crc32(b"IDAT")
+    for piece in idat:
+        idat_crc = zlib.crc32(piece, idat_crc)
+
+    parts = [b"\x89PNG\r\n\x1a\n",
+             chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, bit_depth, color_type, 0, 0, 0))]
     if icc_bytes:
-        out += chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes))
-    out += chunk(b"IDAT", zlib.compress(raw, 1))
-    out += chunk(b"IEND", b"")
-    return out
+        parts.append(chunk(b"iCCP", b"ICC Profile\x00\x00" + zlib.compress(icc_bytes)))
+    parts.append(struct.pack(">I", idat_len) + b"IDAT")
+    parts.extend(idat)
+    parts.append(struct.pack(">I", idat_crc & 0xFFFFFFFF))
+    parts.append(chunk(b"IEND", b""))
+    return b"".join(parts)
 
 def _exif_box_rank(box) -> int:
     """Sort key of reorder_jxl_boxes: 0 for an Exif box (plain, or brob
@@ -5457,11 +5496,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
                 # Capture original bit depth before converting to 16-bit for the JXL pipeline.
                 original_depth = 8 if img.dtype == np.uint8 else 16
-                # Convert 8-bit to 16-bit with proper scaling (multiply by 257)
+                # Convert 8-bit to 16-bit with proper scaling (multiply by 257).
+                # One array, never a copy of a page that already is uint16
+                # (#569: each copy is 270 MB per worker on a 45 MP page).
                 if img.dtype == np.uint8:
-                    img = img.astype(np.uint16) * 257  # 0-255 -> 0-65535
+                    img = np.multiply(img, 257, dtype=np.uint16)  # 0-255 -> 0-65535
                 else:
-                    img = img.astype(np.uint16)
+                    img = img.astype(np.uint16, copy=False)
             # Grayscale detection is driven ONLY by the ACTUAL array: a 2D
             # array or a single-channel 3D array is grayscale; a 2-channel
             # array is gray+alpha (LA). The planning-time samples-per-pixel is
@@ -6518,7 +6559,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             max(_PAGE_PIXELS.get((os.path.normcase(str(t[0])), t[3]), 0)
                 for t in tasks),
             _budget_d, CJXL_EFFORT, CJXL_BUFFERING,
-            modular=bool(CJXL_MODULAR))
+            modular=bool(CJXL_MODULAR),
+            extra_bytes_per_pixel=_PYTHON_BYTES_PER_PIXEL)
     for _t in tasks:
         _record_source_identity(_t[0])      # X2: before anything reads it
     with ThreadPoolExecutor(max_workers=workers) as ex:

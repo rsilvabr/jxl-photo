@@ -2807,6 +2807,10 @@ def cleanup_xmp_icc(tiff_path):
     except Exception as e:
         logger.debug(f"XMP cleanup skipped: {e}")
 
+# Rows converted to 8 bits at a time for the preview (#570).
+_PREVIEW_BLOCK_ROWS = 256
+
+
 def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
     """Add JPEG preview as second page of TIFF with proper thumbnail structure.
 
@@ -2885,19 +2889,31 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
             new_w = max(1, int(w * max_dim / h))
 
         # Convert to 8-bit for JPEG preview (rounded, like the rest of the
-        # pipeline — not a bit-shift truncation)
-        if img_data.dtype == np.uint16:
-            img_8bit = np.rint(img_data / 257).astype(np.uint8)
-        elif img_data.dtype == np.uint8:
+        # pipeline — not a bit-shift truncation). In blocks of rows (#570):
+        # the float of the WHOLE image was ~2.2 GB per worker on a 45 MP
+        # master (4 GB at 84 MP) for a 256 px preview. Same formula per
+        # block, so the preview is byte-identical.
+        if img_data.dtype == np.uint8:
             img_8bit = img_data
         else:
-            mx = img_data.max()
-            # Handle NaN, Inf, or zero max values safely
-            if np.isnan(mx) or np.isinf(mx) or mx <= 0:
-                logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
-                img_8bit = np.clip(img_data, 0, 255).astype(np.uint8)
+            img_8bit = np.empty(img_data.shape, dtype=np.uint8)
+            if img_data.dtype == np.uint16:
+                def _to8(block):
+                    return np.rint(block / 257).astype(np.uint8)
             else:
-                img_8bit = ((img_data.astype(np.float32) / mx) * 255).astype(np.uint8)
+                mx = img_data.max()
+                # Handle NaN, Inf, or zero max values safely
+                if np.isnan(mx) or np.isinf(mx) or mx <= 0:
+                    logger.warning(f" >Invalid max value ({mx}) for 8-bit conversion, using direct cast")
+
+                    def _to8(block):
+                        return np.clip(block, 0, 255).astype(np.uint8)
+                else:
+                    def _to8(block):
+                        return ((block.astype(np.float32) / mx) * 255).astype(np.uint8)
+            for _y in range(0, img_data.shape[0], _PREVIEW_BLOCK_ROWS):
+                img_8bit[_y:_y + _PREVIEW_BLOCK_ROWS] = _to8(
+                    img_data[_y:_y + _PREVIEW_BLOCK_ROWS])
 
         # Resize using high-quality resampling
         pil_img = Image.fromarray(img_8bit)
