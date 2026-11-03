@@ -73,6 +73,23 @@ def test_ec_relative_long_path_gets_the_prefix(name, tmp_path, monkeypatch):
     assert out[3:] == ["-d", "0.1", "--effort", "7"], "option values were rewritten"
 
 
+@windows
+@pytest.mark.parametrize("name", BACKENDS)
+def test_ec_option_values_are_never_paths(name, tmp_path, monkeypatch):
+    """261104 review M1: with a deep working folder, `-x strip=xmp` (the
+    recompressor's cjxl call) must not become `\\\\?\\<cwd>\\strip=xmp`."""
+    mod = importlib.import_module(name)
+    cwd = _deep_dir(tmp_path, total=262)
+    monkeypatch.chdir(cwd)
+    assert len(os.path.abspath("strip=xmp")) >= mod._LONG_PATH_THRESHOLD
+    out = mod._long_codec_paths(["cjxl", "in.png", "out.jxl", "-x", "strip=xmp",
+                                 "-x", "strip=exif", "-d", "0.1", "--effort", "7"])
+    assert out[1] == "\\\\?\\" + os.path.abspath("in.png"), out[1]
+    assert out[2] == "\\\\?\\" + os.path.abspath("out.jxl"), out[2]
+    assert out[3:] == ["-x", "strip=xmp", "-x", "strip=exif", "-d", "0.1",
+                       "--effort", "7"], out[3:]
+
+
 @real
 @windows
 def test_ec_real_cjxl_relative_long_path(tmp_path):
@@ -90,6 +107,49 @@ def test_ec_real_cjxl_relative_long_path(tmp_path):
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=600, stdin=subprocess.DEVNULL)
     assert final.exists(), (r.stdout + r.stderr)[-3000:]
+
+
+def _box_types(path: Path):
+    b, i, out = path.read_bytes(), 0, []
+    while i + 8 <= len(b):
+        size, name = int.from_bytes(b[i:i + 4], "big"), b[i + 4:i + 8]
+        out.append(name)
+        if size == 1:
+            size = int.from_bytes(b[i + 8:i + 16], "big")
+        if size == 0:
+            break
+        i += size
+    return out
+
+
+@real
+@windows
+@pytest.mark.parametrize("name", BACKENDS)
+def test_ec_real_strip_xmp_reaches_cjxl(name, tmp_path, monkeypatch):
+    """261104 review M1 with the real cjxl: from a deep working folder, the
+    recompressor's `-x strip=xmp` used to reach cjxl as `\\\\?\\<cwd>\\strip=xmp`.
+    cjxl takes that silently and KEEPS the XMP (the #531 doubling's cause)."""
+    from PIL import Image
+    mod = importlib.import_module(name)
+    cwd = _deep_dir(tmp_path, total=262)
+    monkeypatch.chdir(cwd)
+    assert len(os.path.abspath("strip=xmp")) >= mod._LONG_PATH_THRESHOLD
+    png = tmp_path / "a.png"
+    Image.fromarray((np.random.default_rng(5).random((32, 48, 3)) * 255)
+                    .astype("uint8")).save(png)
+    src = tmp_path / "src [x].jxl"
+    assert subprocess.run(["cjxl", str(png), str(src), "-d", "0", "--container=1"],
+                          capture_output=True).returncode == 0
+    r = mod._run_exiftool_argfile(["-overwrite_original", "-XMP-dc:Description=caption",
+                                   str(src)], timeout=120)
+    assert r.returncode == 0, r.stderr
+    out = tmp_path / "out [y].jxl"
+    r = mod._run_captured(["cjxl", str(src), str(out), "-d", "1", "--container=1",
+                           "-x", "strip=xmp"], 300)
+    assert r.returncode == 0, r.stderr
+    kinds = _box_types(out)
+    assert b"xml " not in kinds and b"brob" not in kinds, (
+        f"cjxl kept the XMP: strip=xmp did not reach it as an option ({kinds})")
 
 
 # ===========================================================================

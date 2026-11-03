@@ -1349,14 +1349,22 @@ def _long_codec_paths(cmd):
             continue
         if not os.path.isabs(s):
             # A relative path is long by its ABSOLUTE form (#575: an input
-            # given relative to a deep working folder). The codecs' other
-            # positional values are numbers (-d 0.1, --effort 7): never paths.
+            # given relative to a deep working folder). Only a token that
+            # looks like a path counts: a separator or an extension, no '='
+            # and not a number — option values (-d 0.1, --effort 7,
+            # -x strip=xmp) are never paths (261104 review, M1).
+            looks_like_path = (
+                "=" not in s
+                and (os.sep in s or (os.altsep and os.altsep in s)
+                     or bool(os.path.splitext(s)[1])))
             try:
                 float(s)
-                out.append(a)
-                continue
+                looks_like_path = False
             except ValueError:
                 pass
+            if not looks_like_path:
+                out.append(a)
+                continue
         s = os.path.abspath(s)
         if len(s) < _LONG_PATH_THRESHOLD:
             out.append(a)
