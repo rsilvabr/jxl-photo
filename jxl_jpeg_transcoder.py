@@ -3607,6 +3607,10 @@ def _repair_one_jbrd(jxl_path: Path, dry_run: bool):
         if _changed_since(jxl_path, st):
             return "broken", ("the file changed while it was being repaired (another "
                               "run?) — left untouched; run --repair-jbrd again")
+        # The archive keeps its date, like the relayout (#580): exiftool
+        # stamped the copy with "now", and a sync run compares this mtime
+        # with its source's.
+        os.utime(str(tmp), ns=(st.st_atime_ns, st.st_mtime_ns))
         os.replace(str(tmp), str(jxl_path))
         if (read_md5_db(jxl_path) is not None
                 or read_jxl_self_hash_db(jxl_path) is not None):

@@ -304,3 +304,32 @@ def test_tc_retry_happens_at_the_end(tmp_path, monkeypatch):
         "the checksum line was never retried after the failed filing")
 
 
+# ===========================================================================
+# T-G (#580)
+# ===========================================================================
+
+@real
+def test_tg_repair_keeps_the_mtime(tmp_path):
+    d = _hostile(tmp_path)
+    jpg = _jpeg(d / "photo (1).jpg")
+    r = tra._run_exiftool_argfile(["-overwrite_original", "-XMP-dc:Description=caption",
+                                   "-XMP-xmp:Rating=4", "-Make=NIKON", str(jpg)],
+                                  timeout=120)
+    assert r.returncode == 0
+    jxl = d / "photo (1).jxl"
+    assert tra._run_captured(["cjxl", str(jpg), str(jxl), "--lossless_jpeg=1"],
+                             300).returncode == 0
+    r = tra._run_exiftool_argfile(["-overwrite_original",
+                                   "-XMP-dc:Relation+=jxlphoto-src:0123456789abcdef",
+                                   "-XMP-dc:Relation+=jxlphoto-srcsum:fedcba9876543210",
+                                   str(jxl)], timeout=120)
+    assert r.returncode == 0
+    assert tra._jxl_reconstruct_md5(jxl) is None, "fixture no longer reproduces the damage"
+    stamp = 1737158400_000000000            # 2025-01-18
+    os.utime(jxl, ns=(stamp, stamp))
+    tra.setup_logger()
+    state, detail = tra._repair_one_jbrd(jxl, dry_run=False)
+    assert state == "repaired", detail
+    assert jxl.stat().st_mtime_ns == stamp, "the repaired archive lost its date"
+
+
