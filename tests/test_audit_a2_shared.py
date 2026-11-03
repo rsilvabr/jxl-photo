@@ -210,6 +210,8 @@ def test_ef_live_run_blocks_the_sweep(name, how, tmp_path):
     p, ready, release = _start_holder(tmp_path, stg, how, name)
     try:
         assert ready.exists(), p.communicate(timeout=30)
+        # Past the grace period (S3): only the LOCK says the run is alive.
+        _age(stg.glob(".jxlphoto-live-*"))
         mod._clean_staging(stg)
         assert waiting.exists(), "another live run's waiting output was swept"
     finally:
@@ -218,8 +220,32 @@ def test_ef_live_run_blocks_the_sweep(name, how, tmp_path):
     # The holder is gone: its lock file is stale and the sweep runs.
     mod._clean_staging(stg)
     assert not waiting.exists(), "the leftover of a finished run was not swept"
-    assert not list(stg.glob(".jxlphoto-live-*")) or how == "by-hand", (
-        "the dead run's lock file was not removed")
+    assert not list(stg.glob(".jxlphoto-live-*")), "the dead run's lock file was not removed"
+
+
+def _age(files, seconds=7200):
+    old = time.time() - seconds
+    for f in files:
+        os.utime(f, (old, old))
+
+
+@pytest.mark.parametrize("name", BACKENDS)
+def test_ef_fresh_unlocked_mark_still_blocks_the_sweep(name, tmp_path):
+    """261104 review S3: between creating its .jxlphoto-live-* file and
+    locking it, a run is not yet visible by the lock. A mark that young counts
+    as held; an old unlocked one is a dead run's and goes."""
+    mod = importlib.import_module(name)
+    mod.setup_logger()
+    stg = tmp_path / "ステージング [u] 5%"
+    stg.mkdir()
+    waiting = _leftover(stg)
+    mark = stg / (".jxlphoto-live-" + "cd" * 16)
+    mark.write_bytes(b"1")                       # created, not locked yet
+    mod._clean_staging(stg)
+    assert waiting.exists() and mark.exists(), "a run that is starting lost its outputs"
+    _age([mark])
+    mod._clean_staging(stg)
+    assert not mark.exists() and not waiting.exists()
 
 
 @pytest.mark.parametrize("name", BACKENDS)

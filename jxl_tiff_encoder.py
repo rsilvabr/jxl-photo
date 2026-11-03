@@ -552,6 +552,9 @@ def _report_staging_leftovers(staging_dir):
 # _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
 _STAGING_LIVE_PREFIX = ".jxlphoto-live-"
 _STAGING_HOLDS = {}
+# A live file this young counts as held even when it is not locked: its run
+# may be between creating and locking it (261104 review, S3).
+_STAGING_LIVE_GRACE_SECONDS = 60
 
 
 def _try_lock_nb(fh) -> bool:
@@ -656,6 +659,16 @@ def _staging_used_by_another_run(staging_dir) -> bool:
     busy = False
     for f in marks:
         if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True
+            continue
+        if fresh:
+            busy = True             # just created: maybe not locked yet
             continue
         try:
             fh = open(f, "r+b")
