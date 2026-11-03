@@ -1898,7 +1898,11 @@ def _read_source_markers_batch(outputs: list) -> dict:
     calls as possible — one per file would be minutes on a large library.
 
     A file whose markers cannot be read comes back with both None, which the
-    caller treats as "cannot prove anything": fail closed.
+    caller treats as "cannot prove anything": fail closed. It ALSO carries
+    'unread': True — "cannot tell" is not "no marker" (X-A of the 2026-11-03
+    audit): an overwrite guard that took a failed batch for a legacy,
+    markerless archive let the overwrite through. Unread = the batch failed
+    or stalled, or exiftool returned no entry (or an Error) for that file.
     """
     markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
     # normcase -> the exact key the caller will look up by.
@@ -1910,6 +1914,7 @@ def _read_source_markers_batch(outputs: list) -> dict:
     BATCH = 400
     for i in range(0, len(outputs), BATCH):
         chunk = outputs[i:i + BATCH]
+        answered = set()
         argfile = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -1930,6 +1935,10 @@ def _read_source_markers_batch(outputs: list) -> dict:
             data = json.loads(r.stdout)
             for entry in data:
                 src = entry.get("SourceFile")
+                if src is not None and not entry.get("Error"):
+                    # Answered, with or without a Relation: a file with no
+                    # Relation at all is a real "no marker", not an unread one.
+                    answered.add(os.path.normcase(str(Path(src))))
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
@@ -1959,6 +1968,9 @@ def _read_source_markers_batch(outputs: list) -> dict:
             logger.warning(f"Provenance: marker batch failed ({e}); "
                            f"{len(chunk)} file(s) cannot be verified")
         finally:
+            for o in chunk:
+                if os.path.normcase(str(o)) not in answered:
+                    markers[str(o)]["unread"] = True
             if argfile:
                 try:
                     os.unlink(argfile)
@@ -5539,10 +5551,13 @@ def _foreign_overwrite_refusals(items):
     scheduled preset is one) overwrote that photo's only file, with no
     warning at all in the collapsing modes where same-named sources meet
     (#268's missing half). So it is a refusal now, in every mode. A markerless
-    or unreadable output keeps the old behaviour: nothing to compare, and
-    refusing would block every archive written before the markers existed —
-    except a lossless JPEG archive, which never has markers and is judged by
-    its bytes and its JPEG instead (#558, _jbrd_overwrite_refusal).
+    output keeps the old behaviour: nothing to compare, and refusing would
+    block every archive written before the markers existed — except a lossless
+    JPEG archive, which never has markers and is judged by its bytes and its
+    JPEG instead (#558, _jbrd_overwrite_refusal). An UNREADABLE one is refused
+    (X-A of the 2026-11-03 audit: the batch failed or stalled, so "cannot
+    tell" — it may be another photo's archive); --no-overwrite-guard turns
+    that refusal into a warning, like the marker one.
     """
     targets = [it for it in items
                if not it["in_place"]
@@ -5558,16 +5573,35 @@ def _foreign_overwrite_refusals(items):
         out_info = marks.get(str(it["final"])) or {"src": None, "srcsum": None}
         src_info = marks.get(str(it["src"])) or {"src": None, "srcsum": None}
         if out_info.get("src") is None and out_info.get("srcsum") is None:
-            # Markerless (or unreadable): nothing to compare — unless it is a
-            # lossless JPEG archive, which never carries markers.
+            # Markerless: nothing to compare — unless it is a lossless JPEG
+            # archive, which never carries markers.
             why = _jbrd_overwrite_refusal(it)
             if why:
                 refused.append((it, why))
+                continue
+            if out_info.get("unread") and not has_jbrd_box(it["final"]):
+                # X-A: unreadable is "cannot tell", not "markerless".
+                if not OVERWRITE_GUARD:
+                    logger.warning(f"  OVERWRITE (overwrite guard off) | "
+                                   f"{it['final'].name}: its provenance markers could "
+                                   f"not be read")
+                    continue
+                refused.append((it, (
+                    "the existing output's provenance markers could not be read (the "
+                    "exiftool batch failed or stalled), so nothing proves it is not "
+                    "another photo's archive — re-run once exiftool reads the folder "
+                    "again")))
             continue
         if not _markers_match(out_info, src_info, PROVENANCE_CHECK):
             if not OVERWRITE_GUARD:
                 logger.warning(f"  OVERWRITE (overwrite guard off) | {it['final'].name}: "
                                f"its provenance markers name a different origin")
+                continue
+            if src_info.get("unread"):
+                refused.append((it, (
+                    "this source's provenance markers could not be read (the exiftool "
+                    "batch failed or stalled), so nothing proves the existing output "
+                    "is its archive — re-run once exiftool reads the folder again")))
                 continue
             refused.append((it, (
                 f"the existing output's provenance markers name a different origin "
@@ -6972,9 +7006,16 @@ def main():
                 if _markers_match(out_info, src_info, PROVENANCE_CHECK):
                     continue
                 refused.append(it)
-                reason = ("existing output carries no matching provenance marker "
-                          "— cannot prove it is this photo's archive; refusing to "
-                          "overwrite it and delete the source")
+                if out_info.get("unread") or src_info.get("unread"):
+                    reason = ("the provenance markers could not be read (the exiftool "
+                              "batch failed or stalled) — cannot prove the existing "
+                              "output is this photo's archive; refusing to overwrite "
+                              "it and delete the source (re-run once exiftool reads "
+                              "the folder again)")
+                else:
+                    reason = ("existing output carries no matching provenance marker "
+                              "— cannot prove it is this photo's archive; refusing to "
+                              "overwrite it and delete the source")
                 failures.append((str(it["src"]), reason))
                 if args.dry_run:
                     logger.info(f" DRY | would REFUSE | {it['src'].name} | {reason}")
