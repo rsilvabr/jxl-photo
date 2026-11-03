@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.21.0](#v2210)** | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
+| **[v2.22.0_beta1](#v2220_beta1)** | 2026-11-04 | Pre-release. The wizard reaches every script option (the summary's "all options" screen), menus for renamed folders, the ICC test cache and the scripts' own settings; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out (round 71, 8 fixes) |
+| [v2.21.0](#v2210) | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
 | [v2.20.0](#v2200) | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
 | [v2.19.2](#v2192) | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
 | [v2.19.1](#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place (round 67, 1 fix) |
@@ -80,6 +81,59 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.22.0_beta1
+
+**Pre-release, 2026-11-04.** Last stable: [v2.21.0](#v2210). The second part
+of the wrapper redesign (every option reachable from the wizard, the scripts'
+settings without editing them) and the rest of the 2026-11-03 audit. Three
+command lines behave differently — see
+[Upgrading](upgrading.md#v2220-a-jxl--jpeg-never-deletes-the-jxl-modes-67-anchor-below-the-input-and-leave-derivatives-out).
+
+- **Every script option from the wizard.** The Step 7 summary has an `O` key:
+  all the options of the job's direction, grouped, with their values; `/text`
+  filters ("buf" finds `--buffering`). The fifteen flags the wizard never
+  passed (`--buffering`, `--no-preflight`, `--clean-staging`,
+  `--icc-png-strategy`, `--scan-scope`, `--restamp-then-sync`,
+  `--explorer-thumbnail`, `--allow-incomplete-groups`, `--compress-metadata`,
+  `--output-name`, the sharpening parameters, …) are set there, saved with the
+  last session and the presets, and checked against each other before the run
+  (`--restamp-then-sync` with a delete is refused before the HHMM time). The
+  summary lists them on an `Options:` line.
+- **New menus.** `R` fixes the path records after a folder was renamed or
+  moved (`--restamp-moved`, dry run first); `C` resets the encoder's ICC test
+  cache; `S` edits the four scripts' settings — folder names, timeouts, the
+  memory cap, thumbnail sizes, the recompressor's policies — in a JSON overlay
+  instead of the `.py` files. Each script reads and checks it when it starts
+  and logs the file and every value it took; deletion, confirmations, guards,
+  verification thresholds, `OVERWRITE`, `STRIP_METADATA` and the encoder's
+  copy of the original profile are never taken from it. Menu letters work in
+  either case.
+- **A JXL → JPEG or 8-bit PNG never deletes the JXL (#600).** The owner's
+  decision on T-B of the audit: like the decoder's 8-bit TIFF and the
+  recompressor's derivatives, a lossy or lower-depth copy is not a
+  replacement for the master. The bit-exact JPEG recovery and a 16-bit PNG
+  still delete.
+- **Modes 6/7:** the anchor is the first `_EXPORT` at or below the input, no
+  longer a folder above it that happens to match (`Lightroom_Export`, #601);
+  derivatives next to their master are left out instead of stopping the run
+  on a duplicate output (#602).
+- **Expert flags:** a `--mode` there is refused (it ran behind checks made for
+  another mode, #603); the flags are parsed with the script's own command line
+  before the run, so a typo no longer fails after the HHMM time (#604;
+  `build_parser()` in the encoder, decoder and recompressor, `--help`
+  unchanged).
+- Found by the review on Windows: menu C showed a Python traceback for a user
+  name outside the ANSI code page (#605); on the options screen typing 1 for
+  `--buffering 1` set level 0 (#606, never released); the overlay could turn
+  off the original-profile copy (#607, never released).
+
+The argv of the owner's six presets is identical to v2.21.0's. New tests for
+each fix fail on the commit before it, real-codec and real-exiftool ones
+included, in folders with Japanese characters, `[ ]`, a space and `%`. 3300
+tests; the real-photo battery passes (132 checks, all optional fixture
+folders), with no overlay and with one that changes the encoder's
+`EXPLORER_THUMBNAIL_SIZE` to 512.
 
 ## v2.21.0
 

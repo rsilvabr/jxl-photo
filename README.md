@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.21.0** (2026-11-04) · [What's new](#whats-new-in-v2210) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.22.0_beta1** (2026-11-04, pre-release; last stable: [v2.21.0](docs/version_history.md#v2210)) · [What's new](#whats-new-in-v2220_beta1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.21.0](#whats-new-in-v2210)
+- [What's new in v2.22.0_beta1](#whats-new-in-v2220_beta1)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -395,34 +395,33 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.21.0
+## What's new in v2.22.0_beta1
 
-2026-11-04. The rest of the 2026-11-03 audit; most of it closes rare combinations.
+Pre-release, 2026-11-04. Every option within reach of the wizard, and a few behaviour changes worth reading.
 
-- **JPEG/PNG from lossy masters that keep their profile only in XMP** (the cautious ICC strategy, for scanner and table-curve profiles) now carry that profile instead of an sRGB label. If you delivered JPEGs from such masters, convert them again ([Upgrading](docs/upgrading.md#v2210-lossy-jxl--jpegpng-keeps-the-masters-profile-metadata-failures-keep-the-source)).
-- **Less memory per worker**: about 0.4 GB less per encoder worker at 45 MP, and the decoder's preview no longer needs a floating-point copy of the image (4 decoder workers: 9.7 → 4.3 GB).
-- **A failed metadata copy keeps the source** in the transcoder's lossy conversions, as in the encoder and the decoder.
-- Smaller fixes for unusual setups: staging, moved multi-page splits, junctions as output folders, concurrent `--clean-staging`, long relative paths.
+- **All options for a job:** press `O` on the summary screen to see and change every option of the run — the ones the wizard never asked about included (`--buffering`, `--restamp-then-sync`, `--explorer-thumbnail`, …). They are saved with the presets.
+- **New menus:** `R` fixes the records of renamed or moved folders, `C` resets the ICC test cache, `S` changes the scripts' own settings without editing them.
+- **A JXL → JPEG (or 8-bit PNG) never deletes the JXL**; modes 6/7 anchor on the `_EXPORT` below the input and leave derivatives out ([Upgrading](docs/upgrading.md#v2220-a-jxl--jpeg-never-deletes-the-jxl-modes-67-anchor-below-the-input-and-leave-derivatives-out)).
 
-Full notes: [version history](docs/version_history.md#v2210). **3147 tests**, and the real-photo battery passes (132 checks, run inside a hostile folder).
+Full notes: [version history](docs/version_history.md#v2220_beta1). **3300 tests**, and the real-photo battery passes (132 checks, run inside a hostile folder).
+
+### In v2.21.0
+
+- **JPEG/PNG from lossy masters that keep their profile only in XMP** carry that profile instead of an sRGB label; less memory per worker; a failed metadata copy keeps the source ([Upgrading](docs/upgrading.md#v2210-lossy-jxl--jpegpng-keeps-the-masters-profile-metadata-failures-keep-the-source)).
 
 ### In v2.20.0
 
 - **Hardening from a full read of the scripts**: an output whose provenance record exiftool could not read is refused instead of overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress ([Upgrading](docs/upgrading.md#v2200-unreadable-provenance-records-are-refused-modes-67-skip-other-scripts-folders)).
 
-### In v2.19.2
-
-- **IrfanView shows the EXIF of JPEG → JXL files**: it is now stored uncompressed (a median 2.3 KB per photo); menu option 8 / `--repair-jbrd` repairs older files without touching the image ([Upgrading](docs/upgrading.md#v2192-irfanview-shows-the-exif-of-jpeg--jxl-files-repair-older-ones-in-place)).
-
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.21.0** | 2026-11-04 | JPEG/PNG of cautious-strategy masters carry their real profile; less memory per worker; a failed metadata copy keeps the source |
+| **v2.22.0_beta1** | 2026-11-04 | Pre-release. Every option within reach of the wizard; menus R/C/S (renamed folders, ICC cache, script settings); a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input |
+| [v2.21.0](docs/version_history.md#v2210) | 2026-11-04 | JPEG/PNG of cautious-strategy masters carry their real profile; less memory per worker; a failed metadata copy keeps the source |
 | [v2.20.0](docs/version_history.md#v2200) | 2026-11-03 | Hardening: an unreadable provenance record is refused, not overwritten; modes 6/7 skip the other scripts' folders; planning reports progress |
 | [v2.19.2](docs/version_history.md#v2192) | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files; menu option 8 repairs older ones in place, proving the same JPEG comes back |
 | [v2.19.1](docs/version_history.md#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place |
-| [v2.19.0](docs/version_history.md#v2190) | 2026-11-02 | The ICC profile's copy moves out of "creator software" into a `jxlphoto-iccprofile` marker; older files are still read |
 | [v2.18.1](docs/version_history.md#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.18.0](docs/version_history.md#v2180) | 2026-10-29 | Runs that delete TIFFs check every JXL's pixels first; hardening around lossless JPEG archives, thumbnail pages and in-place edits |
 | [v2.17.0](docs/version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |

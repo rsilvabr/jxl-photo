@@ -11,6 +11,33 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.22.0: a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out
+
+- **A JXL decoded to a JPEG or to an 8-bit PNG never deletes the JXL** (#600):
+  a JPEG is lossy and an 8-bit PNG may have fewer bits than the master — the
+  same rule as the decoder's 8-bit TIFF and the recompressor's derivatives.
+  `--force-convert --decode … --delete-source` to JPEG/8-bit PNG now exits 2;
+  the automatic JXL → JPEG keeps each JXL it converts lossy (a `KEEP` line);
+  the wizard refuses the combination before the HHMM time and a manifest row
+  runs without its delete. The bit-exact recovery of a JPEG archive and a
+  16-bit PNG still delete.
+- **Modes 6/7 anchor on the first `_EXPORT` at or below the input folder**
+  (#601). A library kept under a folder whose name also matches the marker
+  (`Lightroom_Export`, `C1_Export`) used to anchor there, writing outputs in
+  `Lightroom_Export\16B_JXL\…`; they now go below the real `_EXPORT`. If you
+  ran modes 6/7 on such a library, the next run writes the outputs in the
+  right place: delete the old folder by hand once you have checked it. A run
+  pointed AT the matching folder still anchors on it.
+- **Modes 6/7 leave out derivatives** (#602): the decoder, the recompressor
+  and the transcoder's JPEG/PNG export skip every JXL carrying a
+  `jxlphoto-derived` marker (an sRGB or resized copy next to its master)
+  unless mode 7 asks for its folder with `--export-subfolder`. Runs that
+  stopped on "Duplicate output destination" now go ahead.
+- **Expert flags are checked before the run** (#603, #604): a `--mode` there
+  is refused (pick the mode in the wizard), and a flag the script does not
+  know, or a value outside its choices, is refused before the HHMM time
+  instead of failing after it.
+
 ## v2.21.0: lossy JXL → JPEG/PNG keeps the master's profile; metadata failures keep the source
 
 - **A JXL → JPEG/PNG conversion without `--icc-profile` now gives the output
