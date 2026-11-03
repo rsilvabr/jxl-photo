@@ -5445,6 +5445,18 @@ def process_group(items, workers: int):
             # not be adoptable as a NEW input.
             dest_tmp = (final_path.parent
                         / f"{uuid.uuid4().hex}_{final_path.stem}.tmp")
+            # #572: the copy out of staging is checked BEFORE it replaces the
+            # only copy — a cross-volume move that damages bytes without an
+            # error (antivirus, a flaky USB bridge) used to be caught only
+            # after the original was gone.
+            try:
+                _staged_size = it["write"].stat().st_size
+                _staged_md5 = md5_of_file(it["write"])
+            except OSError as e:
+                logger.error(f"  REPLACE FAILED, original kept | "
+                             f"{final_path.name} | staged re-encode unreadable: {e}")
+                results[src_str] = ("error", str(final_path))
+                return
             try:
                 shutil.move(str(it["write"]), str(dest_tmp))
             except OSError as e:
@@ -5457,6 +5469,22 @@ def process_group(items, workers: int):
                     pass
                 moved = False
             else:
+                try:
+                    _copy_ok = (dest_tmp.stat().st_size == _staged_size
+                                and md5_of_file(dest_tmp) == _staged_md5
+                                and _verify_jxl_integrity(dest_tmp))
+                except OSError:
+                    _copy_ok = False
+                if not _copy_ok:
+                    logger.error(f"  REPLACE REFUSED, original kept | {final_path.name} | "
+                                 f"the copy out of staging is not the verified "
+                                 f"re-encode (size/MD5/integrity)")
+                    try:
+                        dest_tmp.unlink()
+                    except OSError:
+                        pass
+                    results[src_str] = ("error", str(final_path))
+                    return
                 try:
                     os.replace(str(dest_tmp), str(final_path))
                     moved = True
