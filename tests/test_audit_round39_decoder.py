@@ -401,8 +401,11 @@ def test_provenance_marker_write_success_still_passes(monkeypatch, tmp_path):
     _jxl_stub(src)
     tif = tmp_path / "a.tif"
     tif.write_bytes(b"\x00")
+    # A real exiftool always answers a -j read with JSON (#582: an empty
+    # answer is a failed read).
     monkeypatch.setattr(dec, "_run_exiftool_argfile",
-                        lambda *a, **k: _FakeRun())
+                        lambda lines, **k: _FakeRun(
+                            stdout='[{"SourceFile": "a.tif"}]' if "-j" in lines else ""))
     assert dec.copy_metadata(src, tif, tmp_path, provenance_sources=[src]) is True
 
 

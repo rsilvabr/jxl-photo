@@ -79,8 +79,11 @@ def test_copy_metadata_reports_a_nonzero_exiftool_exit(monkeypatch, tmp_path):
 def test_copy_metadata_success_still_returns_true(monkeypatch, tmp_path):
     tif = tmp_path / "a.tif"
     tif.write_bytes(b"\x00")
+    # A real exiftool always answers a -j read with JSON (#582: an empty
+    # answer is a failed read).
     monkeypatch.setattr(dec, "_run_exiftool_argfile",
-                        lambda *a, **k: _FakeRun())
+                        lambda lines, **k: _FakeRun(
+                            stdout='[{"SourceFile": "a.tif"}]' if "-j" in lines else ""))
     assert dec.copy_metadata(tmp_path / "a.jxl", tif, tmp_path) is True
 
 
