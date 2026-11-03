@@ -181,3 +181,30 @@ def test_builder_emits_only_registry_flags(name, wp, tmp_path, monkeypatch):
     allowed = wp._registry_flags(direction)
     stray = [a for a in argv if a.startswith("--") and a not in allowed and a not in tail]
     assert not stray, f"{name}: flags emitted outside the registry: {stray}"
+
+
+def test_direct_lossy_decode_says_it_drops_a_rename(wp, tmp_path, monkeypatch, capsys):
+    """S4 of the 261103 review: the direct JXL -> JPEG run never passes
+    --rename-from (only a manifest row does), so a value inherited from a
+    JXL -> JXL setting used to vanish in silence. It still is not passed —
+    renaming these outputs unasked would be worse — but the run says so."""
+    monkeypatch.setattr(wp.ConfigManager, "_get_config_path",
+                        lambda self: tmp_path / ".jxl_tools_config.json")
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    cfg = wp.ConfigManager()
+    menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+    wf = GOLDEN._subst(GOLDEN._wf("jxl", "jpeg", "jxl_to_jpeg_auto", 6,
+                                  advanced_options={"rename_from": "DSC",
+                                                    "rename_to": "IMG [x]"}),
+                       str(tmp_path / "case"))
+    Path(wf["input_dir"]).mkdir(parents=True, exist_ok=True)
+    calls = []
+    monkeypatch.setattr(wp.InteractiveMenu, "_stream_child",
+                        lambda self, cmd, idle_timeout=None:
+                        (calls.append(list(map(str, cmd))), 0)[1])
+    monkeypatch.setattr(wp.InteractiveMenu, "_confirm_lossy_delete_skipped",
+                        lambda self, workflow: None)
+    assert menu.execute_workflow(wf, GOLDEN.STATUS)
+    assert "--rename-from" not in calls[0], calls[0]
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--rename-from is not passed on a direct JXL → JPEG/PNG run" in out, out

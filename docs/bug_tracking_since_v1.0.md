@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #567.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #568.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -23,7 +23,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | — | #563–#566 (4) |
+| [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | — | #563–#567 (5) |
 | [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |
 | [Round-67 — EXIF hidden from IrfanView](#round-67--exif-hidden-from-irfanview-2026-11-02) | 2026-11-02 | v2.19.1 | #561 (1) |
 | [Round-66 — leftover split pages, a temp folder exiftool cannot name, lossless JPEG archives without their checksum line, in-place edits racing another run](#round-66--leftover-split-pages-a-temp-folder-exiftool-cannot-name-lossless-jpeg-archives-without-their-checksum-line-in-place-edits-racing-another-run-2026-10-29) | 2026-10-29 | v2.18.0_beta1 | #551–#560 (10) |
@@ -82,17 +82,22 @@ were never tagged and never shipped.
 ## Round-69 — the 261103 full-repo audit (2026-11-03)
 
 A full read of the five scripts and how they meet, with probes for each
-finding. Most of what it flagged were rare combinations; these four were
-confirmed and fixed (the rest wait for the owner's real-photo battery).
+finding. Most of what it flagged were rare combinations; these were
+confirmed and fixed, then checked by the owner's local review with real
+photos (#567 came from that review).
 Regression tests: `tests/test_unread_markers.py` (27 fail at the base commit),
 `tests/test_thumbnail_box_order.py` (8), `tests/test_other_tool_folders.py`
-(9), `tests/test_batch_read_progress.py` (19).
+(9, plus 4 for the `converted_jxl` masters that fail on the first version of
+#565), `tests/test_batch_read_progress.py` (19),
+`tests/test_wrapper_option_registry.py::test_direct_lossy_decode_says_it_drops_a_rename`
+(#567).
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
 | 563 | **An unreadable provenance record counted as "no record".** When the planning-time exiftool batch failed or stalled (or returned no entry for a file), `_read_source_markers_batch` left that file as `{src: None, srcsum: None}` — the answer of an old archive without a record — and every overwrite guard let the overwrite through, onto what may be the only copy of another photo (an earlier run deleted its source). The reader now adds `unread`; the guards refuse such an output while `OVERWRITE_GUARD` is on (a warning with it off): encoder `_foreign_overwrite_reason` and its strict guard (never adopted), decoder `main()`, transcoder `_foreign_overwrite_filter` (lossy outputs; jbrd and checksum paths unchanged), recompressor `_foreign_overwrite_refusals` (output or source unread). Strict refusals name the cause; `--restamp-moved` counts unreadable records apart. | all four backends | Fixed |
-| 564 | **A restamp moved the Explorer thumbnail behind the image data.** `reorder_jxl_boxes` (three copies) sent every box it did not know to the end of the file. `_rewrite_master_relation` runs it on masters that already carry a thumbnail (`--restamp-moved`, `--restamp-then-sync`, the adopt stamp), so the `uuid` box landed after the codestream, where jxl-thumb does not look. An unknown box that sat before the codestream now stays there; `--refresh-explorer-thumbnails`, which called such a file current, moves the box back, bytes unchanged (`_thumbnail_box_misplaced`, `_move_thumbnail_before_codestream`; status `REORDERED`). | jxl_tiff_encoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
-| 565 | **Modes 6/7 took the other scripts' outputs for masters.** Below the export marker the decoder and the recompressor took every JXL, so a master and its derivative (`16B_JXL_small`) or JPEG archive (`JXL_jpeg`) resolved to the same output and the run stopped on the duplicate (exit 2), every time. Both now skip those folders below the marker — each tool's configured value and shipped default, read from the sibling scripts with `ast` (`_sibling_str_settings`, `_other_tool_output_folders`, `_skip_other_tool_output`, parity-pinned); never the encoder's master folder, never mode 7's requested subfolder. The wrapper's manifest collision walk mirrors it. | jxl_tiff_decoder.py, jxl_recompressor.py, jxl_photo.py | Fixed |
+| 564 | **A restamp moved the Explorer thumbnail behind the image data.** `reorder_jxl_boxes` (three copies) sent every box it did not know to the end of the file. `_rewrite_master_relation` runs it on masters that already carry a thumbnail (`--restamp-moved`, `--restamp-then-sync`, the adopt stamp), so the `uuid` box landed after the codestream, away from its documented place (jxl-thumb reads every box, so Explorer kept showing it — checked in the 261103 review; a reader that stops at the codestream would not). The three copies are now identical and parity-pinned. An unknown box that sat before the codestream now stays there; `--refresh-explorer-thumbnails`, which called such a file current, moves the box back, bytes unchanged (`_thumbnail_box_misplaced`, `_move_thumbnail_before_codestream`; status `REORDERED`). | jxl_tiff_encoder.py, jxl_recompressor.py, jxl_jpeg_transcoder.py | Fixed |
+| 565 | **Modes 6/7 took the other scripts' outputs for masters.** Below the export marker the decoder and the recompressor took every JXL, so a master and its derivative (`16B_JXL_small`) or JPEG archive (`JXL_jpeg`) resolved to the same output and the run stopped on the duplicate (exit 2), every time. Both now skip those folders below the marker — each tool's configured value and shipped default, read from the sibling scripts with `ast` (`_sibling_str_settings`, `_other_tool_output_folders`, `_skip_other_tool_output`, parity-pinned); never a folder the encoder writes masters into (`_MASTER_FOLDER_SOURCES`; the first version skipped the transcoder's `converted_jxl`, which is also the encoder's mode 1 folder — caught by the 261103 review before any release), never mode 7's requested subfolder. The wrapper's manifest collision walk mirrors it. | jxl_tiff_decoder.py, jxl_recompressor.py, jxl_photo.py | Fixed |
+| 567 | **A direct JXL → JPEG/PNG run dropped a rename in silence.** Only a manifest row passes `--rename-from` on the transcoder's lossy decode; a value left in a direct run's options (a hand-edited preset, or one carried over from a JXL → JXL setting — the wizard never asks for it there) was ignored without a word. It is still not passed (renaming the outputs unasked would be worse), but the run now says so; the lossless recovery's refusal no longer suggests the direct lossy conversion would rename. | jxl_photo.py | Fixed |
 | 566 | **A long planning phase looked like a hung child.** The planning-time exiftool batch reads printed nothing until they finished; on a busy disk (#537) a large library could spend an hour silent and the wrapper stopped the child ("No output for 60 min"). Every batch reader now reports between batches once slow (`_batch_read_state`/`_batch_read_tick`, parity-pinned), and the wrapper's limit is the config field `child_idle_timeout_minutes`. | all five scripts | Fixed |
 
 ## Round-68 — the EXIF of JPEG → JXL files in IrfanView (2026-11-03)

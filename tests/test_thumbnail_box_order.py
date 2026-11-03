@@ -6,9 +6,11 @@ codestream.
 did not know — the thumbnail's `uuid` box among them — AFTER the codestream.
 `_rewrite_master_relation` runs it on masters that already carry a thumbnail
 (--restamp-moved, --restamp-then-sync, the --provenance adopt stamp), so each
-of those moved the thumbnail to the end of the file, where jxl-thumb does not
-look for it. And `--refresh-explorer-thumbnails` read the fingerprint wherever
-the box was, called it "current", and never moved it back.
+of those moved the thumbnail to the end of the file, away from the documented
+place before the image data (jxl-thumb reads every box, so Explorer kept
+showing it; a reader that stops at the codestream would not). And
+`--refresh-explorer-thumbnails` read the fingerprint wherever the box was,
+called it "current", and never moved it back.
 
 Now an unknown box that sat before the codestream stays before it (in its
 order, after the metadata boxes), and the refresh moves a misplaced thumbnail

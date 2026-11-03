@@ -8976,8 +8976,9 @@ class InteractiveMenu:
                 and _adv_pre.get('rename_from')):
             self._print_error("A bit-exact JPEG reconstruction keeps the "
                               "original file names — --rename-from does not "
-                              "apply to the lossless JXL→JPEG recovery. Pick "
-                              "the lossy conversion for that.")
+                              "apply to the lossless JXL→JPEG recovery. To "
+                              "rename, use a manifest row with the lossy "
+                              "conversion (RenameFrom column).")
             return False
         # OutputICC is likewise ignored on the lossless path (there is no
         # pixel to convert) — warn, don't refuse: the recovery itself is
@@ -8992,6 +8993,24 @@ class InteractiveMenu:
                 console.print(f"[yellow]{_rich_safe(_icc_msg)}[/yellow]")
             else:
                 print(f"WARNING: {_icc_msg}")
+
+        # A DIRECT JXL -> JPEG/PNG conversion does not pass --rename-from (only
+        # a manifest row's RenameFrom column does, _policy_rename): the wizard
+        # never asks for it there, so the value can only be a hand-edited
+        # preset or one carried over from a JXL -> JXL run — renaming these
+        # outputs unasked would be worse. Said out loud instead of dropped in
+        # silence (S4 of the 261103 review).
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and _conv_pre in _DECODE_LOSSY_CONVERSIONS
+                and _adv_pre.get('rename_from')):
+            _ren_msg = ("--rename-from is not passed on a direct JXL → JPEG/PNG run "
+                        "(the value comes from a JXL → JXL setting or a hand-edited "
+                        "preset): the outputs keep their names. Use a manifest "
+                        "RenameFrom column to rename them.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{_rich_safe(_ren_msg)}[/yellow]")
+            else:
+                print(f"WARNING: {_ren_msg}")
 
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
