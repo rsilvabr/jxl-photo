@@ -6056,11 +6056,13 @@ def _thumbnail_sync_guard(tiff_path: Path, output_dir: Path, real_pages: list,
 
 
 def _read_page_markers_batch(paths: list) -> dict:
-    """{path: {'src': id|None, 'group': id|None, 'thumb': bool}} from each
-    file's dc:Relation, in as few exiftool calls as possible. A file whose
-    markers cannot be read comes back all None/False: _clean_stale_split_pages
-    then leaves it alone."""
-    markers = {str(p): {"src": None, "group": None, "thumb": False} for p in paths}
+    """{path: {'src': id|None, 'group': id|None, 'thumb': bool, 'pages': int|None}}
+    from each file's dc:Relation, in as few exiftool calls as possible. A file
+    whose markers cannot be read comes back all None/False: the callers
+    (_clean_stale_split_pages, the moved-split adoption) then leave it alone.
+    'pages' is the split's jxlphoto-pages count (-1 when unparsable)."""
+    markers = {str(p): {"src": None, "group": None, "thumb": False, "pages": None}
+               for p in paths}
     index = {os.path.normcase(str(p)): str(p) for p in paths}
     if not paths:
         return markers
@@ -6089,13 +6091,18 @@ def _read_page_markers_batch(paths: list) -> dict:
                 rel = entry.get("Relation")
                 if src is None or rel is None:
                     continue
-                info = {"src": None, "group": None, "thumb": False}
+                info = {"src": None, "group": None, "thumb": False, "pages": None}
                 for token in (rel if isinstance(rel, list) else [str(rel)]):
                     token = str(token).strip()
                     if token.startswith(SRC_PREFIX):
                         info["src"] = token[len(SRC_PREFIX):]
                     elif token.startswith(MULTIPAGE_XMP_MARKER):
                         info["group"] = token[len(MULTIPAGE_XMP_MARKER):]
+                    elif token.startswith(PAGES_XMP_PREFIX):
+                        try:
+                            info["pages"] = int(token[len(PAGES_XMP_PREFIX):])
+                        except ValueError:
+                            info["pages"] = -1
                     elif token == THUMB_XMP_FLAG:
                         info["thumb"] = True
                 key = os.path.normcase(str(Path(src)))
@@ -6623,11 +6630,23 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
     # TIFF's current bytes (an unreadable marker never adopts). When the id
     # is already the one this run computes, adopting it changes nothing.
     if moved:
-        src_marks = _read_source_markers_batch(
-            [f for _gid, sibs in moved.values() for f in sibs])
+        _moved_files = [f for _gid, sibs in moved.values() for f in sibs]
+        src_marks = _read_source_markers_batch(_moved_files)
+        # The split must also be the SAME page set (261104 review, S1): an
+        # unchanged TIFF whose planned pages changed (a thumbnail now kept)
+        # must not lend the old group's id to the new page — the pages would
+        # then declare different counts and the decoder refuses the group.
+        page_marks = _read_page_markers_batch(_moved_files)
         for key, (gid, sibs) in moved.items():
             infos = [src_marks.get(str(f)) or {} for f in sibs]
             if any(i.get("unread") or not i.get("srcsum") for i in infos):
+                continue
+            pages = [page_marks.get(str(f)) or {} for f in sibs]
+            if any(p.get("group") != gid for p in pages):
+                continue            # the page read failed or disagrees
+            n_planned = len(pages_per_tiff.get(key, ()))
+            if any(p.get("pages") is not None and p.get("pages") != n_planned
+                   for p in pages):
                 continue
             try:
                 content = _file_content_id(split_tiffs[key])
