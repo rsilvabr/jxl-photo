@@ -809,6 +809,37 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     return False
 
 
+
+def _marker_anchor_index(dir_parts, root, marker_lower):
+    """Index in `dir_parts` (the folder parts of a file's path) of the export
+    marker folder that anchors modes 6/7: the FIRST matching folder at or
+    below the input `root` (the root folder itself included), else the
+    CLOSEST matching one above it (a run pointed inside an export folder).
+    A folder ABOVE the root used to win whenever it came first — a library
+    under 'Lightroom_Export' or 'C1_Export' (both match '_EXPORT') anchored
+    there instead of on the real '_EXPORT' below (E-H of the 2026-11-03
+    audit). A path that is not under `root` keeps the old rule (the first
+    match from the top). None when no folder matches."""
+    dir_parts = list(dir_parts)
+    start = 0
+    if root is not None:
+        try:
+            rp = [os.path.normcase(p) for p in Path(root).parts]
+        except TypeError:
+            rp = []
+        dp = [os.path.normcase(p) for p in dir_parts]
+        if rp and dp[:len(rp)] == rp:
+            start = len(rp) - 1         # the root folder itself counts
+        elif rp and dp == rp[:-1]:
+            start = len(dp)             # the root is this very file
+    for i in range(start, len(dir_parts)):
+        if _marker_matches(dir_parts[i].lower(), marker_lower):
+            return i
+    for i in range(min(start, len(dir_parts)) - 1, -1, -1):
+        if _marker_matches(dir_parts[i].lower(), marker_lower):
+            return i
+    return None
+
 def _validate_export_folder_name(name: str, marker: str, subfolder: str):
     """None when `name` is usable as the modes 6/7 output folder, else the reason.
 
@@ -3431,8 +3462,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path,
         # filename happens to start/end with the marker is not an anchor.
         parts = jxl_path.parts
         marker_lower = EXPORT_MARKER.lower()
-        export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts[:-1], input_root, marker_lower)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -3450,8 +3480,7 @@ def resolve_output(jxl_path: Path, mode: int, input_root: Path,
         # EXPORT_MARKER anchor — only JXLs inside export marker/[subfolder]
         parts = jxl_path.parts
         marker_lower = EXPORT_MARKER.lower()
-        export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts[:-1], input_root, marker_lower)
         if export_idx is None:
             return None  # Skip files outside export marker folder
 
@@ -3675,8 +3704,7 @@ def find_jxls_mode6(input_path: Path):
     for t in all_jxls:
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(t.parts[:-1])
-        export_idx = next((i for i, p in enumerate(parts_str)
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
         if export_idx is not None:
             below = [p.lower() for p in parts_str[export_idx + 1:]]
             if _skip_other_tool_output(below, honor_requested_subfolder=False):
@@ -3697,8 +3725,7 @@ def find_jxls_mode7(input_path: Path):
     for t in all_jxls:
         # Match only directory parts; the filename itself is not an anchor
         parts_str = list(t.parts[:-1])
-        export_idx = next((i for i, p in enumerate(parts_str)
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts_str, input_path, marker_lower)
         if export_idx is None:
             continue
         if _skip_other_tool_output([p.lower() for p in parts_str[export_idx + 1:]]):
@@ -7188,7 +7215,9 @@ def main():
                 f"scan={ON_SCAN}{' (raw only)' if str(SCAN_SCOPE).lower() == 'raw' else ''} | "
                 f"unknown={ON_UNKNOWN} | "
                 f"jbrd={JBRD_POLICY} | keep-smaller={KEEP_SMALLER}")
-    if (OUTPUT_ICC and args.mode == 7 and EXPORT_JXL_FOLDER == "16B_JXL_small"
+    # No --export-jxl-folder: the folder is the script setting, never compared
+    # with a literal copy of its shipped value (AGENTS.md).
+    if (OUTPUT_ICC and args.mode == 7 and args.export_jxl_folder is None
             and _OUTPUT_ICC_LABEL.lower() not in EXPORT_JXL_FOLDER.lower()):
         logger.info(f"--output-icc target '{_OUTPUT_ICC_LABEL}' is not part of the "
                     f"output folder name '{EXPORT_JXL_FOLDER}': consider "

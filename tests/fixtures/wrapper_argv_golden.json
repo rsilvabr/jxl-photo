@@ -543,7 +543,7 @@
   "--format",
   "jpeg"
  ],
- "tra_jxl2jpeg_force_expert_delete": [
+ "tra_jxl2jpeg_lossless_expert_delete": [
   "<PY>",
   "<SCRIPTS>/jxl_jpeg_transcoder.py",
   "<ROOT>/250118_吾妻山公園_菜の花 [FINAL]/01_Z7",
@@ -553,18 +553,17 @@
   "6",
   "--export-marker",
   "_EXPORT",
-  "--force-convert",
-  "--decode",
-  "--quality",
-  "95",
+  "--overwrite",
   "--effort",
   "7",
-  "--overwrite",
+  "--quality",
+  "95",
+  "--force-transcode",
+  "--decode",
   "--format",
   "jpeg",
   "--delete-source",
-  "--sharpen-sigma",
-  "0.8",
+  "--compress-metadata",
   "--delete-confirm-off"
  ],
  "tra_jxl2jpeg_lossless_mode8_delete": [

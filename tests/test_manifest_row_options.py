@@ -300,9 +300,12 @@ def test_wizard_resize_with_delete_is_refused_not_dropped(tmp_path, monkeypatch,
 def test_column_clearing_the_wizard_resize_lets_the_delete_run(tmp_path, monkeypatch):
     """An empty Resize cell removes the wizard's resize on that row: with no
     derivative left anywhere, the delete runs normally."""
+    # A 16-bit PNG (the default conversion here): a lossy JPEG never deletes
+    # its JXL any more (T-B, tests/test_lossy_decode_delete.py), so the row
+    # that proves "no derivative left, the delete runs" decodes to 16-bit PNG.
     rows = [(tmp_path / "A", tmp_path / "oA", 2)]
     ok, cmds = _run_manifest(
-        monkeypatch, tmp_path, rows, dest="jpeg", conv="jxl_to_jpeg_force",
+        monkeypatch, tmp_path, rows,
         advanced={"delete_source": True, "resize_mode": "long",
                   "resize_value": 2048},
         row_options=[{"resize_mode": None, "resize_value": None,

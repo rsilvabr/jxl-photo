@@ -15,6 +15,7 @@ deliberate, drop the helper from SHARED_HELPERS with a comment saying why.
 from __future__ import annotations
 
 import ast
+import sys
 import hashlib
 from pathlib import Path
 
@@ -67,6 +68,10 @@ SHARED_HELPERS = [
     # deleting sources in a layout another one guards.
     "_run_collapses_structure",
     "_marker_matches",
+    # E-H: which folder anchors modes 6/7 (the first marker at or below the
+    # input root, else the closest above). A copy drifting is one script
+    # writing a mode 6 output where another one looks for it.
+    "_marker_anchor_index",
     # --exclude-folders discovery filter (encoder/decoder finders + the
     # wrapper's collision walk): a drifting copy would let one site see a file
     # set another does not.
@@ -379,6 +384,10 @@ def _normalise(fn: ast.FunctionDef) -> str:
 
     canonical = _Canonicalise(_bound_names(fn)).visit(fn)
     ast.fix_missing_locations(canonical)
+    # Python 3.13 omits empty fields from ast.dump unless asked: the pinned
+    # hashes were taken with them (3.12), so ask for them.
+    if sys.version_info >= (3, 13):
+        return ast.dump(canonical, annotate_fields=False, show_empty=True)
     return ast.dump(canonical, annotate_fields=False)
 
 

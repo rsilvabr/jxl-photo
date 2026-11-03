@@ -268,11 +268,26 @@ def test_transcoder_still_needs_integrity(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
-              marker="this"):
+              marker="this", fmt="png"):
     src = tmp_path / "photo.jxl"
     _jxl_stub(src)
-    final = tmp_path / "photo.jpg"
-    final.write_bytes(b"\xff\xd8\xff\xd9")
+    # A 16-bit PNG: the one lossy-convert output that may still replace its
+    # JXL (T-B: a JPEG or an 8-bit PNG never does), so the marker proof below
+    # is what decides — as these tests were written to show.
+    # Where the run looks for it (mode 3, as parsed below).
+    final = tr.resolve_output_convert(src, 3, tr.CONVERT_OUTPUT_FOLDER, "", fmt,
+                                      output_root=tmp_path, decode=True)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "png":
+        import struct as _st
+        import zlib as _z
+        def _chunk(n, d):
+            return _st.pack(">I", len(d)) + n + d + _st.pack(">I", _z.crc32(n + d))
+        final.write_bytes(b"\x89PNG\r\n\x1a\n"
+                          + _chunk(b"IHDR", _st.pack(">IIBBBBB", 1, 1, 16, 2, 0, 0, 0))
+                          + _chunk(b"IEND", b""))
+    else:
+        final.write_bytes(b"\xff\xd8\xff\xd9")
     _make_newer(final, src)
 
     tr.setup_logger()
@@ -295,7 +310,8 @@ def _tr_lossy(tmp_path, monkeypatch, *, delete_skipped, integrity=True,
                                                            if marker == "this" else None)}
                                        for p in paths})
     args = tr.build_parser().parse_args(
-        [str(tmp_path), "--force-convert", "--decode", "--mode", "3"])
+        [str(tmp_path), "--force-convert", "--decode", "--mode", "3",
+         "--format", fmt] + (["--bit-depth", "16"] if fmt == "png" else []))
     tr.cmd_convert(args, from_jxl=True)
     return src
 
@@ -306,6 +322,12 @@ def test_transcoder_lossy_keeps_by_default(tmp_path, monkeypatch):
 
 def test_transcoder_lossy_delete_skipped_with_this_sources_marker(tmp_path, monkeypatch):
     assert not _tr_lossy(tmp_path, monkeypatch, delete_skipped=True).exists()
+
+
+def test_transcoder_lossy_jpeg_keeps_its_jxl_even_with_the_marker(tmp_path, monkeypatch):
+    """T-B: a JPEG decoded from the JXL is not a copy of it — the matching
+    marker that lets a 16-bit PNG replace its JXL does not apply."""
+    assert _tr_lossy(tmp_path, monkeypatch, delete_skipped=True, fmt="jpg").exists()
 
 
 @pytest.mark.parametrize("marker", ["other", None])

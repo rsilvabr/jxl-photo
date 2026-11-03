@@ -151,9 +151,12 @@ CASES = {
     "tra_jxl2png_mode1": ("direct", _wf(
         "jxl", "png", "jxl_to_png", 1, effort=7, bit_depth=16,
         advanced_options={"sync": True}), None),
-    "tra_jxl2jpeg_force_expert_delete": ("direct", _wf(
-        "jxl", "jpeg", "jxl_to_jpeg_force", 0, effort=7,
-        expert_flags="--delete-source --sharpen-sigma 0.8",
+    # The lossy jxl_to_jpeg_force + delete case it replaced is refused now
+    # (T-B, tests/test_lossy_decode_delete.py); expert flags + an expert
+    # delete are pinned on the bit-exact recovery instead.
+    "tra_jxl2jpeg_lossless_expert_delete": ("direct", _wf(
+        "jxl", "jpeg", "jxl_to_jpeg_lossless", 0, effort=7,
+        expert_flags="--delete-source --compress-metadata",
         advanced_options={"overwrite": True}), None),
     # --- manifest rows ------------------------------------------------------
     "m_enc_mode6": ("manifest", _wf(

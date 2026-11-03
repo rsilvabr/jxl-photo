@@ -208,6 +208,23 @@ def _flags_ambiguous_delete(flags: Optional[str]) -> Optional[str]:
     return None
 
 
+def _flags_set_mode(flags: Optional[str]) -> Optional[str]:
+    """The expert-flag token that would set the child's --mode, or None.
+
+    The wrapper decides everything around a run from ITS mode: the in-place
+    and delete gates, the collision scan, the counts in the confirmation. A
+    `--mode 8` in the expert flags wins in the child's argparse (it comes
+    last), so the run would replace files in place behind a gate that saw
+    another mode (W-B of the 2026-11-03 audit). `--mo`/`--mod` count too:
+    argparse accepts an unambiguous abbreviation (the decoder has no other
+    --mo... flag)."""
+    for t in _split_expert_flags(flags or ''):
+        tok = t.split('=', 1)[0]
+        if tok.startswith('--') and len(tok) >= 4 and '--mode'.startswith(tok):
+            return t
+    return None
+
+
 def _strip_surrounding_quotes(value: str) -> str:
     """Strip balanced surrounding quotes from pasted paths
     (e.g. Explorer's 'Copy as path' wraps the path in double quotes)."""
@@ -2110,6 +2127,24 @@ def _has_derivative_options(advanced: Dict) -> bool:
     jxlphoto-derived recipe marker."""
     return bool(advanced.get('output_icc') or advanced.get('resize_mode')
                 or (advanced.get('sharpen') or 'none') != 'none')
+
+
+def _lossy_decode_never_deletes(workflow: Dict) -> Optional[str]:
+    """Why this JXL -> JPEG/PNG run cannot delete its JXLs, or None (T-B of
+    the 2026-11-03 audit, the owner's option 1; the transcoder refuses the
+    same pair with exit 2 and keeps such sources per file). A JPEG decoded
+    from a JXL is lossy and an 8-bit PNG may be a degraded copy: neither is
+    a replacement for the master. The bit-exact recovery of a JPEG archive
+    and a 16-bit PNG still may delete."""
+    if workflow.get('origin_format') != 'jxl':
+        return None
+    conv = workflow.get('conversion_type', '')
+    if conv == 'jxl_to_jpeg_force':
+        return ("a JPEG decoded from a JXL is lossy, not a copy of it — only the "
+                "bit-exact recovery of a JPEG archive deletes its JXL")
+    if conv == 'jxl_to_png' and str(_bit_depth_or_default(workflow, 'png')) != '16':
+        return "an 8-bit PNG may be a degraded copy of the JXL — use 16 bits to delete"
+    return None
 
 
 def _append_derivative_flags(cmd: List, advanced: Dict) -> None:
@@ -6963,8 +6998,10 @@ class InteractiveMenu:
                 if (_row_opts_all[i] or {}).get('export_subfolder'):
                     continue
                 _parts = Path(_s).parts
-                _idx = next((j for j, p in enumerate(_parts)
-                             if _marker_matches(p.lower(),
+                # The deepest match: the children's anchor for this Source
+                # (_marker_anchor_index, E-H).
+                _idx = next((j for j in range(len(_parts) - 1, -1, -1)
+                             if _marker_matches(_parts[j].lower(),
                                                 _row_markers[i].lower())), None)
                 if _idx is not None and _idx + 1 < len(_parts):
                     derived.add(_parts[_idx + 1])
@@ -7687,8 +7724,11 @@ class InteractiveMenu:
         """
         parts = Path(source).parts
         marker_lower = (export_marker or ToolConfig.export_marker).lower()
-        idx = next((i for i, p in enumerate(parts)
-                    if _marker_matches(p.lower(), marker_lower)), None)
+        # The DEEPEST match, like the children's anchor for a run pointed at
+        # this Source (_marker_anchor_index, E-H): an outer folder that also
+        # matches ('Lightroom_Export') is not where the outputs go.
+        idx = next((i for i in range(len(parts) - 1, -1, -1)
+                    if _marker_matches(parts[i].lower(), marker_lower)), None)
         if idx is None:
             return None
         return str(Path(*parts[:idx + 1]))
@@ -8057,7 +8097,7 @@ class InteractiveMenu:
                 #     unfiltered (round-trip sources must be found);
                 #   * transcoder DECODE (jxl->jpeg): deliberately UNFILTERED
                 #     (it is how a JPEG archive comes back) — no skip at all.
-                def _other_tool_skip(f: Path, mode: int) -> bool:
+                def _other_tool_skip(f: Path, root: Path, mode: int) -> bool:
                     """The decoder's/recompressor's mode 6/7 filter (X-B),
                     mirrored: a folder below the marker that is another
                     tool's JXL output folder."""
@@ -8065,8 +8105,7 @@ class InteractiveMenu:
                         return False
                     parts = list(f.parts[:-1])
                     marker_lower = _child.EXPORT_MARKER.lower()
-                    idx = next((i for i, p in enumerate(parts)
-                                if _child._marker_matches(p.lower(), marker_lower)), None)
+                    idx = _child._marker_anchor_index(parts, root, marker_lower)
                     if idx is None:
                         return False
                     below = [p.lower() for p in parts[idx + 1:]]
@@ -8080,8 +8119,9 @@ class InteractiveMenu:
                             return False
                         parts = list(f.parts[:-1])
                         marker_lower = _child.EXPORT_MARKER.lower()
-                        idx = next((i for i, p in enumerate(parts)
-                                    if _child._marker_matches(p.lower(), marker_lower)), None)
+                        # The children's anchor rule (E-H): the first marker
+                        # at or below the row's root, else the closest above.
+                        idx = _child._marker_anchor_index(parts, root, marker_lower)
                         if idx is None:
                             return False
                         below = [p.lower() for p in parts[idx + 1:]]
@@ -8120,10 +8160,10 @@ class InteractiveMenu:
                             below = [p.lower() for p in f.parts[:-1]]
                         return (_child._is_own_output_path(below)
                                 or any(p.endswith("_jxl_small") for p in below)
-                                or _other_tool_skip(f, mode))
+                                or _other_tool_skip(f, root, mode))
                 elif _child.__name__ == 'jxl_tiff_decoder':
                     def _skip_check(f: Path, root: Path, mode: int) -> bool:
-                        return _other_tool_skip(f, mode)
+                        return _other_tool_skip(f, root, mode)
 
         by_dest: Dict[str, Dict[str, Path]] = {}
         collisions = []
@@ -8622,6 +8662,15 @@ class InteractiveMenu:
                 else:
                     print(_note)
             delete = not ctx.derivative and not ctx.workflow.get('icc_profile')
+            _never = _lossy_decode_never_deletes(ctx.workflow) if delete else None
+            if _never:
+                # T-B: the row converts, its sources stay (the child would exit 2).
+                _note = f"No delete for this row: {_never}."
+                if RICH_AVAILABLE and console:
+                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
+                else:
+                    print(_note)
+                delete = False
         if not delete:
             return
         cmd.extend(['--delete-source', '--delete-confirm-off'])
@@ -8872,6 +8921,14 @@ class InteractiveMenu:
                 f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
                 f"Spell the flag out in full, with no value.")
             return False
+        _mode_flag = _flags_set_mode(workflow.get('expert_flags'))
+        if _mode_flag:
+            self._print_error(
+                f"Expert flag {_mode_flag!r} cannot run: the mode is chosen in the "
+                f"wizard (or the manifest's Mode column), and every check before the "
+                f"run — in-place and delete confirmations, collisions, counts — uses "
+                f"that one. Remove it from the expert flags and pick the mode there.")
+            return False
 
         # Handle manifest mode (mode 99) — it resolves and checks its own script.
         if workflow.get('mode') == 99:
@@ -8965,6 +9022,22 @@ class InteractiveMenu:
                               "that never deletes its source — drop the delete option "
                               "(or the conversion).")
             return False
+
+        # T-B: a lossy decode is not a copy of the master — refused before the
+        # HHMM token (the transcoder exits 2 on the same pair).
+        _never = _lossy_decode_never_deletes(workflow) if _delete_pre else None
+        if _never:
+            self._print_error(f"This run cannot delete its sources: {_never}. Drop the "
+                              f"delete option.")
+            return False
+        if (_delete_pre and origin == 'jxl' and _conv_pre == 'jxl_to_jpeg_auto'):
+            _auto_note = ("Delete with the automatic JXL → JPEG: only JPEG archives "
+                          "recovered bit for bit delete their JXL; the JXLs converted "
+                          "lossy are kept.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[yellow]{_rich_safe(_auto_note)}[/yellow]")
+            else:
+                print(_auto_note)
 
         # --rename-from on the lossless JXL->JPEG recovery is impossible for
         # the DIRECT run too (the same refusal the manifest executor makes):

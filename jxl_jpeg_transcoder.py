@@ -1080,6 +1080,37 @@ MAGICK_AVAILABLE = shutil.which("magick") is not None
 
 # ExifTool detection - try both name variants
 _exiftool_cmd = None
+
+def _marker_anchor_index(dir_parts, root, marker_lower):
+    """Index in `dir_parts` (the folder parts of a file's path) of the export
+    marker folder that anchors modes 6/7: the FIRST matching folder at or
+    below the input `root` (the root folder itself included), else the
+    CLOSEST matching one above it (a run pointed inside an export folder).
+    A folder ABOVE the root used to win whenever it came first — a library
+    under 'Lightroom_Export' or 'C1_Export' (both match '_EXPORT') anchored
+    there instead of on the real '_EXPORT' below (E-H of the 2026-11-03
+    audit). A path that is not under `root` keeps the old rule (the first
+    match from the top). None when no folder matches."""
+    dir_parts = list(dir_parts)
+    start = 0
+    if root is not None:
+        try:
+            rp = [os.path.normcase(p) for p in Path(root).parts]
+        except TypeError:
+            rp = []
+        dp = [os.path.normcase(p) for p in dir_parts]
+        if rp and dp[:len(rp)] == rp:
+            start = len(rp) - 1         # the root folder itself counts
+        elif rp and dp == rp[:-1]:
+            start = len(dp)             # the root is this very file
+    for i in range(start, len(dir_parts)):
+        if _marker_matches(dir_parts[i].lower(), marker_lower):
+            return i
+    for i in range(min(start, len(dir_parts)) - 1, -1, -1):
+        if _marker_matches(dir_parts[i].lower(), marker_lower):
+            return i
+    return None
+
 def _get_exiftool_cmd():
     global _exiftool_cmd
     if _exiftool_cmd is None:
@@ -2915,8 +2946,7 @@ def resolve_output_transcode(src_path: Path, mode: int, input_root: Path, decode
         parts = src_path.parts
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
-        export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts[:-1], input_root, marker_lower)
         if export_idx is None:
             # Files outside the export marker must be ignored in modes 6/7.
             return None
@@ -5038,8 +5068,7 @@ def resolve_output_convert(src_path: Path, mode: int, output_name: str, suffix: 
         parts = src_path.parts
         marker_lower = EXPORT_MARKER.lower()
         # Match folders starting or ending with EXPORT_MARKER case-insensitively
-        export_idx = next((i for i, p in enumerate(parts[:-1])
-                           if _marker_matches(p.lower(), marker_lower)), None)
+        export_idx = _marker_anchor_index(parts[:-1], output_root, marker_lower)
         if export_idx is None:
             return None  # Skip files outside export marker folder
         export_dir = Path(*parts[:export_idx + 1])
@@ -5778,6 +5807,28 @@ def _png_bit_depth(png_path: Path):
     if len(head) < 25 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
         return None
     return head[24]
+
+
+def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
+    """Why a JXL decoded by the CONVERT path must not be deleted, or None
+    (T-B of the 2026-11-03 audit, the owner's option 1). A derivative never
+    deletes its master; neither does a decode that is not a copy of it: a
+    JPEG (lossy) or a PNG below 16 bits per sample — the decoder keeps its
+    JXLs for an 8-bit TIFF of a deeper source the same way. A 16-bit PNG is
+    a full-depth decode and may replace the JXL; the bit-exact JPEG recovery
+    (jbrd) goes through the transcode path and is not judged here."""
+    if src_path.suffix.lower() not in JXL_EXTS:
+        return None
+    ext = final_file.suffix.lower()
+    if ext in JPEG_EXTS:
+        return ("KEEP (a JPEG decoded from a JXL is lossy, not a copy of it — only "
+                "the bit-exact recovery of a JPEG archive deletes its JXL)")
+    if ext in PNG_EXTS:
+        depth = _png_bit_depth(final_file)
+        if depth != 16:
+            return (f"KEEP (a {depth if depth else '?'}-bit PNG may be a degraded copy "
+                    f"of the JXL — only a 16-bit PNG replaces it)")
+    return None
 
 
 def _origin_marker_lines(src_path: Path) -> list:
@@ -6863,6 +6914,11 @@ def cmd_convert(args, from_jxl: bool = True):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
+            _why_keep = _lossy_decode_keep_reason(src_path, final_file)
+            if _why_keep:
+                _delete_stats["kept"] += 1
+                logger.warning(f" {_why_keep} | {src_path.name}")
+                continue
             # THE real recovery gate, ported from the transcode path (process_
             # group_transcode): structural integrity is not enough when the
             # JXL carries a jbrd box. --force-convert --distance 0 on a JPEG
@@ -7487,6 +7543,11 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
+                _why_keep = _lossy_decode_keep_reason(src_path, final_file)
+                if _why_keep:
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" {_why_keep} | {src_path.name}")
+                    continue
                 # THE real recovery gate, ported from the transcode path (same
                 # as cmd_convert's gate): a jbrd-carrying JXL output (PNG->JXL
                 # never has one, but a JPEG routed through a lossy convert at
@@ -8068,6 +8129,17 @@ def main():
         parser.error("--icc-profile/--to-srgb writes a colour-converted DERIVATIVE: "
                      "it never deletes its source — drop --delete-source/"
                      "--delete-skipped (or the conversion)")
+    # T-B (owner's option 1): an explicit lossy decode never deletes the JXL —
+    # a JPEG is lossy, and an 8-bit PNG may be a degraded copy (per file, the
+    # gates keep those too: _lossy_decode_keep_reason).
+    if (cmd == "convert" and args.decode
+            and (DELETE_SOURCE or args.delete_skipped)
+            and ((args.format or "jpeg") in ("jpeg", "jpg")
+                 or (args.bit_depth or PNG_DEFAULT_BIT_DEPTH) != 16)):
+        parser.error("a JXL -> JPEG (or 8-bit PNG) conversion is not a copy of the JXL: "
+                     "it never deletes its source — drop --delete-source/"
+                     "--delete-skipped, decode to a 16-bit PNG, or use --force-transcode "
+                     "for the bit-exact recovery of JPEG archives")
     if _is_derivative() and (cmd == "transcode" or (cmd == "auto" and args.decode)):
         parser.error("a bit-exact JPEG reconstruction cannot be resized/sharpened — "
                      "drop --force-transcode/--decode (or the resize/sharpening flags)")
