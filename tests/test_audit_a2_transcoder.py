@@ -193,3 +193,70 @@ def test_ta_native_master_keeps_djxl_jpeg(tmp_path):
     assert _scan(next(out.iterdir()).read_bytes()) == _scan(ref.read_bytes())
 
 
+# ===========================================================================
+# T-F (#571)
+# ===========================================================================
+
+def _iptc_jpeg(d: Path) -> Path:
+    jpg = _jpeg(d / "DSC_0001 (2) 5%.jpg")
+    r = tra._run_exiftool_argfile(["-overwrite_original",
+                                   "-IPTC:Caption-Abstract=吾妻山 caption",
+                                   str(jpg)], timeout=120)
+    assert r.returncode == 0, r.stderr
+    return jpg
+
+
+def _failing_exiftool(monkeypatch, needle):
+    real_call = tra._run_exiftool_argfile
+
+    def fake(lines, *a, **k):
+        if any(needle in str(x) for x in lines) and "-overwrite_original" in lines:
+            return subprocess.CompletedProcess(lines, 1, "", "Error: simulated failure")
+        return real_call(lines, *a, **k)
+    monkeypatch.setattr(tra, "_run_exiftool_argfile", fake)
+
+
+@real
+@pytest.mark.parametrize("needle", ["-tagsfromfile", "jxlphoto-src:"],
+                         ids=["metadata-copy", "marker-write"])
+def test_tf_failed_metadata_keeps_the_jpeg(tmp_path, monkeypatch, needle):
+    d = _hostile(tmp_path)
+    jpg = _iptc_jpeg(d)
+    out = tmp_path / HOSTILE / "JXL out"
+    _failing_exiftool(monkeypatch, needle)
+    _main([jpg.parent, out, "--mode", "0", "--force-convert", "--distance", "1",
+           "--delete-source", "--delete-confirm-off"], monkeypatch)
+    assert jpg.exists(), "the source was deleted behind an output that lost metadata"
+    assert not (out / (jpg.stem + ".jxl")).exists(), "an incomplete output was kept"
+
+
+@real
+def test_tf_decode_marker_failure_is_an_error(tmp_path, monkeypatch):
+    d = _hostile(tmp_path)
+    jpg = _jpeg(d / "DSC_0002 [a].jpg")
+    jxl_dir = tmp_path / HOSTILE / "JXL (1)"
+    _run("jxl_jpeg_transcoder.py", d, jxl_dir, "--mode", "0", "--force-convert",
+         "--distance", "1")
+    jxl = jxl_dir / "DSC_0002 [a].jxl"
+    assert jxl.exists()
+    out = tmp_path / HOSTILE / "JPEG back"
+    _failing_exiftool(monkeypatch, "jxlphoto-src:")
+    _main([jxl, out, "--mode", "0", "--force-convert", "--format", "jpeg"], monkeypatch)
+    assert not out.exists() or not any(out.glob("*.jpg")), (
+        "a JPEG without its provenance markers was delivered as OK")
+
+
+@real
+def test_tf_control_plain_jpeg_converts(tmp_path, monkeypatch):
+    """A JPEG with no IPTC/XMP: exiftool says 'No writable tags' with exit 0,
+    which is still a success."""
+    d = _hostile(tmp_path)
+    jpg = _jpeg(d / "plain (3).jpg")
+    r = tra._run_exiftool_argfile(["-overwrite_original", "-all=", str(jpg)], timeout=120)
+    assert r.returncode == 0
+    out = tmp_path / HOSTILE / "JXL plain"
+    _main([jpg.parent, out, "--mode", "0", "--force-convert", "--distance", "1"],
+          monkeypatch)
+    assert (out / "plain (3).jxl").exists()
+
+

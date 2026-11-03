@@ -1821,7 +1821,11 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """Best-effort copy of EXIF/XMP/IPTC metadata using exiftool.
 
     Used for lossy convert paths where cjxl/djxl may not preserve metadata.
-    Failures are ignored so the conversion itself always succeeds.
+    Raises RuntimeError when exiftool fails (#571): the caller turns that into
+    an ERROR for the file, so a --delete-source run keeps the source instead
+    of deleting it behind an output that lost its IPTC or its markers — the
+    verdict the encoder and the decoder already give. "No writable tags"
+    (a source without that metadata) is exit 0, a success.
     Also strips the ICC copy the TIFF encoder writes for TIFF round-trips —
     the jxlphoto-iccprofile token in dc:Relation, and the 'ICC:<base64>' blob
     in XMP CreatorTool of files written up to v2.18.x: it bloats delivered
@@ -1833,54 +1837,58 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         # A '%' in the source's name is expanded by -tagsfromfile and the
         # output got no metadata (#550): copy from a container instead.
         with tempfile.TemporaryDirectory(prefix="jxltr_meta_", dir=TEMP_DIR) as _mt:
-            _run_exiftool_argfile(
+            r_copy = _run_exiftool_argfile(
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
                  "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
+        if r_copy.returncode != 0:
+            raise RuntimeError(f"metadata copy failed (exiftool rc={r_copy.returncode}): "
+                               f"{(r_copy.stderr or r_copy.stdout or '').strip()[:200]}")
         # Strip the ICC copy: jxlphoto-iccprofile tokens from dc:Relation,
         # ICC:<base64> segments from CreatorTool (same logic as the TIFF
-        # decoder's cleanup_xmp_icc) — one read, one write.
-        try:
-            try:
-                content, _toks = _read_creator_and_relation(dst_path)
-            except Exception:
-                content, _toks = "", []
-            strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
-                     for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
-            if "ICC:" in content:
-                content = content.strip()
-                # Blob is bounded: base64 chars only up to the next pipe or EOL,
-                # so a trailing " | Real App" segment is never eaten.
-                clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
-                if 'ICC:' in clean and '|' not in content:
-                    # No pipe separators: the lookahead could not fire, but a
-                    # long base64 blob is unambiguous (real words are never
-                    # 64+ base64 chars).
-                    clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
-                clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
-                clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
-                clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
-                # When the blob was the WHOLE CreatorTool (the common case:
-                # encoder writes bare "ICC:<b64>" when the source had no
-                # CreatorTool of its own), rewriting is still required —
-                # otherwise the blob survives intact.
-                if not clean:
-                    clean = "jxl_jpeg_transcoder"
-                # _argfile_safe like every other CreatorTool write in the
-                # toolkit: an argfile is one argument per LINE, so a
-                # multi-line CreatorTool copied from another program would
-                # split into several bogus arguments here.
-                strip.append(f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}")
-            if strip:
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + strip + [str(dst_path)],
-                    timeout=EXIFTOOL_TIMEOUT
-                )
-        except Exception:
-            pass
-    except Exception:
-        pass
+        # decoder's cleanup_xmp_icc) — one read, one write. A read that
+        # fails raises: the token would stay in the delivered file.
+        content, _toks = _read_creator_and_relation(dst_path)
+        strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
+                 for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
+        if "ICC:" in content:
+            content = content.strip()
+            # Blob is bounded: base64 chars only up to the next pipe or EOL,
+            # so a trailing " | Real App" segment is never eaten.
+            clean = re.sub(r'ICC:[A-Za-z0-9+/=]+(?=\s*(\||$))', '', content, flags=re.MULTILINE).strip()
+            if 'ICC:' in clean and '|' not in content:
+                # No pipe separators: the lookahead could not fire, but a
+                # long base64 blob is unambiguous (real words are never
+                # 64+ base64 chars).
+                clean = re.sub(r'ICC:[A-Za-z0-9+/=]{64,}', '', clean).strip()
+            clean = re.sub(r'\s*\|\s*$', '', clean).strip()   # trailing pipe
+            clean = re.sub(r'^\s*\|\s*', '', clean).strip()   # leading pipe
+            clean = re.sub(r'\s*\|\s*\|\s*', ' | ', clean)    # doubled pipe
+            # When the blob was the WHOLE CreatorTool (the common case:
+            # encoder writes bare "ICC:<b64>" when the source had no
+            # CreatorTool of its own), rewriting is still required —
+            # otherwise the blob survives intact.
+            if not clean:
+                clean = "jxl_jpeg_transcoder"
+            # _argfile_safe like every other CreatorTool write in the
+            # toolkit: an argfile is one argument per LINE, so a
+            # multi-line CreatorTool copied from another program would
+            # split into several bogus arguments here.
+            strip.append(f"-XMP-xmp:CreatorTool={_argfile_safe(clean)}")
+        if strip:
+            r_strip = _run_exiftool_argfile(
+                ["-overwrite_original"] + strip + [str(dst_path)],
+                timeout=EXIFTOOL_TIMEOUT
+            )
+            if r_strip.returncode != 0:
+                raise RuntimeError(
+                    f"ICC-copy cleanup failed (exiftool rc={r_strip.returncode}): "
+                    f"{(r_strip.stderr or r_strip.stdout or '').strip()[:200]}")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"metadata copy failed: {e}") from e
 
 # --------------------------------------------─
 # USER SETTINGS - TRANSCODE MODE CONFIGURATION
@@ -4943,17 +4951,22 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # at d>0 there is no jbrd and the copy runs as before.
         # Provenance markers live under the same guard: the appended XMP
         # breaks reconstruction the same way (see encode_one_transcode).
-        try:
-            if not has_jbrd_box(write_path):
-                _copy_metadata(src_path, write_path)
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
-                    + _provenance_marker_args(src_path)
-                    + _origin_marker_lines(src_path)
-                    + _history_args("converted", src_path, write_path)
-                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
-        except Exception as _e_prov:
-            logger.debug(f"Provenance marker skipped: {_e_prov}")
+        # A failure here is an ERROR for the file (#571): the except below
+        # removes the output and the source stays. It used to be logged at
+        # DEBUG, and --delete-source then deleted a source whose output had
+        # lost its IPTC or its provenance markers.
+        if not has_jbrd_box(write_path):
+            _copy_metadata(src_path, write_path)
+            r_prov = _run_exiftool_argfile(
+                ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
+                + _provenance_marker_args(src_path)
+                + _origin_marker_lines(src_path)
+                + _history_args("converted", src_path, write_path)
+                + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
+            if r_prov.returncode != 0:
+                raise RuntimeError(
+                    f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
+                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
 
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
@@ -6131,14 +6144,16 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             if r2.returncode != 0:
                 raise RuntimeError(f"derivative metadata write: {(r2.stderr or '')[:200]}")
         else:
-            try:
-                _run_exiftool_argfile(
-                    ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
-                    + _provenance_marker_args(jxl_path)
-                    + _history_args("converted", jxl_path, actual_out)
-                    + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
-            except Exception as _e_prov:
-                logger.debug(f"Provenance marker skipped: {_e_prov}")
+            # An ERROR for the file when it fails (#571), like the copy above.
+            r_prov = _run_exiftool_argfile(
+                ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
+                + _provenance_marker_args(jxl_path)
+                + _history_args("converted", jxl_path, actual_out)
+                + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
+            if r_prov.returncode != 0:
+                raise RuntimeError(
+                    f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
+                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
 
         # Validate EVERY successful output (rc=0 does not guarantee a
         # well-formed file).

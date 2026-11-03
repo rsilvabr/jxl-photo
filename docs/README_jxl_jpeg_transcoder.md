@@ -589,6 +589,11 @@ check — except a JPEG → JXL archive that `djxl --reconstruct_jpeg` proves, a
 above. Setting it to `False` allows the delete and logs the missing provenance
 per file.
 
+A lossy conversion whose metadata copy or marker write fails (exiftool exits
+with an error) is an ERROR for that file: the output is removed and the
+source kept, as the encoder and the decoder do. A source with nothing to copy
+("No writable tags") is not a failure.
+
 > ### Bit-exact recovery is proven, not assumed
 >
 > The delete gate on the encode direction also runs a **real**
