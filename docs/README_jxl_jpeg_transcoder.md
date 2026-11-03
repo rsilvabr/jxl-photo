@@ -496,7 +496,9 @@ Options:
                   wrote, never subfolders, and nothing touched in the last hour
                   (a concurrent run may still own it). Sweeps the EFFECTIVE
                   staging dir, so it works with TEMP2_DIR set in the script and
-                  no --staging flag. Never runs under --dry-run
+                  no --staging flag. Never runs under --dry-run. Sweeps nothing
+                  while another run is using the same staging folder (its
+                  finished outputs may be waiting there for their folder)
   --effort 1-10      cjxl effort (default: 7)
   --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)

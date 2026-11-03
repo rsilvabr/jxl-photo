@@ -869,6 +869,7 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       overwrite guard" in behavior_and_limitations.md
 --staging DIR         Staging directory on a fast SSD (overrides TEMP2_DIR)
 --clean-staging       Sweep staging leftovers older than 1h before the run
+                      (nothing while another run uses the same staging folder)
 --no-preflight        Skip the advisory free-space check (it counts only the
                       files this run writes: up-to-date outputs in a sync
                       and policy skips are left out)

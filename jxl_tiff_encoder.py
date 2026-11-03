@@ -15,6 +15,7 @@ import subprocess, os, platform, tempfile, threading, zlib, struct, logging, sys
 import math
 import re
 import functools
+import contextlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -543,6 +544,140 @@ def _report_staging_leftovers(staging_dir):
                    "Pass --clean-staging on a later run to sweep the older ones.")
 
 
+# --clean-staging of one run must not sweep the outputs ANOTHER run left
+# waiting in a shared staging folder for their destination folder to finish
+# (#578). Every run that writes into staging holds a locked
+# `.jxlphoto-live-<id>` file there while it does; the sweep does nothing while
+# a live process holds one. The name starts with a dot, so it never matches
+# _STAGING_PREFIX_RE: it is never reported or swept as a leftover.
+_STAGING_LIVE_PREFIX = ".jxlphoto-live-"
+_STAGING_HOLDS = {}
+
+
+def _try_lock_nb(fh) -> bool:
+    """Lock an open file without waiting. False when another holder has it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_nb(fh) -> None:
+    """Release a lock _try_lock_nb took (closing the file releases it too)."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _staging_hold(staging_dir):
+    """Mark `staging_dir` as in use by this run while the block runs (#578).
+    Reentrant; a no-op without a staging folder."""
+    if not staging_dir:
+        yield
+        return
+    key = os.path.normcase(os.path.abspath(str(staging_dir)))
+    entry = _STAGING_HOLDS.get(key)
+    if entry is None:
+        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
+        fh = None
+        try:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w+b")
+            fh.write(str(os.getpid()).encode("ascii"))
+            fh.flush()
+            if not _try_lock_nb(fh):
+                raise OSError("the lock could not be taken")
+            entry = [path, fh, 0]
+        except OSError as e:
+            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
+                           f"— a --clean-staging run started meanwhile may sweep "
+                           f"this run's waiting outputs")
+            if fh is not None:
+                fh.close()
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            entry = [None, None, 0]
+        _STAGING_HOLDS[key] = entry
+    entry[2] += 1
+    try:
+        yield
+    finally:
+        entry[2] -= 1
+        if entry[2] <= 0:
+            _STAGING_HOLDS.pop(key, None)
+            if entry[1] is not None:
+                _unlock_nb(entry[1])
+                entry[1].close()
+                try:
+                    entry[0].unlink()
+                except OSError:
+                    pass
+
+
+def _holds_staging(fn):
+    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
+    outputs wait in staging until their destination folder is complete."""
+    def wrapper(*args, **kwargs):
+        with _staging_hold(TEMP2_DIR):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__wrapped__ = fn
+    return wrapper
+
+
+def _staging_used_by_another_run(staging_dir) -> bool:
+    """True while another live process holds a `.jxlphoto-live-*` file in
+    `staging_dir`. One nobody holds is from a run that died: it is removed."""
+    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
+           if e[0] is not None}
+    try:
+        marks = [f for f in Path(staging_dir).iterdir()
+                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
+    except OSError:
+        return False
+    busy = False
+    for f in marks:
+        if os.path.normcase(str(f)) in own:
+            continue
+        try:
+            fh = open(f, "r+b")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            busy = True             # cannot even open it: a live holder (fail closed)
+            continue
+        try:
+            if not _try_lock_nb(fh):
+                busy = True
+                continue
+            _unlock_nb(fh)
+        finally:
+            fh.close()
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return busy
+
+
 def _clean_staging(staging_dir):
     """Delete leftovers that have been idle long enough to be nobody's.
 
@@ -551,6 +686,10 @@ def _clean_staging(staging_dir):
     to preserve. Sweeping first clears the previous runs' orphans instead.
     """
     if not staging_dir:
+        return 0, 0
+    if _staging_used_by_another_run(staging_dir):
+        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
+                       f"(its outputs may be waiting there for their folder to finish)")
         return 0, 0
     found, _ = _staging_leftovers(staging_dir)
     if not found:
@@ -6475,6 +6614,7 @@ def _adopt_legacy_group_ids(split_tiffs: Dict[str, Path],
     return adopted
 
 
+@_holds_staging
 def process_group(group_items: list, workers: int, mode: int = 0):
     """
     Converts (tiff, final_jxl, page_idx, is_thumbnail, subfiletype, samples) items
