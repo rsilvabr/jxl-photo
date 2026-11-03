@@ -79,6 +79,10 @@ SHARED_HELPERS = [
     "_other_tool_output_folders",
     "_skip_other_tool_output",
     "_log_other_tool_skips",
+    # W-A: progress between planning-time batches. A copy drifting is one
+    # backend silent for an hour again, and the wrapper stopping it as hung.
+    "_batch_read_state",
+    "_batch_read_tick",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_validate_export_folder_name",

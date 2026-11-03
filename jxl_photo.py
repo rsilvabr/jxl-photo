@@ -864,6 +864,12 @@ class ToolConfig:
     # Shown on every start, not once: someone new to JXL only meets the
     # problem later, in Explorer. Turned off in "Edit default settings".
     show_thumbnail_tip: bool = True
+    # Minutes a child may print nothing before the wrapper stops it as hung
+    # (_stream_child). The children print one line per completed file and,
+    # since W-A of the 2026-11-03 audit, one per slow planning batch; raise it
+    # for a single file or batch slower than an hour (a huge drum scan at
+    # effort 10, a very slow network share). Config file only for now.
+    child_idle_timeout_minutes: int = 60
 
     last_input_dir: Optional[str] = None
     last_output_mode: Optional[str] = None
@@ -8440,7 +8446,17 @@ class InteractiveMenu:
                 ]
         return clean
 
-    def _stream_child(self, cmd: List, idle_timeout: int = 3600) -> int:
+    def _child_idle_timeout(self) -> int:
+        """Seconds of silence before _stream_child stops a child: the
+        config's child_idle_timeout_minutes, at least 5 minutes; 60 minutes
+        when the config has no usable value."""
+        cfg = getattr(getattr(self, "config", None), "config", None)
+        minutes = getattr(cfg, "child_idle_timeout_minutes", None)
+        if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or minutes != minutes:
+            minutes = ToolConfig.child_idle_timeout_minutes
+        return int(max(5, minutes) * 60)
+
+    def _stream_child(self, cmd: List, idle_timeout: Optional[int] = None) -> int:
         """Run a child script, streaming stdout live, with an IDLE deadline.
 
         The deadline resets every time the child prints a line: a long healthy
@@ -8461,6 +8477,8 @@ class InteractiveMenu:
         import queue
         import threading
 
+        if idle_timeout is None:
+            idle_timeout = self._child_idle_timeout()
         # Cleared here rather than in _run_subprocess: the single-run path calls
         # _stream_child directly, so a stale usage error would mislabel the NEXT
         # run's safety abort — and a stale summary would report the PREVIOUS

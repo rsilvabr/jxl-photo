@@ -364,6 +364,34 @@ def _scan_tick(st, found):
     st["next"] = now + st["gap"]
 
 
+def _batch_read_state(label: str, total: int) -> dict:
+    """Bookkeeping for a planning-time exiftool batch reader. See
+    _batch_read_tick."""
+    now = time.monotonic()
+    return {"label": label, "total": total, "t0": now,
+            "next": now + _SCAN_QUIET_SECONDS, "gap": _SCAN_REPORT_EVERY}
+
+
+def _batch_read_tick(st, done: int) -> None:
+    """Between two batches of a planning-time read: "<label>: N/M read" once
+    the read is slow, quiet while it is fast (W-A of the 2026-11-03 audit).
+    A busy disk made one 400-file batch take minutes (#537), and these reads
+    printed nothing until they finished: the wrapper, which stops a child
+    that prints nothing for its idle timeout, took a long planning phase for
+    a hung child. Same pacing as _scan_tick."""
+    if not 0 < done < st["total"]:
+        return
+    now = time.monotonic()
+    if now < st["next"]:
+        return
+    elapsed = now - st["t0"]
+    left = max(0.0, elapsed / done * (st["total"] - done))
+    eta = f"~{left / 60:.0f} min left" if left >= 60 else f"~{left:.0f}s left"
+    logger.info(f"  {st['label']}: {done}/{st['total']} read ({elapsed:.0f}s, {eta})")
+    st["gap"] = min(st["gap"] * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
+    st["next"] = now + st["gap"]
+
+
 def _scan_done(st, found):
     """Close the report, but only if one was ever opened."""
     if st["announced"]:
@@ -994,8 +1022,10 @@ def _read_source_markers_batch(outputs: list) -> dict:
     batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = 400
+    _prog = _batch_read_state("Provenance markers", len(outputs))
     for i in range(0, len(outputs), BATCH):
         chunk = outputs[i:i + BATCH]
+        _batch_read_tick(_prog, i)
         answered = set()
         argfile = None
         try:
@@ -1783,8 +1813,10 @@ def _xmp_icc_jxls_batch(jxls: list) -> set:
     the decode); a batch that cannot be read counts its files in (the
     preview must not promise a deletion it cannot rule out)."""
     found = set()
+    _prog = _batch_read_state("Profile markers", len(jxls))
     for i in range(0, len(jxls), 400):
         chunk = jxls[i:i + 400]
+        _batch_read_tick(_prog, i)
         argfile = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
@@ -4565,8 +4597,10 @@ def _read_multipage_markers_batch(jxls: list) -> dict:
 
     BATCH = 400
     exe = _get_exiftool_cmd()
+    _prog = _batch_read_state("Multipage markers", len(jxls))
     for i in range(0, len(jxls), BATCH):
         chunk = jxls[i:i + BATCH]
+        _batch_read_tick(_prog, i)
         try:
             # Pass the file list via an exiftool argfile (-@): avoids the ~32k
             # Windows command-line limit with large batches, and prevents paths
