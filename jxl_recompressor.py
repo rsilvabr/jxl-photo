@@ -1144,6 +1144,9 @@ _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 # the whole group or nothing (a half-deleted group is spread across two
 # folders with a dangling master page).
 MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
+MULTIPAGE_PAGES_PREFIX = "jxlphoto-pages:"
+# The encoder's PAGES_XMP_PREFIX: how many JXLs the split produced. The delete
+# gate keeps a group whose pages are not all in the run (#574).
 
 DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # dc:Relation token on every --output-icc output: "<prefix><label>", label =
@@ -5736,6 +5739,67 @@ def _read_mpg_markers(paths: list):
     return mpg, complete
 
 
+def _read_mpg_pages_batch(paths: list):
+    """({path str: declared page count | None}, complete) — the
+    jxlphoto-pages:<N> the encoder writes on every page of a split.
+
+    Read only for the sources the delete gate found in a group (#574), in the
+    same batches as _read_mpg_markers. `complete` False when any batch could
+    not be read: the gate then keeps those groups (fail closed)."""
+    totals = {str(p): None for p in paths}
+    index = {os.path.normcase(str(p)): str(p) for p in paths}
+    if not paths:
+        return totals, True
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
+    BATCH = 400
+    complete = True
+    _prog = _batch_read_state("Multipage page counts", len(paths))
+    for i in range(0, len(paths), BATCH):
+        chunk = paths[i:i + BATCH]
+        _batch_read_tick(_prog, i)
+        argfile = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                             dir=TEMP_DIR, encoding="utf-8",
+                                             newline=chr(10)) as af:
+                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
+                af.write(chr(10))
+                argfile = af.name
+            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
+                              EXIFTOOL_BATCH_TIMEOUT, text=True,
+                              stall=EXIFTOOL_BATCH_STALL)
+            if r.returncode != 0 or not r.stdout:
+                complete = False
+                continue
+            for entry in json.loads(r.stdout):
+                src = entry.get("SourceFile")
+                rel = entry.get("Relation")
+                if src is None or rel is None:
+                    continue
+                key = os.path.normcase(str(Path(src)))
+                if key not in index:
+                    continue
+                for token in (rel if isinstance(rel, list) else [str(rel)]):
+                    token = str(token).strip()
+                    if token.startswith(MULTIPAGE_PAGES_PREFIX):
+                        try:
+                            totals[index[key]] = int(token[len(MULTIPAGE_PAGES_PREFIX):])
+                        except ValueError:
+                            totals[index[key]] = -1     # unreadable: fail closed
+                        break
+        except Exception:
+            complete = False
+            continue
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+    return totals, complete
+
+
 def _reconstructed_jpeg_md5(jxl_path: Path) -> Optional[str]:
     """MD5 of the JPEG `djxl --reconstruct_jpeg` gives back from a lossless
     JPEG archive, or None when that cannot run or fails (djxl < 0.12, not an
@@ -6066,18 +6130,46 @@ def _delete_gate(items, results, promoted):
             # the source TIFF, so two copies of one split in two folders share
             # it without being the same document.
             by_group.setdefault((str(dec[0]["src"].parent), _g), []).append(dec)
+    # A group is only whole when every page the split produced is in this run
+    # (#574): a single-file input, or a sibling filtered out by the mode or a
+    # rename, made one page look like a lone group, and it was deleted while
+    # its siblings stayed — the document split across two folders. Read only
+    # for grouped sources that would otherwise be deleted.
+    _short = {}             # group key -> (pages here, pages declared)
+    _grouped = [m[0]["src"] for members in by_group.values()
+                if all(x[3] for x in members) for m in members]
+    if _grouped:
+        _totals, _totals_complete = _read_mpg_pages_batch(_grouped)
+        for _g, members in by_group.items():
+            if not all(m[3] for m in members):
+                continue
+            declared = [_totals.get(str(m[0]["src"])) for m in members]
+            if not _totals_complete or any(d == -1 for d in declared):
+                _short[_g] = (len(members), None)
+            elif any(d is not None and d > len(members) for d in declared):
+                _short[_g] = (len(members), max(d for d in declared if d is not None))
     for _g, members in by_group.items():
-        if all(m[3] for m in members):
+        if all(m[3] for m in members) and _g not in _short:
             continue        # whole group passed (or a lone page): decide alone
         for m in members:
             if m[3]:
                 vetoed.add(str(m[0]["src"]))
+    _short_reason = {str(m[0]["src"]): _short[_g]
+                     for _g, members in by_group.items() if _g in _short
+                     for m in members}
 
     # Pass 3: apply.
     for it, status, final_path, ok, reason, settled in decisions:
         if not settled:
             continue
-        if ok and str(it["src"]) in vetoed:
+        if ok and str(it["src"]) in _short_reason:
+            _k, _n = _short_reason[str(it["src"])]
+            ok, reason = False, (
+                f"only {_k} of the {_n} pages of its multi-page document are in "
+                f"this run — the group is kept together" if _n else
+                "the page count of its multi-page document could not be read — "
+                "the group is kept together")
+        elif ok and str(it["src"]) in vetoed:
             ok, reason = False, ("sibling page of the same multi-page document "
                                  "did not pass its gates — the group is kept "
                                  "together")

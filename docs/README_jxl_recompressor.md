@@ -416,7 +416,10 @@ Multi-page documents delete as a **group**: every page sharing a
 page of the group is deleted — a half-deleted group would be spread across
 two folders with a dangling master page. A page that did not make it this run
 at all (its conversion failed, a policy skipped it, provenance refused it)
-counts as a failed page: it keeps its siblings too.
+counts as a failed page: it keeps its siblings too. So does a page that is
+not in the run at all: each page records how many the split produced
+(`jxlphoto-pages:`), and a group with fewer pages in the run than that — a
+single file given as input, a sibling left out — is kept whole.
 
 In-place runs (mode 0/8, and staging promotions) replace the source only
 after the re-encode passed every gate, via a temp file in the destination

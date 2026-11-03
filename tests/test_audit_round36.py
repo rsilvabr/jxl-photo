@@ -129,6 +129,10 @@ def _group(tmp_path, monkeypatch):
     monkeypatch.setattr(rec, "_verify_jxl_integrity", lambda p: True)
     monkeypatch.setattr(rec, "_read_mpg_markers",
                         lambda paths: ({str(p): "group-1" for p in paths}, True))
+    # The stubs carry no jxlphoto-pages (#574 reads it): whole groups.
+    monkeypatch.setattr(rec, "_read_mpg_pages_batch",
+                        lambda paths: ({str(p): None for p in paths}, True),
+                        raising=False)
     return items
 
 
