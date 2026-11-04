@@ -2512,7 +2512,7 @@ def _child_scan_distance() -> str:
 # same file (the encoder's _MIN_EFFECTIVE_DISTANCE).
 _DISTANCE_CHOICES = [
     (0.0, "lossless", "exact replica"),
-    (0.05, "finest lossy", "cjxl rounds anything lower to this"),
+    (0.05, "finest lossy", "cjxl rounds any lower lossy distance to this"),
     (0.1, "near-lossless", "recommended"),
     (0.5, "high-quality lossy", "some headroom for later edits"),
     (1.0, "visually lossless for viewing",
