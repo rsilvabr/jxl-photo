@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.22.2** (2026-11-04) · [What's new](#whats-new-in-v2222) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.22.3** (2026-11-04) · [What's new](#whats-new-in-v2223) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.22.2](#whats-new-in-v2222)
+- [What's new in v2.22.3](#whats-new-in-v2223)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -401,12 +401,12 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.22.2
+## What's new in v2.22.3
 
 2026-11-04. The wizard names each distance it offers (lossless, finest lossy,
 near-lossless, high-quality lossy, visually lossless for viewing), and the
 review screen shows the distance film scans get, right below the run's.
-Enter still takes your default distance. [Version history](docs/version_history.md#v2222).
+Enter still takes your default distance. [Version history](docs/version_history.md#v2223).
 
 ### In v2.22.1
 
@@ -434,7 +434,7 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.22.2** | 2026-11-04 | Each distance named in the wizard; the film-scan distance on the review screen |
+| **v2.22.3** | 2026-11-04 | Each distance named in the wizard; the film-scan distance on the review screen (v2.22.2 + two texts) |
 | [v2.22.1](docs/version_history.md#v2221) | 2026-11-04 | Every wizard question on one question layer; same questions and command lines |
 | [v2.22.0](docs/version_history.md#v2220) | 2026-11-04 | The wizard by task: a New job and one review screen with every option; new menus; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input |
 | [v2.21.0](docs/version_history.md#v2210) | 2026-11-04 | JPEG/PNG of cautious-strategy masters carry their real profile; less memory per worker; a failed metadata copy keeps the source |

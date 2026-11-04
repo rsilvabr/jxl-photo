@@ -88,6 +88,9 @@ def test_enter_takes_the_configured_distance(menu, cfg):
 def test_the_menu_names_each_distance(menu, cfg, capsys):
     _select_destination(menu, ["", ""])
     printed = capsys.readouterr().out
+    # v2.22.3: the tip sits under the list, the scan line names the review row
+    assert printed.index("Tip: 8-bit TIFFs") > printed.index("[6] your distance")
+    assert "Film scans row" in printed
     for text in ("d=0 — lossless", "d=0.05 — finest lossy", "d=0.1 — near-lossless (recommended)",
                  "d=0.5 — high-quality lossy", "d=1 — visually lossless for viewing",
                  "your distance", "Tip: 8-bit TIFFs"):

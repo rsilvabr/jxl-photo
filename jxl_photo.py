@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.2"
+TOOLKIT_VERSION = "2.22.3"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -3192,8 +3192,9 @@ class UI:
         raise NotImplementedError
 
     def choose(self, qid: str, prompt: str, options: List[Tuple[str, str]],
-               default: Optional[str] = None) -> str:
-        """One key of `options` [(key, label)]."""
+               default: Optional[str] = None, note: Optional[str] = None) -> str:
+        """One key of `options` [(key, label)]; `note` is printed under the
+        list, before the prompt."""
         raise NotImplementedError
 
     # The wizard's older questions keep their exact wording in each renderer
@@ -3261,10 +3262,12 @@ class PlainUI(UI):
         answer = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
         return default if not answer else answer.startswith('y')
 
-    def choose(self, qid, prompt, options, default=None):
+    def choose(self, qid, prompt, options, default=None, note=None):
         keys = [k for k, _l in options]
         for k, label in options:
             print(f"  [{k}] {label}")
+        if note:
+            print(note)
         while True:
             answer = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
             if not answer and default is not None:
@@ -3311,9 +3314,11 @@ class RichUI(UI):
     def confirm(self, qid, prompt, default=False):
         return Confirm.ask(_rich_safe(prompt), default=default)
 
-    def choose(self, qid, prompt, options, default=None):
+    def choose(self, qid, prompt, options, default=None, note=None):
         for k, label in options:
             console.print(f"  [bold cyan]{_rich_safe(k)}[/bold cyan]  {_rich_safe(label)}")
+        if note:
+            console.print(f"[dim]{_rich_safe(note)}[/dim]")
         return Prompt.ask(_rich_safe(prompt), choices=[k for k, _l in options],
                           default=default)
 
@@ -3375,7 +3380,9 @@ class ScriptedUI(UI):
         v = self._next(qid)
         return default if v is None else bool(v)
 
-    def choose(self, qid, prompt, options, default=None):
+    def choose(self, qid, prompt, options, default=None, note=None):
+        if note:
+            self.output.append(note)
         v = self._next(qid)
         v = default if v is None else str(v)
         if v not in [k for k, _l in options]:
@@ -4793,10 +4800,11 @@ class InteractiveMenu:
             default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
                                                              _DISTANCE_CHOICES)
                                 if v == preferred), custom)
-            ui.line("  Tip: 8-bit TIFFs gain little from d=0.05/0.1 over lossless (8-bit "
-                    "gray comes out larger), so keep them lossless; 16-bit TIFFs get much "
-                    "smaller lossy (docs/file_sizes.md).")
-            key = ui.choose("job.quality", "Quality", opts, default_key)
+            key = ui.choose(
+                "job.quality", "Quality", opts, default_key,
+                note=("  Tip: 8-bit TIFFs gain little from d=0.05/0.1 over lossless (8-bit "
+                      "gray comes out larger), so keep them lossless; 16-bit TIFFs get much "
+                      "smaller lossy (docs/file_sizes.md)."))
             if key != custom:
                 workflow['distance'] = _DISTANCE_CHOICES[int(key) - 1][0]
             else:
@@ -4817,7 +4825,7 @@ class InteractiveMenu:
                 ui.line(f"  Film scans use distance {_sd}"
                         f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, an IR "
                         f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
-                        f"those folders). The review's options change it.")
+                        f"those folders). The review's Film scans row changes it.")
         elif tid == 'derive_jxl':
             workflow['distance'] = self._ask_number(
                 "job.distance", "Target distance (0 = lossless, 1 = visually lossless, 2 = smaller)",
