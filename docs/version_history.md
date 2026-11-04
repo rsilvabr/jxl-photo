@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.3](#v2223)** | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
+| **[v2.22.4](#v2224)** | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
+| [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
 | [v2.22.2](#v2222) | 2026-11-04 | The wizard names each distance (lossless, finest lossy, near-lossless, high-quality lossy, visually lossless for viewing) and shows the film-scan distance on the review screen |
 | [v2.22.1](#v2221) | 2026-11-04 | Every wizard question on the same question layer as the New job (the mode step, Settings, presets, manifests, the maintenance menus); same questions, same order |
 | [v2.22.0](#v2220) | 2026-11-04 | The wizard by task: a New job asks what to do, where and how, then one review screen with every option; presets carry over and still run on older copies; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input; a notice when a newer release is out (round 71, 8 fixes) |
@@ -86,9 +87,22 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.22.4
+
+**Released 2026-11-04.** Supersedes v2.22.3. Nothing to do when upgrading:
+Enter still takes the recompressor's own distance (`CJXL_DISTANCE`, 1.0).
+
+- **"Make smaller or resized JXL copies" offers named distances** in cjxl's
+  recommended range (0.5 .. 3.0, `cjxl --help`): d=0.5 high-quality lossy,
+  d=1 visually lossless for viewing, d=2 smaller (phones and sharing), d=3
+  smallest recommended, and your own distance. It used to ask a number.
+- "your distance" says the range the toolkit accepts: 0-15 (cjxl itself goes
+  to 25; the four scripts keep 15 as their limit).
+- "Archive TIFFs" (v2.22.3) keeps its list; its last entry also says 0-15.
+
 ## v2.22.3
 
-**Released 2026-11-04.** Supersedes v2.22.2. Two texts of the quality step:
+**Released 2026-11-04.** Superseded by v2.22.4. Supersedes v2.22.2. Two texts of the quality step:
 the 8-bit/16-bit tip is printed under the list of distances (it came before
 it), and the line about film scans names the review's new Film scans row
 (it still said "the review's options"). Nothing else changed.

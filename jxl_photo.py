@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.3"
+TOOLKIT_VERSION = "2.22.4"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2518,6 +2518,14 @@ _DISTANCE_CHOICES = [
     (1.0, "visually lossless for viewing",
      "JPEG XL's definition: for final copies, not further editing"),
 ]
+# "Make smaller or resized JXL copies": copies of masters, so cjxl's own
+# recommended range (0.5 .. 3.0, `cjxl --help`).
+_RECOMPRESS_CHOICES = [
+    (0.5, "high-quality lossy", "some headroom for later edits"),
+    (1.0, "visually lossless for viewing", "for final copies, not further editing"),
+    (2.0, "smaller", "for phones and sharing"),
+    (3.0, "smallest recommended", "cjxl's recommended range ends here"),
+]
 _DISTANCE_PROMPT = ("Distance (0 = lossless, 0.05 = finest lossy, 0.1 = near-lossless, "
                     "1 = visually lossless for viewing)")
 
@@ -2534,7 +2542,7 @@ def _distance_label(value) -> str:
         return "finest lossy"
     if d <= 0.1:
         return "near-lossless"
-    for v, name, _note in _DISTANCE_CHOICES:
+    for v, name, _note in _DISTANCE_CHOICES + _RECOMPRESS_CHOICES:
         if d == v:
             return name
     return ""
@@ -4795,7 +4803,7 @@ class InteractiveMenu:
             opts = [(str(i), f"d={v:g} — {name} ({note})")
                     for i, (v, name, note) in enumerate(_DISTANCE_CHOICES, 1)]
             custom = str(len(opts) + 1)
-            opts.append((custom, "your distance"))
+            opts.append((custom, "your distance (0-15)"))
             # Enter = the default distance of Settings (0.1 unless changed).
             default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
                                                              _DISTANCE_CHOICES)
@@ -4827,9 +4835,24 @@ class InteractiveMenu:
                         f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
                         f"those folders). The review's Film scans row changes it.")
         elif tid == 'derive_jxl':
-            workflow['distance'] = self._ask_number(
-                "job.distance", "Target distance (0 = lossless, 1 = visually lossless, 2 = smaller)",
-                workflow.get('distance', _child_default('jxl_recompressor', 'distance')), 0.0, 15.0)
+            current = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
+            opts = [(str(i), f"d={v:g} — {name} ({note})")
+                    for i, (v, name, note) in enumerate(_RECOMPRESS_CHOICES, 1)]
+            custom = str(len(opts) + 1)
+            opts.append((custom, "your distance (0-15)"))
+            try:
+                _cur = float(current)
+            except (TypeError, ValueError):
+                _cur = None
+            # Enter = the recompressor's own setting (CJXL_DISTANCE, 1.0).
+            default_key = next((str(i) for i, (v, _n, _x) in enumerate(_RECOMPRESS_CHOICES, 1)
+                                if v == _cur), custom)
+            key = ui.choose("job.quality", "Distance", opts, default_key)
+            if key != custom:
+                workflow['distance'] = _RECOMPRESS_CHOICES[int(key) - 1][0]
+            else:
+                workflow['distance'] = self._ask_number(
+                    "job.distance", "Target distance (0-15, lower = better)", current, 0.0, 15.0)
             frm['distance'] = 'you'
         elif tid == 'reencode_jpeg':
             workflow['distance'] = self._ask_number(

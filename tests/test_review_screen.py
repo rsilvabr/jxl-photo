@@ -34,7 +34,7 @@ HOSTILE = "250118_吾妻山 [FINAL] 5% (2)"
 TASK_KEYS = {
     "archive_tiff": ("2", "2", {"job.quality": "3"}),      # 3 = d=0.1
     "restore_tiff": ("3", "5", {}),
-    "derive_jxl": ("3", "6", {"job.distance": None}),
+    "derive_jxl": ("3", "6", {"job.quality": None}),     # Enter = CJXL_DISTANCE
     "export_jpeg": ("3", "3", {"job.jpeg_quality": None}),
     "export_png": ("3", "4", {}),
     "archive_jpeg": ("1", "1", {}),
