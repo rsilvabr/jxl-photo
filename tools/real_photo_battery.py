@@ -1702,12 +1702,19 @@ def _thumb_box(path):
 
 def _effective_setting(script, name):
     """A script's setting as its runs see it (the overlay in JXLPHOTO_SETTINGS
-    included): imported in a child Python, never a literal copy here."""
-    r = subprocess.run([PY, "-c", f"import sys; sys.path.insert(0, {str(REPO)!r}); "
+    included): imported in a child Python, never a literal copy here. The
+    battery's own Python and the folder of the scripts under test (ENC's):
+    the exe battery points PY at jxl-photo.exe, which takes no -c, and REPO
+    at the exe repository, which holds no script."""
+    scripts = str(Path(ENC).parent)
+    r = subprocess.run([sys.executable, "-c", f"import sys; sys.path.insert(0, {scripts!r}); "
                         f"import {script} as m; print(repr(m.{name}))"],
                        capture_output=True, text=True, encoding="utf-8", env=os.environ)
     import ast
-    return ast.literal_eval(r.stdout.strip().splitlines()[-1])
+    lines = r.stdout.strip().splitlines()
+    if r.returncode != 0 or not lines:
+        raise RuntimeError(f"cannot read {script}.{name}: {(r.stderr or '').strip()[-300:]}")
+    return ast.literal_eval(lines[-1])
 
 
 def explorer_thumbnail_checks(A1, pool_jxl):
