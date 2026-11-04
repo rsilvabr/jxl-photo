@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.0](#v2220)** | 2026-11-04 | The wizard by task: a New job asks what to do, where and how, then one review screen with every option; presets carry over and still run on older copies; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input; a notice when a newer release is out (round 71, 8 fixes) |
+| **[v2.22.1](#v2221)** | 2026-11-04 | Every wizard question on the same question layer as the New job (the mode step, Settings, presets, manifests, the maintenance menus); same questions, same order |
+| [v2.22.0](#v2220) | 2026-11-04 | The wizard by task: a New job asks what to do, where and how, then one review screen with every option; presets carry over and still run on older copies; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input; a notice when a newer release is out (round 71, 8 fixes) |
 | [v2.22.0_beta1](#v2220_beta1) | 2026-11-04 | Pre-release. The wizard reaches every script option (the summary's "all options" screen), menus for renamed folders, the ICC test cache and the scripts' own settings; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out (round 71, 8 fixes) |
 | [v2.21.0](#v2210) | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
 | [v2.20.0](#v2200) | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
@@ -83,9 +84,33 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.22.1
+
+**Released 2026-11-04.** Supersedes v2.22.0. Nothing to do when upgrading:
+the same questions in the same order with the same wording, and the same
+command lines.
+
+- **Every wizard question goes through the question layer** that v2.22.0
+  introduced for the New job and its review screen. The rest (the mode step
+  with `[A]`/`[M]`/`[D]` and the delete questions, Step 5's marker/subfolder/
+  output questions, the detailed mode view, the auto-mode menus, the manifest
+  pick/confirm/"run anyway" questions, Settings, the presets menu and the
+  questions of a repeated job or preset, the Explorer-thumbnail and jbrd
+  flows, the main menu, reset/move settings) asked through `input()` and
+  Rich with one copy of each question per renderer. Each now asks once, with
+  its Rich and plain wording kept, so tests can answer it by id. A new test
+  fails on any `input()` or Rich prompt outside that layer.
+- Two small differences: in Settings with Rich, a workers/quality/effort
+  answer that is not a number keeps the current value (Rich used to ask
+  again, the plain screen already kept it); "Erase all settings?" and
+  "A settings file already exists ... Overwrite?" take `yes` as well as `y`.
+
+New tests fail on v2.22.0 (9 of 10; the tenth checks the Rich main menu,
+unchanged). 3393 tests; the real-photo battery passes (132 checks, all optional fixture folders, run inside a hostile folder).
+
 ## v2.22.0
 
-**Released 2026-11-04.** Supersedes v2.22.0_beta1 and v2.21.0. Everything in
+**Released 2026-11-04.** Superseded by v2.22.1. Supersedes v2.22.0_beta1 and v2.21.0. Everything in
 [v2.22.0_beta1](#v2220_beta1) (every script option from the wizard, menus for
 renamed folders, the ICC cache and the scripts' own settings, round 71), plus
 the third part of the wrapper redesign. Three command lines behave
