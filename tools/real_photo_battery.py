@@ -59,6 +59,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import numpy as np
 import tifffile
 
@@ -74,18 +78,93 @@ results = []        # (section, name, ok, detail)
 HOSTILE_DIR = "250118_吾妻山公園 [FINAL] (2) 100%"
 B = LOGS = None
 _section = ""
+# Sections run in parallel (--jobs): each thread keeps its own section name,
+# checks and console text, merged in the canonical order when it ends.
+_tls = threading.local()
+
+
+class _ThreadOut:
+    """sys.stdout that sends a section thread's text to its buffer (printed
+    whole when the section ends) and everything else to the console."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def write(self, text):
+        buf = getattr(_tls, "buf", None)
+        if buf is not None:
+            buf.append(text)
+        else:
+            self.real.write(text)
+        return len(text)
+
+    def flush(self):
+        self.real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
 
 
 def section(name):
     global _section
-    _section = name
+    if getattr(_tls, "results", None) is not None:
+        _tls.section = name
+    else:
+        _section = name
     print(f"\n== {name}", flush=True)
 
 
 def check(name, ok, detail=""):
-    results.append((_section, name, bool(ok), detail))
+    mine = getattr(_tls, "results", None)
+    if mine is not None:
+        mine.append((_tls.section, name, bool(ok), detail))
+    else:
+        results.append((_section, name, bool(ok), detail))
     print(("PASS " if ok else "FAIL ") + name + (f" - {detail}" if detail else ""),
           flush=True)
+
+
+def _run_plan(plan, jobs):
+    """Run the sections of `plan` [(function, args, "par"|"alone")]: up to
+    `jobs` of the "par" ones at a time, then the "alone" ones one by one (in
+    order); jobs=1 is the old serial run. Their checks are appended to
+    `results` in the plan's order, whatever order they finished in. A section
+    that raises becomes a failed check, and the others still run."""
+    outs = [None] * len(plan)
+
+    def one(i, buffered):
+        fn, args, _how = plan[i]
+        _tls.results, _tls.section = [], ""
+        _tls.buf = [] if buffered else None
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001 — one section must not stop the rest
+            check(f"{fn.__name__}: crashed — {type(e).__name__}: {e}", False)
+            print(traceback.format_exc())
+        finally:
+            outs[i] = ("".join(_tls.buf or []), _tls.results)
+            _tls.results = _tls.buf = None
+
+    if jobs <= 1:
+        for i in range(len(plan)):
+            one(i, buffered=False)
+    else:
+        par = [i for i, (_f, _a, how) in enumerate(plan) if how == "par"]
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            futures = {ex.submit(one, i, True): i for i in par}
+            for f in as_completed(futures):
+                sys.stdout.real.write(outs[futures[f]][0])
+                sys.stdout.real.flush()
+        for i, (_f, _a, how) in enumerate(plan):
+            if how != "par":
+                one(i, buffered=False)
+    global _section
+    for _text, checks in outs:
+        results.extend(checks or [])
+    # A check made after the plan (Logs\) belongs to its last section, as
+    # in the serial run, wherever the threads left the name.
+    if results:
+        _section = results[-1][0]
 
 
 def run(tag, args, timeout=7200):
@@ -1820,6 +1899,7 @@ def main():
     global B, LOGS
     # The scratch folder's name is Japanese; a redirected console is cp1252.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout = _ThreadOut(sys.stdout)
     # EXPLORER_THUMBNAIL = auto covers lossy outputs when jxl-thumb is
     # installed: pinned to "not installed" so every check sees the same
     # outputs on every PC; the Explorer-thumbnail section sets 1 itself.
@@ -1834,6 +1914,10 @@ def main():
     ap.add_argument("--keep", action="store_true", help="keep the scratch folder")
     ap.add_argument("--ascii-paths", action="store_true",
                     help="run in a plain ASCII folder instead of the hostile one")
+    ap.add_argument("--jobs", type=int, default=4,
+                    help="sections run side by side (default 4; 1 = one after the other). "
+                         "The memory cap, Explorer thumbnails and interrupted runs always "
+                         "run alone, after the others")
     ap.add_argument("--settings-overlay", type=Path, default=None,
                     help="run with this script settings overlay (JXLPHOTO_SETTINGS); "
                          "default: none, whatever this PC has")
@@ -1869,42 +1953,36 @@ def main():
         pool_jxl = pool / "converted_jxl"
         check("3 TIFFs encoded (mode 1)", rc == 0 and len(list(pool_jxl.glob("*.jxl"))) == 3)
 
-        encoder_checks(A1, A2, A3, pool_jxl)
-        decoder_checks(A1, pool_jxl)
+        # The report's order. "alone": the memory cap reads the free RAM, the
+        # Explorer thumbnails set os.environ (and share t_auto with the
+        # transcoder), the interrupted runs depend on timing.
+        plan = [(encoder_checks, (A1, A2, A3, pool_jxl), "par"),
+                (decoder_checks, (A1, pool_jxl), "par")]
         if scan is not None:
-            multipage_and_recompressor_checks(A1, pool_jxl, scan)
+            plan.append((multipage_and_recompressor_checks, (A1, pool_jxl, scan), "par"))
         else:
             print("\n(no multi-page scan in raw_scan/: multi-page and in-place checks skipped)")
-        recompressor_foreign_check(A1, A3, pool_jxl)
-        overwrite_guard_checks(A1, A2)
-        memory_cap_checks(A1, pool_jxl)
-        derivative_rederive_checks(A1, pool_jxl)
-        transcoder_checks(A1, A2)
-        hostile_name_checks(A1)
-        interaction_checks(A1, A2)
-        explorer_thumbnail_checks(A1, pool_jxl)
-        wrapper_checks(A1, A2)
-        interrupt_checks(A1, A2, A3)
-        if (args.fixtures / "TIFF16_varied").is_dir():
-            varied_checks(args.fixtures / "TIFF16_varied")
-        else:
-            print("\n(no TIFF16_varied/: varied-export checks skipped)")
-        if (args.fixtures / "TIFF_scans_varied").is_dir():
-            scan_checks(args.fixtures / "TIFF_scans_varied")
-        else:
-            print("\n(no TIFF_scans_varied/: varied-scan checks skipped)")
-        if (args.fixtures / "JPEG_varied").is_dir():
-            jpeg_checks(args.fixtures / "JPEG_varied")
-        else:
-            print("\n(no JPEG_varied/: varied-JPEG checks skipped)")
-        if (args.fixtures / "silverfast_xmp").is_dir():
-            silverfast_checks(args.fixtures / "silverfast_xmp")
-        else:
-            print("\n(no silverfast_xmp/: SilverFast-original checks skipped)")
-        if (args.fixtures / "TIFF_tagless").is_dir():
-            tagless_checks(args.fixtures / "TIFF_tagless")
-        else:
-            print("\n(no TIFF_tagless/: tagless-camera-TIFF checks skipped)")
+        plan += [(recompressor_foreign_check, (A1, A3, pool_jxl), "par"),
+                 (overwrite_guard_checks, (A1, A2), "par"),
+                 (memory_cap_checks, (A1, pool_jxl), "alone"),
+                 (derivative_rederive_checks, (A1, pool_jxl), "par"),
+                 (transcoder_checks, (A1, A2), "par"),
+                 (hostile_name_checks, (A1,), "par"),
+                 (interaction_checks, (A1, A2), "par"),
+                 (explorer_thumbnail_checks, (A1, pool_jxl), "alone"),
+                 (wrapper_checks, (A1, A2), "par"),
+                 (interrupt_checks, (A1, A2, A3), "alone")]
+        for folder, fn, what in (
+                ("TIFF16_varied", varied_checks, "varied-export"),
+                ("TIFF_scans_varied", scan_checks, "varied-scan"),
+                ("JPEG_varied", jpeg_checks, "varied-JPEG"),
+                ("silverfast_xmp", silverfast_checks, "SilverFast-original"),
+                ("TIFF_tagless", tagless_checks, "tagless-camera-TIFF")):
+            if (args.fixtures / folder).is_dir():
+                plan.append((fn, (args.fixtures / folder,), "par"))
+            else:
+                print(f"\n(no {folder}/: {what} checks skipped)")
+        _run_plan(plan, args.jobs)
     finally:
         logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
                       if (REPO / "Logs").is_dir() else 0)
@@ -1913,7 +1991,7 @@ def main():
         n_ok = sum(1 for *_, ok, _ in results if ok)
         lines = [f"# Real-photo battery — {time.strftime('%Y-%m-%d %H:%M')}", "",
                  f"**{n_ok}/{len(results)} passed** in {time.time() - t0:.0f}s · "
-                 f"fixtures `{args.fixtures}` · commit `"
+                 f"fixtures `{args.fixtures}` · jobs {args.jobs} · commit `"
                  + subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO,
                                   capture_output=True, text=True).stdout.strip()
                  + "` (+ working tree)", ""]

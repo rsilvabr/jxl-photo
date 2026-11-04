@@ -419,14 +419,15 @@
   source's name in a temp file read back with `<=`. The sibling tiff-workflow shipped three such
   bugs on 2026-10-17 because its tests used ASCII paths only.
 - After editing any script, run `python -m py_compile` on the changed files.
-- Tests: `python -m pytest tests/ -n 8 -q` (pytest-xdist; ~2.5 min on the
-  owner's machine, ~16 min serial). On the owner's machine `py` resolves to a
+- Tests: `python -m pytest tests/ -n 16 -q` (pytest-xdist; ~3.5 min on the
+  owner's machine — 32 logical CPUs; `-n 8` took 7.8 min on 2026-11-04, so
+  16 is the measured choice — ~16 min serial). On the owner's machine `py` resolves to a
   Python 3.13 without pytest/numpy/tifffile; `python` (3.12) has them — use
   `python` for the suite, the pre-fix proofs and the battery. A test must be
   safe in parallel: its own `tmp_path`, no fixed temp/home path, no assertion
   on a phrase rich may wrap (conftest sets `COLUMNS=240`; normalise
   whitespace when a long path precedes the phrase).
-- Baseline: run the whole suite (`-n 8`, ~2.5 min) BEFORE changing anything
+- Baseline: run the whole suite (`-n 16`, ~3.5 min) BEFORE changing anything
   and record the summary — it tells a new failure from an old one or from the
   environment (a codec update). A plan also states the result of its base
   commit. A test that fails at the end is re-run alone against the extracted
@@ -483,7 +484,12 @@
   RGB+IR/alpha 4th sample, 84 MP), `JPEG_varied` (25 JPEG structures, an
   empty and a non-JPEG file), `silverfast_xmp` (ORIGINAL SilverFast scans:
   its `LSI/` XMP and private tags must round-trip) and `TIFF_tagless` (camera
-  TIFFs that lost every tag: never a film scan). ~12 minutes; the scratch folder is deleted on success and
+  TIFFs that lost every tag: never a film scan). ~15 minutes with the default
+  `--jobs 4` (independent sections side by side; the memory cap, the Explorer
+  thumbnails and the interrupted runs always run alone, after them; ~20 min
+  with `--jobs 1`); the report keeps the same checks in the same order. A new
+  section that sets `os.environ`, reads the free RAM or depends on timing
+  runs "alone" in `main()`'s plan. The scratch folder is deleted on success and
   the report lands in `AI_tools/<YYMMDD>_battery_report.md`. **Run it before
   every release** and after any change to what the codecs/exiftool read or
   write, to a delete gate, to the in-place paths, or to a function's
