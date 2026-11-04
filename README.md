@@ -196,9 +196,8 @@ A **New job** asks what to do, where, and how, then shows one review screen:
   Task      → Archive TIFFs as JXL masters
   Folder    → F:\Photos\2024
   Mode      → 7 (below _EXPORT, one subfolder) — or [A] to have the folder analysed
-  Quality   → d=0.1, near-lossless (recommended)
-  Review    → every option with its value and where it came from
-              (film scans: their own distance, lossless by default);
+  Quality   → d=0.1, near-lossless (recommended); film scans stay lossless
+  Review    → every option with its value and where it came from;
               [a] all options, [d] dry run, [r] run, [s] save as a preset
 ```
 
