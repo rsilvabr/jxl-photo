@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.1"
+TOOLKIT_VERSION = "2.22.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -2507,6 +2507,48 @@ def _child_scan_distance() -> str:
     return "same" if value is None else f"{float(value):g}"
 
 
+# The distances the "Archive TIFFs" quality step offers, with their names.
+# 0.05 is the floor of cjxl 0.12: every lossy distance below it gives the
+# same file (the encoder's _MIN_EFFECTIVE_DISTANCE).
+_DISTANCE_CHOICES = [
+    (0.0, "lossless", "exact replica"),
+    (0.05, "finest lossy", "cjxl rounds anything lower to this"),
+    (0.1, "near-lossless", "recommended"),
+    (0.5, "high-quality lossy", "some headroom for later edits"),
+    (1.0, "visually lossless for viewing",
+     "JPEG XL's definition: for final copies, not further editing"),
+]
+_DISTANCE_PROMPT = ("Distance (0 = lossless, 0.05 = finest lossy, 0.1 = near-lossless, "
+                    "1 = visually lossless for viewing)")
+
+
+def _distance_label(value) -> str:
+    """The name of a distance ("" for one in between), as the review shows it."""
+    try:
+        d = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if d == 0:
+        return "lossless"
+    if d <= 0.05:
+        return "finest lossy"
+    if d <= 0.1:
+        return "near-lossless"
+    for v, name, _note in _DISTANCE_CHOICES:
+        if d == v:
+            return name
+    return ""
+
+
+def _distance_shown(value) -> str:
+    try:
+        text = f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+    label = _distance_label(value)
+    return f"{text} — {label}" if label else text
+
+
 def _valid_scan_distance(text: str):
     """A --scan-distance value the encoder accepts, normalised, or None."""
     t = str(text or "").strip().lower()
@@ -4585,8 +4627,8 @@ class InteractiveMenu:
         ui.markup(None, f"Current distance (TIFF->JXL): {_shown_distance}")
         # No default in the plain prompt: Enter there is "keep current".
         new_distance = ui.ask_line(
-            "settings.distance", "Distance for TIFF->JXL (0=lossless, 0.1=near-lossless)",
-            "New distance (0=lossless, 0.1=near-lossless): ",
+            "settings.distance", "Distance for TIFF->JXL (0=lossless, 0.05=finest lossy, 0.1=near-lossless)",
+            "New distance (0=lossless, 0.05=finest lossy, 0.1=near-lossless): ",
             default=(f"{_sane_distance(current.default_distance):g}" if ui.is_rich else None))
 
         new_confirm = ui.ask_yes("settings.confirm_delete", "Confirm before delete?",
@@ -4743,26 +4785,27 @@ class InteractiveMenu:
         frm = workflow.setdefault('_from', {})
         if tid == 'archive_tiff':
             preferred = _sane_distance(self.config.config.default_distance)
-            opts = [("1", "Lossless (d=0, an exact replica)"),
-                    ("2", f"d={preferred:g} — "
-                          + ("near-lossless (recommended)" if preferred == 0.1
-                             else "your default (change it in Settings)")),
-                    ("3", "d=1.0 — visually lossless"),
-                    ("4", "Custom distance")]
-            key = ui.choose("job.quality", "Quality", opts, "2")
-            if key == "1":
-                workflow['distance'] = 0.0
-            elif key == "2":
-                workflow['distance'] = preferred
-            elif key == "3":
-                workflow['distance'] = 1.0
+            opts = [(str(i), f"d={v:g} — {name} ({note})")
+                    for i, (v, name, note) in enumerate(_DISTANCE_CHOICES, 1)]
+            custom = str(len(opts) + 1)
+            opts.append((custom, "your distance"))
+            # Enter = the default distance of Settings (0.1 unless changed).
+            default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
+                                                             _DISTANCE_CHOICES)
+                                if v == preferred), custom)
+            ui.line("  Tip: 8-bit TIFFs gain little from d=0.05/0.1 over lossless (8-bit "
+                    "gray comes out larger), so keep them lossless; 16-bit TIFFs get much "
+                    "smaller lossy (docs/file_sizes.md).")
+            key = ui.choose("job.quality", "Quality", opts, default_key)
+            if key != custom:
+                workflow['distance'] = _DISTANCE_CHOICES[int(key) - 1][0]
             else:
                 last = self.config.config.last_distance
                 start = _sane_distance(last, fallback=preferred) if last is not None else preferred
                 workflow['distance'] = self._ask_number("job.distance", "Distance (0-15, lower = better)",
                                                         start, 0.0, 15.0)
             workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
-                                           if workflow['distance'] == 0.0 and key != "4"
+                                           if workflow['distance'] == 0.0 and key != custom
                                            else 'jxl_tiff_encoder')
             frm['distance'] = 'you'
             _sd = _child_scan_distance()
@@ -4782,7 +4825,7 @@ class InteractiveMenu:
             frm['distance'] = 'you'
         elif tid == 'reencode_jpeg':
             workflow['distance'] = self._ask_number(
-                "job.distance", "Distance (0 = lossless, 0.1 = near-lossless, 1 = visually lossless)",
+                "job.distance", _DISTANCE_PROMPT,
                 workflow.get('distance', 0.5), 0.0, 15.0)
             frm['distance'] = 'you'
         elif tid == 'export_jpeg':
@@ -4969,8 +5012,7 @@ class InteractiveMenu:
                                                           _child_module(origin, dest))
             def _distance():
                 workflow['distance'] = self._ask_number(
-                    "review.distance", "Distance (0 = lossless, 0.1 = near-lossless, "
-                    "1 = visually lossless)", workflow['distance'], 0.0, 15.0)
+                    "review.distance", _DISTANCE_PROMPT, workflow['distance'], 0.0, 15.0)
                 if origin == 'tiff':
                     workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
                                                    if workflow['distance'] == 0.0
@@ -4981,7 +5023,28 @@ class InteractiveMenu:
                     else:
                         adv.pop('on_scan', None)
                 you('distance')
-            rows.append(("distance", "Distance", f"{float(workflow['distance']):g}", _distance))
+            rows.append(("distance", "Distance", _distance_shown(workflow['distance']), _distance))
+            if origin == 'tiff' and dest == 'jxl':
+                # Film scans keep their own distance (the encoder's
+                # SCAN_DISTANCE, lossless by default): shown next to the
+                # run's distance, so nobody wonders whether scans follow it.
+                def _scan_distance():
+                    current = adv.get('scan_distance') or _child_scan_distance()
+                    typed = self.ui.ask_text(
+                        "review.scan_distance",
+                        "Film-scan distance (a number, or 'same' = the Distance above)",
+                        str(current))
+                    value = _valid_scan_distance(typed)
+                    if value is None:
+                        self._print_error(f"Not a distance: {typed!r} — kept {current}")
+                        return
+                    adv['scan_distance'] = value
+                    you('scan_distance')
+                _sd = adv.get('scan_distance') or _child_scan_distance()
+                _sd_shown = ("same as Distance" if _sd == "same" else _distance_shown(_sd))
+                rows.append(("scan_distance", "Film scans",
+                             f"{_sd_shown} (scanner software, IR page, TIFF without camera EXIF)",
+                             _scan_distance))
         if not (origin == 'jxl' and dest == 'tiff'):
             def _effort():
                 workflow['effort'] = int(self._ask_number("review.effort", "Effort (1-10, higher = smaller)",

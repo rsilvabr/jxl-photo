@@ -32,7 +32,7 @@ HOSTILE = "250118_吾妻山 [FINAL] 5% (2)"
 
 # task -> (old Step 1 key, old Step 2 key, the new flow's quality answers)
 TASK_KEYS = {
-    "archive_tiff": ("2", "2", {"job.quality": "2"}),
+    "archive_tiff": ("2", "2", {"job.quality": "3"}),      # 3 = d=0.1
     "restore_tiff": ("3", "5", {}),
     "derive_jxl": ("3", "6", {"job.distance": None}),
     "export_jpeg": ("3", "3", {"job.jpeg_quality": None}),
@@ -175,11 +175,11 @@ def test_b_goes_back_to_the_mode_step(menu, launched, monkeypatch, tmp_path):
 
 
 def test_rows_reach_the_command_line(menu, launched, monkeypatch, tmp_path):
-    # rows of an archive job: 1 RAM, 2 workers, 3 distance, 4 effort, 5 staging, ...
+    # rows of an archive job: 1 RAM, 2 workers, 3 distance, 4 film scans, 5 effort, 6 staging, ...
     stg = tmp_path / "stg [x] 5%"
     runs = _new_job_argv(
         menu, launched, monkeypatch, tmp_path, "archive_tiff", "1",
-        review=("2", "3", "4", "5", "r"),
+        review=("2", "3", "5", "6", "r"),
         extra_answers={"review.workers": "3", "review.distance": "0.05",
                        "review.effort": "9", "review.staging": str(stg)})
     cmd = runs[-1]
@@ -306,3 +306,19 @@ def test_main_menu_numbers(tmp_path, monkeypatch, choice, flow):
     except SystemExit:
         pass
     assert seen == [flow]
+
+
+def test_the_film_scan_row(menu, launched, tmp_path):
+    """v2.22.2: film scans' own distance sits under the run's, editable."""
+    menu._ui = None
+    wf = _review_workflow(menu, tmp_path, "archive_tiff")
+    rows = menu._review_rows(wf, STATUS)
+    ids = [r[0] for r in rows]
+    i = ids.index("scan_distance")
+    assert ids[i - 1] == "distance" and rows[i][2].startswith("0 — lossless")
+    assert " — " in rows[i - 1][2]                       # the distance is named too
+    menu._ui = wp.ScriptedUI({"review.action": [str(i + 1), "r"],
+                              "review.scan_distance": "0.05"})
+    assert menu._review_screen(wf, STATUS) == "ran"
+    cmd = launched[-1]
+    assert cmd[cmd.index("--scan-distance") + 1] == "0.05"

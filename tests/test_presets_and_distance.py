@@ -77,27 +77,27 @@ def test_sane_distance_honors_custom_fallback():
 # Step 2 entry [2] follows the setting
 # ─────────────────────────────────────────────
 
-def test_option2_uses_configured_distance(menu, cfg):
+def test_enter_takes_the_configured_distance(menu, cfg):
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["2", ""])
+    workflow = _select_destination(menu, ["", ""])
     assert workflow['distance'] == 0.05
     assert workflow['conversion_type'] == 'jxl_tiff_encoder'
     assert workflow['dest_format'] == 'jxl'
 
 
-def test_option2_shows_the_number_in_the_menu(menu, cfg, capsys):
-    """The point of the feature is seeing your own value listed, not d=0.1."""
-    cfg.config.default_distance = 0.05
-    _select_destination(menu, ["2", ""])
+def test_the_menu_names_each_distance(menu, cfg, capsys):
+    _select_destination(menu, ["", ""])
     printed = capsys.readouterr().out
-    assert "d=0.05" in printed
-    assert "0.1" not in printed.split("[3]")[0], "entry [2] must not still read 0.1"
+    for text in ("d=0 — lossless", "d=0.05 — finest lossy", "d=0.1 — near-lossless (recommended)",
+                 "d=0.5 — high-quality lossy", "d=1 — visually lossless for viewing",
+                 "your distance", "Tip: 8-bit TIFFs"):
+        assert text in printed, text
 
 
-def test_option2_defaults_to_the_historical_recommendation(menu, cfg):
-    """Untouched config = exactly the old behaviour, label included."""
+def test_enter_defaults_to_the_historical_recommendation(menu, cfg):
+    """Untouched config = exactly the old behaviour."""
     assert cfg.config.default_distance == 0.1
-    workflow = _select_destination(menu, ["2", ""])
+    workflow = _select_destination(menu, ["", ""])
     assert workflow['distance'] == 0.1
     assert workflow['conversion_type'] == 'jxl_tiff_encoder'
 
@@ -105,33 +105,39 @@ def test_option2_defaults_to_the_historical_recommendation(menu, cfg):
 def test_configured_zero_routes_to_the_lossless_encoder(menu, cfg):
     """d=0 is a separate script path; a configured 0 must not run the lossy one."""
     cfg.config.default_distance = 0.0
-    workflow = _select_destination(menu, ["2", ""])
+    workflow = _select_destination(menu, ["", ""])
     assert workflow['distance'] == 0.0
     assert workflow['conversion_type'] == 'jxl_tiff_encoder_lossless'
 
 
 def test_corrupt_stored_distance_does_not_break_the_menu(menu, cfg):
     """The config is hand-editable JSON: a string must not reach an f-string
-    format spec and take the whole Step 2 menu down."""
+    format spec and take the whole quality menu down."""
     cfg.config.default_distance = "not a number"
-    workflow = _select_destination(menu, ["2", ""])
+    workflow = _select_destination(menu, ["", ""])
     assert workflow['distance'] == 0.1
 
 
-def test_fixed_entries_are_unchanged(menu, cfg):
+def test_fixed_entries(menu, cfg):
     cfg.config.default_distance = 0.05
-    assert _select_destination(menu, ["1", ""])['distance'] == 0.0
-    assert _select_destination(menu, ["3", ""])['distance'] == 1.0
+    for key, d in (("1", 0.0), ("2", 0.05), ("3", 0.1), ("4", 0.5), ("5", 1.0)):
+        assert _select_destination(menu, [key, ""])['distance'] == d
+
+
+def test_a_distance_off_the_list_is_the_custom_default(menu, cfg):
+    cfg.config.last_distance = None
+    cfg.config.default_distance = 0.03
+    assert _select_destination(menu, ["", "", ""])['distance'] == 0.03
 
 
 # ─────────────────────────────────────────────
-# Custom entry [4] remembers the last value
+# Custom entry [6] remembers the last value
 # ─────────────────────────────────────────────
 
 def test_custom_defaults_to_last_used_distance(menu, cfg):
     cfg.config.last_distance = 0.03
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["4", "", ""])   # accept the default
+    workflow = _select_destination(menu, ["6", "", ""])   # accept the default
     assert workflow['distance'] == 0.03
 
 
@@ -139,20 +145,20 @@ def test_custom_default_survives_a_zero_last_distance(menu, cfg):
     """0.0 is falsy: an `or`-based default would silently convert it to 0.1
     and turn a lossless habit into a lossy run."""
     cfg.config.last_distance = 0.0
-    workflow = _select_destination(menu, ["4", "", ""])
+    workflow = _select_destination(menu, ["6", "", ""])
     assert workflow['distance'] == 0.0
 
 
 def test_custom_falls_back_to_the_setting_when_nothing_was_used_yet(menu, cfg):
     cfg.config.last_distance = None
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["4", "", ""])
+    workflow = _select_destination(menu, ["6", "", ""])
     assert workflow['distance'] == 0.05
 
 
 def test_custom_still_accepts_a_typed_value(menu, cfg):
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["4", "2.5", ""])
+    workflow = _select_destination(menu, ["6", "2.5", ""])
     assert workflow['distance'] == 2.5
 
 
