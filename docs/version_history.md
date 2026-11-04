@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.1](#v2221)** | 2026-11-04 | Every wizard question on the same question layer as the New job (the mode step, Settings, presets, manifests, the maintenance menus); same questions, same order |
+| **[v2.22.2](#v2222)** | 2026-11-04 | The wizard names each distance (lossless, finest lossy, near-lossless, high-quality lossy, visually lossless for viewing) and shows the film-scan distance on the review screen |
+| [v2.22.1](#v2221) | 2026-11-04 | Every wizard question on the same question layer as the New job (the mode step, Settings, presets, manifests, the maintenance menus); same questions, same order |
 | [v2.22.0](#v2220) | 2026-11-04 | The wizard by task: a New job asks what to do, where and how, then one review screen with every option; presets carry over and still run on older copies; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input; a notice when a newer release is out (round 71, 8 fixes) |
 | [v2.22.0_beta1](#v2220_beta1) | 2026-11-04 | Pre-release. The wizard reaches every script option (the summary's "all options" screen), menus for renamed folders, the ICC test cache and the scripts' own settings; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out (round 71, 8 fixes) |
 | [v2.21.0](#v2210) | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
@@ -84,9 +85,31 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.22.2
+
+**Released 2026-11-04.** Supersedes v2.22.1. Nothing to do when upgrading:
+Enter on the quality question still takes your default distance (0.1 unless
+changed in Settings), and the command lines are the same.
+
+- **"Archive TIFFs" offers six distances, each named:** d=0 lossless (exact
+  replica), d=0.05 finest lossy (cjxl 0.12 rounds every lower lossy distance
+  to the same file), d=0.1 near-lossless (recommended), d=0.5 high-quality
+  lossy (some headroom for later edits), d=1 visually lossless for viewing
+  (JPEG XL's definition: for final copies, not further editing), and your
+  own distance. The keys moved: 0.1 is now `3` (it was `2`, which showed
+  your default distance), 1.0 is `5`, custom is `6`.
+- A tip under the list: 8-bit TIFFs gain little from d=0.05/0.1 over
+  lossless (8-bit gray comes out larger), 16-bit TIFFs get much smaller
+  lossy — measured in [file_sizes.md](file_sizes.md).
+- **The review names the distance** (`0.1 — near-lossless`) and adds a
+  **Film scans** row right below it: the distance film scans get
+  (`SCAN_DISTANCE`, lossless by default), editable there (`--scan-distance`).
+  It used to be one line in the quality step and an entry of `[a]`.
+- The distance prompts use the same names.
+
 ## v2.22.1
 
-**Released 2026-11-04.** Supersedes v2.22.0. Nothing to do when upgrading:
+**Released 2026-11-04.** Superseded by v2.22.2. Supersedes v2.22.0. Nothing to do when upgrading:
 the same questions in the same order with the same wording, and the same
 command lines.
 

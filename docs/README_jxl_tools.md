@@ -96,7 +96,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
   Task      → 1  Archive TIFFs as JXL masters
   Folder    → F:\Photos\2024
   Mode      → 7 (below _EXPORT, one subfolder)  [A] analyses the folder and suggests one
-  Quality   → 2  d=0.1 — near-lossless (recommended)
+  Quality   → 3  d=0.1 — near-lossless (recommended)   (Enter = your default distance)
   Review    → every option with its value and where it came from;
               [r] runs it, [d] runs it dry first and comes back
 ```
