@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.4](#v2224)** | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
+| **[v2.22.5](#v2225)** | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
+| [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
 | [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
 | [v2.22.2](#v2222) | 2026-11-04 | The wizard names each distance (lossless, finest lossy, near-lossless, high-quality lossy, visually lossless for viewing) and shows the film-scan distance on the review screen |
 | [v2.22.1](#v2221) | 2026-11-04 | Every wizard question on the same question layer as the New job (the mode step, Settings, presets, manifests, the maintenance menus); same questions, same order |
@@ -87,17 +88,27 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.22.5
+
+**Released 2026-11-04.** Supersedes v2.22.4. Distances from 15 to 25 are
+accepted everywhere: `--distance` of the encoder, the transcoder and the
+recompressor, `--scan-distance`, the wizard's questions and the settings
+file. 25 is cjxl's own limit ("Allowed range: 0.0 ... 25.0", checked on
+libjxl 0.11.1, 0.11.2 and 0.12.0: d=25 encodes, d=26 is refused); the
+toolkit's 15 came from an early validation (v1.x) and was never cjxl's. A
+stored distance above 25 is clamped to 25 (it was clamped to 15).
+
 ## v2.22.4
 
-**Released 2026-11-04.** Supersedes v2.22.3. Nothing to do when upgrading:
+**Released 2026-11-04.** Superseded by v2.22.5. Supersedes v2.22.3. Nothing to do when upgrading:
 Enter still takes the recompressor's own distance (`CJXL_DISTANCE`, 1.0).
 
 - **"Make smaller or resized JXL copies" offers named distances** in cjxl's
   recommended range (0.5 .. 3.0, `cjxl --help`): d=0.5 high-quality lossy,
   d=1 visually lossless for viewing, d=2 smaller (phones and sharing), d=3
   smallest recommended, and your own distance. It used to ask a number.
-- "your distance" says the range the toolkit accepts: 0-15 (cjxl itself goes
-  to 25; the four scripts keep 15 as their limit).
+- "your distance" says the range the toolkit accepts: 0-15 (25 since
+  v2.22.5).
 - "Archive TIFFs" (v2.22.3) keeps its list; its last entry also says 0-15.
 
 ## v2.22.3

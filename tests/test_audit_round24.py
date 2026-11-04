@@ -367,8 +367,8 @@ def test_250_mode8_is_not_labelled_delete_in_the_summary():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("args,needle", [
-    (["--distance", "99"], "--distance must be between 0 and 15"),
-    (["--distance", "-1"], "--distance must be between 0 and 15"),
+    (["--distance", "99"], "--distance must be between 0 and 25"),
+    (["--distance", "-1"], "--distance must be between 0 and 25"),
     (["--quality", "500"], "--quality must be between 1 and 100"),
     (["--quality", "0"], "--quality must be between 1 and 100"),
 ])

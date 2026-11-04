@@ -58,7 +58,8 @@ def _select_destination(menu, answers):
     (0.05, 0.05),
     ("0.05", 0.05),
     (0, 0.0),
-    (99, 15.0),        # clamped to cjxl's ceiling
+    (99, 25.0),        # clamped to cjxl's ceiling
+    (20, 20.0),        # 15-25 is valid (v2.22.5)
     (-3, 0.0),
     ("abc", 0.1),      # unparseable -> fallback
     ("0,05", 0.1),     # comma decimal (pt-BR keyboard) -> fallback, not 5.0
@@ -187,7 +188,7 @@ def test_settings_persist_distance_to_disk(menu, cfg):
 
 def test_settings_clamp_distance(menu, cfg):
     _edit_settings(menu, "99")
-    assert cfg.config.default_distance == 15.0
+    assert cfg.config.default_distance == 25.0
 
 
 def test_settings_reject_garbage_and_keep_the_old_value(menu, cfg):

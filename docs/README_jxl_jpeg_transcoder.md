@@ -519,7 +519,7 @@ Options:
                   while another run is using the same staging folder (its
                   finished outputs may be waiting there for their folder)
   --effort 1-10      cjxl effort (default: 7)
-  --distance 0-15    JXL butteraugli distance for lossy encoding (default: 1.0)
+  --distance 0-25    JXL butteraugli distance for lossy encoding (default: 1.0)
   --ram              Use RAM pipeline (faster, default: True)
   --no-ram           Use disk pipeline (slower, less memory)
   --output-name NAME Output folder name for convert mode (default: "converted")

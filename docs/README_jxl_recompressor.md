@@ -820,7 +820,7 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 --workers N           Parallel workers (default: min(CPU, 16))
 --overwrite           Always recompress, even if the output exists
 --sync                Recompress only when the source JXL is newer than the output
---distance 0-15       Target JXL distance (default: CJXL_DISTANCE = 1.0)
+--distance 0-25       Target JXL distance (default: CJXL_DISTANCE = 1.0)
 --effort 1-10         cjxl effort (default: CJXL_EFFORT = 7)
 --buffering 0-3       [libjxl >= 0.12] encoder buffering level
 --on-downgrade POL    ask/copy/skip/convert for requests that cannot gain (default: ask)
@@ -942,7 +942,7 @@ Same model as the other scripts: defaults live at the top of
 `jxl_recompressor.py`, CLI flags override them per run.
 
 ```python
-CJXL_DISTANCE = 1.0          # Target distance (0-15)
+CJXL_DISTANCE = 1.0          # Target distance (0-25)
 CJXL_EFFORT = 7              # Effort: size/encode-time, NOT quality
 CJXL_BUFFERING = None        # [libjxl >= 0.12] --buffering for cjxl. None = cjxl
                              # chooses (streaming, EXCEPT the whole-image cases

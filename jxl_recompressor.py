@@ -42,7 +42,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.4"
+TOOLKIT_VERSION = "2.22.5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -910,7 +910,7 @@ def _tool_at_least(exe: str, major: int, minor: int) -> bool:
 # ─────────────────────────────────────────────
 
 CJXL_DISTANCE = 1.0
-# Target distance for the NEW files (0-15). This is the whole point of the
+# Target distance for the NEW files (0-25). This is the whole point of the
 # tool: archives were written at high quality (d=0.05-0.1) and are recompressed
 # smaller later when storage runs short.
 # 0   = lossless re-encode (only useful from a LOSSLESS source, see below)
@@ -6950,7 +6950,7 @@ def build_parser():
     parser.add_argument("--sync", action="store_true",
                         help="Recompress only when the source JXL is newer than the output")
     parser.add_argument("--distance", type=float, default=None,
-                        help="Target JXL distance 0-15 (default: CJXL_DISTANCE setting, 1.0)")
+                        help="Target JXL distance 0-25 (default: CJXL_DISTANCE setting, 1.0)")
     parser.add_argument("--effort", type=int, default=None, choices=range(1, 11),
                         help="cjxl effort 1-10 (default: CJXL_EFFORT setting, 7)")
     parser.add_argument("--buffering", type=int, default=None, choices=[0, 1, 2, 3],
@@ -7156,8 +7156,8 @@ def main():
 
     # Apply CLI over the script settings.
     if args.distance is not None:
-        if not 0.0 <= args.distance <= 15.0:
-            parser.error("--distance must be between 0 and 15")
+        if not 0.0 <= args.distance <= 25.0:
+            parser.error("--distance must be between 0 and 25")
         CJXL_DISTANCE = args.distance
     if args.effort is not None:
         CJXL_EFFORT = args.effort

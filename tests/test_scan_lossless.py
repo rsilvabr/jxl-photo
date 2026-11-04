@@ -345,7 +345,7 @@ def test_both_scripts_ship_the_same_scanner_list():
 
 
 @pytest.mark.parametrize("text,value", [("0", "0"), ("0.05", "0.05"), ("same", "same"),
-                                        ("SAME", "same"), ("16", None), ("x", None)])
+                                        ("SAME", "same"), ("16", "16"), ("26", None), ("x", None)])
 def test_wizard_scan_distance_values(text, value):
     import jxl_photo as wp
     assert wp._valid_scan_distance(text) == value

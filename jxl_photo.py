@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.4"
+TOOLKIT_VERSION = "2.22.5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -266,8 +266,13 @@ def _strip_surrounding_quotes(value: str) -> str:
     return value
 
 
+# cjxl's own ceiling ("Allowed range: 0.0 ... 25.0" in 0.11.x, "range: 0.0 ..
+# 25.0" in 0.12.0; d=26 is refused). The toolkit kept 15 until v2.22.4.
+_MAX_DISTANCE = 25.0
+
+
 def _sane_distance(value: Any, fallback: float = 0.1) -> float:
-    """Clamp any stored/typed distance into cjxl's valid 0.0-15.0 range.
+    """Clamp any stored/typed distance into cjxl's valid 0.0-25.0 range (libjxl 0.11 and 0.12).
 
     The config file is plain JSON the user can hand-edit, and _load_config does
     no type checking — a distance that came back as "0,05" or None would other-
@@ -279,7 +284,7 @@ def _sane_distance(value: Any, fallback: float = 0.1) -> float:
         return fallback
     if result != result:  # NaN: float('nan') fails every comparison below
         return fallback
-    return max(0.0, min(result, 15.0))
+    return max(0.0, min(result, _MAX_DISTANCE))
 
 
 # The numbers a saved workflow replays straight into the child's argv, with the
@@ -2566,7 +2571,7 @@ def _valid_scan_distance(text: str):
         d = float(t)
     except ValueError:
         return None
-    return f"{d:g}" if 0 <= d <= 15 else None
+    return f"{d:g}" if 0 <= d <= _MAX_DISTANCE else None
 
 
 # The encoder's --thumbnail-mode choices, and the ones that can write a
@@ -4803,7 +4808,7 @@ class InteractiveMenu:
             opts = [(str(i), f"d={v:g} — {name} ({note})")
                     for i, (v, name, note) in enumerate(_DISTANCE_CHOICES, 1)]
             custom = str(len(opts) + 1)
-            opts.append((custom, "your distance (0-15)"))
+            opts.append((custom, "your distance (0-25)"))
             # Enter = the default distance of Settings (0.1 unless changed).
             default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
                                                              _DISTANCE_CHOICES)
@@ -4818,8 +4823,8 @@ class InteractiveMenu:
             else:
                 last = self.config.config.last_distance
                 start = _sane_distance(last, fallback=preferred) if last is not None else preferred
-                workflow['distance'] = self._ask_number("job.distance", "Distance (0-15, lower = better)",
-                                                        start, 0.0, 15.0)
+                workflow['distance'] = self._ask_number("job.distance", "Distance (0-25, lower = better)",
+                                                        start, 0.0, _MAX_DISTANCE)
             workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
                                            if workflow['distance'] == 0.0 and key != custom
                                            else 'jxl_tiff_encoder')
@@ -4839,7 +4844,7 @@ class InteractiveMenu:
             opts = [(str(i), f"d={v:g} — {name} ({note})")
                     for i, (v, name, note) in enumerate(_RECOMPRESS_CHOICES, 1)]
             custom = str(len(opts) + 1)
-            opts.append((custom, "your distance (0-15)"))
+            opts.append((custom, "your distance (0-25)"))
             try:
                 _cur = float(current)
             except (TypeError, ValueError):
@@ -4852,12 +4857,12 @@ class InteractiveMenu:
                 workflow['distance'] = _RECOMPRESS_CHOICES[int(key) - 1][0]
             else:
                 workflow['distance'] = self._ask_number(
-                    "job.distance", "Target distance (0-15, lower = better)", current, 0.0, 15.0)
+                    "job.distance", "Target distance (0-25, lower = better)", current, 0.0, _MAX_DISTANCE)
             frm['distance'] = 'you'
         elif tid == 'reencode_jpeg':
             workflow['distance'] = self._ask_number(
                 "job.distance", _DISTANCE_PROMPT,
-                workflow.get('distance', 0.5), 0.0, 15.0)
+                workflow.get('distance', 0.5), 0.0, _MAX_DISTANCE)
             frm['distance'] = 'you'
         elif tid == 'export_jpeg':
             workflow['quality'] = int(self._ask_number(
@@ -5043,7 +5048,7 @@ class InteractiveMenu:
                                                           _child_module(origin, dest))
             def _distance():
                 workflow['distance'] = self._ask_number(
-                    "review.distance", _DISTANCE_PROMPT, workflow['distance'], 0.0, 15.0)
+                    "review.distance", _DISTANCE_PROMPT, workflow['distance'], 0.0, _MAX_DISTANCE)
                 if origin == 'tiff':
                     workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
                                                    if workflow['distance'] == 0.0

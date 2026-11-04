@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.4"
+TOOLKIT_VERSION = "2.22.5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -7808,8 +7808,8 @@ def main():
         EXPORT_JXL_FOLDER = args.export_jxl_folder.strip()
 
     if args.distance is not None:
-        if not 0 <= args.distance <= 15:
-            parser.error("--distance must be between 0 and 15")
+        if not 0 <= args.distance <= 25:
+            parser.error("--distance must be between 0 and 25")
         # cjxl clamps: --distance 0.005 and 0.05 were measured producing
         # byte-identical output. Someone asking for 0.02 to get "closer to
         # lossless" gets exactly the 0.05 file and should hear so, rather than
@@ -7869,8 +7869,8 @@ def main():
                 SCAN_DISTANCE = float(args.scan_distance)
             except ValueError:
                 parser.error("--scan-distance takes a number (0 = lossless) or 'same'")
-            if not 0 <= SCAN_DISTANCE <= 15:
-                parser.error("--scan-distance must be between 0 and 15")
+            if not 0 <= SCAN_DISTANCE <= 25:
+                parser.error("--scan-distance must be between 0 and 25")
     if args.scan_scope is not None:
         SCAN_SCOPE = args.scan_scope
     if args.thumbnail_mode is not None:

@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.4"
+TOOLKIT_VERSION = "2.22.5"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -8138,8 +8138,8 @@ def main():
     # and --quality 500 sailed through argparse and failed inside cjxl/djxl
     # once PER FILE, with the real cause named nowhere. Exit 2 = "aborted /
     # invalid arguments", matching the documented exit-code table.
-    if not 0 <= args.distance <= 15:
-        print("ERROR: --distance must be between 0 and 15")
+    if not 0 <= args.distance <= 25:
+        print("ERROR: --distance must be between 0 and 25")
         sys.exit(2)
     if not 1 <= args.quality <= 100:
         print("ERROR: --quality must be between 1 and 100")
