@@ -414,29 +414,14 @@ def _step6_workflow(tmp_path, origin, dest, conv, mode=7):
     }
 
 
-def _record_rich(wp, monkeypatch):
-    asked = []
-
-    def ask(prompt, *a, **k):
-        asked.append(str(prompt))
-        if "Output colour space" in str(prompt):
-            return "sRGB"
-        if "Resize" == str(prompt):
-            return "long"
-        return k.get("default", "")
-
-    def confirm(prompt, *a, **k):
-        asked.append(str(prompt))
-        return True
-
-    monkeypatch.setattr(wp.Prompt, "ask", staticmethod(ask))
-    monkeypatch.setattr(wp.IntPrompt, "ask",
-                        staticmethod(lambda *a, **k: int(k.get("default", 1) or 1)))
-    monkeypatch.setattr(wp.Confirm, "ask", staticmethod(confirm))
-    return asked
+_DERIV_ROWS = ("output_icc", "shaping", "icc_profile")
 
 
-_DERIV_PROMPTS = ("Output colour space", "Convert to sRGB", "Resize")
+def _review_rows_of(menu, wf):
+    """Delivery C: Step 6 is the review; its questions are rows."""
+    status = {"cjxl": True, "djxl": True, "magick": True, "tifffile": True}
+    menu._review_init(wf, status)
+    return [r[0] for r in menu._review_rows(wf, status)]
 
 
 @pytest.mark.parametrize("origin,dest,conv", [
@@ -445,12 +430,11 @@ _DERIV_PROMPTS = ("Output colour space", "Convert to sRGB", "Resize")
 ])
 def test_w7_step6_offers_no_derivative_with_delete_rich(wp, menu, tmp_path, monkeypatch,
                                                         origin, dest, conv):
-    if not wp.RICH_AVAILABLE:
-        pytest.skip("rich branch")
-    asked = _record_rich(wp, monkeypatch)
+    """With [D] on, the review offers no derivative row (colour, sRGB,
+    resize/sharpen) and drops an earlier answer: the run would be refused."""
     wf = _step6_workflow(tmp_path, origin, dest, conv)
-    menu._wizard_parameters_basic(wf, {"cjxl": True, "magick": True})
-    assert not [p for p in asked if p.startswith(_DERIV_PROMPTS)], asked
+    rows = _review_rows_of(menu, wf)
+    assert not [r for r in rows if r in _DERIV_ROWS], rows
     assert not any(k in wf["advanced_options"] for k in _SEEDED), wf["advanced_options"]
     if dest != "jxl":
         assert not wf.get("icc_profile"), "Convert to sRGB survived [D]"
@@ -463,16 +447,9 @@ def test_w7_step6_offers_no_derivative_with_delete_rich(wp, menu, tmp_path, monk
 def test_w7_step6_offers_no_derivative_with_delete_plain(wp, menu, tmp_path, monkeypatch,
                                                          origin, dest, conv):
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    asked = []
-
-    def _input(prompt=""):
-        asked.append(str(prompt))
-        return ""
-
-    monkeypatch.setattr("builtins.input", _input)
     wf = _step6_workflow(tmp_path, origin, dest, conv)
-    menu._wizard_parameters_basic(wf, {"cjxl": True, "magick": True})
-    assert not [p for p in asked if p.startswith(_DERIV_PROMPTS)], asked
+    rows = _review_rows_of(menu, wf)
+    assert not [r for r in rows if r in _DERIV_ROWS], rows
     assert not any(k in wf["advanced_options"] for k in _SEEDED), wf["advanced_options"]
     if dest != "jxl":
         assert not wf.get("icc_profile"), "Convert to sRGB survived [D]"

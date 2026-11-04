@@ -47,8 +47,14 @@ def _tiff_workflow(src):
 def test_summary_keeps_the_brackets(tmp_path, screen, menu, monkeypatch):
     src = tmp_path / FOLDER_NAME / "src"
     src.mkdir(parents=True)
-    monkeypatch.setattr(jxl_photo.Prompt, "ask", lambda *a, **k: "no")
-    menu._wizard_confirm(_tiff_workflow(src))
+    # Delivery C: the summary is the review screen (Rich UI, the same
+    # escaping); "q" cancels it.
+    monkeypatch.setattr(jxl_photo.Prompt, "ask", lambda *a, **k: "q")
+    menu._ui = jxl_photo.RichUI()
+    wf = _tiff_workflow(src)
+    status = {"cjxl": True, "djxl": True, "tifffile": True, "magick": True}
+    menu._review_init(wf, status)
+    assert menu._review_screen(wf, status) == "quit"
     assert "[test]" in screen.getvalue()
 
 

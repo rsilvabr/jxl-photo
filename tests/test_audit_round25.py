@@ -221,49 +221,46 @@ def _manifest_workflow(**over):
     return wf
 
 
-def test_255_plain_text_manifest_summary_shows_delete_source(menu, monkeypatch, capsys):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a: "NO")
+# Delivery C: the old Step 7 summary is the review screen's header now. The
+# rule stays: before a manifest run starts, the screen says it deletes,
+# names the expert flags and the multi-page policy. (A dry run is the review's
+# [d] key, no longer a state to announce.)
 
-    assert menu._wizard_confirm(_manifest_workflow()) is False
-    out = capsys.readouterr().out
-    assert "DELETE SOURCE: ON (!)" in out, (
-        "pre-fix the plain-text manifest branch never printed extra_info")
+_STATUS = {k: True for k in ("cjxl", "djxl", "exiftool", "magick", "tifffile",
+                             "pillow", "imagecodecs")}
+
+
+def _review_text(menu, wf):
+    wf = dict(wf, mode_config={}, expert_flags=wf.get("expert_flags", ""),
+              quality=90, compression="zip", use_ram=True, add_preview=True)
+    menu._ui = wp.ScriptedUI({"review.action": ["q"]})
+    assert menu._review_screen(wf, _STATUS) == "quit"
+    return "\n".join(menu._ui.output)
+
+
+def test_255_plain_text_manifest_summary_shows_delete_source(menu, monkeypatch, capsys):
+    out = _review_text(menu, _manifest_workflow())
+    assert "DELETE SOURCE: ON (!)" in out
 
 
 def test_255_plain_text_manifest_summary_shows_dry_run_and_expert(menu, monkeypatch, capsys):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a: "NO")
-
-    wf = _manifest_workflow(dry_run=True, expert_flags="--effort 9",
-                            advanced_options={})
-    menu._wizard_confirm(wf)
-    out = capsys.readouterr().out
-    assert "DRY RUN" in out
-    assert "Expert: Yes" in out
+    out = _review_text(menu, _manifest_workflow(expert_flags="--effort 9",
+                                                advanced_options={}))
+    assert "Expert flags: --effort 9" in out
 
 
 def test_255_manifest_summary_shows_the_multipage_line(menu, monkeypatch, capsys):
     """An `ignore` manifest discards the IR page of every scan — say so."""
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a: "NO")
-
-    wf = _manifest_workflow(advanced_options={"multipage_mode": "ignore"})
-    menu._wizard_confirm(wf)
-    out = capsys.readouterr().out
-    assert "Multi-page TIFF:" in out
+    out = _review_text(menu, _manifest_workflow(advanced_options={"multipage_mode": "ignore"}))
+    assert "Multi-page TIFFs:" in out
     assert "DISCARDED" in out
 
 
 def test_255_manifest_summary_omits_multipage_for_other_directions(menu, monkeypatch, capsys):
     """Do not over-fix: JXL->TIFF has no multi-page ENCODE setting."""
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a: "NO")
-
-    wf = _manifest_workflow(origin_format="jxl", dest_format="tiff",
-                            conversion_type="jxl_tiff_decoder")
-    menu._wizard_confirm(wf)
-    assert "Multi-page TIFF:" not in capsys.readouterr().out
+    out = _review_text(menu, _manifest_workflow(origin_format="jxl", dest_format="tiff",
+                                                conversion_type="jxl_tiff_decoder"))
+    assert "Multi-page TIFFs:" not in out
 
 
 # ---------------------------------------------------------------------------

@@ -75,10 +75,9 @@ def test_w5_step7_recounts_with_the_mode7_subfolder(wp, menu, tmp_path, monkeypa
     panel = menu._count_origin_files(dict(wf, mode_config={}), 7)
     assert panel == 3
     menu._delete_panel_count = panel
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a: "NO")
-    assert menu._wizard_confirm(wf) is False
-    out = " ".join(capsys.readouterr().out.split())
+    # Delivery C: the old Step 7 summary is the review's header
+    # (_summary_info); the recount is made there, with the final settings.
+    out = " ".join(" ".join(menu._summary_info(wf)).split())
     assert "2 TIFF file(s) in scope" in out, out
     assert "counted 3" in out, out
 

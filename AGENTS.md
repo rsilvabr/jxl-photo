@@ -93,8 +93,13 @@
   planned file has to handle that action (the duplicate abort and the orphan
   sweep count it as a writing item).
 - `jxl_photo.py` — interactive wrapper that invokes the 4 scripts via subprocess.
-  Menus R (`--restamp-moved`, dry run first), C (`--clear-icc-cache`) and S
-  (the script settings overlay); Step 7 takes `O` (all options of the job)
+  Menu by task (delivery C of the wrapper redesign): 1 New job, 2 Repeat last job, 3 Presets,
+  4 Folder list (manifest), 5 renamed folders (`--restamp-moved`, dry run
+  first), 6 Explorer thumbnails, 7 JPEG archives (jbrd), 8 ICC test cache
+  (`--clear-icc-cache`), 9 Settings (wrapper defaults, script settings =
+  the overlay, reset, move), D dependencies; the beta's letters R/C/S stay
+  aliases. A New job = task (`TASKS`) → folder → mode step (`[A]`/`[M]`/
+  `[D]`) → quality → review (`_review_screen`)
 
 ## Settings are never hardcoded
 - Every script's user-editable settings live at the TOP of the script
@@ -345,15 +350,16 @@
   `_policy_*` rule when it needs more than "emit when set"; the value comes
   from the run or the child (`_workflow_or_child`), never a literal default.
   A flag the wrapper deliberately does not pass goes in `NOT_OFFERED` with the
-  reason, a flag of a maintenance screen (menus 8/9/R/C) in
+  reason, a flag of a maintenance screen (menus 5-8) in
   `MAINTENANCE_FLAGS`. `tests/test_wrapper_option_registry.py` fails on an
   undeclared child flag; `tests/test_wrapper_argv_golden.py` pins the argv of
   25 runs (regen only from a known-good commit:
   `JXLPHOTO_REGEN_ARGV_GOLDEN=1`). A flag the wizard does not ask about takes
   `legacy_key="extra.<id>"`: its value lives in the run's `extra_options`
-  (saved as `last_extra_options`, so presets keep it), the Step 7 `O` screen
-  sets it (`_all_options_screen`; essentials and delete rules stay in the
-  wizard, `danger=True` asks first) and the summary lists it. Combinations
+  (saved as `last_extra_options`, so presets keep it), the review's `[a]`
+  screen sets it (`_all_options_screen`; essentials and delete rules stay in
+  the review rows / the mode step's `[D]`, `danger=True` asks first) and the
+  review lists it. Combinations
   go in `requires`/`conflicts` (ids), checked by `_registry_rule_problem` on
   the screen and in `execute_workflow` before any HHMM token — e.g.
   `--restamp-then-sync` conflicts with the deletes and Overwrite. Expert
@@ -363,8 +369,32 @@
 - **The UI layer** (`UI`, `PlainUI`, `RichUI`, `ScriptedUI`) asks by
   question id (`opt.screen`, `opt.<id>`, `restamp.*`, `icccache.confirm`,
   `settings.*`); tests answer by id with `ScriptedUI` (a question with no
-  answer left is an error). The new screens use it; the older wizard steps
-  still ask through Rich/`input()` (phase 3 moves them).
+  answer left is an error). The New job's task, folder, quality and review
+  use it (`job.*`, `review.*`); the mode step (`_wizard_select_mode` with
+  `[A]`/`[M]`/`[D]`, `_wizard_mode_specific_config`), Settings and the
+  presets menu still ask through Rich/`input()`.
+- **The review** (`_review_init` + `_review_rows` + `_review_screen`) starts
+  every job at the state the old Steps 6/6A left when every question was
+  answered with Enter, so `[r]` at once runs exactly the old wizard's run:
+  `tests/fixtures/review_default_argv.json` pins it per task (regenerate
+  only from a commit that still had the old wizard:
+  `JXLPHOTO_REGEN_REVIEW_GOLDEN=1`). A new essential question is a row with
+  its own rule (what is not offered with `[D]` or in place says so); an
+  option of the old Step 6A is an `Opt` the `[a]` screen can edit.
+- **Jobs and presets v2** (`# === JOBS ===`): a preset is `{"schema": 2,
+  "job": ...}` PLUS the v1 `last_*` snapshot made from the job, because
+  `~/.jxl_tools_config.json` is shared with older copies (the execution
+  copy, jxl-photo-exe) whose `--run-preset` reads only `last_*`. Every
+  replay goes through `_run_saved_session(_preset_session(p))`;
+  `job_from_session_v1`/`session_v1_from_job` are lossless (test with the
+  owner's real presets, `tests/fixtures/owner_presets_v1.json`). The last
+  job stays in the `last_*` fields.
+- **Pre-run refusals live in `_GATE_RULES`** (`_job_gates(menu, wf, path)`,
+  paths `common`/`direct`/`manifest`/`preset`), called by
+  `execute_workflow`, `_execute_manifest_workflow` and `_run_saved_session`
+  where their checks always ran. A new pre-run refusal is a rule there
+  (`tests/test_job_gates.py` fails on an inline one); the HHMM and in-place
+  confirmations stay in `_confirm_archive_mode`/`_confirm_in_place_replace`.
 
 ## Verification
 - **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").

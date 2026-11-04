@@ -1187,7 +1187,8 @@ class ConfigManager:
     def save_preset(self, name: str, session: Dict) -> None:
         from datetime import datetime
         presets = dict(self.config.presets or {})
-        presets[name] = dict(session)
+        # Schema 2 (the job) plus the v1 snapshot older copies read (JOBS).
+        presets[name] = _preset_v2(dict(session))
         presets[name]['saved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.config.presets = presets
         self.save_config()
@@ -2218,23 +2219,36 @@ def _resize_display(advanced: Dict) -> str:
             + (" (upscale allowed)" if advanced.get('allow_upscale') else ""))
 
 
-def _ask_output_shaping(workflow: Dict) -> None:
-    """Step 6 helper: the resize/sharpening questions.
+def _shaping_text(adv: Dict) -> str:
+    """'long 2048, screen' — the resize/sharpening recipe in a few words."""
+    bits = []
+    if adv.get('resize_mode'):
+        v = adv.get('resize_value')
+        bits.append(f"{adv['resize_mode']} {v:g}" if isinstance(v, float) else
+                    f"{adv['resize_mode']} {v}")
+        if adv.get('allow_upscale'):
+            bits.append("upscale")
+    if (adv.get('sharpen') or 'none') != 'none':
+        bits.append(f"sharpen {adv['sharpen']}")
+    return ", ".join(bits) if bits else "none"
+
+
+def _ask_output_shaping(workflow: Dict, ui: "Optional[UI]" = None) -> None:
+    """The resize/sharpening questions ('review.resize', 'review.resize_value',
+    'review.upscale', 'review.sharpen'), through `ui` (PlainUI when none is
+    given: the same input() prompts as before). Every answer starts from
+    "none": the questions set the whole recipe again.
 
     Fills advanced_options['resize_mode'/'resize_value'/'allow_upscale'/
     'sharpen']; "none" CLEARS all of them, so an answer from an earlier pass
-    through the step can never ride along into the command."""
+    can never ride along into the command."""
+    if ui is None:
+        ui = RichUI() if (RICH_AVAILABLE and console) else PlainUI()
     _adv = workflow.setdefault('advanced_options', {})
-    _rich = RICH_AVAILABLE and console
-
-    if _rich:
-        _mode = Prompt.ask("Resize", choices=["none", "long", "short", "percent"],
-                           default="none")
-    else:
-        _mode = input("Resize (none/long/short/percent) [none]: ").strip().lower() or "none"
-        if _mode not in ("none", "long", "short", "percent"):
-            _mode = "none"
-
+    _mode = ui.choose("review.resize", "Resize",
+                      [("none", "no resize"), ("long", "long edge in pixels"),
+                       ("short", "short edge in pixels"), ("percent", "scale in percent")],
+                      "none")
     if _mode == "none":
         for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
             _adv.pop(_k, None)
@@ -2244,63 +2258,43 @@ def _ask_output_shaping(workflow: Dict) -> None:
                  "percent": "Scale in percent"}[_mode]
         # The same domain the manifest's Resize column enforces
         # (_MANIFEST_RESIZE_RE): a percent must be finite and > 0 (float()
-        # happily parses 'nan' and 'inf'), an edge must be a positive
-        # integer. An out-of-domain NUMBER gets a re-prompt; unparseable text
-        # in the plain UI keeps the old "never guess a size" disable.
+        # happily parses 'nan' and 'inf'), an edge a positive integer. An
+        # out-of-domain NUMBER is asked again; text that is not a number
+        # disables the resize: never guess a size (a typo must not become a
+        # 1 px output).
         while True:
-            if _rich:
-                try:
-                    if _mode == "percent":
-                        _value = float(Prompt.ask(_what, default="100"))
-                    else:
-                        _value = int(IntPrompt.ask(_what))
-                except ValueError:
-                    print("Invalid number — try again.")
-                    continue
-            else:
-                _raw = input(f"{_what}: ").strip()
-                try:
-                    _value = float(_raw) if _mode == "percent" else int(_raw)
-                except ValueError:
-                    # Never guess a size: a typo must not become a 1 px output.
-                    print("Invalid value — resize disabled for this run.")
-                    _mode, _value = "none", None
-                    break
+            _raw = ui.ask_text("review.resize_value", _what, "100" if _mode == "percent" else "")
+            try:
+                _value = float(_raw) if _mode == "percent" else int(_raw)
+            except (TypeError, ValueError):
+                ui.line("Invalid value — resize disabled for this run.")
+                _mode, _value = "none", None
+                break
             if _mode == "percent":
-                _ok = (_value == _value
-                       and _value not in (float("inf"), float("-inf"))
+                _ok = (_value == _value and _value not in (float("inf"), float("-inf"))
                        and _value > 0)
             else:
                 _ok = _value > 0
             if _ok:
                 break
-            print("Must be a positive (and finite) number — try again.")
+            ui.line("Must be a positive (and finite) number — try again.")
         if _mode == "none":
             for _k in ('resize_mode', 'resize_value', 'allow_upscale'):
                 _adv.pop(_k, None)
         else:
             _adv['resize_mode'] = _mode
             _adv['resize_value'] = _value
-            if _rich:
-                _up = Confirm.ask("Allow upscale (enlarge images smaller than the "
-                                  "target)?", default=False)
-            else:
-                _up = input("Allow upscale? [y/N]: ").strip().lower().startswith("y")
-            if _up:
+            if ui.confirm("review.upscale", "Allow upscale (enlarge images smaller than the "
+                          "target)?", False):
                 _adv['allow_upscale'] = True
             else:
                 _adv.pop('allow_upscale', None)
             if _mode == "percent" and _value > 100 and not _adv.get('allow_upscale'):
-                print("WARNING: a percentage above 100 upscales; the child refuses it "
-                      "without --allow-upscale.")
-
-    if _rich:
-        _sharpen = Prompt.ask("Output sharpening", choices=["none", "screen", "print"],
-                              default="none")
-    else:
-        _sharpen = input("Output sharpening (none/screen/print) [none]: ").strip().lower() or "none"
-        if _sharpen not in ("none", "screen", "print"):
-            _sharpen = "none"
+                ui.line("WARNING: a percentage above 100 upscales; the child refuses it "
+                        "without --allow-upscale.")
+    _sharpen = ui.choose("review.sharpen", "Output sharpening",
+                         [("none", "none"), ("screen", "screen"), ("print", "print")],
+                         "none")
     if _sharpen == "none":
         _adv.pop('sharpen', None)
     else:
@@ -2803,14 +2797,17 @@ REGISTRY: Tuple[Opt, ...] = (
         "D50 patch", "ICC D50 white-point patch.", choices=('on', 'off', 'auto'),
         legacy_key="advanced.d50_patch"),
     Opt("modular", "--modular", _TIFF2JXL, "value", "performance", "expert",
-        "Modular mode", "Force cjxl's modular mode (only 'on' is passed).",
-        choices=('on', 'off'),
-        value=lambda c: 'on' if c.advanced.get('modular') == 'on' else None),
+        "Modular mode", "Force the Modular encoder for lossy output — screenshots and "
+        "graphics only: on photos, equal quality, bigger files, 20-100x slower.",
+        choices=('on', 'off'), legacy_key="advanced.modular"),
     Opt("encode_tag", "--encode-tag", _TIFF2JXL, "value", "metadata", "advanced",
         "Encode record", "Where the cjxl d=/e= record is written.",
         choices=('xmp', 'software', 'off'), legacy_key="advanced.encode_tag"),
     Opt("multipage_mode", "--multipage-mode", _TIFF2JXL, "value", "multipage", "advanced",
-        "Multi-page TIFFs", "What happens to the pages after the first.",
+        "Multi-page TIFFs", "What happens to the pages after the first: split = one "
+        "JXL per page, thumbnails per the next option (the shipped setting); split_all = "
+        "every page, thumbnails too; skip = leave multi-page TIFFs alone; ignore = encode "
+        "page 0 only, DROP the rest (an IR page of a film scan included).",
         choices=('ignore', 'skip', 'split', 'split_all'),
         legacy_key="advanced.multipage_mode"),
     Opt("thumbnail_mode", "--thumbnail-mode", _TIFF2JXL, "value", "multipage", "advanced",
@@ -3043,8 +3040,8 @@ NOT_OFFERED: Dict[str, str] = {
 MAINTENANCE_FLAGS: Dict[str, str] = {
     "jxl_jpeg_transcoder:--repair-jbrd": "repair_jbrd_flow",
     "jxl_recompressor:--refresh-explorer-thumbnails": "explorer_thumbnail_flow",
-    "jxl_tiff_encoder:--restamp-moved": "restamp_flow (menu R)",
-    "jxl_tiff_encoder:--clear-icc-cache": "clear_icc_cache_flow (menu C)",
+    "jxl_tiff_encoder:--restamp-moved": "restamp_flow (menu 5)",
+    "jxl_tiff_encoder:--clear-icc-cache": "clear_icc_cache_flow (menu 8)",
 }
 
 
@@ -3412,6 +3409,429 @@ def _write_overlay_file(path: Path, data: Dict) -> None:
 # === END OF SCRIPT SETTINGS OVERLAY ==========================================
 
 
+# === JOBS ====================================================================
+#
+# A Job is one run, described by what was CHOSEN for it (task, folder, mode,
+# options). Presets are saved as {"schema": 2, "job": {...}} and ALSO carry
+# the old last_* snapshot generated from the job: the settings file is shared
+# with older copies of the toolkit (an execution copy, the Windows program)
+# whose --run-preset reads only the last_* fields. The last job stays in the
+# last_* fields for the same reason; ConfigManager.last_job() reads it as a
+# Job. Every replay goes through _run_saved_session with the v1 snapshot of
+# the job, so a preset replays exactly the command line it did before.
+
+# (id, label, origin, dest, conversion types offered — the first is the default)
+TASKS: Tuple[Tuple[str, str, str, str, Tuple[str, ...]], ...] = (
+    ("archive_tiff", "Archive TIFFs as JXL masters", "tiff", "jxl",
+     ("jxl_tiff_encoder", "jxl_tiff_encoder_lossless")),
+    ("restore_tiff", "Restore TIFFs from JXL masters", "jxl", "tiff",
+     ("jxl_tiff_decoder",)),
+    ("derive_jxl", "Make smaller or resized JXL copies", "jxl", "jxl",
+     ("jxl_recompress",)),
+    ("export_jpeg", "Export JPEGs for sharing (lossy)", "jxl", "jpeg",
+     ("jxl_to_jpeg_force", "jxl_to_jpeg_auto")),
+    ("export_png", "Export PNGs", "jxl", "png", ("jxl_to_png",)),
+    ("archive_jpeg", "Archive JPEGs losslessly (bit-exact)", "jpeg", "jxl",
+     ("transcode_lossless",)),
+    ("recover_jpeg", "Get the original JPEGs back (bit-exact)", "jxl", "jpeg",
+     ("jxl_to_jpeg_lossless", "jxl_to_jpeg_auto")),
+    ("reencode_jpeg", "Re-encode JPEGs lossy", "jpeg", "jxl", ("convert_lossy",)),
+)
+_TASK_BY_ID = {t[0]: t for t in TASKS}
+
+
+def _task_of(origin: Optional[str], dest: Optional[str], conv: Optional[str]) -> str:
+    """The TASKS id of an (origin, dest, conversion type), or "custom".
+    jxl_to_jpeg_auto (lossless when the JXL can rebuild its JPEG, lossy
+    otherwise) counts as "recover_jpeg": the old menu offered it first."""
+    if conv == "jxl_to_jpeg_auto":
+        return "recover_jpeg"
+    for tid, _label, o, d, convs in TASKS:
+        if o == origin and d == dest and conv in convs:
+            return tid
+    return "custom"
+
+
+@dataclass
+class Job:
+    task: str
+    source: Optional[str] = None
+    dest: Optional[str] = None
+    mode: int = 0
+    options: Dict[str, Any] = field(default_factory=dict)
+    expert_flags: Optional[str] = None
+    manifest_path: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"task": self.task, "source": self.source, "dest": self.dest,
+                "mode": self.mode, "options": dict(self.options),
+                "expert_flags": self.expert_flags, "manifest_path": self.manifest_path}
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "Job":
+        """A Job from its saved form; ValueError on anything else (a hand edit)."""
+        if not isinstance(d, dict) or not isinstance(d.get("task"), str):
+            raise ValueError("not a job")
+        opts = d.get("options") or {}
+        if not isinstance(opts, dict):
+            raise ValueError("options is not an object")
+        mode = d.get("mode", 0)
+        if isinstance(mode, bool) or not isinstance(mode, int):
+            raise ValueError("mode is not a whole number")
+        for key in ("source", "expert_flags"):
+            if d.get(key) is not None and not isinstance(d.get(key), str):
+                raise ValueError(f"{key} is not text")
+        for key in ("dest", "manifest_path"):
+            if d.get(key) is not None and not isinstance(d.get(key), str):
+                raise ValueError(f"{key} is not text")
+        return cls(task=d["task"], source=d.get("source"), dest=d.get("dest"),
+                   mode=mode, options=dict(opts), expert_flags=d.get("expert_flags"),
+                   manifest_path=d.get("manifest_path"))
+
+
+# The v1 fields a Job keeps outside `options` (every other last_* goes there).
+_JOB_OWN_FIELDS = ("last_input_dir", "last_output_mode", "last_expert_flags",
+                   "last_manifest_path")
+
+
+def job_from_session_v1(session: Dict) -> Job:
+    """The Job of a v1 snapshot (the last_* fields of the config, or a v1
+    preset). Lossless: session_v1_from_job gives every non-None last_* back."""
+    opts = {k[len("last_"):]: v for k, v in session.items()
+            if k.startswith("last_") and v is not None and k not in _JOB_OWN_FIELDS}
+    mode = _session_int(session, "last_output_mode", 0)
+    mc = session.get("last_mode_config") if isinstance(session.get("last_mode_config"), dict) else {}
+    # A mode stored as text ("7") is kept as it was, so the way back is exact.
+    if session.get("last_output_mode") is not None:
+        opts["_output_mode_raw"] = session.get("last_output_mode")
+    return Job(task=_task_of(session.get("last_origin_format"),
+                             session.get("last_dest_format"),
+                             session.get("last_conversion_type")),
+               source=session.get("last_input_dir"),
+               dest=(mc or {}).get("output_dir") if mode == 2 else None,
+               mode=mode, options=opts,
+               expert_flags=session.get("last_expert_flags"),
+               manifest_path=session.get("last_manifest_path"))
+
+
+def session_v1_from_job(job: Job) -> Dict:
+    """The v1 snapshot (last_* fields) of a Job — what _run_saved_session and
+    older copies of the toolkit read."""
+    out: Dict[str, Any] = {}
+    for k, v in (job.options or {}).items():
+        if k.startswith("_") or v is None:
+            continue
+        out[f"last_{k}"] = v
+    if job.source is not None:
+        out["last_input_dir"] = job.source
+    raw_mode = (job.options or {}).get("_output_mode_raw")
+    out["last_output_mode"] = raw_mode if raw_mode is not None else str(job.mode)
+    if job.expert_flags is not None:
+        out["last_expert_flags"] = job.expert_flags
+    if job.manifest_path is not None:
+        out["last_manifest_path"] = job.manifest_path
+    if job.mode == 2 and job.dest:
+        mc = dict(out.get("last_mode_config") or {})
+        mc["output_dir"] = job.dest
+        out["last_mode_config"] = mc
+    if job.task in _TASK_BY_ID and "last_origin_format" not in out:
+        _tid, _label, origin, dest, convs = _TASK_BY_ID[job.task]
+        out["last_origin_format"], out["last_dest_format"] = origin, dest
+        out.setdefault("last_conversion_type", convs[0])
+    return out
+
+
+def _preset_v2(session: Dict) -> Dict:
+    """The saved form of a preset: the job, plus the v1 snapshot generated
+    from it (older copies of the toolkit read only that)."""
+    job = job_from_session_v1(session)
+    return {"schema": 2, "job": job.to_dict(), **session_v1_from_job(job)}
+
+
+def _preset_session(preset: Dict) -> Dict:
+    """The v1 snapshot to replay for a saved preset, v1 or v2. A v2 preset's
+    job wins over its last_* copy; a job that cannot be read falls back to the
+    copy, with a warning (a hand edit)."""
+    if not isinstance(preset, dict):
+        return {}
+    if preset.get("schema") == 2 and "job" in preset:
+        try:
+            return session_v1_from_job(Job.from_dict(preset["job"]))
+        except ValueError as e:
+            print(f"WARNING: this preset's job cannot be read ({e}); using its "
+                  f"saved settings instead.")
+    return {k: v for k, v in preset.items() if k.startswith("last_")}
+
+# === END OF JOBS =============================================================
+
+
+# === JOB GATES ===============================================================
+#
+# The refusals made before a run, in ONE ordered table for the three paths
+# that start one: "common" (every run, before the manifest dispatch),
+# "direct" (a folder run), "manifest" (a CSV; needs the resolved rows) and
+# "preset" (an unattended --run-preset). Each rule prints its own message
+# and returns True when it refuses; a rule may also only print a note. The
+# HHMM and in-place confirmations stay in _confirm_archive_mode /
+# _confirm_in_place_replace, asked by the paths after the gates.
+
+
+def _gate_ambiguous_delete_flags(menu, wf, ctx) -> bool:
+    # A delete flag the child's argparse rejects cannot run: it exits 2
+    # ("ambiguous option", or an explicit argument on a store_true flag)
+    # before the child does anything. Caught ahead of every gate, so the user
+    # is not charged an HHMM token for a doomed run.
+    _amb = _flags_ambiguous_delete(wf.get('expert_flags'))
+    if _amb:
+        menu._print_error(
+            f"Expert flag {_amb!r} cannot run: the child scripts reject it (it is "
+            f"an ambiguous abbreviation of --delete-source / --delete-skipped / "
+            f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
+            f"Spell the flag out in full, with no value.")
+        return True
+    return False
+
+
+def _gate_expert_flags_parse(menu, wf, ctx) -> bool:
+    _xprob = _expert_flags_problem(wf.get('origin_format'), wf.get('dest_format'),
+                                   wf.get('expert_flags'))
+    if _xprob:
+        menu._print_error(f"Expert flags cannot run: {_xprob}. Nothing was started; "
+                          f"fix or remove them.")
+        return True
+    return False
+
+
+def _gate_registry_rules(menu, wf, ctx) -> bool:
+    _rule = _registry_rule_problem(wf)
+    if _rule:
+        menu._print_error(f"These options cannot run together: {_rule}. Nothing was "
+                          f"started; change them on the summary's options screen.")
+        return True
+    return False
+
+
+def _gate_mode_in_expert_flags(menu, wf, ctx) -> bool:
+    _mode_flag = _flags_set_mode(wf.get('expert_flags'))
+    if _mode_flag:
+        menu._print_error(
+            f"Expert flag {_mode_flag!r} cannot run: the mode is chosen in the "
+            f"wizard (or the manifest's Mode column), and every check before the "
+            f"run — in-place and delete confirmations, collisions, counts — uses "
+            f"that one. Remove it from the expert flags and pick the mode there.")
+        return True
+    return False
+
+
+def _note(text: str, prefix: str = "") -> None:
+    if RICH_AVAILABLE and console:
+        console.print(f"[yellow]{_rich_safe(text)}[/yellow]")
+    else:
+        print(f"{prefix}{text}")
+
+
+def _gate_direct_derivatives(menu, wf, ctx) -> bool:
+    """Derivatives (colour conversion, resize, sharpening) and output
+    renaming have no in-place form, and a derivative never deletes; the
+    degraded decodes, the lossy decode (T-B) and the lossless recovery's
+    rename follow. Refused before the HHMM token is charged for a run the
+    child would reject with exit 2."""
+    origin, dest = wf['origin_format'], wf['dest_format']
+    _adv_pre = wf.get('advanced_options') or {}
+    _shaping_pre = _has_derivative_options(_adv_pre)
+    _delete_pre = bool(_adv_pre.get('delete_source')
+                       or _flags_request_delete(wf.get('expert_flags')))
+    _conv_pre = wf.get('conversion_type', '')
+    if origin == 'jxl' and dest == 'jxl':
+        if _shaping_pre:
+            if wf.get('mode') in (0, 8):
+                menu._print_error("Derivatives (colour conversion/resize/sharpening) "
+                                  "cannot run in place (modes 0/8) — pick mode 1-7.")
+                return True
+            if _delete_pre:
+                menu._print_error("A derivative never deletes its source — drop the "
+                                  "delete option.")
+                return True
+        if _adv_pre.get('rename_from') and wf.get('mode') in (0, 8):
+            menu._print_error("--rename-from cannot be used in place (modes 0/8): the "
+                              "renamed file would sit beside its source and be "
+                              "re-processed as a new input.")
+            return True
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
+            and _shaping_pre and _delete_pre):
+        # Same rule for the transcoder's decode direction: a resized or
+        # sharpened JPEG/PNG is a derivative, and the child refuses
+        # --delete-source with the resize/sharpening flags.
+        menu._print_error("Resize/sharpening write a derivative that never deletes "
+                          "its source — drop the delete option.")
+        return True
+    if origin == 'jxl' and dest == 'tiff' and _delete_pre:
+        # W4 (2026-10-08 audit): a degraded decode is not a copy of the master.
+        if _adv_pre.get('none'):
+            menu._print_error("Decode mode 'none' writes no colour profile and no "
+                              "XMP/IPTC — the TIFF is not a copy of the master, so "
+                              "it cannot delete the JXLs. Drop the delete option "
+                              "(or pick another decode mode).")
+            return True
+        if str(_bit_depth_or_default(wf, 'tiff')) == '8' or _adv_pre.get('basic'):
+            _note("Bit depth 8 / decode mode 'basic' makes a degraded copy: the "
+                  "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
+                  "whose real profile lives in XMP.")
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
+            and wf.get('icc_profile') and _delete_pre):
+        # W6 (2026-10-08 audit): a colour conversion is a derivative too.
+        menu._print_error("Colour conversion (Convert to sRGB) writes a derivative "
+                          "that never deletes its source — drop the delete option "
+                          "(or the conversion).")
+        return True
+    # T-B: a lossy decode is not a copy of the master (the transcoder exits 2
+    # on the same pair).
+    _never = _lossy_decode_never_deletes(wf) if _delete_pre else None
+    if _never:
+        menu._print_error(f"This run cannot delete its sources: {_never}. Drop the "
+                          f"delete option.")
+        return True
+    if _delete_pre and origin == 'jxl' and _conv_pre == 'jxl_to_jpeg_auto':
+        _note("Delete with the automatic JXL → JPEG: only JPEG archives "
+              "recovered bit for bit delete their JXL; the JXLs converted "
+              "lossy are kept.")
+    # --rename-from on the lossless JXL->JPEG recovery is impossible: the
+    # recovered JPEG keeps the original file name (W2-1a).
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and _conv_pre == 'jxl_to_jpeg_lossless' and _adv_pre.get('rename_from')):
+        menu._print_error("A bit-exact JPEG reconstruction keeps the "
+                          "original file names — --rename-from does not "
+                          "apply to the lossless JXL→JPEG recovery. To "
+                          "rename, use a manifest row with the lossy "
+                          "conversion (RenameFrom column).")
+        return True
+    # OutputICC is ignored on the lossless path: warn, don't refuse.
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and _conv_pre == 'jxl_to_jpeg_lossless' and _adv_pre.get('output_icc')):
+        _note("OutputICC is ignored by a bit-exact JPEG reconstruction "
+              "— the recovered JPEG keeps the original bytes, "
+              "colour included.", prefix="WARNING: ")
+    # A direct JXL -> JPEG/PNG run does not pass --rename-from (S4 of the
+    # 261103 review): said out loud instead of dropped in silence.
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and _conv_pre in _DECODE_LOSSY_CONVERSIONS and _adv_pre.get('rename_from')):
+        _note("--rename-from is not passed on a direct JXL → JPEG/PNG run "
+              "(the value comes from a JXL → JXL setting or a hand-edited "
+              "preset): the outputs keep their names. Use a manifest "
+              "RenameFrom column to rename them.", prefix="WARNING: ")
+    return False
+
+
+def _gate_manifest_derivatives(menu, wf, ctx) -> bool:
+    """The derivative rules per manifest ROW (a column can make one row a
+    derivative where the wizard's answer made none, or vice versa): only the
+    rows that combine a derivative with a delete or an in-place layout are
+    refused, before anything is charged or written."""
+    origin, dest = ctx['origin'], ctx['dest']
+    advanced = ctx['advanced']
+    row_effs = ctx['row_effs']
+    resolved_entries = ctx['resolved_entries']
+    _derived_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs)
+                     if _has_derivative_options(_a)]
+    _rename_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs) if _a.get('rename_from')]
+    _manifest_delete = bool(advanced.get('delete_source')
+                            or _flags_request_delete(wf.get('expert_flags')))
+    if origin == 'jxl' and dest == 'jxl' and (_derived_rows or _rename_rows):
+        if _derived_rows and _manifest_delete:
+            menu._print_error("A derivative (colour conversion/resize/sharpening) "
+                              "never deletes its source — drop the delete option "
+                              f"(derivative row(s): {', '.join(map(str, _derived_rows))}).")
+            return True
+        # resolved_entries, NOT manifest_entries: a legacy row (no Mode cell)
+        # arrives as None, which _derivative_in_place_rows never flags.
+        _in_place = set()
+        for _i, _e in enumerate(resolved_entries):
+            if _derivative_in_place_rows([_e]):
+                _in_place.add(_i + 1)
+        _bad = sorted(_in_place & (set(_derived_rows) | set(_rename_rows)))
+        if _bad:
+            menu._print_error(f"Derivatives (colour conversion/resize/sharpening) and "
+                              f"--rename-from cannot run in place, and manifest "
+                              f"row(s) {', '.join(map(str, _bad))} would (mode 8, or "
+                              f"mode 0 with Destination = Source). Give them another "
+                              f"mode (1-7) or a different Destination:")
+            for _n in _bad[:5]:
+                s_, d_, m_ = resolved_entries[_n - 1]
+                print(f"  row {_n}, mode {m_}: {s_}")
+            if len(_bad) > 5:
+                print(f"  ... and {len(_bad) - 5} more")
+            return True
+    if (origin == 'jxl' and dest in ('jpeg', 'png')
+            and wf.get('conversion_type') in
+                ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
+            and _manifest_delete):
+        # Resize/sharpening rows with a delete are refused up front (an
+        # OutputICC row alone only loses its delete, in _policy_delete).
+        _shape_rows = [i + 1 for i, (_w, _a) in enumerate(row_effs)
+                       if _a.get('resize_mode') or (_a.get('sharpen') or 'none') != 'none']
+        if _shape_rows:
+            menu._print_error("Resize/sharpening write a derivative that never deletes "
+                              "its source — remove the delete option or move "
+                              f"row(s) {', '.join(map(str, _shape_rows))} to a separate "
+                              "manifest without it.")
+            return True
+    return False
+
+
+def _gate_preset_unattended(menu, wf, ctx) -> bool:
+    """A destructive preset cannot run unattended: the delete gates ask for an
+    HHMM token nobody can type, and skipping them would let a scheduled task
+    delete originals on its own. Three ways a stored run reaches a deletion
+    are checked: delete_source in ANY mode, --delete-source in the expert
+    flags, and a JXL -> JXL run in modes 0/8 (it replaces the sources in
+    place: the recompressor's confirmation would read an EOF stdin)."""
+    if ctx.get('dry_run'):
+        return False
+    session = ctx['session']
+    _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
+    _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
+    _in_place_recompress = (ctx['origin'] == 'jxl' and ctx['dest'] == 'jxl'
+                            and ctx['mode'] in (0, 8))
+    if _flag_delete or _adv_delete or _in_place_recompress:
+        why = ("replaces the source JXLs in place"
+               if _in_place_recompress and not (_flag_delete or _adv_delete)
+               else "deletes source files "
+                    f"({'--delete-source in expert flags' if _flag_delete else 'delete_source is on'})")
+        menu._print_error(
+            f"This preset {why}. "
+            "That confirmation cannot be given unattended - run it from "
+            "the menu, or add --dry-run to simulate it here.")
+        return True
+    return False
+
+
+# (name, paths, rule). Order matters: a path runs its rules top to bottom
+# and stops at the first refusal.
+_GATE_RULES: Tuple[Tuple[str, frozenset, Callable], ...] = (
+    ("ambiguous_delete_flags", frozenset({"common"}), _gate_ambiguous_delete_flags),
+    ("expert_flags_parse", frozenset({"common"}), _gate_expert_flags_parse),
+    ("registry_rules", frozenset({"common"}), _gate_registry_rules),
+    ("mode_in_expert_flags", frozenset({"common"}), _gate_mode_in_expert_flags),
+    ("direct_derivatives", frozenset({"direct"}), _gate_direct_derivatives),
+    ("manifest_derivatives", frozenset({"manifest"}), _gate_manifest_derivatives),
+    ("preset_unattended", frozenset({"preset"}), _gate_preset_unattended),
+)
+
+
+def _job_gates(menu, workflow: Dict, path: str, **ctx) -> bool:
+    """Run the _GATE_RULES of `path` in order; True = refused (the rule has
+    printed why). Every path that starts a run calls it at the point where
+    its checks always ran, so the order of the messages is the old one."""
+    for _name, paths, rule in _GATE_RULES:
+        if path in paths and rule(menu, workflow, ctx):
+            return True
+    return False
+
+# === END OF JOB GATES ========================================================
+
+
 class InteractiveMenu:
     def __init__(self, config_manager: ConfigManager,
                  dependency_checker: DependencyChecker):
@@ -3446,9 +3866,10 @@ class InteractiveMenu:
         """Display main menu - NO DEFAULT"""
         options = []
 
+        options.append(("", "CONVERT", None))
         if has_last_session:
             last_info = f"({self.config.config.last_output_mode or 'unknown'})"
-            options.append(("1", "New workflow", True))
+            options.append(("1", "New job: archive, restore, export, recompress...", True))
             # A manifest workflow is repeatable as long as its CSV is still
             # there — the repeat re-reads the file. Offering an entry whose CSV
             # was deleted or moved would only dead-end at the confirmation, so
@@ -3468,31 +3889,33 @@ class InteractiveMenu:
             if _last_is_manifest:
                 saved_manifest = self.config.config.last_manifest_path
                 if saved_manifest and Path(saved_manifest).exists():
-                    options.append(("2", f"Repeat last workflow (manifest: {Path(saved_manifest).name})", True))
+                    options.append(("2", f"Repeat last job (manifest: {Path(saved_manifest).name})", True))
                 else:
-                    options.append(("2", "Repeat last workflow [manifest CSV no longer available]", False))
+                    options.append(("2", "Repeat last job [manifest CSV no longer available]", False))
             else:
-                options.append(("2", f"Repeat last workflow {last_info}", True))
+                options.append(("2", f"Repeat last job {last_info}", True))
         else:
-            options.append(("1", "New workflow", True))
-            options.append(("2", "Repeat last workflow (none saved)", False))
+            options.append(("1", "New job: archive, restore, export, recompress...", True))
+            options.append(("2", "Repeat last job (none saved)", False))
 
         preset_count = len(self.config.config.presets or {})
         preset_label = (f"Presets ({preset_count} saved)" if preset_count
-                        else "Presets (save the last workflow under a name)")
+                        else "Presets (save a job under a name)")
         options.extend([
-            ("3", "Check dependencies again", True),
-            ("4", "Edit default settings", True),
-            ("5", "Reset all settings", True),
-            ("6", "Move settings file", True),
-            ("7", preset_label, True),
-            ("8", "Repair JPEG->JXL files (jbrd recovery, EXIF for IrfanView)", True),
-            ("9", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
-            ("R", "Renamed or moved folders: fix the masters' path records", True),
-            ("C", "Reset the encoder's ICC test cache", True),
-            ("S", "Script settings: the scripts' own defaults, without editing them", True),
+            ("3", preset_label, True),
+            ("4", "Folder list (manifest): run a CSV of folders", True),
+            ("", "MAINTAIN", None),
+            ("5", "Renamed or moved folders: fix the masters' path records", True),
+            ("6", "Explorer thumbnails for existing JXLs (jxl-thumb)", True),
+            ("7", "JPEG archives (jbrd): audit, repair, EXIF for IrfanView", True),
+            ("8", "Reset the encoder's ICC test cache", True),
+            ("", "SETTINGS", None),
+            ("9", "Settings: wrapper defaults, script settings, reset, move", True),
+            ("D", "Dependencies: check again", True),
             ("0", "Exit", True),
         ])
+        # The letters menus R/C/S had in v2.22.0_beta1 still work (not shown).
+        aliases = {"R": "5", "C": "8", "S": "S"}
 
         if RICH_AVAILABLE and console:
             table = Table(show_header=False, box=None)
@@ -3501,6 +3924,9 @@ class InteractiveMenu:
             table.add_column("Status", justify="center")
 
             for key, desc, available in options:
+                if available is None:
+                    table.add_row("", f"[bold]{desc}[/bold]", "")
+                    continue
                 status_str = "" if available else "[dim](unavailable)[/dim]"
                 table.add_row(key, desc, status_str)
 
@@ -3508,22 +3934,27 @@ class InteractiveMenu:
 
             valid_choices = [o[0] for o in options if o[2]]
             while True:
-                # R and C are letters: either case is taken (Rich's own
-                # choices= check would refuse a lower-case 'r').
+                # D (and the old R/C/S) are letters: either case is taken
+                # (Rich's own choices= check would refuse a lower-case 'd').
                 choice = Prompt.ask("Select option").strip().upper()
-                if choice in valid_choices:
+                choice = aliases.get(choice, choice)
+                if choice in valid_choices or choice == "S":
                     return choice
                 console.print(f"[red]Choose one of: {', '.join(valid_choices)}[/red]")
         else:
             print("\n--- Main Menu ---")
             for key, desc, available in options:
+                if available is None:
+                    print(desc)
+                    continue
                 status_str = "" if available else " [UNAVAILABLE]"
                 print(f"[{key}] {desc}{status_str}")
 
             valid_choices = [o[0] for o in options if o[2]]
             while True:
                 choice = input("\nSelect option: ").strip().upper()
-                if choice in valid_choices:
+                choice = aliases.get(choice, choice)
+                if choice in valid_choices or choice == "S":
                     return choice
                 print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
 
@@ -3536,7 +3967,7 @@ class InteractiveMenu:
             self.__dict__['_ui'] = ui
         return ui
 
-    def _all_options_screen(self, workflow: Dict) -> None:
+    def _all_options_screen(self, workflow: Dict, flt: str = "") -> None:
         """Step 7's "all options for this job": every registry entry of this
         run's direction, grouped, with its value; the plain ones can be
         changed here (written to their slot, so the command builder and the
@@ -3547,7 +3978,6 @@ class InteractiveMenu:
         if not origin or not dest:
             return
         workflow.setdefault('extra_options', {})
-        flt = ""
         while True:
             ctx = _CmdCtx(origin, dest, workflow.get('input_dir'), None,
                           workflow.get('mode'), workflow.get('workers'), workflow,
@@ -3847,7 +4277,7 @@ class InteractiveMenu:
                                    else f"{json.dumps(new, ensure_ascii=False)} (overlay)"))
 
     def repair_jbrd_flow(self, status) -> None:
-        """Menu option 8: audit/repair jbrd JXLs whose JPEG recovery broke.
+        """Menu 7 (JPEG archives): audit/repair jbrd JXLs whose JPEG recovery broke.
 
         Thin wrapper over `jxl_jpeg_transcoder.py <folder> --repair-jbrd`: the
         repair itself already works on a copy and only replaces a file when
@@ -3907,7 +4337,7 @@ class InteractiveMenu:
             self._print_error("Repair reported files still broken — see the log above.")
 
     def explorer_thumbnail_flow(self, status) -> None:
-        """Menu option 9: Explorer thumbnails for JXLs that already exist.
+        """Menu 6: Explorer thumbnails for JXLs that already exist.
 
         Thin wrapper over `jxl_recompressor.py <folder> --refresh-explorer-thumbnails`
         (mode 0 = this folder, mode 8 = with subfolders). Nothing is
@@ -4087,267 +4517,777 @@ class InteractiveMenu:
         self.config.save_config()
         self._print_success("Settings saved!")
 
-    def run_wizard(self, status: Dict[str, bool]) -> Optional[Dict[str, Any]]:
-        """Main workflow wizard with 3-tier parameters"""
-        last_staging = self.config.config.last_staging
-        if last_staging is None:
-            last_staging = self.config.config.staging_dir
+    # === NEW JOB (delivery C): task, folder, mode, quality, review =========
 
-        workflow = {
-            'input_dir': None,
-            'origin_format': None,
-            'dest_format': None,
-            'conversion_type': None,
-            'mode': None,
-            'workers': self.config.config.last_workers or self.config.config.default_workers,
-            'quality': self.config.config.last_quality or self.config.config.default_quality,
-            'effort': self.config.config.last_effort or self.config.config.default_effort,
-            'staging': last_staging,
-            'icc_profile': None,
-            'use_ram': (self.config.config.last_use_ram
-                        if self.config.config.last_use_ram is not None
+    @staticmethod
+    def _task_unavailable(origin: str, dest: str, conv: str,
+                          status: Dict[str, bool]) -> Optional[str]:
+        """What a task needs and this PC lacks, or None (the old Steps 1-2:
+        JPEG/TIFF -> JXL need cjxl, TIFF needs tifffile, JXL needs djxl, a
+        JXL -> JXL recompression needs cjxl too)."""
+        need = []
+        if origin in ('jpeg', 'tiff') or dest == 'jxl':
+            need.append('cjxl')
+        if origin == 'jxl':
+            need.append('djxl')
+        if 'tiff' in (origin, dest):
+            need.append('tifffile')
+        missing = [n for n in need if not status.get(n)]
+        return ", ".join(missing) if missing else None
+
+    def _new_workflow(self) -> Dict[str, Any]:
+        """A run's starting state: the last job's values, else the wrapper's
+        settings, else the children's (the old wizard's defaults)."""
+        c = self.config.config
+        last_staging = c.last_staging if c.last_staging is not None else c.staging_dir
+        wf = {
+            'input_dir': None, 'origin_format': None, 'dest_format': None,
+            'conversion_type': None, 'mode': None,
+            'workers': c.last_workers or c.default_workers,
+            'quality': c.last_quality or c.default_quality,
+            'effort': c.last_effort or c.default_effort,
+            'staging': last_staging, 'icc_profile': None,
+            'use_ram': (c.last_use_ram if c.last_use_ram is not None
                         else _child_default('jxl_tiff_encoder', 'use_ram')),
-            'compression': (self.config.config.last_compression
-                            or _child_default('jxl_tiff_decoder', 'compression')),
-            # None = the child's own default; TIFF and PNG have different
-            # children, and the direction is not chosen yet
-            # (_bit_depth_or_default).
-            'bit_depth': self.config.config.last_bit_depth,
-            'add_preview': (self.config.config.last_add_preview
-                            if self.config.config.last_add_preview is not None
+            'compression': c.last_compression or _child_default('jxl_tiff_decoder', 'compression'),
+            'bit_depth': c.last_bit_depth,
+            'add_preview': (c.last_add_preview if c.last_add_preview is not None
                             else _child_default('jxl_tiff_decoder', 'add_preview')),
-            'dry_run': False,
-            'advanced_options': {},
-            'expert_flags': '',
-            'mode_config': {},
-            'auto_mode_used': False,
+            'dry_run': False, 'advanced_options': {}, 'expert_flags': '',
+            'mode_config': {}, 'auto_mode_used': False,
         }
+        wf['_from'] = {
+            'workers': 'last job' if c.last_workers else 'settings',
+            'effort': 'last job' if c.last_effort else 'settings',
+            'quality': 'last job' if c.last_quality else 'settings',
+            'staging': 'last job' if c.last_staging is not None else 'settings',
+            'use_ram': 'last job' if c.last_use_ram is not None else 'script',
+            'compression': 'last job' if c.last_compression else 'script',
+            'bit_depth': 'last job' if c.last_bit_depth else 'script',
+            'add_preview': 'last job' if c.last_add_preview is not None else 'script',
+            'overwrite_guard': 'last job' if c.last_overwrite_guard is not None else 'script',
+            'd50_patch': 'script',
+        }
+        return wf
 
-        if not self._wizard_select_origin(workflow, status):
-            return None
-        if not self._wizard_select_destination(workflow, status):
-            return None
-        if not self._wizard_select_files(workflow):
-            return None
-        if not self._wizard_select_mode(workflow):
-            return None
-        if not self._wizard_mode_specific_config(workflow):
-            return None
-        # mode_config is persisted only at the end of the wizard (in main),
-        # so cancelling mid-wizard never mutates saved state.
-        if not self._wizard_parameters_basic(workflow, status):
-            return None
-        if not self._wizard_confirm(workflow):
-            return None
-
-        return workflow
-
-    def _wizard_select_origin(self, workflow: Dict, status: Dict[str, bool]) -> bool:
-        """Step 1: Select source format - NO PNG"""
+    def _job_pick_task(self, status: Dict[str, bool]) -> Optional[str]:
+        """'job.task': what the run does. Each task is the (source, output,
+        conversion) the old Steps 1-2 picked."""
+        ui = self.ui
+        ui.section("New job — what do you want to do?")
+        keys = {}
         options = []
+        for i, (tid, label, origin, dest, convs) in enumerate(TASKS, 1):
+            why = self._task_unavailable(origin, dest, convs[0], status)
+            options.append((str(i), f"{label:42} {origin.upper()} → {dest.upper()}"
+                            + (f"   (needs {why})" if why else "")))
+            keys[str(i)] = (tid, why)
+        options.append(("0", "back"))
+        while True:
+            key = ui.choose("job.task", "Task", options, "1")
+            if key == "0":
+                return None
+            tid, why = keys[key]
+            if why:
+                ui.warn(f"This task needs {why}, which this PC does not have.")
+                continue
+            return tid
 
-        if status.get('cjxl'):
-            options.append(("1", "JPEG", ".jpg, .jpeg", True))
+    def _ask_number(self, qid: str, prompt: str, default, lo, hi, kind=float):
+        """A number from self.ui, clamped to [lo, hi]; the default on a typo."""
+        text = self.ui.ask_text(qid, prompt, f"{default:g}" if isinstance(default, float)
+                                else str(default))
+        try:
+            value = kind(text)
+        except (TypeError, ValueError):
+            self.ui.warn(f"Not a number: {text!r} — keeping {default}.")
+            return default
+        return max(lo, min(value, hi))
 
-        if status.get('tifffile'):
-            options.append(("2", "TIFF", ".tif, .tiff", True))
-        else:
-            options.append(("2", "TIFF", ".tif (requires: pip install tifffile numpy)", False))
-
-        if status.get('djxl'):
-            options.append(("3", "JXL", ".jxl", True))
-
-        if not options:
-            self._print_error("No formats available.")
-            return False
-
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Step 1: Source Format[/bold cyan]")
-            table = Table(show_header=True)
-            table.add_column("#", justify="center", style="cyan")
-            table.add_column("Format", style="green")
-            table.add_column("Extensions")
-            table.add_column("Status", style="dim")
-
-            for key, name, desc, avail in options:
-                status_text = "✓ Available" if avail else "✗ Unavailable"
-                table.add_row(key, name, desc, status_text)
-
-            console.print(table)
-
-            valid_choices = [o[0] for o in options if o[3]]
-            while True:
-                choice = Prompt.ask("Select source format", choices=valid_choices)
-                if choice:
-                    break
-        else:
-            print("\n--- Step 1: Source Format ---")
-            for key, name, desc, avail in options:
-                status_str = "" if avail else " [UNAVAILABLE]"
-                print(f"[{key}] {name:12} - {desc}{status_str}")
-
-            valid_choices = [o[0] for o in options if o[3]]
-            while True:
-                choice = input(f"\nSelect ({'/'.join(valid_choices)}): ").strip()
-                if choice in valid_choices:
-                    break
-                print("Invalid selection.")
-
-        format_map = {"1": "jpeg", "2": "tiff", "3": "jxl"}
-        workflow['origin_format'] = format_map.get(choice)
-        return True
-
-    def _wizard_select_destination(self, workflow: Dict, status: Dict[str, bool]) -> bool:
-        """Step 2: Destination"""
-        origin = workflow['origin_format']
-        options = []
-        # TIFF -> JXL entry [2] is driven by the configured default_distance
-        # (Settings), so the value the user actually shoots at is one keystroke
-        # away. Out of the box it is 0.1 and reads exactly as it always did.
-        # Computed here (not inside the TIFF branch) because the code that
-        # applies the choice further down needs the same value.
-        preferred = _sane_distance(self.config.config.default_distance)
-
-        if origin == "jpeg" and status.get('cjxl'):
-            options.append(("1", "JXL Lossless  ", "Lossless JPEG ⇌ JXL transcoding (recommended)", "transcode_lossless"))
-            options.append(("2", "JXL Lossy     ", "Lossy — JPEG→JXL encode loses quality", "convert_lossy"))
-        elif origin == "tiff" and status.get('cjxl'):
-            preferred_desc = ("Near-lossless (recommended)" if preferred == 0.1
-                              else "Your default (change in Settings)")
-            # d=0 is a DIFFERENT code path (the lossless encoder), so a user who
-            # sets 0 as their default must get that path, not a d=0 lossy run.
-            preferred_type = "jxl_tiff_encoder_lossless" if preferred == 0.0 else "jxl_tiff_encoder"
-            options.append(("1", "d=0   ", "Lossless (exact replica)", "jxl_tiff_encoder_lossless"))
-            options.append(("2", f"d={preferred:<5g}", preferred_desc, preferred_type))
-            options.append(("3", "d=1.0 ", "Visually lossless", "jxl_tiff_encoder"))
-            options.append(("4", "Custom", "Enter any value 0-15", "jxl_tiff_encoder"))
-        elif origin == "jxl" and status.get('djxl'):
-            options.append(("1", "JPEG Auto-Detect", "Auto: lossless if jbrd present, else lossy", "jxl_to_jpeg_auto"))
-            options.append(("2", "JPEG Lossless   ", "Force lossless transcoding (requires jbrd)", "jxl_to_jpeg_lossless"))
-            options.append(("3", "JPEG Lossy      ", "Force lossy conversion with quality/ICC control", "jxl_to_jpeg_force"))
-            options.append(("4", "PNG             ", "PNG with transparency", "jxl_to_png"))
-            if status.get('cjxl'):
-                options.append(("6", "JXL (smaller)   ", "Recompress JXL to a smaller JXL, metadata kept", "jxl_recompress"))
-            if status.get('tifffile'):
-                options.append(("5", "TIFF            ", "Lossless master", "jxl_tiff_decoder"))
-
-        if not options:
-            self._print_error(f"No conversions available for {origin}.")
-            return False
-
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Step 2: Destination[/bold cyan]")
-            for key, name, desc, _ in options:
-                console.print(f"[{key}] [bold]{name}[/bold] - {desc}")
-
-            valid_choices = [o[0] for o in options]
-            while True:
-                choice = Prompt.ask("Select destination", choices=valid_choices)
-                if choice:
-                    break
-        else:
-            print(f"\n\n--- Step 2: Destination ---")
-            for key, name, desc, _ in options:
-                print(f"[{key}] {name} - {desc}")
-
-            valid_choices = [o[0] for o in options]
-            while True:
-                choice = input(f"Select ({'/'.join(valid_choices)}): ").strip()
-                if choice in valid_choices:
-                    break
-
-        selected = next(o for o in options if o[0] == choice)
-        workflow['conversion_type'] = selected[3]
-
-        if origin == "tiff":
-            if choice == "1":
-                workflow['distance_choice'] = "0"
-                workflow['dest_format'] = 'jxl'
+    def _job_quality(self, workflow: Dict) -> bool:
+        """'job.quality': the one quality question a task has, asked before the
+        review (the review can change it again). Archive TIFFs: lossless /
+        your default distance / visually lossless / custom; JXL -> JXL and
+        JPEG -> JXL lossy: a distance; JPEG export: a quality."""
+        ui = self.ui
+        tid = workflow.get('_task')
+        frm = workflow.setdefault('_from', {})
+        if tid == 'archive_tiff':
+            preferred = _sane_distance(self.config.config.default_distance)
+            opts = [("1", "Lossless (d=0, an exact replica)"),
+                    ("2", f"d={preferred:g} — "
+                          + ("near-lossless (recommended)" if preferred == 0.1
+                             else "your default (change it in Settings)")),
+                    ("3", "d=1.0 — visually lossless"),
+                    ("4", "Custom distance")]
+            key = ui.choose("job.quality", "Quality", opts, "2")
+            if key == "1":
                 workflow['distance'] = 0.0
-            elif choice == "2":
-                workflow['distance_choice'] = f"{preferred:g}"
-                workflow['dest_format'] = 'jxl'
+            elif key == "2":
                 workflow['distance'] = preferred
-            elif choice == "3":
-                workflow['distance_choice'] = "1.0"
-                workflow['dest_format'] = 'jxl'
+            elif key == "3":
                 workflow['distance'] = 1.0
             else:
-                workflow['distance_choice'] = "custom"
-                workflow['dest_format'] = 'jxl'
-
-            # Custom starts from the last distance actually used, falling back to
-            # the configured default. Tested with `is not None`, never `or`:
-            # a legitimate 0.0 is falsy and would silently become 0.1.
-            last_used = self.config.config.last_distance
-            custom_default = _sane_distance(last_used, fallback=preferred) if last_used is not None else preferred
-
-            if RICH_AVAILABLE and console:
-                if choice == "4":
-                    dist_default = custom_default
-                    dist_str = Prompt.ask("Distance (0.0-15.0, lower=better)", default=f"{dist_default:g}")
-                    try:
-                        workflow['distance'] = max(0.0, min(float(dist_str), 15.0))
-                    except ValueError:
-                        workflow['distance'] = dist_default
-                custom_effort = IntPrompt.ask("Effort (1-10, higher=smaller)", default=workflow['effort'])
-                workflow['effort'] = max(1, min(custom_effort, 10))
-            else:
-                if choice == "4":
-                    dist_default = custom_default
-                    dist_str = input(f"Distance (0.0-15.0) [{dist_default:g}]: ").strip()
-                    try:
-                        workflow['distance'] = max(0.0, min(float(dist_str), 15.0)) if dist_str else dist_default
-                    except ValueError:
-                        workflow['distance'] = dist_default
-                effort_input = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                if effort_input.isdigit():
-                    workflow['effort'] = max(1, min(int(effort_input), 10))
-            # Film scans run at the encoder's own distance: say so here, where
-            # the distance is chosen, not only in the advanced options.
+                last = self.config.config.last_distance
+                start = _sane_distance(last, fallback=preferred) if last is not None else preferred
+                workflow['distance'] = self._ask_number("job.distance", "Distance (0-15, lower = better)",
+                                                        start, 0.0, 15.0)
+            workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
+                                           if workflow['distance'] == 0.0 and key != "4"
+                                           else 'jxl_tiff_encoder')
+            frm['distance'] = 'you'
             _sd = _child_scan_distance()
             try:
-                _sd_differs = _sd != "same" and float(_sd) != float(workflow.get('distance'))
+                _differs = _sd != "same" and float(_sd) != float(workflow['distance'])
             except (TypeError, ValueError):
-                _sd_differs = False
-            if _sd_differs:
-                _note = (f"Film scans use distance {_sd}"
-                         f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, "
-                         f"an IR page, or a TIFF with no Software tag and no camera EXIF "
-                         f"(the run lists those folders). Advanced options change it.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [dim]{_note}[/dim]")
-                else:
-                    print(f"  {_note}")
-        elif origin == "jpeg":
-            workflow['dest_format'] = 'jxl'
-        elif origin == "jxl":
-            if choice in ["1", "2", "3"]:
-                # Choices 1, 2, 3 = JPEG output (Auto, Lossless, Lossy)
-                workflow['dest_format'] = 'jpeg'
-            elif choice == "4":
-                workflow['dest_format'] = 'png'
-            elif choice == "5":
-                workflow['dest_format'] = 'tiff'
-            elif choice == "6":
-                # JXL -> JXL recompression (jxl_recompressor.py)
-                workflow['dest_format'] = 'jxl'
-            else:
-                workflow['dest_format'] = 'jpeg'
+                _differs = False
+            if _differs:
+                ui.line(f"  Film scans use distance {_sd}"
+                        f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, an IR "
+                        f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
+                        f"those folders). The review's options change it.")
+        elif tid == 'derive_jxl':
+            workflow['distance'] = self._ask_number(
+                "job.distance", "Target distance (0 = lossless, 1 = visually lossless, 2 = smaller)",
+                workflow.get('distance', _child_default('jxl_recompressor', 'distance')), 0.0, 15.0)
+            frm['distance'] = 'you'
+        elif tid == 'reencode_jpeg':
+            workflow['distance'] = self._ask_number(
+                "job.distance", "Distance (0 = lossless, 0.1 = near-lossless, 1 = visually lossless)",
+                workflow.get('distance', 0.5), 0.0, 15.0)
+            frm['distance'] = 'you'
+        elif tid == 'export_jpeg':
+            workflow['quality'] = int(self._ask_number(
+                "job.jpeg_quality", "JPEG quality (1-100)",
+                _workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'), 1, 100, int))
+            frm['quality'] = 'you'
         return True
 
-    def _wizard_select_files(self, workflow: Dict) -> bool:
-        """Step 3: Files"""
-        default_dir = self.config.config.last_input_dir or os.getcwd()
+    def _review_init(self, workflow: Dict, status: Dict[str, bool]) -> None:
+        """The state the old Steps 6/6A left when every question was answered
+        with Enter, so a run reviewed and started with [r] runs exactly what
+        the old wizard ran by default. The review's rows and the options
+        screen then change it in place."""
+        conv = workflow['conversion_type']
+        origin, dest = workflow['origin_format'], workflow['dest_format']
+        adv = workflow.setdefault('advanced_options', {})
+        delete_on = _step6_delete_on(workflow)
+        # Step 6, all defaults taken.
+        if conv == 'jxl_recompress':
+            workflow.setdefault('distance', _child_default('jxl_recompressor', 'distance'))
+            adv['on_downgrade'] = 'copy'
+            adv['on_regeneration'] = 'convert'
+            if workflow.get('distance') and float(workflow['distance']) > 0:
+                adv['on_scan'] = 'copy'
+            # Enter on the old colour question was "keep" and on resize/
+            # sharpen "none": both CLEARED the recipe, so an answer from an
+            # earlier pass never rode along (and none is offered in place or
+            # with [D]). The review offers it again from scratch.
+            _drop_derivative_options(adv)
+        elif conv == 'convert_lossy':
+            workflow.setdefault('distance', 0.5)
+        if (origin == 'jxl' and dest == 'jpeg'
+                and conv in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force')):
+            workflow['quality'] = _workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and conv in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')):
+            if delete_on:
+                workflow.pop('icc_profile', None)
+                _drop_derivative_options(adv)
+            elif not status.get('magick'):
+                _drop_derivative_options(adv)
+            else:
+                # Enter on the old resize/sharpen questions: "none" (cleared).
+                for _k in ('resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
+                    adv.pop(_k, None)
+        if dest == 'png':
+            workflow['bit_depth'] = int(_bit_depth_or_default(workflow, 'png'))
+        if dest == 'tiff':
+            workflow['bit_depth'] = int(_bit_depth_or_default(workflow, 'tiff'))
+            if origin == 'jxl':
+                workflow['decode_mode_asked'] = 'roundtrip'
+        workflow['dry_run'] = False
+        workflow['overwrite_mode'] = '2'
+        if not delete_on:
+            _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
+            _og_last = self.config.config.last_overwrite_guard
+            _og = _og_child if _og_last is None else bool(_og_last)
+            workflow['overwrite_guard'] = bool(_og)
+            workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
+        if origin == 'tiff' and dest == 'jxl':
+            workflow['d50_patch'] = _child_default('jxl_tiff_encoder', 'd50_patch')
+        # Step 6A, "Configure advanced options? n".
+        self._advanced_defaults(workflow)
 
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Step 3: Source Directory[/bold cyan]")
-            input_dir = Prompt.ask("Directory containing files", default=default_dir)
+    def _advanced_defaults(self, workflow: Dict) -> None:
+        """The advanced options of a run whose advanced questions were not
+        asked (the old Step 6A "no"): rebuilt from the run's own answers, the
+        last job and the children's settings. Step 6's recompressor policies
+        and derivative recipe are carried across (losing them drops the child
+        back to `ask`, a SILENT SKIP on the wrapper's pipe)."""
+        origin, dest = workflow['origin_format'], workflow['dest_format']
+        c = self.config.config
+        _prev_adv = workflow.get('advanced_options') or {}
+        advanced_options: Dict[str, Any] = {}
+        if workflow.get('overwrite_mode', '2') == "1":
+            advanced_options['overwrite'], advanced_options['sync'] = True, False
         else:
-            print(f"\n--- Step 3: Source Directory ---")
-            input_dir = input(f"Directory [{default_dir}]: ").strip() or default_dir
+            advanced_options['overwrite'], advanced_options['sync'] = False, True
+        if origin == 'tiff' and dest == 'jxl':
+            advanced_options['d50_patch'] = (workflow.get('d50_patch')
+                                             or _child_default('jxl_tiff_encoder', 'd50_patch'))
+            advanced_options['encode_tag'] = (workflow.get('encode_tag')
+                                              or _child_default('jxl_tiff_encoder', 'encode_tag'))
+            advanced_options['multipage_mode'] = (c.last_multipage_mode
+                                                  or _child_default('jxl_tiff_encoder', 'multipage_mode'))
+            advanced_options['thumbnail_mode'] = (c.last_thumbnail_mode
+                                                  or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
+            advanced_options['thumbnail_suffix'] = (c.last_thumbnail_suffix
+                                                    or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
+        elif origin == 'jxl' and dest == 'tiff':
+            advanced_options['thumbnail_handling'] = (c.last_thumbnail_handling
+                                                      or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
+            advanced_options['thumbnail_suffix'] = (c.last_thumbnail_suffix
+                                                    or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
+            _no_recon = c.last_no_reconstruct_multipage
+            advanced_options['no_reconstruct_multipage'] = (
+                bool(_no_recon) if _no_recon is not None
+                else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
+            advanced_options['depth_policy'] = (c.last_depth_policy
+                                                or _child_default('jxl_tiff_decoder', 'depth_policy'))
+        for key in ('matrix', 'basic', 'none', 'target_icc'):
+            if key in _prev_adv:
+                advanced_options[key] = _prev_adv[key]
+        # The delete decision (and its gates) taken in Step 4's [D].
+        if workflow.get('delete_source'):
+            advanced_options['delete_source'] = True
+        if workflow.get('verify_roundtrip'):
+            advanced_options['verify_roundtrip'] = True
+        if workflow.get('delete_skipped'):
+            advanced_options['delete_skipped'] = True
+        if workflow.get('provenance'):
+            advanced_options['provenance'] = workflow['provenance']
+        if workflow.get('overwrite_guard') is False:
+            advanced_options['overwrite_guard'] = False
+        if workflow.get('adopt_scan') is False:
+            advanced_options['adopt_scan'] = False
+        for _k in ('on_downgrade', 'on_regeneration', 'on_unknown', 'on_scan',
+                   'jbrd_policy', 'no_keep_smaller',
+                   'rederive_on_encode_change', 'rederive_on_lower_effort',
+                   'output_icc', 'rename_from', 'rename_to',
+                   'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
+            if _k in _prev_adv:
+                advanced_options[_k] = _prev_adv[_k]
+        workflow['advanced_options'] = advanced_options
 
-        path = Path(_strip_surrounding_quotes(input_dir)).expanduser().resolve()
+    def _review_rows(self, workflow: Dict, status: Dict[str, bool]) -> List[Tuple[str, str, str, Callable]]:
+        """(key, label, value shown, editor) of the run's essential options —
+        the questions the old Step 6 asked, each with its own rule (what is
+        offered with [D] or in place). The editors write the same keys the old
+        questions wrote."""
+        ui = self.ui
+        conv = workflow['conversion_type']
+        origin, dest = workflow['origin_format'], workflow['dest_format']
+        adv = workflow.setdefault('advanced_options', {})
+        frm = workflow.setdefault('_from', {})
+        delete_on = _step6_delete_on(workflow)
+        rows: List[Tuple[str, str, str, Callable]] = []
+
+        def yn(v):
+            return "yes" if v else "no"
+
+        def you(key):
+            frm[key] = 'you'
+
+        _conv_labels = {
+            'jxl_to_jpeg_force': "lossy (quality, colour, size)",
+            'jxl_to_jpeg_auto': "auto: bit-exact when the JXL holds a JPEG, else lossy",
+            'jxl_to_jpeg_lossless': "bit-exact only (JPEG archives)"}
+        _task = _TASK_BY_ID.get(workflow.get('_task'))
+        if _task and len(_task[4]) > 1 and origin == 'jxl' and dest == 'jpeg':
+            def _conversion(convs=_task[4]):
+                key = ui.choose("review.conversion", "Conversion",
+                                [(str(i), _conv_labels[c]) for i, c in enumerate(convs, 1)],
+                                str(convs.index(workflow['conversion_type']) + 1))
+                workflow['conversion_type'] = convs[int(key) - 1]
+                # The lossy paths take a quality; the bit-exact one does not.
+                if workflow['conversion_type'] in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force'):
+                    workflow['quality'] = _workflow_or_child(workflow, 'quality',
+                                                             'jxl_jpeg_transcoder')
+                you('conversion')
+            rows.append(("conversion", "Conversion",
+                         _conv_labels.get(workflow['conversion_type'], workflow['conversion_type']),
+                         _conversion))
+
+        if origin == 'tiff':
+            def _ram():
+                workflow['use_ram'] = ui.confirm("review.use_ram", "Use RAM for the intermediate PNG? (faster)",
+                                                 bool(workflow.get('use_ram')))
+                you('use_ram')
+            rows.append(("use_ram", "PNG in RAM", yn(workflow.get('use_ram')), _ram))
+
+        def _workers():
+            workflow['workers'] = int(self._ask_number("review.workers", "Workers (1-32)",
+                                                       workflow['workers'], 1, 32, int))
+            you('workers')
+        rows.append(("workers", "Workers", str(workflow['workers']), _workers))
+
+        if conv in ('jxl_tiff_encoder', 'jxl_tiff_encoder_lossless', 'jxl_recompress', 'convert_lossy'):
+            # Set by the quality step or _review_init; the child's own value
+            # otherwise, never a literal (AGENTS.md).
+            if workflow.get('distance') is None:
+                workflow['distance'] = _workflow_or_child(workflow, 'distance',
+                                                          _child_module(origin, dest))
+            def _distance():
+                workflow['distance'] = self._ask_number(
+                    "review.distance", "Distance (0 = lossless, 0.1 = near-lossless, "
+                    "1 = visually lossless)", workflow['distance'], 0.0, 15.0)
+                if origin == 'tiff':
+                    workflow['conversion_type'] = ('jxl_tiff_encoder_lossless'
+                                                   if workflow['distance'] == 0.0
+                                                   else 'jxl_tiff_encoder')
+                if conv == 'jxl_recompress':
+                    if workflow['distance'] > 0:
+                        adv.setdefault('on_scan', 'copy')
+                    else:
+                        adv.pop('on_scan', None)
+                you('distance')
+            rows.append(("distance", "Distance", f"{float(workflow['distance']):g}", _distance))
+        if not (origin == 'jxl' and dest == 'tiff'):
+            def _effort():
+                workflow['effort'] = int(self._ask_number("review.effort", "Effort (1-10, higher = smaller)",
+                                                          workflow['effort'], 1, 10, int))
+                you('effort')
+            rows.append(("effort", "Effort", str(workflow['effort']), _effort))
+
+        if conv == 'jxl_recompress':
+            for key, label, text in (
+                    ("on_downgrade", "Already good enough",
+                     "If a file's recorded settings are already as good as or better than this "
+                     "target (re-encoding cannot gain anything)"),
+                    ("on_regeneration", "Recompressed before",
+                     "If a file was already lossy-recompressed once (generation >= 2) and this "
+                     "run would add another generation (each adds ~0.2-0.6 dB of loss)"),
+                    ("on_scan", "Film scans",
+                     "If a file is a film scan (a lossy re-encode loses what only a new scan "
+                     "brings back)")):
+                if key == "on_scan" and not (workflow.get('distance') and float(workflow['distance']) > 0):
+                    continue
+                def _policy(key=key, text=text):
+                    ui.line(text)
+                    adv[key] = ui.choose(f"review.{key}", "copy the original / skip it / convert anyway",
+                                         [("copy", "copy the original"), ("skip", "skip it"),
+                                          ("convert", "convert anyway")], adv.get(key, 'copy'))
+                    you(key)
+                rows.append((key, label, str(adv.get(key)), _policy))
+            if workflow['mode'] in (0, 8):
+                rows.append(("derivative", "Colour/size derivative",
+                             "not in place (modes 0/8)", None))
+            elif delete_on:
+                rows.append(("derivative", "Colour/size derivative", "not with [D]", None))
+            else:
+                def _colour():
+                    target = ui.ask_text("review.output_icc", "Output colour space: keep / sRGB / "
+                                         "AdobeRGB / path to .icc", adv.get('output_icc') or "keep").strip()
+                    if target and target.lower() != "keep":
+                        adv['output_icc'] = target
+                        rf = ui.ask_text("review.rename_from", "Rename text in the output file names "
+                                         "(e.g. ProPhoto) — empty = keep names",
+                                         adv.get('rename_from') or "").strip()
+                        if rf:
+                            adv['rename_from'] = rf
+                            adv['rename_to'] = ui.ask_text("review.rename_to", "Replace it with",
+                                                           adv.get('rename_to') or "").strip()
+                        else:
+                            adv.pop('rename_from', None)
+                            adv.pop('rename_to', None)
+                    else:
+                        for _k in ('output_icc', 'rename_from', 'rename_to'):
+                            adv.pop(_k, None)
+                    you('output_icc')
+                shown = adv.get('output_icc') or "keep"
+                if adv.get('rename_from'):
+                    shown += f" (rename {adv['rename_from']} → {adv.get('rename_to') or ''})"
+                rows.append(("output_icc", "Output colour space", shown, _colour))
+                rows.append(("shaping", "Resize / sharpen", _shaping_text(adv),
+                             lambda: (_ask_output_shaping(workflow, ui), you('shaping'))))
+
+        def _staging():
+            cur = workflow.get('staging') or ""
+            text = ui.ask_text("review.staging", "Staging folder ('none' = system default)", cur).strip()
+            if text.lower() in ('none', 'system default'):
+                workflow['staging'] = None
+            elif text:
+                workflow['staging'] = _strip_surrounding_quotes(text)
+            you('staging')
+        rows.append(("staging", "Staging folder", workflow.get('staging') or "system default", _staging))
+
+        if origin == 'jxl' and dest == 'jpeg' and conv in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force'):
+            def _quality():
+                workflow['quality'] = int(self._ask_number("review.quality", "JPEG quality (1-100)",
+                                                           workflow['quality'], 1, 100, int))
+                you('quality')
+            rows.append(("quality", "JPEG quality", str(workflow.get('quality')), _quality))
+        if (origin == 'jxl' and dest in ('jpeg', 'png')
+                and conv in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')):
+            if delete_on:
+                rows.append(("derivative", "sRGB / resize / sharpen", "not with [D]", None))
+            elif status.get('magick'):
+                def _srgb():
+                    if ui.confirm("review.srgb", "Convert to sRGB?", bool(workflow.get('icc_profile'))):
+                        workflow['icc_profile'] = 'sRGB'
+                    else:
+                        workflow['icc_profile'] = None
+                    you('icc_profile')
+                rows.append(("icc_profile", "Convert to sRGB", yn(workflow.get('icc_profile')), _srgb))
+                rows.append(("shaping", "Resize / sharpen", _shaping_text(adv),
+                             lambda: (_ask_output_shaping(workflow, ui), you('shaping'))))
+        if dest == 'png':
+            def _png_depth():
+                workflow['bit_depth'] = int(ui.choose("review.png_depth", "PNG bit depth",
+                                                      [("8", "8 bits"), ("16", "16 bits")],
+                                                      str(workflow.get('bit_depth') or 16)))
+                you('bit_depth')
+            rows.append(("bit_depth", "PNG bit depth", str(workflow.get('bit_depth')), _png_depth))
+        if dest == 'tiff':
+            def _compression():
+                workflow['compression'] = ui.choose(
+                    "review.compression", "TIFF compression",
+                    [("zip", "zip"), ("lzw", "lzw"), ("none", "none")], workflow['compression'])
+                you('compression')
+            rows.append(("compression", "TIFF compression", str(workflow['compression']), _compression))
+
+            def _tiff_depth():
+                workflow['bit_depth'] = int(ui.choose("review.tiff_depth", "Bit depth",
+                                                      [("8", "8 bits"), ("16", "16 bits")],
+                                                      str(workflow.get('bit_depth') or 16)))
+                you('bit_depth')
+            rows.append(("bit_depth", "Bit depth", str(workflow.get('bit_depth')), _tiff_depth))
+
+            def _preview():
+                workflow['add_preview'] = ui.confirm("review.preview", "Add a JPEG preview? "
+                                                     "(faster viewing)", bool(workflow.get('add_preview')))
+                you('add_preview')
+            rows.append(("add_preview", "JPEG preview", yn(workflow.get('add_preview')), _preview))
+            if origin == 'jxl':
+                def _decode_mode():
+                    mode = ui.choose("review.decode_mode", "Decode mode",
+                                     [("roundtrip", "roundtrip (the original profile)"),
+                                      ("basic", "basic"), ("matrix", "matrix (+ target profile)"),
+                                      ("none", "none")], workflow.get('decode_mode_asked') or 'roundtrip')
+                    workflow['decode_mode_asked'] = mode
+                    for _k in ('matrix', 'basic', 'none', 'target_icc'):
+                        adv.pop(_k, None)
+                    if mode == "matrix":
+                        adv['matrix'] = True
+                        t = ui.ask_text("review.target_icc", "Target ICC (file path or sRGB, "
+                                        "empty = none)", "").strip()
+                        if t:
+                            adv['target_icc'] = t
+                    elif mode in ("basic", "none"):
+                        adv[mode] = True
+                    you('decode_mode')
+                rows.append(("decode_mode", "Decode mode",
+                             workflow.get('decode_mode_asked') or 'roundtrip', _decode_mode))
+
+        def _existing():
+            key = ui.choose("review.existing", "Existing outputs",
+                            [("2", "sync — reconvert only what is newer"), ("1", "overwrite all")],
+                            workflow.get('overwrite_mode', '2'))
+            workflow['overwrite_mode'] = key
+            adv['overwrite'], adv['sync'] = (key == "1"), (key != "1")
+            you('overwrite_mode')
+        rows.append(("existing", "Existing outputs",
+                     "overwrite all" if workflow.get('overwrite_mode') == "1" else "sync (only newer)",
+                     _existing))
+
+        if delete_on:
+            rows.append(("delete", "Delete the sources", "YES — chosen with [D] in the mode step", None))
+        else:
+            def _guard():
+                ui.line("Overwrite guard: an output records the full path of the file that made "
+                        "it. On = an output made from ANOTHER path is never overwritten (protects "
+                        "photos whose source an earlier run deleted). Off = overwrite it (logged); "
+                        "choose off if you never delete sources and you rename or move folders.")
+                og = ui.confirm("review.overwrite_guard", "Overwrite guard on?",
+                                bool(workflow.get('overwrite_guard', True)))
+                workflow['overwrite_guard'] = bool(og)
+                workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(og)
+                if og:
+                    adv.pop('overwrite_guard', None)
+                else:
+                    adv['overwrite_guard'] = False
+                you('overwrite_guard')
+            rows.append(("delete", "Delete the sources", "no ([b] back to the mode step for [D])", None))
+            rows.append(("overwrite_guard", "Overwrite guard",
+                         "on" if workflow.get('overwrite_guard', True) else "off", _guard))
+        if origin == 'tiff' and dest == 'jxl':
+            def _d50():
+                v = ui.choose("review.d50", "D50 patch", [("auto", "auto"), ("on", "on"), ("off", "off")],
+                              workflow.get('d50_patch') or 'auto')
+                workflow['d50_patch'] = v
+                adv['d50_patch'] = v
+                you('d50_patch')
+            rows.append(("d50_patch", "D50 patch", str(workflow.get('d50_patch')), _d50))
+        return rows
+
+    def _summary_info(self, workflow: Dict) -> List[str]:
+        """The run's state worth reading before it starts (the old Step 7's
+        "Config:" line): staging, delete scope and gates, guard, options,
+        expert flags, exclusions, dry run."""
+        info = []
+        if workflow.get('use_ram') and workflow.get('origin_format') == 'tiff':
+            info.append("RAM: Yes")
+        if workflow.get('icc_profile'):
+            info.append(f"ICC: {workflow['icc_profile']}")
+        if workflow.get('auto_mode_used'):
+            info.append("Auto Mode: Yes")
+        _adv = workflow.get('advanced_options') or {}
+        if _adv.get('delete_source'):
+            if workflow.get('mode') == 99:
+                info.append("DELETE SOURCE: ON (!)")
+            else:
+                _n_now = self._count_origin_files(workflow, workflow.get('mode'))
+                _o = (workflow.get('origin_format') or '').upper()
+                _cnt = (f"{_n_now} {_o} file(s) in scope" if _n_now >= 0
+                        else f"an unknown number of {_o} file(s) in scope")
+                _prev = getattr(self, '_delete_panel_count', None)
+                if (_prev is not None and _prev >= 0 and _n_now >= 0 and _prev != _n_now):
+                    _cnt += f" (the [D] panel counted {_prev} before the mode settings were known)"
+                info.append(f"DELETE SOURCE: ON (!) — {_cnt}")
+            info.append("Verify round-trip: ON" if _adv.get('verify_roundtrip')
+                        else "Verify round-trip: off (structural check only)")
+            if _adv.get('delete_skipped'):
+                info.append("Also deletes ALREADY-CONVERTED originals (!)")
+            if _adv.get('provenance'):
+                info.append(f"Match existing outputs by: {_adv['provenance']}")
+            if _adv.get('adopt_scan') is False:
+                info.append("Adopt scan: OFF (pairing trusted, not verified)")
+        if _adv.get('overwrite_guard') is False:
+            info.append("Overwrite guard: off")
+        _extras = _extra_options_summary(workflow)
+        if _extras:
+            info.append("Options: " + ", ".join(_extras))
+        if workflow.get('expert_flags'):
+            info.append(f"Expert flags: {workflow['expert_flags']} (applied LAST)")
+        if workflow.get('exclude_folders'):
+            info.append(f"Excluding: {workflow['exclude_folders']}")
+        return info
+
+    _MODE_NAMES = {0: "in place", 1: "subfolder", 2: "flat output folder",
+                   3: "recursive subfolders", 4: "renamed copy of each folder",
+                   5: "sibling folder", 6: "below the export marker",
+                   7: "below the export marker, one subfolder", 8: "in place, recursive",
+                   99: "manifest (each row its own mode)"}
+
+    def _review_command(self, workflow: Dict) -> Optional[List]:
+        """The command the run would start (the direct run), or None."""
+        origin, dest = workflow['origin_format'], workflow['dest_format']
+        if workflow.get('mode') == 99:
+            return None
+        script = str(SCRIPT_DIR / f"{_child_module(origin, dest)}.py")
+        output_dir = ((workflow.get('mode_config') or {}).get('output_dir')
+                      if workflow.get('mode') == 2 else None)
+        return self.build_child_cmd(script, origin, dest, workflow['input_dir'], output_dir,
+                                    workflow['mode'], workflow['workers'], workflow,
+                                    workflow.get('advanced_options') or {}, manifest=False)
+
+    def _review_screen(self, workflow: Dict, status: Dict[str, bool]) -> str:
+        """The review of a job: every essential option with where its value
+        came from, [a]/[/] all options, [c] the command line, [x] expert
+        flags, [d] a dry run (then back here), [r] run, [s] save as a preset,
+        [b] back. Returns "ran", "failed", "saved", "back" or "quit"."""
+        ui = self.ui
+        tid = workflow.get('_task')
+        title = _TASK_BY_ID[tid][1] if tid in _TASK_BY_ID else (
+            f"{(workflow.get('origin_format') or '?').upper()} → "
+            f"{(workflow.get('dest_format') or '?').upper()}")
+        while True:
+            rows = self._review_rows(workflow, status)
+            frm = workflow.get('_from') or {}
+            ui.section(f"Review — {title}")
+            if workflow.get('mode') == 99:
+                ui.line(f"Manifest  {workflow.get('manifest_path')}  "
+                        f"({len(workflow.get('manifest_entries') or [])} entries)")
+            else:
+                ui.line(f"Folder    {workflow.get('input_dir')}")
+            ui.line(f"Mode      {workflow.get('mode')} — "
+                    f"{self._MODE_NAMES.get(workflow.get('mode'), '?')}")
+            if (workflow.get('origin_format'), workflow.get('dest_format')) == ('tiff', 'jxl'):
+                _mp = self._multipage_summary(workflow)
+                if _mp:
+                    ui.line(f"Multi-page TIFFs: {_mp[0]}")
+            numbered = {}
+            for key, label, value, editor in rows:
+                n = str(len(numbered) + 1)
+                numbered[n] = (key, label, editor)
+                src = frm.get(key, "")
+                tag = "" if editor else "   (fixed)"
+                ui.line(f"  [{n:>2}] {label:24} {value:34} {src}{tag}")
+            for line in self._summary_info(workflow):
+                ui.line(f"  · {line}")
+            ui.line("[number] change  [a] all options  [/text] search  [c] command line  "
+                    "[x] expert flags")
+            ui.line("[d] dry run  [r] RUN  [s] save as preset  [b] back  [q] cancel")
+            answer = ui.ask_text("review.action", "Review", "").strip()
+            low = answer.lower()
+            if low in ("", "?"):
+                continue
+            if low == "q":
+                return "quit"
+            if low == "b":
+                return "back"
+            if low == "a":
+                self._all_options_screen(workflow)
+                continue
+            if answer.startswith("/"):
+                self._all_options_screen(workflow, flt=answer[1:].strip().lower())
+                continue
+            if low == "c":
+                cmd = self._review_command(workflow)
+                if cmd is None:
+                    ui.line("A manifest builds one command per row; the run prints each one.")
+                else:
+                    ui.line(" ".join(_display_cmd(cmd)))
+                continue
+            if low == "x":
+                flags = ui.ask_text("review.expert", "Expert flags (applied last; empty = none)",
+                                    workflow.get('expert_flags') or "").strip()
+                problem = _expert_flags_problem(workflow['origin_format'],
+                                                workflow['dest_format'], flags)
+                if problem:
+                    ui.warn(f"Not changed: {problem}.")
+                else:
+                    workflow['expert_flags'] = flags
+                continue
+            if low == "s":
+                raw = ui.ask_text("review.preset_name", "Preset name", "")
+                name = self._clean_preset_name(raw)
+                if not name:
+                    ui.warn("Invalid name (empty, too long, or contains control characters).")
+                    continue
+                if name in (self.config.config.presets or {}) and not ui.confirm(
+                        "review.preset_overwrite", f"Preset '{name}' exists. Overwrite?", False):
+                    continue
+                self._save_last_from_workflow(workflow)
+                self.config.save_preset(name, self.config.session_snapshot())
+                self._print_success(f"Preset '{name}' saved (also the last job).")
+                continue
+            if low in ("d", "r"):
+                self._save_last_from_workflow(workflow)
+                workflow['dry_run'] = (low == "d")
+                try:
+                    ok = bool(self.execute_workflow(workflow, status))
+                finally:
+                    dry = workflow['dry_run']
+                    workflow['dry_run'] = False
+                if dry:
+                    continue
+                return "ran" if ok else "failed"
+            item = numbered.get(answer)
+            if item is None:
+                ui.warn(f"No option {answer!r}.")
+                continue
+            key, label, editor = item
+            if editor is None:
+                ui.warn(f"'{label}' cannot be changed here.")
+                continue
+            editor()
+
+    def _save_last_from_workflow(self, workflow: Dict) -> None:
+        """Store this run as the last job (the old wizard did it before
+        "Execute now?"): the delete-gate answers staged on the workflow are
+        committed, and every last_* field the run defines is written."""
+        config = self.config
+        origin = workflow['origin_format']
+        dest = workflow['dest_format']
+        conv = workflow['conversion_type']
+        if origin == 'tiff' and dest == 'jxl':
+            saved_distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
+            saved_quality = None
+        elif 'lossy' in conv or conv in ('jxl_to_jpeg_force', 'jxl_to_jpeg_auto'):
+            saved_quality = _workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')
+            saved_distance = workflow.get('distance')
+        elif conv == 'jxl_recompress':
+            saved_distance = (workflow.get('distance') if workflow.get('distance') is not None
+                              else _child_default('jxl_recompressor', 'distance'))
+            saved_quality = None
+        elif conv == 'jxl_tiff_decoder':
+            saved_quality = None
+            saved_distance = None
+        else:
+            saved_quality = config.config.default_quality
+            saved_distance = None
+        for _field, _value in (workflow.pop('_pending_session_fields', None) or {}).items():
+            setattr(config.config, _field, _value)
+        adv = workflow.get('advanced_options', {}) or {}
+        config.save_last_session(
+            input_dir=workflow['input_dir'], output_mode=str(workflow['mode']),
+            workers=workflow['workers'], staging=workflow['staging'],
+            effort=workflow['effort'], quality=saved_quality, distance=saved_distance,
+            origin_format=origin, dest_format=dest, conversion_type=conv,
+            icc_profile=workflow.get('icc_profile'), expert_flags=workflow.get('expert_flags'),
+            d50_patch=adv.get('d50_patch'), encode_tag=adv.get('encode_tag'),
+            multipage_mode=adv.get('multipage_mode'), thumbnail_mode=adv.get('thumbnail_mode'),
+            thumbnail_suffix=adv.get('thumbnail_suffix'),
+            thumbnail_handling=adv.get('thumbnail_handling'),
+            no_reconstruct_multipage=adv.get('no_reconstruct_multipage'),
+            depth_policy=adv.get('depth_policy'), advanced_options=adv,
+            use_ram=workflow.get('use_ram') if origin == 'tiff' else None,
+            compression=workflow.get('compression') if dest == 'tiff' else None,
+            bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
+            add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
+            mode_config=workflow.get('mode_config'),
+            manifest_path=workflow.get('manifest_path'),
+            extra_options=workflow.get('extra_options') or {},
+            exclude_folders=(workflow['exclude_folders']
+                             if (origin, dest) in (('tiff', 'jxl'), ('jxl', 'tiff'))
+                             and 'exclude_folders' in workflow
+                             else config._STAGING_UNSET),
+        )
+
+    def new_job_flow(self, status: Dict[str, bool], manifest: bool = False) -> bool:
+        """Menu 1 (and 4 with manifest=True): the task, the folder (or the
+        manifest), the mode with its [A]/[M]/[D], the quality, then the
+        review. [b] on the review goes back to the mode step."""
+        import copy
+        tid = self._job_pick_task(status)
+        if not tid:
+            return False
+        _tid, _label, origin, dest, convs = _TASK_BY_ID[tid]
+        workflow = self._new_workflow()
+        workflow.update(origin_format=origin, dest_format=dest,
+                        conversion_type=convs[0], _task=tid)
+        if manifest:
+            workflow['input_dir'] = self.config.config.last_input_dir or os.getcwd()
+        elif not self._wizard_select_files(workflow):
+            return False
+        base = copy.deepcopy(workflow)
+        while True:
+            workflow = copy.deepcopy(base)
+            if manifest:
+                if not self._wizard_run_from_manifest(workflow):
+                    return False
+            elif not self._wizard_select_mode(workflow):
+                return False
+            if not self._wizard_mode_specific_config(workflow):
+                return False
+            if not self._job_quality(workflow):
+                return False
+            self._review_init(workflow, status)
+            result = self._review_screen(workflow, status)
+            if result == "back":
+                continue
+            return result == "ran"
+
+    def _wizard_select_files(self, workflow: Dict) -> bool:
+        """The folder ('job.folder') and, for TIFF <-> JXL, the folder names to
+        exclude ('job.exclude')."""
+        ui = self.ui
+        default_dir = self.config.config.last_input_dir or os.getcwd()
+        ui.section("Folder")
+        input_dir = ui.ask_text("job.folder", "Directory containing files", default_dir)
+        path = Path(_strip_surrounding_quotes(input_dir or default_dir)).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             self._print_error(f"Invalid directory: {path}")
             return False
@@ -4356,33 +5296,23 @@ class InteractiveMenu:
 
         # Folder exclusions, ONLY for the directions whose child has the
         # flag (--exclude-folders exists in the TIFF encoder and decoder).
-        # Asked here, at the END of Step 3, and NOT in Step 5: the [D]
-        # delete gate counts the source files in Step 4 (_count_origin_files),
-        # so a later question would leave the "About to delete originals"
-        # panel counting a tree the run would skip (bug #297's class).
-        # The mode is not known yet, so the note says "recursive modes".
+        # Asked here, BEFORE the mode step: its [D] delete gate counts the
+        # source files (_count_origin_files), so a later question would leave
+        # the "About to delete originals" panel counting a tree the run would
+        # skip (bug #297's class). The mode is not known yet, so the note says
+        # "recursive modes".
         if (workflow.get('origin_format'), workflow.get('dest_format')) in (
                 ('tiff', 'jxl'), ('jxl', 'tiff')):
             _excl_default = self.config.config.last_exclude_folders
-            _excl_q = ("Exclude folders? (';'-separated folder names, '-' = none; "
-                       "only affects recursive modes)")
-            if RICH_AVAILABLE and console:
-                _excl_raw = Prompt.ask(_excl_q, default=_excl_default or "-")
-            else:
-                print("Folder NAMES to exclude, ';'-separated ('-' = none; "
-                      "only affects recursive modes)")
-                # Empty answer = keep the displayed default, exactly like the
-                # rich branch's Prompt.ask(default=...) and the other plain
-                # prompts (the default is shown in brackets, so Enter must
-                # mean "the same as last time"). '-'/'none' still mean "no
-                # exclusion".
-                _excl_raw = (input(f"Exclude folders [{_excl_default or '-'}]: ")
-                             .strip() or (_excl_default or ""))
+            # Enter keeps the displayed default (the last run's exclusion);
+            # '-'/'none' mean "no exclusion".
+            _excl_raw = ui.ask_text(
+                "job.exclude", "Exclude folders? (';'-separated folder names, '-' = none; "
+                "only affects recursive modes)", _excl_default or "-")
             _excl_raw = (_excl_raw or "").strip()
-            # Staged in the workflow ONLY: persistence happens in
-            # save_last_session's sentinel path after the run, so cancelling
-            # the wizard later must not leave this answer on disk (the #319f
-            # invariant — a cancelled wizard persists nothing).
+            # Staged in the workflow ONLY: persistence happens when the run
+            # starts, so cancelling later must not leave this answer on disk
+            # (the #319f invariant — a cancelled job persists nothing).
             if not _excl_raw or _excl_raw.lower() in ("-", "none"):
                 workflow['exclude_folders'] = None
             else:
@@ -5243,7 +6173,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Step 4: Organization Mode[/bold cyan]")
-            console.print("[dim]The export marker (e.g. '_EXPORT') is configurable in option 4 (Edit default settings)[/dim]")
+            console.print("[dim]The export marker (e.g. '_EXPORT') is configurable in Settings (menu 9)[/dim]")
             console.print("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') are the scripts' settings: Script settings (menu S)[/dim]")
 
             # Highlight auto mode and manifest
@@ -5324,7 +6254,7 @@ class InteractiveMenu:
 
         note_lines = [
             "[bold yellow]Configurable items:[/bold yellow] the export marker (e.g. '_EXPORT') can be customized",
-            "in [bold cyan]Edit default settings (option 4)[/bold cyan]. Folder names like 'converted_jxl'",
+            "in [bold cyan]Settings (menu 9)[/bold cyan]. Folder names like 'converted_jxl'",
             "are the scripts' own settings: [bold cyan]Script settings (menu S)[/bold cyan].",
         ]
         if RICH_AVAILABLE and console:
@@ -6259,953 +7189,6 @@ class InteractiveMenu:
             "Source JXLs will be REPLACED by the recompressed versions — the "
             "original bytes cannot be recovered afterwards")
 
-    def _wizard_parameters_basic(self, workflow: Dict, status: Dict[str, bool]) -> bool:
-        """Step 6: Basic Parameters (always shown)"""
-        conv_type = workflow['conversion_type']
-        origin = workflow['origin_format']
-        dest = workflow['dest_format']
-
-        current_staging = workflow['staging']
-        staging_display = current_staging if current_staging else "system default"
-
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Step 6: Basic Parameters[/bold cyan]")
-
-            if origin == 'tiff':
-                use_ram = Confirm.ask("Use RAM for intermediate PNG? (faster)", default=workflow['use_ram'])
-                workflow['use_ram'] = use_ram
-
-            workers = IntPrompt.ask("Workers", default=workflow['workers'])
-            workflow['workers'] = max(1, min(workers, 32))
-
-            if origin == 'tiff' and dest == 'jxl':
-                q = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
-                console.print(f"[dim]Distance:[/dim] {q:.2f} (set in Step 2)")
-                console.print(f"[dim]Effort:[/dim] {workflow['effort']} (set in Step 2)")
-
-            elif origin == 'jxl' and dest == 'tiff':
-                # No effort parameter for JXL decoding - djxl doesn't use it
-                pass
-            elif conv_type == 'jxl_recompress':
-                # JXL -> JXL: distance-driven like the TIFF encoder
-                try:
-                    distance = float(Prompt.ask("Target distance (0=lossless, 1=visually lossless, 2=smaller)", default=str(workflow.get('distance', _child_default('jxl_recompressor', 'distance')))))
-                    workflow['distance'] = max(0.0, min(distance, 15.0))
-                except ValueError:
-                    workflow['distance'] = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
-                    console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
-                effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
-                workflow['effort'] = max(1, min(effort, 10))
-                # The child cannot prompt through the wrapper's pipe, so the
-                # downgrade policy is decided HERE and passed as a flag.
-                console.print("[dim]If a file's recorded settings are already as good as or better "
-                              "than this target (re-encoding cannot gain anything):[/dim]")
-                dg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
-                                choices=["copy", "skip", "convert"], default="copy")
-                workflow.setdefault('advanced_options', {})['on_downgrade'] = dg
-                # Same reason: the child cannot prompt, so the regeneration
-                # guard (file already lossy-recompressed at least once, gen>=2)
-                # is decided here too. Default "convert": the user just asked
-                # for a new distance, and the threshold (gen >= 2) means this
-                # only fires for files that were ALREADY recompressed once —
-                # the main use case (encoder previews -> archive) never
-                # reaches this question.
-                console.print("[dim]If a file was already lossy-recompressed once (generation >= 2) "
-                              "and this run would add another generation (each adds ~0.2-0.6 dB of "
-                              "loss on top of the byte savings, measured):[/dim]")
-                rg = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
-                                choices=["copy", "skip", "convert"], default="convert")
-                workflow.setdefault('advanced_options', {})['on_regeneration'] = rg
-                # Film scans are never re-encoded lossy unless asked
-                # (--on-scan); the child's own default is a safe "copy".
-                if workflow.get('distance', 0) and float(workflow['distance']) > 0:
-                    console.print("[dim]If a file is a film scan (a lossy re-encode loses what "
-                                  "only a new scan brings back):[/dim]")
-                    sc = Prompt.ask("Copy the original instead, skip it, or convert anyway?",
-                                    choices=["copy", "skip", "convert"], default="copy")
-                    workflow.setdefault('advanced_options', {})['on_scan'] = sc
-                if workflow['mode'] in (0, 8):
-                    console.print("[dim]Colour conversion needs a separate output folder — "
-                                  "not offered in modes 0/8 (in place).[/dim]")
-                    # Nothing from an earlier pass through this step may
-                    # survive: the guard in execute_workflow would refuse the
-                    # run for an option the user was never offered here.
-                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-                elif _step6_delete_on(workflow):
-                    console.print(f"[dim]{_NO_DERIVATIVE_WITH_DELETE}[/dim]")
-                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-                else:
-                    console.print("[dim]A colour-converted derivative (16-bit, from the source's "
-                                  "own profile) instead of a plain recompression?[/dim]")
-                    icc_target = Prompt.ask(
-                        "Output colour space: keep / sRGB / AdobeRGB / path to .icc",
-                        default="keep").strip()
-                    _adv = workflow.setdefault('advanced_options', {})
-                    if icc_target and icc_target.lower() != "keep":
-                        _adv['output_icc'] = icc_target
-                        _rename_from = Prompt.ask(
-                            "Rename text in the output file names (e.g. ProPhoto) — "
-                            "empty = keep names", default="").strip()
-                        if _rename_from:
-                            _adv['rename_from'] = _rename_from
-                            _adv['rename_to'] = Prompt.ask("Replace it with", default="").strip()
-                        else:
-                            _adv.pop('rename_from', None)
-                            _adv.pop('rename_to', None)
-                    else:
-                        # "keep": the rename belongs to the derivative question,
-                        # so an earlier answer must not ride along into a plain
-                        # recompression.
-                        _drop_derivative_options(_adv)
-                    # Resize/sharpening are a derivative of their own: offered
-                    # wherever a separate output folder exists (not modes 0/8).
-                    _ask_output_shaping(workflow)
-            elif 'lossy' in conv_type:
-                # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
-                # (convert_lossy is the only conversion type containing 'lossy')
-                try:
-                    distance = float(Prompt.ask("Distance (0=lossless, 0.1=near-lossless, 1=visually lossless)", default=str(workflow.get('distance', 0.5))))
-                    workflow['distance'] = max(0.0, min(distance, 15.0))
-                except ValueError:
-                    workflow['distance'] = workflow.get('distance', 0.5)
-                    console.print(f"[yellow]Invalid number, using {workflow['distance']}[/yellow]")
-                effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
-                workflow['effort'] = max(1, min(effort, 10))
-            else:
-                effort = IntPrompt.ask("Effort (1-10)", default=workflow['effort'])
-                workflow['effort'] = max(1, min(effort, 10))
-
-            staging_prompt = f"Staging [{staging_display}] (enter to keep, 'none' = system default)"
-            staging_input = Prompt.ask(staging_prompt, default=current_staging if current_staging else "")
-
-            if staging_input.strip() == "":
-                pass  # Enter keeps the current value
-            elif staging_input.lower() in ('system default', 'none'):
-                workflow['staging'] = None
-            else:
-                workflow['staging'] = _strip_surrounding_quotes(staging_input)
-
-            # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
-            if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                quality = IntPrompt.ask("Quality (1-100)", default=_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder'))
-                workflow['quality'] = max(1, min(quality, 100))
-
-            # ICC conversion applies to both JPEG and PNG outputs
-            if (origin == 'jxl' and dest in ('jpeg', 'png')
-                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                      'jxl_to_png')
-                    and _step6_delete_on(workflow)):
-                # The colour conversion and resize/sharpening below make a
-                # derivative (W6/W7): not offered with [D] on.
-                console.print(f"[dim]{_NO_DERIVATIVE_WITH_DELETE}[/dim]")
-                workflow.pop('icc_profile', None)
-                _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-            elif origin == 'jxl' and dest in ('jpeg', 'png'):
-                if status.get('magick'):
-                    convert_icc = Confirm.ask("Convert to sRGB?", default=False)
-                    if convert_icc:
-                        workflow['icc_profile'] = 'sRGB'
-                # Resize/sharpening (a derivative) apply to the decode
-                # direction; the lossless recovery reproduces the original
-                # JPEG and cannot shape pixels, so it is not offered there.
-                if conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                 'jxl_to_png'):
-                    if status.get('magick'):
-                        _ask_output_shaping(workflow)
-                    else:
-                        _drop_derivative_options(
-                            workflow.setdefault('advanced_options', {}))
-
-            if dest == 'png':
-                bd_default = _bit_depth_or_default(workflow, dest)
-                depth = IntPrompt.ask("PNG bit depth", choices=["8", "16"], default=str(bd_default))
-                workflow['bit_depth'] = int(depth) if depth else bd_default
-
-            if dest == 'tiff':
-                compression = Prompt.ask("TIFF compression", choices=["zip", "lzw", "none"], default=workflow['compression'])
-                workflow['compression'] = compression
-                bd_default = _bit_depth_or_default(workflow, dest)
-                depth = IntPrompt.ask("Bit depth", choices=["8", "16"], default=bd_default)
-                workflow['bit_depth'] = int(depth) if depth else bd_default
-                # Preview option for JXL→TIFF
-                add_preview = Confirm.ask(
-                    "Add JPEG preview? (for faster viewing)",
-                    default=bool(workflow.get('add_preview',
-                                              _child_default('jxl_tiff_decoder', 'add_preview'))))
-                workflow['add_preview'] = add_preview
-
-                # Matrix/Basic mode and target ICC for JXL→TIFF
-                if origin == 'jxl' and dest == 'tiff':
-                    decode_mode = Prompt.ask(
-                        "Decode mode",
-                        choices=["roundtrip", "basic", "matrix", "none"],
-                        default="roundtrip"
-                    )
-                    # Mark it: Step 6A must not ask the same thing again.
-                    workflow['decode_mode_asked'] = decode_mode
-                    advanced_options = workflow.setdefault('advanced_options', {})
-                    if decode_mode == "matrix":
-                        advanced_options['matrix'] = True
-                        # Target ICC only applies to matrix mode
-                        target_icc = Prompt.ask(
-                            "Target ICC (file path or sRGB)",
-                            default=""
-                        )
-                        if target_icc and target_icc.strip():
-                            advanced_options['target_icc'] = target_icc.strip()
-                    elif decode_mode == "basic":
-                        advanced_options['basic'] = True
-                    elif decode_mode == "none":
-                        advanced_options['none'] = True
-
-            dry_run = Confirm.ask("Dry run? (simulate without converting)", default=False)
-            workflow['dry_run'] = dry_run
-
-            console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
-            ow = Prompt.ask("If exists", choices=["1", "2"], default="2")
-            workflow['overwrite_mode'] = ow
-
-            # Expert flags are typed later (Step 6E): a --delete-source there
-            # with the guard off is refused by the child (exit 2), loudly.
-            if not _step6_delete_on(workflow):
-                _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
-                _og_last = self.config.config.last_overwrite_guard
-                _og_default = _og_child if _og_last is None else bool(_og_last)
-                console.print(
-                    "[dim]Overwrite guard: an output records the full path of the file "
-                    "that made it.\n"
-                    "  on  = (default) an output made from ANOTHER path is never "
-                    "overwritten — protects photos whose source an earlier run deleted.\n"
-                    "  off = overwrite it (logged). Choose off if you never delete "
-                    "sources and you rename or move folders: otherwise re-editing a "
-                    "photo after renaming its folder is refused.[/dim]")
-                _og = Confirm.ask(
-                    "Overwrite guard (refuse outputs made from another path)?",
-                    default=_og_default)
-                workflow['overwrite_guard'] = bool(_og)
-                workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
-
-            if origin == 'tiff' and dest == 'jxl':
-                d50 = Prompt.ask("D50 patch", choices=["auto", "on", "off"],
-                                 default=_child_default('jxl_tiff_encoder', 'd50_patch'))
-                workflow['d50_patch'] = d50
-
-        else:
-            print("\n--- Step 6: Basic Parameters ---")
-
-            if origin == 'tiff':
-                ram_default = workflow.get('use_ram', _child_default('jxl_tiff_encoder', 'use_ram'))
-                ram_input = input(f"Use RAM for intermediate PNG? [{'Y/n' if ram_default else 'y/N'}]: ").strip().lower()
-                # Enter keeps the default; any other answer flips it only when
-                # it says so (n for a Y default, y for an N default).
-                workflow['use_ram'] = (not ram_input.startswith('n') if ram_default
-                                       else ram_input.startswith('y'))
-
-            workers = input(f"Workers [{workflow['workers']}]: ").strip()
-            workflow['workers'] = max(1, min(int(workers), 32)) if workers.isdigit() else workflow['workers']
-
-            if origin == 'tiff' and dest == 'jxl':
-                print(f"Distance: {_workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder'):.2f} (set in Step 2)")
-                print(f"Effort: {workflow['effort']} (set in Step 2)")
-            elif origin == 'jxl' and dest == 'tiff':
-                # No effort parameter for JXL decoding - djxl doesn't use it
-                pass
-            elif conv_type == 'jxl_recompress':
-                rec_default = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
-                distance = input(f"Target distance (0=lossless, 1=visually lossless) [{rec_default}]: ").strip()
-                try:
-                    workflow['distance'] = max(0.0, min(float(distance) if distance else rec_default, 15.0))
-                except ValueError:
-                    workflow['distance'] = rec_default
-                effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
-                # The child cannot prompt through the wrapper's pipe, so the
-                # downgrade policy is decided HERE and passed as a flag.
-                print("If the recorded settings are already as good as or better than the target")
-                dg_input = input("(re-encoding cannot gain anything): copy/skip/convert [copy]: ").strip().lower()
-                workflow.setdefault('advanced_options', {})['on_downgrade'] = (
-                    dg_input if dg_input in ("copy", "skip", "convert") else "copy")
-                print("If a file was already lossy-recompressed once (generation >= 2) and this run")
-                rg_input = input("would add another generation (each adds ~0.2-0.6 dB of loss on top of the byte savings): copy/skip/convert [convert]: ").strip().lower()
-                workflow.setdefault('advanced_options', {})['on_regeneration'] = (
-                    rg_input if rg_input in ("copy", "skip", "convert") else "convert")
-                if workflow.get('distance', 0) and float(workflow['distance']) > 0:
-                    sc_input = input("If a file is a film scan (a lossy re-encode loses what only a new scan brings back): copy/skip/convert [copy]: ").strip().lower()
-                    workflow.setdefault('advanced_options', {})['on_scan'] = (
-                        sc_input if sc_input in ("copy", "skip", "convert") else "copy")
-                if workflow['mode'] in (0, 8):
-                    print("Colour conversion needs a separate output folder — not offered "
-                          "in modes 0/8 (in place).")
-                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-                elif _step6_delete_on(workflow):
-                    print(_NO_DERIVATIVE_WITH_DELETE)
-                    _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-                else:
-                    icc_input = input("Output colour space: keep / sRGB / AdobeRGB / path to .icc [keep]: ").strip()
-                    _adv = workflow.setdefault('advanced_options', {})
-                    if icc_input and icc_input.lower() != "keep":
-                        _adv['output_icc'] = icc_input
-                        _rename_from = input("Rename text in the output file names (e.g. ProPhoto) — "
-                                             "empty = keep names: ").strip()
-                        if _rename_from:
-                            _adv['rename_from'] = _rename_from
-                            _adv['rename_to'] = input("Replace it with: ").strip()
-                        else:
-                            _adv.pop('rename_from', None)
-                            _adv.pop('rename_to', None)
-                    else:
-                        _drop_derivative_options(_adv)
-                    # Resize/sharpening are a derivative of their own: offered
-                    # wherever a separate output folder exists (not modes 0/8).
-                    _ask_output_shaping(workflow)
-            elif 'lossy' in conv_type:
-                if conv_type == 'convert_lossy':
-                    # JPEG -> JXL lossy uses cjxl distance, not JPEG quality
-                    distance = input(f"Distance (0=lossless, 0.1=near-lossless, 1=visually lossless) [{workflow.get('distance', 0.5)}]: ").strip()
-                    try:
-                        workflow['distance'] = max(0.0, min(float(distance) if distance else workflow.get('distance', 0.5), 15.0))
-                    except ValueError:
-                        workflow['distance'] = workflow.get('distance', 0.5)
-                else:
-                    quality = input(f"Quality (1-100) [{workflow['quality']}]: ").strip()
-                    workflow['quality'] = max(1, min(int(quality), 100)) if quality.isdigit() else workflow['quality']
-                effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
-            else:
-                effort = input(f"Effort (1-10) [{workflow['effort']}]: ").strip()
-                workflow['effort'] = max(1, min(int(effort), 10)) if effort.isdigit() else workflow['effort']
-
-            if origin == 'tiff' and dest == 'jxl':
-                d50_default = _child_default('jxl_tiff_encoder', 'd50_patch')
-                d50_input = input(f"D50 patch (auto/on/off) [{d50_default}]: ").strip().lower() or d50_default
-                workflow['d50_patch'] = d50_input if d50_input in ["auto", "on", "off"] else d50_default
-
-            staging_input = input(f"Staging [{staging_display}] (empty=keep, 'none'=system default): ").strip()
-            if staging_input.lower() in ('system default', 'none'):
-                workflow['staging'] = None
-            elif staging_input:
-                workflow['staging'] = _strip_surrounding_quotes(staging_input)
-
-            # Quality and ICC settings for JPEG output (for lossy modes: AUTO and FORCE_LOSSY)
-            if origin == 'jxl' and dest == 'jpeg' and workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                quality = input(f"Quality (1-100) [{_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')}]: ").strip()
-                if quality.isdigit():
-                    workflow['quality'] = max(1, min(int(quality), 100))
-
-            # ICC conversion applies to both JPEG and PNG outputs
-            if (origin == 'jxl' and dest in ('jpeg', 'png')
-                    and conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                      'jxl_to_png')
-                    and _step6_delete_on(workflow)):
-                # Same rule as the rich branch (W6/W7).
-                print(_NO_DERIVATIVE_WITH_DELETE)
-                workflow.pop('icc_profile', None)
-                _drop_derivative_options(workflow.setdefault('advanced_options', {}))
-            elif origin == 'jxl' and dest in ('jpeg', 'png'):
-                if status.get('magick'):
-                    icc_input = input("Convert to sRGB? [y/N]: ").strip().lower()
-                    if icc_input.startswith('y'):
-                        workflow['icc_profile'] = 'sRGB'
-                # Resize/sharpening (a derivative) apply to the decode
-                # direction; the lossless recovery reproduces the original
-                # JPEG and cannot shape pixels, so it is not offered there.
-                if conv_type in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                 'jxl_to_png'):
-                    if status.get('magick'):
-                        _ask_output_shaping(workflow)
-                    else:
-                        _drop_derivative_options(
-                            workflow.setdefault('advanced_options', {}))
-
-            if dest == 'png':
-                bd_default = _bit_depth_or_default(workflow, dest)
-                depth_input = input(f"PNG bit depth (8/16) [{bd_default}]: ").strip()
-                workflow['bit_depth'] = int(depth_input) if depth_input in ['8', '16'] else bd_default
-
-            if dest == 'tiff':
-                comp_input = input(f"TIFF compression (zip/lzw/none) [{workflow['compression']}]: ").strip()
-                if comp_input in ['zip', 'lzw', 'none']:
-                    workflow['compression'] = comp_input
-                bd_default = _bit_depth_or_default(workflow, dest)
-                depth_input = input(f"Bit depth (8/16) [{bd_default}]: ").strip()
-                workflow['bit_depth'] = int(depth_input) if depth_input in ['8', '16'] else bd_default
-                # Preview option for JXL→TIFF
-                pv_default = workflow.get('add_preview',
-                                          _child_default('jxl_tiff_decoder', 'add_preview'))
-                preview_input = input(f"Add JPEG preview? [{'Y/n' if pv_default else 'y/N'}]: ").strip().lower()
-                workflow['add_preview'] = (not preview_input.startswith('n') if pv_default
-                                           else preview_input.startswith('y'))
-
-                # Matrix/Basic mode and target ICC for JXL→TIFF
-                if origin == 'jxl' and dest == 'tiff':
-                    decode_mode = input("Decode mode (roundtrip/basic/matrix/none) [roundtrip]: ").strip().lower() or "roundtrip"
-                    if decode_mode not in ("roundtrip", "basic", "matrix", "none"):
-                        decode_mode = "roundtrip"
-                    # Mark it: Step 6A must not ask the same thing again.
-                    workflow['decode_mode_asked'] = decode_mode
-                    advanced_options = workflow.setdefault('advanced_options', {})
-                    if decode_mode == "matrix":
-                        advanced_options['matrix'] = True
-                        # Target ICC only applies to matrix mode
-                        target_icc = input("Target ICC (file path, sRGB, or empty): ").strip()
-                        if target_icc:
-                            advanced_options['target_icc'] = target_icc
-                    elif decode_mode == "basic":
-                        advanced_options['basic'] = True
-                    elif decode_mode == "none":
-                        advanced_options['none'] = True
-
-            dry_input = input("Dry run? [y/N]: ").strip().lower()
-            workflow['dry_run'] = dry_input.startswith('y')
-
-            ow_input = input("Existing file handling (1=overwrite, 2=sync) [2]: ").strip() or "2"
-            workflow['overwrite_mode'] = ow_input
-
-            # Expert flags are typed later (Step 6E): a --delete-source there
-            # with the guard off is refused by the child (exit 2), loudly.
-            if not _step6_delete_on(workflow):
-                _og_child = _child_default(_child_module(origin, dest), 'overwrite_guard')
-                _og_last = self.config.config.last_overwrite_guard
-                _og_default = _og_child if _og_last is None else bool(_og_last)
-                print("Overwrite guard: an output records the full path of the file "
-                      "that made it.")
-                print("  on  = (default) an output made from ANOTHER path is never "
-                      "overwritten —")
-                print("        protects photos whose source an earlier run deleted.")
-                print("  off = overwrite it (logged). Choose off if you never delete "
-                      "sources and")
-                print("        you rename or move folders: otherwise re-editing a photo "
-                      "after")
-                print("        renaming its folder is refused.")
-                _og_in = input(f"Overwrite guard (refuse outputs made from another "
-                               f"path)? [{'Y/n' if _og_default else 'y/N'}]: ").strip().lower()
-                _og = _og_default if not _og_in else _og_in.startswith('y')
-                workflow['overwrite_guard'] = bool(_og)
-                workflow.setdefault('_pending_session_fields', {})['last_overwrite_guard'] = bool(_og)
-
-        # Nothing is persisted here: all session state is saved once, at the
-        # end of the wizard in main(), so cancelling mid-wizard never mutates
-        # saved defaults.
-        return self._wizard_parameters_advanced(workflow, status)
-
-    def _wizard_parameters_advanced(self, workflow: Dict, status: Dict[str, bool]) -> bool:
-        """Step 6A: Advanced Options (optional)"""
-        origin = workflow['origin_format']
-        dest = workflow['dest_format']
-
-        # The dict is rebuilt from scratch below — but Step 6 may already have
-        # written the recompressor policies into it (on_downgrade etc.), and
-        # losing them drops the child back to `ask`, which is a SILENT SKIP on
-        # the wrapper's pipe. Capture them up front and carry them across at
-        # the end of every branch.
-        _prev_adv = workflow.get('advanced_options') or {}
-
-        def _carry_recompress_policies(target: Dict) -> None:
-            for _k in ('on_downgrade', 'on_regeneration', 'on_unknown', 'on_scan',
-                       'jbrd_policy', 'no_keep_smaller',
-                       'rederive_on_encode_change', 'rederive_on_lower_effort',
-                       'output_icc', 'rename_from', 'rename_to',
-                       'resize_mode', 'resize_value', 'allow_upscale', 'sharpen'):
-                if _k in _prev_adv:
-                    target[_k] = _prev_adv[_k]
-
-        advanced_options = {}
-
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Step 6A: Advanced Options[/bold cyan]")
-            show_advanced = Confirm.ask("Configure advanced options?", default=False)
-        else:
-            print("\n--- Step 6A: Advanced Options ---")
-            adv_input = input("Configure advanced options? [y/N]: ").strip().lower()
-            show_advanced = adv_input.startswith('y')
-
-        if not show_advanced:
-            ow_mode = workflow.get('overwrite_mode', '2')
-            if ow_mode == "1":
-                advanced_options['overwrite'] = True
-                advanced_options['sync'] = False
-            else:
-                # Default and only other option is sync (2)
-                advanced_options['overwrite'] = False
-                advanced_options['sync'] = True
-            if origin == 'tiff' and dest == 'jxl':
-                advanced_options['d50_patch'] = (workflow.get('d50_patch')
-                                                 or _child_default('jxl_tiff_encoder', 'd50_patch'))
-                advanced_options['encode_tag'] = (workflow.get('encode_tag')
-                                                  or _child_default('jxl_tiff_encoder', 'encode_tag'))
-                advanced_options['multipage_mode'] = (self.config.config.last_multipage_mode
-                                                      or _child_default('jxl_tiff_encoder', 'multipage_mode'))
-                advanced_options['thumbnail_mode'] = (self.config.config.last_thumbnail_mode
-                                                      or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
-                advanced_options['thumbnail_suffix'] = (self.config.config.last_thumbnail_suffix
-                                                        or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
-            elif origin == 'jxl' and dest == 'tiff':
-                advanced_options['thumbnail_handling'] = (self.config.config.last_thumbnail_handling
-                                                          or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
-                advanced_options['thumbnail_suffix'] = (self.config.config.last_thumbnail_suffix
-                                                        or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
-                _no_recon = self.config.config.last_no_reconstruct_multipage
-                advanced_options['no_reconstruct_multipage'] = (
-                    bool(_no_recon) if _no_recon is not None
-                    else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
-                advanced_options['depth_policy'] = (self.config.config.last_depth_policy
-                                                    or _child_default('jxl_tiff_decoder', 'depth_policy'))
-            # Preserve decode-mode/target-icc chosen earlier when not showing advanced
-            existing = workflow.get('advanced_options', {})
-            for key in ('matrix', 'basic', 'none', 'target_icc'):
-                if key in existing:
-                    advanced_options[key] = existing[key]
-            # Preserve the delete decision (and its verify gate) taken in Step 4's [D]
-            if workflow.get('delete_source'):
-                advanced_options['delete_source'] = True
-            if workflow.get('verify_roundtrip'):
-                advanced_options['verify_roundtrip'] = True
-            if workflow.get('delete_skipped'):
-                advanced_options['delete_skipped'] = True
-            if workflow.get('provenance'):
-                advanced_options['provenance'] = workflow['provenance']
-            if workflow.get('overwrite_guard') is False:
-                advanced_options['overwrite_guard'] = False
-            if workflow.get('adopt_scan') is False:
-                advanced_options['adopt_scan'] = False
-            _carry_recompress_policies(advanced_options)
-            workflow['advanced_options'] = advanced_options
-            return self._wizard_parameters_expert(workflow)
-
-        if origin == 'tiff' and dest == 'jxl':
-            if RICH_AVAILABLE and console:
-                strip_meta = Confirm.ask("Strip metadata?", default=False)
-                encode_tag = Prompt.ask("Encode tag location", choices=["xmp", "software", "off"],
-                                        default=_child_default('jxl_tiff_encoder', 'encode_tag'))
-                # Measured on real photos: equal quality, bigger files, 20-100x
-                # slower — only sensible for screenshots/graphics batches.
-                force_modular = Confirm.ask(
-                    "Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only)",
-                    default=False)
-                # Multi-page TIFF options
-                mp_default = (self.config.config.last_multipage_mode
-                              or _child_default('jxl_tiff_encoder', 'multipage_mode'))
-                # The default has been `split` since v1.8.2 (mp_default above
-                # says so too); advertising `ignore` as the default pointed the
-                # user at the one choice that silently discards image data.
-                console.print(
-                    "  [dim]split     = one JXL per real page; thumbnails per the next question (default)\n"
-                    "  split_all = one JXL per page, thumbnails always included\n"
-                    "  ignore    = encode page 0 only, DROP the rest\n"
-                    "  skip      = leave multi-page TIFFs untouched[/dim]")
-                multipage_mode = Prompt.ask(
-                    "Multi-page TIFF handling",
-                    choices=["ignore", "skip", "split", "split_all"],
-                    default=mp_default
-                )
-                # Not asked below for every choice: keep the remembered (or the
-                # encoder's own) values rather than overwrite them with literals.
-                tm_default = (self.config.config.last_thumbnail_mode
-                              or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
-                ts_default = (self.config.config.last_thumbnail_suffix
-                              or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
-                thumbnail_mode = tm_default
-                thumbnail_suffix = ts_default
-                # Only "split" consults the thumbnail question — split_all always
-                # includes thumbnails, so asking there implied a choice that the
-                # encoder ignores.
-                if multipage_mode == "split":
-                    console.print("  [dim]auto = keep them except Capture One previews "
-                                  "(THUMBNAIL_DROP_SOFTWARE); scans = only for scanner "
-                                  "software, an IR page, or no Software tag and no camera EXIF[/dim]")
-                    thumbnail_mode = Prompt.ask(
-                        "Embedded thumbnail/preview pages",
-                        choices=_THUMBNAIL_MODES,
-                        default=tm_default if tm_default in _THUMBNAIL_MODES else "auto"
-                    )
-                if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
-                    thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
-                # Film scans (scanner software, an IR page, or no camera EXIF): their own
-                # distance, lossless by default (SCAN_DISTANCE).
-                sd_default = (workflow.get('advanced_options', {}).get('scan_distance')
-                              or _child_scan_distance())
-                console.print("  [dim]Film scans (scanner software, an IR page, or no Software tag and no camera EXIF) can use their "
-                              "own distance: 0 = lossless, 'same' = the distance above[/dim]")
-                scan_distance = _valid_scan_distance(
-                    Prompt.ask("Distance for film scans", default=sd_default)) or sd_default
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-            else:
-                strip_input = input("Strip metadata? [y/N]: ").strip().lower()
-                strip_meta = strip_input.startswith('y')
-                et_default = _child_default('jxl_tiff_encoder', 'encode_tag')
-                encode_tag_input = input(f"Encode tag (xmp/software/off) [{et_default}]: ").strip().lower() or et_default
-                encode_tag = encode_tag_input if encode_tag_input in ["xmp", "software", "off"] else et_default
-                modular_input = input("Force Modular encoder for lossy? (NOT for photos — screenshots/graphics only) [y/N]: ").strip().lower()
-                force_modular = modular_input.startswith('y')
-                # Multi-page TIFF options
-                mp_default = (self.config.config.last_multipage_mode
-                              or _child_default('jxl_tiff_encoder', 'multipage_mode'))
-                print("  split     = one JXL per real page; thumbnails per the next question (default)")
-                print("  split_all = one JXL per page, thumbnails always included")
-                print("  ignore    = encode page 0 only, DROP the rest")
-                print("  skip      = leave multi-page TIFFs untouched")
-                mp_input = input(f"Multi-page TIFF handling (split/split_all/ignore/skip) [{mp_default}]: ").strip().lower() or mp_default
-                # A typo must fall back to the DEFAULT, not to the one choice
-                # that discards pages: `ignore` here silently dropped the IR /
-                # mask page of every film scan. The rich branch cannot reach
-                # this (it uses choices=).
-                multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else mp_default
-                # Not asked below for every choice: keep the remembered (or the
-                # encoder's own) values rather than overwrite them with literals.
-                tm_default = (self.config.config.last_thumbnail_mode
-                              or _child_default('jxl_tiff_encoder', 'thumbnail_mode'))
-                ts_default = (self.config.config.last_thumbnail_suffix
-                              or _child_default('jxl_tiff_encoder', 'thumbnail_suffix'))
-                thumbnail_mode = tm_default
-                thumbnail_suffix = ts_default
-                # split_all always includes thumbnails; only "split" has a choice.
-                if multipage_mode == "split":
-                    print("  auto  = keep them except Capture One previews (THUMBNAIL_DROP_SOFTWARE)")
-                    print("  scans = keep them only for scans (scanner software, an IR page, or no Software tag and no camera EXIF)")
-                    tm_input = input(f"Embedded thumbnail/preview pages ({'/'.join(_THUMBNAIL_MODES)}) [{tm_default}]: ").strip().lower() or tm_default
-                    # Fall back to the DEFAULT on a typo, not to a fixed value
-                    # (same rule as multipage_mode above).
-                    thumbnail_mode = tm_input if tm_input in _THUMBNAIL_MODES else tm_default
-                if multipage_mode == "split_all" or thumbnail_mode in _THUMBNAIL_KEEPING_MODES:
-                    ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
-                    thumbnail_suffix = ts_input if ts_input else ts_default
-                sd_default = (workflow.get('advanced_options', {}).get('scan_distance')
-                              or _child_scan_distance())
-                print("  Film scans (scanner software, an IR page, or no Software tag and no camera EXIF) can use their own distance:")
-                sd_input = input(f"  Distance for film scans (0 = lossless, 'same' = the distance above) [{sd_default}]: ").strip()
-                scan_distance = _valid_scan_distance(sd_input) if sd_input else sd_default
-                scan_distance = scan_distance or sd_default
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-
-            if overwrite_mode == "1":
-                overwrite, sync = True, False
-            elif overwrite_mode == "2":
-                overwrite, sync = False, True
-            else:
-                overwrite, sync = False, False
-
-            advanced_options['strip'] = strip_meta
-            advanced_options['encode_tag'] = encode_tag
-            if force_modular:
-                advanced_options['modular'] = 'on'
-            advanced_options['d50_patch'] = (workflow.get('d50_patch')
-                                             or _child_default('jxl_tiff_encoder', 'd50_patch'))
-            advanced_options['overwrite'] = overwrite
-            advanced_options['sync'] = sync
-            advanced_options['delete_source'] = delete_src
-            if workflow.get('verify_roundtrip'):
-                advanced_options['verify_roundtrip'] = True
-            if workflow.get('delete_skipped'):
-                advanced_options['delete_skipped'] = True
-            if workflow.get('provenance'):
-                advanced_options['provenance'] = workflow['provenance']
-            if workflow.get('overwrite_guard') is False:
-                advanced_options['overwrite_guard'] = False
-            if workflow.get('adopt_scan') is False:
-                advanced_options['adopt_scan'] = False
-            advanced_options['multipage_mode'] = multipage_mode
-            advanced_options['thumbnail_mode'] = thumbnail_mode
-            advanced_options['thumbnail_suffix'] = thumbnail_suffix
-            advanced_options['scan_distance'] = scan_distance
-
-        elif origin == 'jxl' and dest == 'tiff':
-            _prev = workflow.get('advanced_options', {})
-            _already_asked = workflow.get('decode_mode_asked') is not None
-            if RICH_AVAILABLE and console:
-                if _already_asked:
-                    # Decode mode was already chosen in Step 6 — reuse it
-                    # instead of asking the same thing twice.
-                    use_matrix = bool(_prev.get('matrix'))
-                    use_basic = bool(_prev.get('basic'))
-                    use_none = bool(_prev.get('none'))
-                    target_icc = _prev.get('target_icc') or ""
-                else:
-                    use_matrix = Confirm.ask("Use ICC matrix conversion?", default=bool(_prev.get('matrix')))
-                    use_none = False
-                    use_basic = False
-                    if not use_matrix:
-                        _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
-                        icc_mode = Prompt.ask("ICC mode", choices=["auto", "basic", "none"], default=_icc_default)
-                        use_basic = (icc_mode == "basic")
-                        use_none = (icc_mode == "none")
-                    # Target ICC only applies to matrix mode (decoder ignores it otherwise)
-                    if use_matrix:
-                        _ticc_prev = _prev.get('target_icc') or ""
-                        _ticc_default = "sRGB" if _ticc_prev.lower() == "srgb" else ("custom" if _ticc_prev else "")
-                        target_icc = Prompt.ask("Target ICC profile", choices=["", "sRGB", "custom"], default=_ticc_default)
-                        if target_icc == "custom":
-                            if _ticc_prev and _ticc_prev.lower() != "srgb":
-                                target_icc = Prompt.ask("Enter ICC profile path", default=_ticc_prev)
-                            else:
-                                target_icc = Prompt.ask("Enter ICC profile path")
-                    else:
-                        target_icc = ""
-                no_cleanup = Confirm.ask("Skip ICC cleanup?", default=False)
-                # Thumbnail reconstruction handling
-                th_default = (self.config.config.last_thumbnail_handling
-                              or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
-                thumbnail_handling = Prompt.ask(
-                    "Thumbnail handling for multi-page TIFFs",
-                    choices=["ignore", "include", "generate"],
-                    default=th_default
-                )
-                if thumbnail_handling == "generate":
-                    console.print("[yellow]generate is not yet implemented; using include[/yellow]")
-                    thumbnail_handling = "include"
-                ts_default = (self.config.config.last_thumbnail_suffix
-                              or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
-                thumbnail_suffix = Prompt.ask("Thumbnail suffix", default=ts_default)
-                no_recon_default = (self.config.config.last_no_reconstruct_multipage
-                                    if self.config.config.last_no_reconstruct_multipage is not None
-                                    else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
-                no_reconstruct_multipage = Confirm.ask("Decode every JXL to its own TIFF (no multi-page reconstruction)?", default=no_recon_default)
-                dp_default = (self.config.config.last_depth_policy
-                              or _child_default('jxl_tiff_decoder', 'depth_policy'))
-                depth_policy = Prompt.ask(
-                    "Bit depth policy",
-                    choices=["force16", "preserve_thumbnails", "preserve_original"],
-                    default=dp_default
-                )
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-            else:
-                _prev = workflow.get('advanced_options', {})
-                _already_asked = workflow.get('decode_mode_asked') is not None
-                if _already_asked:
-                    # Decode mode was already chosen in Step 6 — reuse it.
-                    use_matrix = bool(_prev.get('matrix'))
-                    use_basic = bool(_prev.get('basic'))
-                    use_none = bool(_prev.get('none'))
-                    target_icc = _prev.get('target_icc') or ""
-                else:
-                    _m_default = "y" if _prev.get('matrix') else "n"
-                    matrix_input = input(f"Use ICC matrix conversion? [{_m_default}/n]: ").strip().lower() or _m_default
-                    use_matrix = matrix_input.startswith('y')
-                    use_none = False
-                    use_basic = False
-                    if not use_matrix:
-                        print("ICC mode: auto = use ICC from XMP or djxl (default)")
-                        print("          basic = force Basic mode (djxl ICC)")
-                        print("          none  = no ICC handling")
-                        _icc_default = "basic" if _prev.get('basic') else ("none" if _prev.get('none') else "auto")
-                        icc_mode = input(f"ICC mode [auto/basic/none] [{_icc_default}]: ").strip().lower() or _icc_default
-                        use_basic = (icc_mode == "basic")
-                        use_none = (icc_mode == "none")
-                    # Target ICC only applies to matrix mode (decoder ignores it otherwise)
-                    if use_matrix:
-                        _ticc_prev = _prev.get('target_icc') or ""
-                        target_icc = input(f"Target ICC (sRGB/custom/empty to clear) [{_ticc_prev}]: ").strip()
-                        if not target_icc:
-                            target_icc = _ticc_prev  # empty input keeps previous
-                        elif target_icc.lower() == "empty":
-                            target_icc = ""  # explicit clear
-                        elif target_icc.lower() == "custom":
-                            target_icc = input("Enter ICC profile path: ").strip()
-                        else:
-                            target_icc = _strip_surrounding_quotes(target_icc)
-                    else:
-                        target_icc = ""
-                cleanup_input = input("Skip ICC cleanup? [y/N]: ").strip().lower()
-                no_cleanup = cleanup_input.startswith('y')
-                # Thumbnail reconstruction handling
-                th_default = (getattr(self.config.config, 'last_thumbnail_handling', None)
-                              or _child_default('jxl_tiff_decoder', 'thumbnail_handling'))
-                th_input = input(f"Thumbnail handling for multi-page TIFFs (ignore/include/generate) [{th_default}]: ").strip().lower() or th_default
-                thumbnail_handling = th_input if th_input in ["ignore", "include", "generate"] else th_default
-                if thumbnail_handling == "generate":
-                    print("generate is not yet implemented; using include")
-                    thumbnail_handling = "include"
-                ts_default = (getattr(self.config.config, 'last_thumbnail_suffix', None)
-                              or _child_default('jxl_tiff_decoder', 'thumbnail_suffix'))
-                ts_input = input(f"Thumbnail suffix [{ts_default}]: ").strip()
-                thumbnail_suffix = ts_input if ts_input else ts_default
-                _no_recon_on = (self.config.config.last_no_reconstruct_multipage
-                                if self.config.config.last_no_reconstruct_multipage is not None
-                                else not _child_default('jxl_tiff_decoder', 'reconstruct_multipage'))
-                no_recon_default = "y" if _no_recon_on else "n"
-                no_recon_input = input(f"Decode every JXL to its own TIFF (no multi-page reconstruction)? [{no_recon_default}/n]: ").strip().lower() or no_recon_default
-                no_reconstruct_multipage = no_recon_input.startswith('y')
-                dp_default = (getattr(self.config.config, 'last_depth_policy', None)
-                              or _child_default('jxl_tiff_decoder', 'depth_policy'))
-                dp_input = input(f"Bit depth policy (force16/preserve_thumbnails/preserve_original) [{dp_default}]: ").strip().lower() or dp_default
-                depth_policy = dp_input if dp_input in ["force16", "preserve_thumbnails", "preserve_original"] else dp_default
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-
-            if overwrite_mode == "1":
-                overwrite, sync = True, False
-            elif overwrite_mode == "2":
-                overwrite, sync = False, True
-            else:
-                overwrite, sync = False, False
-
-            advanced_options['matrix'] = use_matrix
-            advanced_options['basic'] = use_basic
-            advanced_options['none'] = use_none
-            advanced_options['target_icc'] = target_icc if target_icc else None
-            advanced_options['no_icc_cleanup'] = no_cleanup
-            advanced_options['overwrite'] = overwrite
-            advanced_options['sync'] = sync
-            advanced_options['delete_source'] = delete_src
-            if workflow.get('verify_roundtrip'):
-                advanced_options['verify_roundtrip'] = True
-            if workflow.get('delete_skipped'):
-                advanced_options['delete_skipped'] = True
-            if workflow.get('provenance'):
-                advanced_options['provenance'] = workflow['provenance']
-            if workflow.get('overwrite_guard') is False:
-                advanced_options['overwrite_guard'] = False
-            if workflow.get('adopt_scan') is False:
-                advanced_options['adopt_scan'] = False
-            advanced_options['thumbnail_handling'] = thumbnail_handling
-            advanced_options['thumbnail_suffix'] = thumbnail_suffix
-            advanced_options['no_reconstruct_multipage'] = no_reconstruct_multipage
-            advanced_options['depth_policy'] = depth_policy
-
-        else:
-            # The recompressor has no --no-md5/--no-verify/--output-suffix
-            # flags (the cmd builder never emits them for jxl->jxl), so asking
-            # for them here would silently do nothing. It has its own policy
-            # questions instead.
-            _is_recompress = workflow.get('conversion_type') == 'jxl_recompress'
-            on_unknown = None
-            jbrd_policy = None
-            rederive = None
-            rederive_lower = None
-            if RICH_AVAILABLE and console:
-                if _is_recompress:
-                    on_unknown = Prompt.ask(
-                        "JXL with no recorded encode settings (cannot tell whether re-encoding gains anything)",
-                        choices=["convert", "copy", "skip"], default="convert")
-                    jbrd_policy = Prompt.ask(
-                        "JXL carrying a lossless JPEG reconstruction (jbrd)",
-                        choices=["copy", "skip", "convert"], default="copy")
-                    rederive = Confirm.ask(
-                        "Re-derive existing derivatives when distance/effort change? "
-                        "(colour/resize/sharpen runs only)",
-                        default=_child_bool_setting(
-                            'jxl_recompressor', 'REDERIVE_ON_ENCODE_CHANGE', True))
-                    if rederive:
-                        rederive_lower = Confirm.ask(
-                            "  ...also when only the effort goes DOWN (same distance)? "
-                            "(the existing file is the smaller one)",
-                            default=_child_bool_setting(
-                                'jxl_recompressor', 'REDERIVE_ON_LOWER_EFFORT', False))
-                    no_md5 = no_verify = False
-                    auto_repair = False
-                    output_suffix = ""
-                else:
-                    no_md5 = Confirm.ask("Skip MD5 verification? (faster)", default=False)
-                    no_verify = Confirm.ask("Skip validation? (faster, risky)", default=False)
-                    # Only the JXL -> JPEG lossless path ever hits reconstruction.
-                    auto_repair = False
-                    if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
-                        auto_repair = Confirm.ask(
-                            "If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified)",
-                            default=False)
-                    output_suffix = Prompt.ask("Output suffix (e.g., _converted)", default="")
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-            else:
-                if _is_recompress:
-                    ou_input = input("JXL with no recorded encode settings: convert/copy/skip [convert]: ").strip().lower()
-                    on_unknown = ou_input if ou_input in ("convert", "copy", "skip") else "convert"
-                    jp_input = input("JXL with a lossless JPEG reconstruction (jbrd): copy/skip/convert [copy]: ").strip().lower()
-                    jbrd_policy = jp_input if jp_input in ("copy", "skip", "convert") else "copy"
-                    _rd_def = _child_bool_setting(
-                        'jxl_recompressor', 'REDERIVE_ON_ENCODE_CHANGE', True)
-                    rd_input = input(
-                        "Re-derive existing derivatives when distance/effort change? "
-                        f"[{'Y/n' if _rd_def else 'y/N'}]: ").strip().lower()
-                    rederive = (True if rd_input.startswith('y') else
-                                False if rd_input.startswith('n') else _rd_def)
-                    if rederive:
-                        _rl_def = _child_bool_setting(
-                            'jxl_recompressor', 'REDERIVE_ON_LOWER_EFFORT', False)
-                        rl_input = input(
-                            "  ...also when only the effort goes DOWN (same distance)? "
-                            f"[{'Y/n' if _rl_def else 'y/N'}]: ").strip().lower()
-                        rederive_lower = (True if rl_input.startswith('y') else
-                                          False if rl_input.startswith('n') else _rl_def)
-                    no_md5 = no_verify = False
-                    auto_repair = False
-                    output_suffix = ""
-                else:
-                    md5_input = input("Skip MD5 verification? [y/N]: ").strip().lower()
-                    no_md5 = md5_input.startswith('y')
-                    verify_input = input("Skip validation? [y/N]: ").strip().lower()
-                    no_verify = verify_input.startswith('y')
-                    auto_repair = False
-                    if workflow.get('origin_format') == 'jxl' and workflow.get('dest_format') == 'jpeg':
-                        ar_input = input("If JPEG recovery fails (v2.0.0-v2.0.3 marker damage), repair a COPY and decode from it? (the JXL is never modified) [y/N]: ").strip().lower()
-                        auto_repair = ar_input.startswith('y')
-                    output_suffix = input("Output suffix (e.g., _converted): ").strip()
-                overwrite_mode = workflow.get('overwrite_mode', '2')
-                delete_src = workflow.get('delete_source', False)
-
-            if overwrite_mode == "1":
-                overwrite, sync = True, False
-            elif overwrite_mode == "2":
-                overwrite, sync = False, True
-            else:
-                overwrite, sync = False, False
-
-            if not _is_recompress:
-                advanced_options['no_md5'] = no_md5
-                advanced_options['no_verify'] = no_verify
-            else:
-                advanced_options['on_unknown'] = on_unknown
-                advanced_options['jbrd_policy'] = jbrd_policy
-                advanced_options['rederive_on_encode_change'] = rederive
-                if rederive_lower is not None:
-                    advanced_options['rederive_on_lower_effort'] = rederive_lower
-            if auto_repair:
-                advanced_options['auto_repair_jbrd'] = True
-            advanced_options['overwrite'] = overwrite
-            advanced_options['sync'] = sync
-            advanced_options['delete_source'] = delete_src
-            if workflow.get('verify_roundtrip'):
-                advanced_options['verify_roundtrip'] = True
-            if workflow.get('delete_skipped'):
-                advanced_options['delete_skipped'] = True
-            if workflow.get('provenance'):
-                advanced_options['provenance'] = workflow['provenance']
-            if workflow.get('overwrite_guard') is False:
-                advanced_options['overwrite_guard'] = False
-            if workflow.get('adopt_scan') is False:
-                advanced_options['adopt_scan'] = False
-            if not _is_recompress:
-                advanced_options['output_suffix'] = output_suffix if output_suffix else None
-
-        _carry_recompress_policies(advanced_options)
-        workflow['advanced_options'] = advanced_options
-        return self._wizard_parameters_expert(workflow)
-
-    def _wizard_parameters_expert(self, workflow: Dict) -> bool:
-        """Step 6B: Expert Mode (free-form flags)"""
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Step 6B: Expert Mode[/bold cyan]")
-            show_expert = Confirm.ask("Add custom command-line flags?", default=False)
-        else:
-            print("\n--- Step 6B: Expert Mode ---")
-            expert_input = input("Add custom flags? [y/N]: ").strip().lower()
-            show_expert = expert_input.startswith('y')
-
-        if show_expert:
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Enter any additional flags as they would appear on command line:[/dim]")
-                console.print("[dim]Example: --strip --effort 10 --d50-patch warm[/dim]")
-                expert_flags = Prompt.ask("Custom flags", default="")
-            else:
-                print("Enter additional flags (e.g., --strip --effort 10 --d50-patch warm):")
-                expert_flags = input("> ").strip()
-
-            workflow['expert_flags'] = expert_flags
-
-        return True
-
     def _multipage_summary(self, workflow: Dict):
         """Return (label, is_warning) describing what happens to multi-page TIFFs.
 
@@ -7232,318 +7215,6 @@ class InteractiveMenu:
             'scans': "thumbnail pages kept for scans only",
         }.get(tm, "thumbnail pages excluded")
         return f"split — one JXL per page ({tm_note})", False
-
-    def _wizard_confirm(self, workflow: Dict) -> bool:
-        """Step 7: Final Confirmation"""
-        # Mode 8 is in-place RECURSIVE; deleting the originals is a separate
-        # opt-in that shows up below as "DELETE SOURCE: ON (!)". Calling the
-        # mode itself "DELETE originals" made a plain mode-8 run (TIFF and JXL
-        # coexisting, the default) read as destructive.
-        mode_names = {
-            0: "In-place", 1: "Subfolder", 2: "Flat", 3: "Recursive subfolders",
-            4: "Rename (suffix)", 5: "Sibling", 6: "EXPORT full", 7: "EXPORT only",
-            8: "In-place recursive"
-        }
-
-        extra_info = []
-        if workflow.get('use_ram'):
-            extra_info.append("RAM: Yes")
-        if workflow.get('icc_profile'):
-            extra_info.append(f"ICC: {workflow['icc_profile']}")
-        staging_display = workflow['staging'] or "system default"
-        extra_info.append(f"Staging: {staging_display}")
-        if workflow.get('auto_mode_used'):
-            extra_info.append("Auto Mode: Yes")
-        # "Advanced" only when something beyond the always-present defaults
-        # (overwrite/sync/delete_source) was actually configured
-        _adv = workflow.get('advanced_options') or {}
-        _default_keys = {'overwrite', 'sync', 'delete_source'}
-        if any(k not in _default_keys and v not in (None, False, "") for k, v in _adv.items()):
-            extra_info.append("Advanced: Yes")
-        if _adv.get('delete_source'):
-            # W5 (2026-10-08 audit): the [D] panel counts the originals in
-            # Step 4, before Step 5 sets the export marker, the mode-7 subfolder
-            # and the output folder — a DIFFERENT set of files than the run
-            # touches (reproduced: panel 3, run 2). Recount here, where the
-            # mode settings are final, and say when the two disagree.
-            if workflow.get('mode') == 99:
-                # A manifest: every entry has its own source; its recap lists them.
-                extra_info.append("DELETE SOURCE: ON (!)")
-            else:
-                _n_now = self._count_origin_files(workflow, workflow.get('mode'))
-                _o = (workflow.get('origin_format') or '').upper()
-                _cnt = (f"{_n_now} {_o} file(s) in scope" if _n_now >= 0
-                        else f"an unknown number of {_o} file(s) in scope")
-                _prev = getattr(self, '_delete_panel_count', None)
-                if (_prev is not None and _prev >= 0 and _n_now >= 0
-                        and _prev != _n_now):
-                    _cnt += (f" (the [D] panel counted {_prev} before the mode "
-                             f"settings were known)")
-                extra_info.append(f"DELETE SOURCE: ON (!) — {_cnt}")
-            # Say which gate stands in front of the unlink, because "verified"
-            # means two very different things with and without this.
-            extra_info.append("Verify round-trip: ON"
-                              if _adv.get('verify_roundtrip')
-                              else "Verify round-trip: off (structural check only)")
-            if _adv.get('delete_skipped'):
-                extra_info.append("Also deletes ALREADY-CONVERTED originals (!)")
-            if _adv.get('provenance'):
-                extra_info.append(f"Match existing outputs by: {_adv['provenance']}")
-            if _adv.get('adopt_scan') is False:
-                extra_info.append("Adopt scan: OFF (pairing trusted, not verified)")
-        # Outside the delete block on purpose: the guard-off state can never
-        # coexist with a delete (the child refuses that combination).
-        if _adv.get('overwrite_guard') is False:
-            extra_info.append("Overwrite guard: off")
-        _extras = _extra_options_summary(workflow)
-        if _extras:
-            extra_info.append("Options: " + ", ".join(_extras))
-        if workflow.get('expert_flags'):
-            extra_info.append("Expert: Yes (applied LAST — overrides earlier choices)")
-        if workflow.get('exclude_folders'):
-            extra_info.append(f"Excluding: {workflow['exclude_folders']}")
-        if workflow.get('dry_run'):
-            extra_info.append("DRY RUN")
-
-        origin = workflow['origin_format']
-        dest = workflow['dest_format']
-
-        # Handle manifest mode (99) specially
-        if workflow.get('mode') == 99:
-            manifest_path = workflow.get('manifest_path', 'unknown')
-            manifest_entries = workflow.get('manifest_entries', [])
-            # The multi-page line belongs here too. Its whole reason to exist is
-            # to be the last word on what happens to extra pages before the user
-            # types YES — and a manifest run is the LARGEST run this wrapper
-            # starts, so leaving it out meant an `ignore`/`skip` manifest
-            # discarded the IR page of every film scan without one word.
-            _mp = (self._multipage_summary(workflow)
-                   if origin == 'tiff' and dest == 'jxl' else None)
-            if RICH_AVAILABLE and console:
-                console.print("\n[bold cyan]Step 7: Summary (Manifest Mode)[/bold cyan]")
-                table = Table.grid(expand=True)
-                table.add_column(style="bold")
-                table.add_column()
-                table.add_row("Mode:", "Manifest (auto-detect per entry)")
-                table.add_row("Manifest:", _rich_safe(manifest_path))
-                table.add_row("Entries:", str(len(manifest_entries)))
-                table.add_row("Workers:", str(workflow['workers']))
-                if _mp:
-                    table.add_row("Multi-page TIFF:",
-                                  f"[yellow]{_mp[0]}[/yellow]" if _mp[1] else _mp[0])
-                if extra_info:
-                    table.add_row("Config:", _rich_safe(", ".join(extra_info)))
-                console.print(Panel(table, border_style="green"))
-                console.print("\n[yellow]Type YES to confirm[/yellow] [dim](O = all options for this job)[/dim]")
-                confirm = Prompt.ask("Confirm")
-                if confirm.strip().upper() == "O":
-                    self._all_options_screen(workflow)
-                    return self._wizard_confirm(workflow)
-                if confirm.upper() != "YES":
-                    console.print("[dim]Cancelling...[/dim]\n")
-                    return False
-                return True
-            else:
-                print("\n--- Step 7: Summary (Manifest Mode) ---")
-                print(f"Mode: Manifest (auto-detect per entry)")
-                print(f"Manifest: {manifest_path}")
-                print(f"Entries: {len(manifest_entries)}")
-                print(f"Workers: {workflow['workers']}")
-                if _mp:
-                    print(f"Multi-page TIFF: {_mp[0]}")
-                # extra_info carries DELETE SOURCE, DRY RUN, staging and the
-                # expert-flags warning. The rich branch has always shown it;
-                # this one never did, so a plain terminal asked for YES on a
-                # manifest that deletes originals without saying so.
-                if extra_info:
-                    print(f"Config: {', '.join(extra_info)}")
-                print("\nType YES to confirm (O = all options for this job):")
-                confirm = input("> ").strip()
-                if confirm.upper() == "O":
-                    self._all_options_screen(workflow)
-                    return self._wizard_confirm(workflow)
-                if confirm.upper() != "YES":
-                    print("Cancelling...\n")
-                    return False
-                return True
-
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Step 7: Summary[/bold cyan]")
-            table = Table.grid(expand=True)
-            table.add_column(style="bold")
-            table.add_column()
-            table.add_row("Source:", origin.upper())
-            table.add_row("Destination:", dest.upper() if dest else "?")
-            table.add_row("Mode:", f"{workflow['mode']} - {mode_names.get(workflow['mode'])}")
-            table.add_row("Directory:", _rich_safe(workflow['input_dir']))
-            adv = workflow.get('advanced_options', {})
-            if adv.get('overwrite'):
-                ow_label = "overwrite all"
-            elif adv.get('sync'):
-                ow_label = "sync (reconvert if newer)"
-            else:
-                ow_label = "sync (default)"
-            table.add_row("If exists:", ow_label)
-            table.add_row("Workers:", str(workflow['workers']))
-
-            # Mode-specific config so the user doesn't confirm blind
-            _mc = workflow.get('mode_config', {})
-            if workflow['mode'] in (6, 7):
-                table.add_row("Export marker:", _rich_safe(_mc.get('export_marker') or self.config.config.export_marker))
-                if workflow['mode'] == 7:
-                    table.add_row("Export subfolder:", _rich_safe(_mc.get('export_subfolder') or "(all)"))
-                if _mc.get('export_jxl_folder'):
-                    table.add_row("Output folder:", _rich_safe(_mc['export_jxl_folder']))
-            elif workflow['mode'] == 2 and _mc.get('output_dir'):
-                table.add_row("Output dir:", _rich_safe(_mc['output_dir']))
-
-            if origin == 'tiff' and dest == 'jxl':
-                table.add_row("Distance:", str(workflow['distance']))
-                if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
-                    table.add_row("D50 Patch:", workflow['advanced_options']['d50_patch'])
-                _mp_label, _mp_warn = self._multipage_summary(workflow)
-                table.add_row("Multi-page TIFF:",
-                              f"[yellow]{_mp_label}[/yellow]" if _mp_warn else _mp_label)
-            elif 'lossy' in workflow['conversion_type']:
-                # convert_lossy is JPEG->JXL lossy, which is distance-driven
-                table.add_row("Distance:", str(workflow.get('distance', 1.0)))
-            elif origin == 'jxl' and dest == 'jpeg':
-                # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
-                if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                    table.add_row("Quality:", str(_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')))
-            elif origin == 'jxl' and dest == 'tiff':
-                # JXL->TIFF: show preview option
-                preview_status = "Yes" if workflow.get(
-                    'add_preview', _child_default('jxl_tiff_decoder', 'add_preview')) else "No"
-                table.add_row("JPEG Preview:", preview_status)
-            elif workflow.get('conversion_type') == 'jxl_recompress':
-                # JXL->JXL: the target distance and the downgrade policy are
-                # what the user must see before typing YES
-                table.add_row("Distance:", str(workflow.get('distance', _child_default('jxl_recompressor', 'distance'))))
-                _dg = workflow.get('advanced_options', {}).get('on_downgrade')
-                table.add_row("If no gain possible:", _dg or "copy (child default: ask)")
-                _rg = workflow.get('advanced_options', {}).get('on_regeneration')
-                table.add_row("If already re-encoded:", _rg or "copy (child default: ask)")
-                _adv = workflow.get('advanced_options', {})
-                table.add_row("Output colour space:", _rich_safe(_adv.get('output_icc') or "keep source"))
-                if (_adv.get('rederive_on_encode_change') is not None
-                        and _has_derivative_options(_adv)):
-                    table.add_row("Re-derive on distance/effort change:",
-                                  "Yes" if _adv['rederive_on_encode_change'] else "No")
-                if (_adv.get('rederive_on_lower_effort') is not None
-                        and _has_derivative_options(_adv)):
-                    table.add_row("  ...also on a lower effort:",
-                                  "Yes" if _adv['rederive_on_lower_effort'] else "No")
-                if _adv.get('rename_from'):
-                    table.add_row("Rename:",
-                                  _rich_safe(f"'{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'"))
-            # Resize/sharpening are a derivative recipe the user must see before
-            # typing YES (JXL -> JXL and the transcoder's decode direction).
-            _shape_adv = workflow.get('advanced_options', {})
-            if _has_derivative_options(_shape_adv):
-                table.add_row("Resize:", _resize_display(_shape_adv))
-                table.add_row("Sharpening:", _shape_adv.get('sharpen') or "none")
-            # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
-            if not (origin == 'jxl' and dest == 'tiff'):
-                table.add_row("Effort:", str(workflow['effort']))
-
-            if extra_info:
-                table.add_row("Config:", _rich_safe(", ".join(extra_info)))
-            console.print(Panel(table, border_style="green"))
-
-            console.print("\n[yellow]Type YES to confirm[/yellow] [dim](O = all options for this job)[/dim]")
-            confirm = Prompt.ask("Confirm")
-            if confirm.strip().upper() == "O":
-                self._all_options_screen(workflow)
-                return self._wizard_confirm(workflow)
-            if confirm.upper() != "YES":
-                console.print("[dim]Cancelling...[/dim]\n")
-                return False
-            return True
-        else:
-            print("\n--- Step 7: Summary ---")
-            adv = workflow.get('advanced_options', {})
-            if adv.get('overwrite'):
-                ow_label = "overwrite all"
-            elif adv.get('sync'):
-                ow_label = "sync (reconvert if newer)"
-            else:
-                ow_label = "sync (default)"
-            print(f"Source: {origin.upper()}")
-            print(f"Destination: {dest.upper() if dest else '?'}")
-            print(f"Mode: {workflow['mode']} - {mode_names.get(workflow['mode'])}")
-            print(f"Directory: {workflow['input_dir']}")
-            _mc = workflow.get('mode_config', {})
-            if workflow['mode'] in (6, 7):
-                print(f"Export marker: {_mc.get('export_marker') or self.config.config.export_marker}")
-                if workflow['mode'] == 7:
-                    print(f"Export subfolder: {_mc.get('export_subfolder') or '(all)'}")
-                if _mc.get('export_jxl_folder'):
-                    print(f"Output folder: {_mc['export_jxl_folder']}")
-            elif workflow['mode'] == 2 and _mc.get('output_dir'):
-                print(f"Output dir: {_mc['output_dir']}")
-            print(f"If exists: {ow_label}")
-            print(f"Workers: {workflow['workers']}")
-
-            if origin == 'tiff' and dest == 'jxl':
-                print(f"Distance: {workflow['distance']}")
-                if 'advanced_options' in workflow and workflow['advanced_options'].get('d50_patch'):
-                    print(f"D50 Patch: {workflow['advanced_options']['d50_patch']}")
-                _mp_label, _mp_warn = self._multipage_summary(workflow)
-                print(f"Multi-page TIFF: {_mp_label}")
-            elif 'lossy' in workflow['conversion_type']:
-                # convert_lossy is JPEG->JXL lossy, which is distance-driven
-                print(f"Distance: {workflow.get('distance', 1.0)}")
-            elif origin == 'jxl' and dest == 'jpeg':
-                # JXL->JPEG: show quality for AUTO and FORCE_LOSSY modes
-                if workflow.get('conversion_type') in ['jxl_to_jpeg_auto', 'jxl_to_jpeg_force']:
-                    print(f"Quality: {_workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')}")
-            elif origin == 'jxl' and dest == 'tiff':
-                # JXL->TIFF: show preview option
-                preview_status = "Yes" if workflow.get(
-                    'add_preview', _child_default('jxl_tiff_decoder', 'add_preview')) else "No"
-                print(f"JPEG Preview: {preview_status}")
-            elif workflow.get('conversion_type') == 'jxl_recompress':
-                # JXL->JXL: the target distance and the downgrade policy are
-                # what the user must see before typing YES
-                print(f"Distance: {workflow.get('distance', _child_default('jxl_recompressor', 'distance'))}")
-                _dg = workflow.get('advanced_options', {}).get('on_downgrade')
-                print(f"If no gain possible: {_dg or 'copy (child default: ask)'}")
-                _rg = workflow.get('advanced_options', {}).get('on_regeneration')
-                print(f"If already re-encoded: {_rg or 'copy (child default: ask)'}")
-                _adv = workflow.get('advanced_options', {})
-                print(f"Output colour space: {_adv.get('output_icc') or 'keep source'}")
-                if (_adv.get('rederive_on_encode_change') is not None
-                        and _has_derivative_options(_adv)):
-                    print("Re-derive on distance/effort change:",
-                          "Yes" if _adv['rederive_on_encode_change'] else "No")
-                if (_adv.get('rederive_on_lower_effort') is not None
-                        and _has_derivative_options(_adv)):
-                    print("  ...also on a lower effort:",
-                          "Yes" if _adv['rederive_on_lower_effort'] else "No")
-                if _adv.get('rename_from'):
-                    print(f"Rename: '{_adv['rename_from']}' -> '{_adv.get('rename_to') or ''}'")
-            # Resize/sharpening are a derivative recipe the user must see before
-            # typing YES (JXL -> JXL and the transcoder's decode direction).
-            _shape_adv = workflow.get('advanced_options', {})
-            if _has_derivative_options(_shape_adv):
-                print(f"Resize: {_resize_display(_shape_adv)}")
-                print(f"Sharpening: {_shape_adv.get('sharpen') or 'none'}")
-            # Effort is cjxl-only; decoding (JXL->TIFF) does not use it
-            if not (origin == 'jxl' and dest == 'tiff'):
-                print(f"Effort: {workflow['effort']}")
-
-            if extra_info:
-                print(f"Config: {', '.join(extra_info)}")
-            print("\nType YES to confirm (O = all options for this job):")
-            confirm = input("> ").strip()
-            if confirm.upper() == "O":
-                self._all_options_screen(workflow)
-                return self._wizard_confirm(workflow)
-            if confirm.upper() != "YES":
-                print("Cancelling...\n")
-                return False
-            return True
 
     def _execute_manifest_workflow(self, workflow: Dict, status: Dict[str, bool]) -> bool:
         """Execute workflow from manifest entries."""
@@ -7609,11 +7280,6 @@ class InteractiveMenu:
                     mc.get('export_subfolder'),
                     mc.get('export_jxl_folder'))
 
-        _derived_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                         if _has_derivative_options(_a)]
-        _rename_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                        if _a.get('rename_from')]
-
         # Create the analyzer once — prefer the workflow's mode_config marker (a
         # manifest run with a custom marker must detect modes with the same
         # marker the children will use). `analyzer` is also used by the
@@ -7639,64 +7305,12 @@ class InteractiveMenu:
             for _i, (source, dest_path, entry_mode) in enumerate(manifest_entries)
         ]
 
-        # The derivative options have no in-place form and never delete (same
-        # rules as the direct-run guard in execute_workflow). Evaluated PER
-        # ROW: a manifest column can make one row a derivative where the
-        # wizard's answer made none (or vice versa), so only the rows that
-        # actually combine the two are refused — before anything is charged
-        # or written.
-        _manifest_delete = bool(advanced.get('delete_source')
-                                or _flags_request_delete(workflow.get('expert_flags')))
-        if origin == 'jxl' and dest == 'jxl' and (_derived_rows or _rename_rows):
-            if _derived_rows and _manifest_delete:
-                self._print_error("A derivative (colour conversion/resize/sharpening) "
-                                  "never deletes its source — drop the delete option "
-                                  f"(derivative row(s): {', '.join(map(str, _derived_rows))}).")
-                return False
-            # resolved_entries, NOT manifest_entries: a legacy row (no Mode
-            # cell) arrives as None, which _derivative_in_place_rows never
-            # flags — the child then refused the run with exit 2 in the
-            # MIDDLE of the manifest, after the HHMM token was charged. The
-            # mode-7 derivation and the overlap guard already used the
-            # resolved list; this one was the straggler.
-            _in_place = set()
-            for _i, _e in enumerate(resolved_entries):
-                if _derivative_in_place_rows([_e]):
-                    _in_place.add(_i + 1)
-            _bad = sorted(_in_place & (set(_derived_rows) | set(_rename_rows)))
-            if _bad:
-                self._print_error(f"Derivatives (colour conversion/resize/sharpening) and "
-                                  f"--rename-from cannot run in place, and manifest "
-                                  f"row(s) {', '.join(map(str, _bad))} would (mode 8, or "
-                                  f"mode 0 with Destination = Source). Give them another "
-                                  f"mode (1-7) or a different Destination:")
-                for _n in _bad[:5]:
-                    s_, d_, m_ = resolved_entries[_n - 1]
-                    print(f"  row {_n}, mode {m_}: {s_}")
-                if len(_bad) > 5:
-                    print(f"  ... and {len(_bad) - 5} more")
-                return False
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and workflow.get('conversion_type') in
-                    ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force', 'jxl_to_png')
-                and _manifest_delete):
-            # The transcoder's decode direction. Resize/sharpening write a
-            # derivative that never deletes: a row whose EFFECTIVE recipe
-            # (wizard answer or its own columns) resizes or sharpens, combined
-            # with --delete-source, is refused up front — the user asked for a
-            # delete, so it must never be dropped silently. OutputICC alone
-            # does not count (it mirrors --icc-profile in the direct mode):
-            # those rows keep their conversion and never receive
-            # --delete-source — the command builder suppresses it per row.
-            _shape_rows = [i + 1 for i, (_w, _a) in enumerate(_row_effs)
-                           if _a.get('resize_mode')
-                           or (_a.get('sharpen') or 'none') != 'none']
-            if _shape_rows:
-                self._print_error("Resize/sharpening write a derivative that never deletes "
-                                  "its source — remove the delete option or move "
-                                  f"row(s) {', '.join(map(str, _shape_rows))} to a separate "
-                                  "manifest without it.")
-                return False
+        # The derivative rules per ROW (_GATE_RULES, path "manifest"), before
+        # anything is charged or written.
+        if _job_gates(self, workflow, "manifest", origin=origin, dest=dest,
+                      advanced=advanced, row_effs=_row_effs,
+                      resolved_entries=resolved_entries):
+            return False
         if (origin == 'jxl' and dest in ('jpeg', 'png')
                 and workflow.get('conversion_type') == 'jxl_to_jpeg_lossless'):
             # A bit-exact JPEG reconstruction cannot be resized/sharpened; the
@@ -9731,38 +9345,9 @@ class InteractiveMenu:
         # funnels through here, so resetting at the entry covers both (F-7).
         self._exclude_folder_warned = set()
 
-        # A delete flag the child's argparse rejects cannot run: it exits 2
-        # ("ambiguous option", or an explicit argument on a store_true flag)
-        # before the child does anything. Caught here, ahead of every gate, so
-        # the user is not charged an HHMM token for a doomed run (and is told
-        # what to type instead).
-        _amb = _flags_ambiguous_delete(workflow.get('expert_flags'))
-        if _amb:
-            self._print_error(
-                f"Expert flag {_amb!r} cannot run: the child scripts reject it (it is "
-                f"an ambiguous abbreviation of --delete-source / --delete-skipped / "
-                f"--delete-confirm-off, or an '=...' value on a flag that takes none). "
-                f"Spell the flag out in full, with no value.")
-            return False
-        _xprob = _expert_flags_problem(workflow.get('origin_format'),
-                                       workflow.get('dest_format'),
-                                       workflow.get('expert_flags'))
-        if _xprob:
-            self._print_error(f"Expert flags cannot run: {_xprob}. Nothing was started; "
-                              f"fix or remove them.")
-            return False
-        _rule = _registry_rule_problem(workflow)
-        if _rule:
-            self._print_error(f"These options cannot run together: {_rule}. Nothing was "
-                              f"started; change them on the summary's options screen.")
-            return False
-        _mode_flag = _flags_set_mode(workflow.get('expert_flags'))
-        if _mode_flag:
-            self._print_error(
-                f"Expert flag {_mode_flag!r} cannot run: the mode is chosen in the "
-                f"wizard (or the manifest's Mode column), and every check before the "
-                f"run — in-place and delete confirmations, collisions, counts — uses "
-                f"that one. Remove it from the expert flags and pick the mode there.")
+        # The checks every run gets before anything else (expert flags,
+        # option rules): _GATE_RULES, path "common".
+        if _job_gates(self, workflow, "common"):
             return False
 
         # Handle manifest mode (mode 99) — it resolves and checks its own script.
@@ -9790,135 +9375,11 @@ class InteractiveMenu:
             self._print_error("Ensure scripts are in the same folder as jxl_photo_v2.py")
             return False
 
-        # Derivatives (colour conversion, resize, sharpening) and output
-        # renaming have no in-place form, and a derivative never deletes.
-        # Refused here, BEFORE the HHMM token is charged for a run the child
-        # would reject with exit 2.
-        _adv_pre = workflow.get('advanced_options') or {}
-        _shaping_pre = _has_derivative_options(_adv_pre)
-        _delete_pre = bool(_adv_pre.get('delete_source')
-                           or _flags_request_delete(workflow.get('expert_flags')))
-        _conv_pre = workflow.get('conversion_type', '')
-        if origin == 'jxl' and dest == 'jxl':
-            if _shaping_pre:
-                if workflow.get('mode') in (0, 8):
-                    self._print_error("Derivatives (colour conversion/resize/sharpening) "
-                                      "cannot run in place (modes 0/8) — pick mode 1-7.")
-                    return False
-                if _delete_pre:
-                    self._print_error("A derivative never deletes its source — drop the "
-                                      "delete option.")
-                    return False
-            if _adv_pre.get('rename_from') and workflow.get('mode') in (0, 8):
-                self._print_error("--rename-from cannot be used in place (modes 0/8): the "
-                                  "renamed file would sit beside its source and be "
-                                  "re-processed as a new input.")
-                return False
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                  'jxl_to_png')
-                and _shaping_pre and _delete_pre):
-            # Same rule for the transcoder's decode direction: a resized or
-            # sharpened JPEG/PNG is a derivative, and the child refuses
-            # --delete-source with the resize/sharpening flags.
-            self._print_error("Resize/sharpening write a derivative that never deletes "
-                              "its source — drop the delete option.")
+        # Derivatives, degraded decodes, the lossy decode (T-B), the lossless
+        # recovery's rename: _GATE_RULES, path "direct", BEFORE the HHMM
+        # token is charged for a run the child would reject with exit 2.
+        if _job_gates(self, workflow, "direct"):
             return False
-        if origin == 'jxl' and dest == 'tiff' and _delete_pre:
-            # W4 (2026-10-08 audit): a degraded decode is not a copy of the
-            # master. The decoder refuses --none + --delete-source (exit 2)
-            # and keeps the JXLs of an 8-bit decode of a deeper source or of a
-            # --basic decode that drops the XMP profile; say it here, before
-            # the HHMM token, instead of letting the child refuse or keep.
-            if _adv_pre.get('none'):
-                self._print_error("Decode mode 'none' writes no colour profile and no "
-                                  "XMP/IPTC — the TIFF is not a copy of the master, so "
-                                  "it cannot delete the JXLs. Drop the delete option "
-                                  "(or pick another decode mode).")
-                return False
-            if str(_bit_depth_or_default(workflow, 'tiff')) == '8' or _adv_pre.get('basic'):
-                _note = ("Bit depth 8 / decode mode 'basic' makes a degraded copy: the "
-                         "decoder KEEPS the JXLs whose master is deeper than 8 bits or "
-                         "whose real profile lives in XMP.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
-                else:
-                    print(_note)
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and _conv_pre in ('jxl_to_jpeg_auto', 'jxl_to_jpeg_force',
-                                  'jxl_to_png')
-                and workflow.get('icc_profile') and _delete_pre):
-            # W6 (2026-10-08 audit): a colour conversion is a derivative too —
-            # the manifest's OutputICC rows never deleted, while this direct
-            # route deleted the 16-bit master after an 8-bit sRGB JPEG. The
-            # child refuses --icc-profile + --delete-source now; refused here
-            # first, before the HHMM token.
-            self._print_error("Colour conversion (Convert to sRGB) writes a derivative "
-                              "that never deletes its source — drop the delete option "
-                              "(or the conversion).")
-            return False
-
-        # T-B: a lossy decode is not a copy of the master — refused before the
-        # HHMM token (the transcoder exits 2 on the same pair).
-        _never = _lossy_decode_never_deletes(workflow) if _delete_pre else None
-        if _never:
-            self._print_error(f"This run cannot delete its sources: {_never}. Drop the "
-                              f"delete option.")
-            return False
-        if (_delete_pre and origin == 'jxl' and _conv_pre == 'jxl_to_jpeg_auto'):
-            _auto_note = ("Delete with the automatic JXL → JPEG: only JPEG archives "
-                          "recovered bit for bit delete their JXL; the JXLs converted "
-                          "lossy are kept.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(_auto_note)}[/yellow]")
-            else:
-                print(_auto_note)
-
-        # --rename-from on the lossless JXL->JPEG recovery is impossible for
-        # the DIRECT run too (the same refusal the manifest executor makes):
-        # the recovered JPEG keeps the original file name, so a rename left in
-        # the workflow (a preset carried over from a JXL->JXL run) must refuse
-        # up front, before the token (W2-1a).
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and _conv_pre == 'jxl_to_jpeg_lossless'
-                and _adv_pre.get('rename_from')):
-            self._print_error("A bit-exact JPEG reconstruction keeps the "
-                              "original file names — --rename-from does not "
-                              "apply to the lossless JXL→JPEG recovery. To "
-                              "rename, use a manifest row with the lossy "
-                              "conversion (RenameFrom column).")
-            return False
-        # OutputICC is likewise ignored on the lossless path (there is no
-        # pixel to convert) — warn, don't refuse: the recovery itself is
-        # still exactly what was asked.
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and _conv_pre == 'jxl_to_jpeg_lossless'
-                and _adv_pre.get('output_icc')):
-            _icc_msg = ("OutputICC is ignored by a bit-exact JPEG reconstruction "
-                        "— the recovered JPEG keeps the original bytes, "
-                        "colour included.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(_icc_msg)}[/yellow]")
-            else:
-                print(f"WARNING: {_icc_msg}")
-
-        # A DIRECT JXL -> JPEG/PNG conversion does not pass --rename-from (only
-        # a manifest row's RenameFrom column does, _policy_rename): the wizard
-        # never asks for it there, so the value can only be a hand-edited
-        # preset or one carried over from a JXL -> JXL run — renaming these
-        # outputs unasked would be worse. Said out loud instead of dropped in
-        # silence (S4 of the 261103 review).
-        if (origin == 'jxl' and dest in ('jpeg', 'png')
-                and _conv_pre in _DECODE_LOSSY_CONVERSIONS
-                and _adv_pre.get('rename_from')):
-            _ren_msg = ("--rename-from is not passed on a direct JXL → JPEG/PNG run "
-                        "(the value comes from a JXL → JXL setting or a hand-edited "
-                        "preset): the outputs keep their names. Use a manifest "
-                        "RenameFrom column to rename them.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(_ren_msg)}[/yellow]")
-            else:
-                print(f"WARNING: {_ren_msg}")
 
         # Lossy + delete_skipped: the one combination with no provenance of any
         # kind. (Only the lossy TRANSCODER directions, `_LOSSY_CONVERSIONS`; the
@@ -10077,7 +9538,7 @@ class InteractiveMenu:
                     table.add_column("Workflow")
                     table.add_column("Saved", style="dim")
                     for i, name in enumerate(names, 1):
-                        table.add_row(str(i), _rich_safe(name), _rich_safe(self._describe_session(presets[name])),
+                        table.add_row(str(i), _rich_safe(name), _rich_safe(self._describe_session(_preset_session(presets[name]))),
                                       presets[name].get('saved_at', ''))
                     console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
                 else:
@@ -10091,7 +9552,7 @@ class InteractiveMenu:
                 if names:
                     for i, name in enumerate(names, 1):
                         print(f"  {i}. {name}")
-                        print(f"     {self._describe_session(presets[name])}")
+                        print(f"     {self._describe_session(_preset_session(presets[name]))}")
                 else:
                     print("  (none saved yet)")
                 print("[number] run | [S] save last workflow as preset | [D] delete | [B] back")
@@ -10151,7 +9612,7 @@ class InteractiveMenu:
                 # Straight to the shared runner: a preset is exactly a stored
                 # session, and it gets the same overwrite/sync and dry-run
                 # questions as 'Repeat last workflow'.
-                self._run_saved_session(presets[name], status)
+                self._run_saved_session(_preset_session(presets[name]), status)
                 return
 
             self._print_error("Not a valid option.")
@@ -10356,41 +9817,11 @@ class InteractiveMenu:
             dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
 
         if unattended:
-            # A destructive preset cannot run unattended: the delete gates ask
-            # for an HHMM token nobody can type here, and skipping them would
-            # let a scheduled task delete originals on its own. Fail closed and
-            # say what to do instead.
-            #
-            # Three ways a stored run can reach a deletion, all of them checked:
-            #   * advanced_options['delete_source'] (the menu's own path), in ANY
-            #     mode — deleting is orthogonal to layout, and keying this on
-            #     mode 8 let a mode-3 preset through;
-            #   * a MANIFEST preset (mode 99), whose entries carry their own
-            #     modes — the session records 99, so a plain `== 8` test missed
-            #     it and the run fell through to _execute_manifest_workflow,
-            #     which printed an interactive HHMM prompt into the scheduler
-            #     log before failing on EOF. Safe, but unreadable at 3am;
-            #   * --delete-source hidden in expert flags, which never touches
-            #     advanced_options at all (see _flags_request_delete).
-            _adv_delete = bool((session.get('last_advanced_options') or {}).get('delete_source'))
-            _flag_delete = _flags_request_delete(session.get('last_expert_flags'))
-            # JXL -> JXL modes 0/8 replace the sources IN PLACE — a preset
-            # replaying one unattended would feed the recompressor's
-            # interactive confirmation an EOF stdin and die with exit 3 (or
-            # worse, used to invisibly prompt into a scheduler log). Same
-            # unattended gate as the delete case.
-            _in_place_recompress = (origin == 'jxl' and last_dest == 'jxl'
-                                    and last_mode in (0, 8))
-            if not dry_choice and (_flag_delete or _adv_delete
-                                   or _in_place_recompress):
-                why = ("replaces the source JXLs in place"
-                       if _in_place_recompress and not (_flag_delete or _adv_delete)
-                       else "deletes source files "
-                            f"({'--delete-source in expert flags' if _flag_delete else 'delete_source is on'})")
-                self._print_error(
-                    f"This preset {why}. "
-                    "That confirmation cannot be given unattended - run it from "
-                    "the menu, or add --dry-run to simulate it here.")
+            # A destructive preset cannot run unattended (_GATE_RULES, path
+            # "preset": delete in any mode or in the expert flags, or an
+            # in-place recompression).
+            if _job_gates(self, {}, "preset", session=session, dry_run=dry_choice,
+                          origin=origin, dest=last_dest, mode=last_mode):
                 return False
             proceed = True
         elif RICH_AVAILABLE and console:
@@ -10692,9 +10123,9 @@ def _main():
         # it), so this runs BEFORE the cjxl/djxl gate below.
         presets = config.config.presets or {}
         if not presets:
-            print("No presets saved. Run a workflow, then save it from menu option 7.")
+            print("No presets saved. Run a job, then save it with [s] on its review (or from menu 3).")
         for name in sorted(presets):
-            print(f"{name}\n    {menu._describe_session(presets[name])}")
+            print(f"{name}\n    {menu._describe_session(_preset_session(presets[name]))}")
         sys.exit(0)
 
     if not status.get('cjxl') and not status.get('djxl'):
@@ -10708,7 +10139,7 @@ def _main():
             print(f"ERROR: no preset named {args.run_preset!r}. Available: {available}")
             sys.exit(2)
         ok = menu._run_saved_session(
-            presets[args.run_preset], status,
+            _preset_session(presets[args.run_preset]), status,
             answers={'overwrite': args.overwrite, 'dry_run': args.dry_run})
         sys.exit(0 if ok else 1)
 
@@ -10716,7 +10147,7 @@ def _main():
     _tip = _jxl_thumbnail_tip() if config.config.show_thumbnail_tip else None
     if _tip:
         print(_tip)
-        print("     (Hide this tip: 4 - Edit default settings.)")
+        print("     (Hide this tip: 9 - Settings, then 1.)")
 
     # Main loop
     while True:
@@ -10727,149 +10158,59 @@ def _main():
             print("Exiting...")
             break
 
-        elif choice == "1":
-            workflow = menu.run_wizard(status)
-            if workflow:
-                origin = workflow['origin_format']
-                dest = workflow['dest_format']
+        # The letters of v2.22.0_beta1's menus R and C (show_main_menu maps
+        # them too; S stays the script settings).
+        choice = {"R": "5", "C": "8"}.get(choice, choice)
 
-                if origin == 'tiff' and dest == 'jxl':
-                    saved_distance = _workflow_or_child(workflow, 'distance', 'jxl_tiff_encoder')
-                    saved_quality = None
-                elif 'lossy' in workflow['conversion_type'] or workflow['conversion_type'] in ('jxl_to_jpeg_force', 'jxl_to_jpeg_auto'):
-                    saved_quality = _workflow_or_child(workflow, 'quality', 'jxl_jpeg_transcoder')
-                    # Lossy JXL encode also uses distance; preserve it for repeat
-                    saved_distance = workflow.get('distance')
-                elif workflow['conversion_type'] == 'jxl_recompress':
-                    # JXL -> JXL is distance-driven; no quality knob involved.
-                    saved_distance = (workflow.get('distance') if workflow.get('distance') is not None
-                                      else _child_default('jxl_recompressor', 'distance'))
-                    saved_quality = None
-                elif workflow['conversion_type'] == 'jxl_tiff_decoder':
-                    # The decoder is never passed --quality, so storing one only
-                    # makes the preset list advertise a knob the run ignores.
-                    saved_quality = None
-                    saved_distance = None
-                else:
-                    saved_quality = config.config.default_quality
-                    saved_distance = None
-
-                # The delete-gate answers (round-trip verify, provenance, ...)
-                # were staged on the workflow by _ask_delete_options, NOT written
-                # to the config — a cancelled wizard must leave saved state
-                # untouched. The wizard has confirmed, so commit them here;
-                # save_last_session's save_config() persists them.
-                for _field, _value in (workflow.pop('_pending_session_fields', None) or {}).items():
-                    setattr(config.config, _field, _value)
-
-                # Manifest runs (mode 99) are saved like any other: the repeat
-                # re-reads the CSV, which is what makes a recurring "sync the
-                # whole library" run a two-keystroke operation. Saving one DOES
-                # overwrite the previous repeat slot — that is the intent.
-                config.save_last_session(
-                    input_dir=workflow['input_dir'],
-                    output_mode=str(workflow['mode']),
-                    workers=workflow['workers'],
-                    staging=workflow['staging'],
-                    effort=workflow['effort'],
-                    quality=saved_quality,
-                    distance=saved_distance,
-                    origin_format=workflow['origin_format'],
-                    dest_format=workflow['dest_format'],
-                    conversion_type=workflow['conversion_type'],
-                    icc_profile=workflow.get('icc_profile'),
-                    expert_flags=workflow.get('expert_flags'),
-                    d50_patch=workflow.get('advanced_options', {}).get('d50_patch'),
-                    encode_tag=workflow.get('advanced_options', {}).get('encode_tag'),
-                    multipage_mode=workflow.get('advanced_options', {}).get('multipage_mode'),
-                    thumbnail_mode=workflow.get('advanced_options', {}).get('thumbnail_mode'),
-                    thumbnail_suffix=workflow.get('advanced_options', {}).get('thumbnail_suffix'),
-                    thumbnail_handling=workflow.get('advanced_options', {}).get('thumbnail_handling'),
-                    no_reconstruct_multipage=workflow.get('advanced_options', {}).get('no_reconstruct_multipage'),
-                    depth_policy=workflow.get('advanced_options', {}).get('depth_policy'),
-                    advanced_options=workflow.get('advanced_options'),
-                    use_ram=workflow.get('use_ram') if origin == 'tiff' else None,
-                    compression=workflow.get('compression') if dest == 'tiff' else None,
-                    bit_depth=workflow.get('bit_depth') if dest in ('tiff', 'png') else None,
-                    add_preview=workflow.get('add_preview') if dest == 'tiff' else None,
-                    mode_config=workflow.get('mode_config'),
-                    # None on a normal run: clears any previously stored CSV.
-                    manifest_path=workflow.get('manifest_path'),
-                    extra_options=workflow.get('extra_options') or {},
-                    # The wizard stages the answer only in the TIFF<->JXL
-                    # directions (same gate the replay honors): for every
-                    # other direction the run never asked, so the saved
-                    # value is kept (`is not self._STAGING_UNSET`
-                    # semantics) instead of having a scripted None from a
-                    # direction that never asks erase a TIFF run's
-                    # exclusion.
-                    exclude_folders=(workflow['exclude_folders']
-                                     if (workflow['origin_format'], workflow['dest_format'])
-                                     in (('tiff', 'jxl'), ('jxl', 'tiff'))
-                                     and 'exclude_folders' in workflow
-                                     else config._STAGING_UNSET),
-                )
-
-                if RICH_AVAILABLE and console:
-                    execute_now = Confirm.ask("\nConfiguration saved! Execute now?", default=True)
-                else:
-                    exec_input = input("\nExecute now? [Y/n]: ").strip().lower()
-                    execute_now = not exec_input.startswith('n')
-
-                if execute_now:
-                    success = menu.execute_workflow(workflow, status)
-                    if success:
-                        if RICH_AVAILABLE and console:
-                            again = Confirm.ask("\nConvert another folder?", default=False)
-                            if not again:
-                                break
-                        else:
-                            again = input("\nConvert another folder? [y/N]: ").strip().lower()
-                            if not again.startswith('y'):
-                                break
-                    else:
-                        if RICH_AVAILABLE and console:
-                            retry = Confirm.ask("Try again?", default=True)
-                            if not retry:
-                                break
-                        else:
-                            retry = input("Try again? [Y/n]: ").strip().lower()
-                            if retry.startswith('n'):
-                                break
-                else:
-                    print("\nConfiguration saved. Use 'Repeat last workflow' to execute later.")
-            else:
-                continue
+        if choice == "1":
+            # New job: task, folder, mode, quality, review ([r] runs it).
+            menu.new_job_flow(status)
 
         elif choice == "2" and has_last:
             menu._run_saved_session(config.session_snapshot(), status)
 
-        elif choice == "7":
+        elif choice == "3":
             menu.presets_menu(status)
 
-        elif choice == "8":
-            menu.repair_jbrd_flow(status)
+        elif choice == "4":
+            # Folder list: the task, then a manifest CSV, then the review.
+            menu.new_job_flow(status, manifest=True)
 
-        elif choice == "9":
-            menu.explorer_thumbnail_flow(status)
-
-        elif choice == "R":
+        elif choice == "5":
             menu.restamp_flow(status)
 
-        elif choice == "C":
+        elif choice == "6":
+            menu.explorer_thumbnail_flow(status)
+
+        elif choice == "7":
+            menu.repair_jbrd_flow(status)
+
+        elif choice == "8":
             menu.clear_icc_cache_flow(status)
 
         elif choice == "S":
             menu.script_settings_flow()
 
-        elif choice == "3":
+        elif choice == "9":
+            sub = menu.ui.choose("menu.settings", "Settings",
+                                 [("1", "wrapper defaults (workers, staging, marker, distance...)"),
+                                  ("2", "script settings (the four scripts' own defaults)"),
+                                  ("3", "reset all settings"),
+                                  ("4", "move the settings file"), ("0", "back")], "0")
+            if sub == "1":
+                menu.edit_settings()
+            elif sub == "2":
+                menu.script_settings_flow()
+            elif sub == "3":
+                choice = "_reset"
+            elif sub == "4":
+                choice = "_move"
+
+        if choice == "D":
             status = checker.check_dependencies(force=True)
             menu.display_status(status)
 
-        elif choice == "4":
-            menu.edit_settings()
-
-        elif choice == "5":
+        elif choice == "_reset":
             if RICH_AVAILABLE and console:
                 confirm = Confirm.ask(
                     "[red]This will erase all saved settings. Continue?[/red]",
@@ -10896,7 +10237,7 @@ def _main():
                 except Exception as e:
                     menu._print_error(f"Error erasing: {e}")
 
-        elif choice == "6":
+        elif choice == "_move":
             script_config = SCRIPT_DIR / ".jxl_tools_config.json"
             if platform.system() == "Windows":
                 user_profile_dir = Path(os.environ.get("USERPROFILE", Path.home()))

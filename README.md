@@ -170,39 +170,42 @@ The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided
 │ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
-│  1  New workflow                                                                                                   │
-│  2  Repeat last workflow (unknown)                                                                                 │
-│  3  Check dependencies again                                                                                       │
-│  4  Edit default settings                                                                                          │
-│  5  Reset all settings                                                                                             │
-│  6  Move settings file                                                                                             │
-│  7  Presets (2 saved)                                                                                              │
-│  8  Repair JPEG recovery (jbrd audit/repair)                                                                       │
+│     CONVERT                                                                                                        │
+│  1  New job: archive, restore, export, recompress...                                                               │
+│  2  Repeat last job                                                                                                │
+│  3  Presets (2 saved)                                                                                              │
+│  4  Folder list (manifest): run a CSV of folders                                                                   │
+│     MAINTAIN                                                                                                       │
+│  5  Renamed or moved folders: fix the masters' path records                                                        │
+│  6  Explorer thumbnails for existing JXLs (jxl-thumb)                                                              │
+│  7  JPEG archives (jbrd): audit, repair, EXIF for IrfanView                                                        │
+│  8  Reset the encoder's ICC test cache                                                                             │
+│     SETTINGS                                                                                                       │
+│  9  Settings: wrapper defaults, script settings, reset, move                                                       │
+│  D  Dependencies: check again                                                                                      │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The wizard guides you through: Source format → Destination → Directory → Output mode → Parameters → Confirm.
+A **New job** asks what to do, where, and how, then shows one review screen:
 
 ```
-[1] New workflow
-  Step 1: Source Format   → TIFF
-  Step 2: Destination     → JXL d=0.1
-  Step 3: Directory       → F:\Photos\2024
-  Step 4: Mode            → 7 (Marker _EXPORT, subfolder)
-  Step 5: Confirmation    → OK
-  Step 6: Parameters      → Workers: 8, Distance: 0.1, Effort: 7
-  Step 7: Summary         → Review and type YES to confirm
-  → Executes the underlying script with all options
+[1] New job
+  Task      → Archive TIFFs as JXL masters
+  Folder    → F:\Photos\2024
+  Mode      → 7 (below _EXPORT, one subfolder) — or [A] to have the folder analysed
+  Quality   → d=0.1, near-lossless
+  Review    → every option with its value and where it came from;
+              [a] all options, [d] dry run, [r] run, [s] save as a preset
 ```
 
-The value between `[brackets]` (blue in the menu) is the default: press `Enter` to accept it. Full wrapper guide: [docs/README_jxl_tools.md](docs/README_jxl_tools.md). Its settings live in `.jxl_tools_config.json`, next to `jxl_photo.py` or in your home folder (main menu option 6 moves it).
+The value between `[brackets]` (blue in the menu) is the default: press `Enter` to accept it. Full wrapper guide: [docs/README_jxl_tools.md](docs/README_jxl_tools.md). Its settings live in `.jxl_tools_config.json`, next to `jxl_photo.py` or in your home folder (Settings, menu 9, moves it).
 
 ---
 
 ## Auto Mode and manifests
 
-Instead of memorizing modes 0–8, press **[A]** in Step 4: the wizard reads your folder structure and *recommends* a mode — `_EXPORT` / `Export_*` folders → 6/7 (Capture One / Lightroom), deep subfolders → 3, several folders → 2, a single folder → 0 — and previews where each folder's output goes. It never runs anything you have not confirmed; **[N]** picks the mode yourself.
+Instead of memorizing modes 0–8, press **[A]** in the mode step of a New job: the wizard reads your folder structure and *recommends* a mode — `_EXPORT` / `Export_*` folders → 6/7 (Capture One / Lightroom), deep subfolders → 3, several folders → 2, a single folder → 0 — and previews where each folder's output goes. It never runs anything you have not confirmed; **[N]** picks the mode yourself.
 
 From there, **[P]** writes a **manifest**: a CSV with one Source → Destination row per folder, each with its own mode (and optionally its own colour space, size, sharpening, rename or export folder). Edit it in Excel, comment a row out with `#`, and run it again any time with **[M]**:
 

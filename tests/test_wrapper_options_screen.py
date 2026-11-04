@@ -263,14 +263,14 @@ def test_summary_lists_the_options_and_O_opens_the_screen(tmp_path, monkeypatch,
                                                           capsys):
     opt = next(o for o in wp.REGISTRY if o.id == "scan_scope")
     wf = _workflow(tmp_path, "tiff2jxl", extra_options={"buffering": 1})
-    ui = PickUI([opt], {"opt.scan_scope": "2"})
+    # Delivery C: the summary is the review screen; [a] opens the options
+    # screen, and the review shown after it names both options.
+    ui = PickUI([opt], {"opt.scan_scope": "2", "review.action": ["a", "q"]})
     menu = _menu(tmp_path, monkeypatch, ui)
-    with mock.patch("builtins.input", side_effect=["o", "YES"]):
-        assert menu._wizard_confirm(wf) is True
+    assert menu._review_screen(wf, STATUS) == "quit"
     assert wf["extra_options"] == {"buffering": 1, "scan_scope": "raw"}
-    out = capsys.readouterr().out
-    assert "O = all options for this job" in out
-    # The second summary (after the screen) names both.
+    out = "\n".join(ui.output)
+    assert "[a] all options" in out
     assert "Options: --buffering 1, --scan-scope raw" in out, out
 
 
@@ -327,7 +327,10 @@ def test_extra_options_are_saved_with_the_session(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- menus R / C
 
-@pytest.mark.parametrize("typed,expected", [("r", "R"), ("R", "R"), ("c", "C")])
+# Delivery C renumbered the menu (5 = renamed folders, 8 = ICC cache): the
+# letters R and C stay accepted, in either case, as those entries.
+@pytest.mark.parametrize("typed,expected", [("r", "5"), ("R", "5"), ("c", "8"),
+                                            ("d", "D"), ("s", "S")])
 def test_main_menu_takes_the_letters_in_either_case(typed, expected, tmp_path,
                                                     monkeypatch):
     menu = _menu(tmp_path, monkeypatch)

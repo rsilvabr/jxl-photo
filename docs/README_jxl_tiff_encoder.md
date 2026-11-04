@@ -302,7 +302,7 @@ djxl, exiftool edits (which keep it), Lightroom-style metadata writers.
 The toolkit's own box reorder keeps it there too. Before this fix
 `--restamp-moved` and the `--provenance adopt` stamp moved it to the end of
 the file; jxl-thumb reads every box, so Explorer kept showing it, and
-`--refresh-explorer-thumbnails` (menu option 9) puts it back in place.
+`--refresh-explorer-thumbnails` (menu 6) puts it back in place.
 It is not in the EXIF on purpose: a 768 px JPEG does not fit the 64 KB EXIF
 segment of a JPEG, and djxl, which copies a JXL's EXIF into the JPEG it
 writes, fails on such a file ("Bogus marker length").
@@ -339,7 +339,7 @@ thumbnail, or a file where the thumbnail would be more than
 of a few dozen KB, a 2048 px derivative. Those decode fast anyway.
 
 Files that already exist get theirs from the recompressor's
-`--refresh-explorer-thumbnails` (or menu option 9 of `jxl_photo.py`), which
+`--refresh-explorer-thumbnails` (or menu 6 of `jxl_photo.py`), which
 changes nothing but the thumbnail and keeps each file's modified date — see
 [README_jxl_recompressor.md](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails).
 

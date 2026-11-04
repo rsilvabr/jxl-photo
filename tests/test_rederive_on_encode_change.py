@@ -431,33 +431,55 @@ def test_child_bool_setting_fallbacks():
 # T6 - the wizard asks the question on the recompression branch (plain input)
 # ---------------------------------------------------------------------------
 
-def _recompress_workflow():
-    return {"origin_format": "jxl", "dest_format": "jxl",
-            "conversion_type": "jxl_recompress", "overwrite_mode": "2"}
+# Delivery C: the old Step 6A questions are entries of the review's options
+# screen now. Untouched, the wrapper passes nothing and the recompressor's own
+# REDERIVE_* setting decides (the old "default comes from the child"); set on
+# the screen, the flag goes on the command line.
+
+def _derivative_workflow(tmp_path):
+    return {"origin_format": "jxl", "dest_format": "jxl", "conversion_type": "jxl_recompress",
+            "mode": 1, "input_dir": str(tmp_path), "workers": 2, "distance": 1.0,
+            "effort": 7, "mode_config": {}, "expert_flags": "", "extra_options": {},
+            "advanced_options": {"output_icc": "sRGB", "overwrite": False, "sync": True}}
 
 
-def test_wizard_answers_no_to_rederive(monkeypatch):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "n"]))
+def _screen_pick(menu, wf, opt_id, value_key):
+    """Set one entry through the real options screen: its row number, then
+    the value key ("1" = script default, "2" = on, "3" = off for a tri)."""
+    ctx = wp._CmdCtx("jxl", "jxl", wf["input_dir"], None, wf["mode"], wf["workers"], wf,
+                     wf["advanced_options"], False, None)
+    rows = [o for gid, _t in wp.GROUPS for o in wp.REGISTRY
+            if o.group == gid and ctx.direction in o.directions and o.level != "internal"
+            and (o.when is None or o.when(ctx))]
+    n = str([o.id for o in rows].index(opt_id) + 1)
+    menu._ui = wp.ScriptedUI({"opt.screen": [n, ""], f"opt.{opt_id}": value_key})
+    menu._all_options_screen(wf)
+
+
+def _direct_argv(menu, wf, monkeypatch):
+    calls = []
+    monkeypatch.setattr(menu, "_stream_child",
+                        lambda cmd, idle_timeout=None: calls.append([str(c) for c in cmd]) or 0)
+    menu.execute_workflow(dict(wf, dry_run=True), {})
+    return calls[-1]
+
+
+def test_wizard_answers_no_to_rederive(monkeypatch, tmp_path):
     menu = _menu()
-    workflow = _recompress_workflow()
-    menu._wizard_parameters_advanced(workflow, {})
-    adv = workflow["advanced_options"]
-    assert adv.get("on_unknown") == "convert"
-    assert adv.get("jbrd_policy") == "copy"
-    assert adv["rederive_on_encode_change"] is False
+    wf = _derivative_workflow(tmp_path)
+    _screen_pick(menu, wf, "rederive_on_encode_change", "3")
+    assert wf["advanced_options"]["rederive_on_encode_change"] is False
+    assert "--no-rederive-on-encode-change" in _direct_argv(menu, wf, monkeypatch)
 
 
-def test_wizard_rederive_default_comes_from_the_child(monkeypatch):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", ""]))
-    monkeypatch.setattr(rec, "REDERIVE_ON_ENCODE_CHANGE", False)
+def test_wizard_rederive_default_comes_from_the_child(monkeypatch, tmp_path):
     menu = _menu()
-    workflow = _recompress_workflow()
-    menu._wizard_parameters_advanced(workflow, {})
-    # Empty answers to the three recompressor questions keep their defaults,
-    # and the new question's default came from the child's setting: False.
-    assert workflow["advanced_options"]["rederive_on_encode_change"] is False
+    wf = _derivative_workflow(tmp_path)
+    _screen_pick(menu, wf, "rederive_on_encode_change", "1")     # the script's value
+    assert "rederive_on_encode_change" not in wf["advanced_options"]
+    argv = _direct_argv(menu, wf, monkeypatch)
+    assert "--rederive-on-encode-change" not in argv
+    assert "--no-rederive-on-encode-change" not in argv
 
 
 # ---------------------------------------------------------------------------
@@ -494,32 +516,32 @@ def test_direct_cmd_carries_lower_effort_flag(tmp_path, monkeypatch):
     assert "--rederive-on-lower-effort" in calls[-1]
 
 
-def test_wizard_asks_lower_effort_after_a_yes(monkeypatch):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    # advanced? y | on_unknown | jbrd | re-derive (default yes) | lower: y
-    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "", "y"]))
+def test_wizard_asks_lower_effort_after_a_yes(monkeypatch, tmp_path):
     menu = _menu()
-    workflow = _recompress_workflow()
-    menu._wizard_parameters_advanced(workflow, {})
-    adv = workflow["advanced_options"]
+    wf = _derivative_workflow(tmp_path)
+    _screen_pick(menu, wf, "rederive_on_encode_change", "2")
+    _screen_pick(menu, wf, "rederive_on_lower_effort", "2")
+    adv = wf["advanced_options"]
     assert adv["rederive_on_encode_change"] is True
     assert adv["rederive_on_lower_effort"] is True
+    assert "--rederive-on-lower-effort" in _direct_argv(menu, wf, monkeypatch)
 
 
-def test_wizard_lower_effort_default_comes_from_the_child(monkeypatch):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "", ""]))
+def test_wizard_lower_effort_default_comes_from_the_child(monkeypatch, tmp_path):
     monkeypatch.setattr(rec, "REDERIVE_ON_LOWER_EFFORT", True)
     menu = _menu()
-    workflow = _recompress_workflow()
-    menu._wizard_parameters_advanced(workflow, {})
-    assert workflow["advanced_options"]["rederive_on_lower_effort"] is True
+    wf = _derivative_workflow(tmp_path)
+    argv = _direct_argv(menu, wf, monkeypatch)
+    # Nothing passed: the recompressor's own REDERIVE_ON_LOWER_EFFORT decides.
+    assert "--rederive-on-lower-effort" not in argv
+    assert "--no-rederive-on-lower-effort" not in argv
 
 
-def test_wizard_skips_lower_effort_after_a_no(monkeypatch):
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", _input_feeder(["y", "", "", "n"]))
+def test_wizard_skips_lower_effort_after_a_no(monkeypatch, tmp_path):
     menu = _menu()
-    workflow = _recompress_workflow()
-    menu._wizard_parameters_advanced(workflow, {})
-    assert "rederive_on_lower_effort" not in workflow["advanced_options"]
+    wf = _derivative_workflow(tmp_path)
+    _screen_pick(menu, wf, "rederive_on_encode_change", "3")
+    assert "rederive_on_lower_effort" not in wf["advanced_options"]
+    assert "--rederive-on-lower-effort" not in _direct_argv(menu, wf, monkeypatch)
+
+

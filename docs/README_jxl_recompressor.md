@@ -317,7 +317,7 @@ so a TIFF re-exported since still reads as newer and is reconverted on the
 next sync. JPEG → JXL lossless files (`jbrd`) are never edited. A bare
 codestream file (no container) is wrapped in one first; the image data is
 unchanged. `--dry-run` lists what would change. It cannot be combined with
-an output folder, `--delete-source` or the derivative options. Menu option 9
+an output folder, `--delete-source` or the derivative options. Menu 6
 of `jxl_photo.py` runs it.
 
 ## Output modes

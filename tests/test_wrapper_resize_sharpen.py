@@ -203,11 +203,10 @@ def test_manifest_refuses_shaping_in_place_rows_up_front(tmp_path, monkeypatch):
 
 
 def test_step6_resize_answers_survive_advanced(monkeypatch, tmp_path):
-    """The advanced step rebuilds advanced_options from scratch; the shaping
-    answers must ride along like output_icc does."""
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    """The advanced options are rebuilt from scratch (delivery C:
+    _advanced_defaults, the old Step 6A "no"); the shaping answers must ride
+    along like output_icc does."""
     wf = _jxl_to_jxl_workflow(tmp_path, advanced=dict(_SEEDED))
-    _menu()._wizard_parameters_advanced(wf, {"cjxl": True})
+    _menu()._advanced_defaults(wf)
     assert wf["advanced_options"].get("resize_mode") == "long"
     assert wf["advanced_options"].get("sharpen") == "screen"

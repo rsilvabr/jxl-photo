@@ -115,12 +115,12 @@ def _flag(cmd, name):
 # ---------------------------------------------------------------------------
 
 def test_skipped_advanced_options_follow_the_encoder(menu, monkeypatch, edited_encoder):
-    monkeypatch.setattr("builtins.input", lambda *a: "n")
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
+    # Delivery C: the old Step 6A 'no' is _advanced_defaults (the review builds
+    # the advanced options once from the run, the last job and the children).
     wf = {"origin_format": "tiff", "dest_format": "jxl",
           "conversion_type": "jxl_tiff_encoder", "overwrite_mode": "2"}
 
-    assert menu._wizard_parameters_advanced(wf, STATUS)
+    menu._advanced_defaults(wf)
 
     adv = wf["advanced_options"]
     assert adv["multipage_mode"] == "split_all"
@@ -131,12 +131,12 @@ def test_skipped_advanced_options_follow_the_encoder(menu, monkeypatch, edited_e
 
 
 def test_skipped_advanced_options_follow_the_decoder(menu, monkeypatch, edited_decoder):
-    monkeypatch.setattr("builtins.input", lambda *a: "n")
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
+    # Delivery C: the old Step 6A 'no' is _advanced_defaults (the review builds
+    # the advanced options once from the run, the last job and the children).
     wf = {"origin_format": "jxl", "dest_format": "tiff",
           "conversion_type": "jxl_tiff_decoder", "overwrite_mode": "2"}
 
-    assert menu._wizard_parameters_advanced(wf, STATUS)
+    menu._advanced_defaults(wf)
 
     adv = wf["advanced_options"]
     assert adv["thumbnail_handling"] == "ignore"
@@ -148,12 +148,10 @@ def test_skipped_advanced_options_follow_the_decoder(menu, monkeypatch, edited_d
 def test_a_remembered_answer_still_wins(menu, monkeypatch, edited_encoder):
     menu.config.config.last_multipage_mode = "skip"
     menu.config.config.last_thumbnail_suffix = "_mine"
-    monkeypatch.setattr("builtins.input", lambda *a: "n")
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
     wf = {"origin_format": "tiff", "dest_format": "jxl",
           "conversion_type": "jxl_tiff_encoder", "overwrite_mode": "2"}
 
-    assert menu._wizard_parameters_advanced(wf, STATUS)
+    menu._advanced_defaults(wf)
 
     adv = wf["advanced_options"]
     assert adv["multipage_mode"] == "skip"
@@ -165,55 +163,62 @@ def test_a_remembered_answer_still_wins(menu, monkeypatch, edited_encoder):
 # Step 6A answered "yes", every question answered with Enter
 # ---------------------------------------------------------------------------
 
+def _wp_of(menu):
+    """The wrapper module this menu comes from (loaded fresh per test)."""
+    import types
+    return types.SimpleNamespace(**type(menu).__init__.__globals__)
+
+
+def _options_screen_text(menu, wf):
+    """The options screen of a run (delivery C's [a]), left at once."""
+    wf.setdefault("input_dir", "x")
+    wf.setdefault("mode", 1)
+    wf.setdefault("workers", 2)
+    menu._ui = _wp_of(menu).ScriptedUI({"opt.screen": [""]})
+    menu._all_options_screen(wf)
+    return "\n".join(menu._ui.output)
+
+
 def test_advanced_encoder_questions_offer_the_encoder_settings(menu, monkeypatch, edited_encoder):
-    prompts = []
-    monkeypatch.setattr("builtins.input",
-                        lambda p="": prompts.append(p) or ("y" if not prompts[:-1] else ""))
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
+    """Delivery C: the old Step 6A questions are the options screen's entries;
+    the values it shows are the encoder's settings."""
     wf = {"origin_format": "tiff", "dest_format": "jxl",
           "conversion_type": "jxl_tiff_encoder", "overwrite_mode": "2"}
-
-    assert menu._wizard_parameters_advanced(wf, STATUS)
-
+    menu._advanced_defaults(wf)
     adv = wf["advanced_options"]
     assert adv["encode_tag"] == "software"
     assert "embed_thumbnail" not in adv
     assert adv["multipage_mode"] == "split_all"
     assert adv["thumbnail_suffix"] == "_thumb"
-    shown = "\n".join(prompts)
+    shown = _options_screen_text(menu, wf)
     assert "thumbnail? (~20KB)" not in shown
-    assert "[software]" in shown and "[split_all]" in shown and "[_thumb]" in shown
+    assert "Encode record: software" in shown
+    assert "Multi-page TIFFs: split_all" in shown
+    assert "Thumbnail suffix: _thumb" in shown
 
 
 def test_advanced_decoder_questions_offer_the_decoder_settings(menu, monkeypatch, edited_decoder):
-    prompts = []
-    monkeypatch.setattr("builtins.input",
-                        lambda p="": prompts.append(p) or ("y" if not prompts[:-1] else ""))
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
     wf = {"origin_format": "jxl", "dest_format": "tiff",
           "conversion_type": "jxl_tiff_decoder", "overwrite_mode": "2"}
-
-    assert menu._wizard_parameters_advanced(wf, STATUS)
-
+    menu._advanced_defaults(wf)
     adv = wf["advanced_options"]
     assert adv["thumbnail_handling"] == "ignore"
     assert adv["thumbnail_suffix"] == "_t"
     assert adv["no_reconstruct_multipage"] is True
     assert adv["depth_policy"] == "force16"
+    shown = _options_screen_text(menu, wf)
+    assert "Thumbnail pages: ignore" in shown or "ignore" in shown
 
 
 def test_a_typo_falls_back_to_the_decoder_setting(menu, monkeypatch, edited_decoder):
-    answers = iter(["y", "n", "", "", "thumbs", "", "", "sixteen"])
+    """A typo is asked again; Enter then keeps the decoder's own setting (the
+    entry is unset: nothing reaches the command line, the decoder decides)."""
+    answers = iter(["thumbs", ""])
     monkeypatch.setattr("builtins.input", lambda p="": next(answers, ""))
-    monkeypatch.setattr(menu, "_wizard_parameters_expert", lambda wf: True)
-    wf = {"origin_format": "jxl", "dest_format": "tiff",
-          "conversion_type": "jxl_tiff_decoder", "overwrite_mode": "2"}
-
-    assert menu._wizard_parameters_advanced(wf, STATUS)
-
-    adv = wf["advanced_options"]
-    assert adv["thumbnail_handling"] == "ignore"
-    assert adv["depth_policy"] == "force16"
+    menu._ui = _wp_of(menu).PlainUI()
+    opt = next(o for o in _wp_of(menu).REGISTRY if o.id == "thumbnail_handling")
+    assert menu._ask_option_value(opt, None) is None
+    assert dec.THUMBNAIL_HANDLING == "ignore"
 
 
 # ---------------------------------------------------------------------------
@@ -221,65 +226,40 @@ def test_a_typo_falls_back_to_the_decoder_setting(menu, monkeypatch, edited_deco
 # ---------------------------------------------------------------------------
 
 def test_the_wizard_starts_from_the_children(menu, monkeypatch, edited_encoder, edited_decoder):
-    seen = {}
-    monkeypatch.setattr(menu, "_wizard_select_origin",
-                        lambda wf, st: seen.update(wf) or False)
-
-    assert menu.run_wizard(STATUS) is None
+    seen = menu._new_workflow()
 
     assert seen["use_ram"] is False
     assert seen["compression"] == "lzw"
     assert seen["add_preview"] is False
 
 
+def _reviewed(menu, origin, dest, conv):
+    """A new job's state as the review shows it (delivery C: the old Step 6
+    answered with Enter everywhere is _review_init)."""
+    wf = dict(menu._new_workflow(), origin_format=origin, dest_format=dest,
+              conversion_type=conv, mode=1, staging="", input_dir="x")
+    menu._review_init(wf, STATUS)
+    return wf, {r[0]: r[2] for r in menu._review_rows(wf, STATUS)}
+
+
 def test_step6_tiff_output_offers_the_decoder_settings(wp, menu, monkeypatch, edited_decoder):
-    seen = {}
-    monkeypatch.setattr(menu, "_wizard_select_origin",
-                        lambda wf, st: seen.update(wf) or False)
-    menu.run_wizard(STATUS)
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda p="": prompts.append(p) or "")
-    wf = dict(seen, origin_format="jxl", dest_format="tiff",
-              conversion_type="jxl_tiff_decoder", mode=1, staging="")
-
-    menu._wizard_parameters_basic(wf, STATUS)
-
+    wf, shown = _reviewed(menu, "jxl", "tiff", "jxl_tiff_decoder")
     assert wf["bit_depth"] == 8
     assert wf["compression"] == "lzw"
     assert wf["add_preview"] is False
-    shown = "\n".join(prompts)
-    assert "Bit depth (8/16) [8]" in shown
+    assert shown["bit_depth"] == "8"
 
 
 def test_step6_recompressor_distance_is_the_recompressor_setting(menu, monkeypatch):
     monkeypatch.setattr(rec, "CJXL_DISTANCE", 2.5)
-    seen = {}
-    monkeypatch.setattr(menu, "_wizard_select_origin",
-                        lambda wf, st: seen.update(wf) or False)
-    menu.run_wizard(STATUS)
-    prompts = []
-    monkeypatch.setattr("builtins.input", lambda p="": prompts.append(p) or "")
-    wf = dict(seen, origin_format="jxl", dest_format="jxl",
-              conversion_type="jxl_recompress", mode=1, staging="")
-
-    menu._wizard_parameters_basic(wf, STATUS)
-
+    wf, shown = _reviewed(menu, "jxl", "jxl", "jxl_recompress")
     assert wf["distance"] == 2.5
-    assert any("[2.5]" in p for p in prompts if "distance" in p.lower())
+    assert shown["distance"] == "2.5"
 
 
 def test_png_bit_depth_is_the_transcoders_setting(menu, monkeypatch):
     monkeypatch.setattr(tra, "PNG_DEFAULT_BIT_DEPTH", 8)
-    seen = {}
-    monkeypatch.setattr(menu, "_wizard_select_origin",
-                        lambda wf, st: seen.update(wf) or False)
-    menu.run_wizard(STATUS)
-    monkeypatch.setattr("builtins.input", lambda p="": "")
-    wf = dict(seen, origin_format="jxl", dest_format="png",
-              conversion_type="jxl_to_png", mode=1, staging="")
-
-    menu._wizard_parameters_basic(wf, STATUS)
-
+    wf, _shown = _reviewed(menu, "jxl", "png", "jxl_to_png")
     assert wf["bit_depth"] == 8
 
 

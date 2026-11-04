@@ -36,12 +36,17 @@ def menu(cfg):
 
 
 def _select_destination(menu, answers):
-    """Drive Step 2 through the plain-text branch with canned keystrokes."""
-    workflow = {'origin_format': 'tiff', 'effort': 7}
+    """Drive the quality question of "Archive TIFFs as JXL masters" (the old
+    Step 2 entries, delivery C's job.quality) through the plain-text UI with
+    canned keystrokes. The old Step 2 asked the effort right after; the
+    review asks it now, so a trailing answer for it is simply not read."""
+    workflow = {'origin_format': 'tiff', 'dest_format': 'jxl', 'effort': 7,
+                '_task': 'archive_tiff', 'conversion_type': 'jxl_tiff_encoder'}
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=answers):
-        ok = menu._wizard_select_destination(workflow, {'cjxl': True})
-    assert ok, "Step 2 should have accepted the selection"
+        menu._ui = wp.PlainUI()
+        ok = menu._job_quality(workflow)
+    assert ok, "the quality question should have accepted the selection"
     return workflow
 
 

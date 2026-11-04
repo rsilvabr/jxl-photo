@@ -324,25 +324,42 @@ def test_248_report_names_match_the_scripts(tmp_path, origin, dest, mode1, mode3
 # #249 / #250 — wizard text
 # ---------------------------------------------------------------------------
 
+# Delivery C moved the multi-page question from the old Step 6A to the
+# review's options screen: a list of choices, so the rules are now "the help
+# never calls ignore the default, the default is the encoder's own setting,
+# and a typo selects nothing".
+
+def _wp():
+    import jxl_photo as wp
+    return wp
+
+
 def test_249_multipage_help_announces_split_as_the_default():
-    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
-    assert "ignore   = encode page 0 only, drop the rest (default)" not in src
-    assert "ignore    = encode page 0 only, drop the rest (default)" not in src
-    assert src.count("thumbnails per the next question (default)") == 2
+    wp = _wp()
+    o = next(o for o in wp.REGISTRY if o.id == "multipage_mode")
+    assert "ignore = encode page 0 only, DROP the rest" in o.help
+    assert "split = one JXL per page" in o.help
+    assert "(default)" not in o.help
+    assert wp._child_default("jxl_tiff_encoder", "multipage_mode") == "split"
 
 
-def test_249_plain_text_fallbacks_use_the_default_not_ignore():
-    """A typo must not select the one mode that discards image data."""
-    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
-    assert 'multipage_mode = mp_input if mp_input in ["ignore", "skip", "split", "split_all"] else mp_default' in src
-    assert 'thumbnail_mode = tm_input if tm_input in _THUMBNAIL_MODES else tm_default' in src
-    assert 'else "ignore"' not in src
+def test_249_plain_text_fallbacks_use_the_default_not_ignore(monkeypatch):
+    """A typo must not select the one mode that discards image data: the
+    choice is asked again, and Enter keeps the script's own value."""
+    wp = _wp()
+    answers = iter(["ignre", ""])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
+    menu = wp.InteractiveMenu.__new__(wp.InteractiveMenu)
+    menu._ui = wp.PlainUI()
+    o = next(o for o in wp.REGISTRY if o.id == "multipage_mode")
+    assert menu._ask_option_value(o, None) is None          # the script's value
 
 
 def test_250_mode8_is_not_labelled_delete_in_the_summary():
-    src = (REPO / "jxl_photo.py").read_text(encoding="utf-8")
-    assert '8: "DELETE originals"' not in src
-    assert '8: "In-place recursive"' in src
+    wp = _wp()
+    assert "delete" not in wp.InteractiveMenu._MODE_NAMES[8].lower()
+    assert wp.InteractiveMenu._MODE_NAMES[8] == "in place, recursive"
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,8 @@ manifest instead of a plain folder.
 
 Two ways to run one:
 
-- **Interactively:** `[1] New workflow` → pick the direction → Auto Mode →
-  `[M] Run from manifest`.
+- **Interactively:** menu `4` (Folder list) → pick the task → the CSV → the
+  review (or `[M]` in the mode step of a New job).
 - **Unattended:** inside a preset (`--run-preset`), which is what Task Scheduler
   runs — see [Manifest → preset → Task Scheduler](#manifest--preset--task-scheduler-end-to-end).
 
@@ -22,7 +22,7 @@ Two ways to run one:
 
 ### Option A — let Auto Mode generate it (recommended)
 
-`[1] New workflow` → direction → source folder → Auto Mode →
+`[1] New job` → task → source folder → `[A]` (Auto Mode) in the mode step →
 `[P] Generate manifest CSV` writes `manifests\manifest_YYYYMMDD_HHMMSS.csv`
 next to `jxl_photo.py`, already with:
 
@@ -79,7 +79,7 @@ Rules that apply to the file itself:
 |--------|------------------|---------|
 | `Source` | **No** — an empty cell turns the row into a comment | Input folder (a file also works in the flat modes 0/1). |
 | `Destination` | Yes — empty falls back to `Source` | Only honored by modes **0** and **2**; every other mode computes its own output location, and a value here is ignored (the wrapper warns). Mode 2 wants a real destination: empty ⇒ Destination = Source, which flattens the tree next to the originals (the recompressor refuses that, exit 2). |
-| `Mode` | Yes — empty = auto-detect (legacy behaviour) | 0–8, per row; different folders can use different modes (see the [mode table](README_jxl_tools.md#step-4--organization-mode)). Excel's `7.0` is accepted; a fraction like `7.5` is refused, not truncated. |
+| `Mode` | Yes — empty = auto-detect (legacy behaviour) | 0–8, per row; different folders can use different modes (see the [mode table](README_jxl_tools.md#mode)). Excel's `7.0` is accepted; a fraction like `7.5` is refused, not truncated. |
 | `Direction` | Yes, per row — but if *no* row fills it, the file is legacy and only assumed to match, with a warning | `tiff2jxl`, `jxl2tiff`, `jpeg2jxl`, `jxl2jpeg`, `jxl2png` or `jxl2jxl`. Every filled cell must equal the workflow you start — a TIFF→JXL manifest can never be replayed by a JXL→TIFF session, and one file never mixes two directions. |
 
 * * *

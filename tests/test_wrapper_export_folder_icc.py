@@ -260,39 +260,40 @@ def _step6_workflow(tmp_path, mode):
     }
 
 
-def _answer_rich(monkeypatch, colour_space):
-    def ask(prompt, *a, **k):
-        if "Output colour space" in str(prompt):
-            return colour_space
-        if "Target distance" in str(prompt):
-            return "1.0"
-        return k.get("default", "")
-    monkeypatch.setattr(wp.Prompt, "ask", staticmethod(ask))
-    monkeypatch.setattr(wp.IntPrompt, "ask",
-                        staticmethod(lambda *a, **k: int(k.get("default", 1))))
-    monkeypatch.setattr(wp.Confirm, "ask",
-                        staticmethod(lambda *a, **k: bool(k.get("default", False))))
+_DERIV_ROWS = ("output_icc", "shaping", "icc_profile")
 
 
-@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="rich branch")
+def _reviewed(wf):
+    """Delivery C: the old Step 6 answered with Enter is _review_init, and its
+    questions are the review's rows."""
+    menu = _menu()
+    status = {"cjxl": True, "djxl": True, "magick": True, "tifffile": True}
+    menu._review_init(wf, status)
+    return [r[0] for r in menu._review_rows(wf, status)]
+
+
 @pytest.mark.parametrize("mode", [7, 8])
 def test_step6_keep_or_in_place_drops_every_derivative_answer_rich(tmp_path, monkeypatch, mode):
     """'keep' used to drop only output_icc — the rename rode along into a plain
     recompression; modes 0/8 dropped nothing, so the execute guard refused a
-    run for an option the step never offered."""
-    _answer_rich(monkeypatch, "keep")
+    run for an option the step never offered. The review starts every job
+    with no derivative (the old Enter answers), offered again only outside
+    modes 0/8."""
     wf = _step6_workflow(tmp_path, mode)
-    _menu()._wizard_parameters_basic(wf, {"cjxl": True})
+    rows = _reviewed(wf)
     adv = wf["advanced_options"]
     assert not any(k in adv for k in _SEEDED), adv
+    if mode == 8:
+        assert not any(r in rows for r in _DERIV_ROWS), rows
+    else:
+        assert "output_icc" in rows and "shaping" in rows
 
 
 @pytest.mark.parametrize("mode", [7, 8])
 def test_step6_keep_or_in_place_drops_every_derivative_answer_plain(tmp_path, monkeypatch, mode):
     monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "")   # every default; colour = keep
     wf = _step6_workflow(tmp_path, mode)
-    _menu()._wizard_parameters_basic(wf, {"cjxl": True})
+    _reviewed(wf)
     adv = wf["advanced_options"]
     assert not any(k in adv for k in _SEEDED), adv
 

@@ -95,9 +95,9 @@ def test_manifest_cmd_carries_recompress_policies():
 def test_wizard_declining_advanced_keeps_recompress_policies(monkeypatch):
     """Step 6 may have written the policies already; answering 'no' to the
     advanced step rebuilt the dict from scratch and dropped them (the child
-    fell back to `ask`, a silent skip on the wrapper's pipe)."""
-    monkeypatch.setattr(wp, "RICH_AVAILABLE", False)
-    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+    fell back to `ask`, a silent skip on the wrapper's pipe). Delivery C:
+    the review builds the advanced options once (_advanced_defaults, the old
+    "no" branch) and must keep them the same way."""
     menu = _menu()
     workflow = {"origin_format": "jxl", "dest_format": "jxl",
                 "overwrite_mode": "2",
@@ -105,7 +105,7 @@ def test_wizard_declining_advanced_keeps_recompress_policies(monkeypatch):
                                      "on_regeneration": "skip",
                                      "on_unknown": "convert",
                                      "jbrd_policy": "copy"}}
-    menu._wizard_parameters_advanced(workflow, {})
+    menu._advanced_defaults(workflow)
     adv = workflow["advanced_options"]
     assert adv.get("on_downgrade") == "skip"
     assert adv.get("on_regeneration") == "skip"

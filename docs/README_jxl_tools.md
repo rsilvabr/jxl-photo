@@ -73,40 +73,35 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 │ [✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich                    │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭───────────────────────────────────────────────────── Main Menu ────────────────────────────────────────────────────╮
-│  1  New workflow                                                                                                   │
-│  2  Repeat last workflow (unknown)                                                                                 │
-│  3  Check dependencies again                                                                                       │
-│  4  Edit default settings                                                                                          │
-│  5  Reset all settings                                                                                             │
-│  6  Move settings file                                                                                             │
-│  7  Presets (2 saved)                                                                                              │
-│  8  Repair JPEG->JXL files (jbrd recovery, EXIF for IrfanView)                                                     │
-│  9  Explorer thumbnails for existing JXLs (jxl-thumb)                                                              │
+│     CONVERT                                                                                                        │
+│  1  New job: archive, restore, export, recompress...                                                               │
+│  2  Repeat last job (manifest: manifest_library.csv)                                                               │
+│  3  Presets (2 saved)                                                                                              │
+│  4  Folder list (manifest): run a CSV of folders                                                                   │
+│     MAINTAIN                                                                                                       │
+│  5  Renamed or moved folders: fix the masters' path records                                                        │
+│  6  Explorer thumbnails for existing JXLs (jxl-thumb)                                                              │
+│  7  JPEG archives (jbrd): audit, repair, EXIF for IrfanView                                                        │
+│  8  Reset the encoder's ICC test cache                                                                             │
+│     SETTINGS                                                                                                       │
+│  9  Settings: wrapper defaults, script settings, reset, move                                                       │
+│  D  Dependencies: check again                                                                                      │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-**Typical session:**
+**A typical job:**
 ```
-[1] New workflow
-  Step 1: Source Format   → TIFF
-  Step 2: Destination     → JXL d=0.1
-  Step 3: Directory       → F:\Photos\2024
-  Step 4: Mode            → 7 (Marker _EXPORT, subfolder)
-  Step 5: Confirmation    → OK
-  Step 6: Parameters      → Workers: 8, Distance: 0.1, Effort: 7
-  Step 7: Summary         → Review and type YES to confirm
-  → Executes the underlying script with all options
+[1] New job
+  Task      → 1  Archive TIFFs as JXL masters
+  Folder    → F:\Photos\2024
+  Mode      → 7 (below _EXPORT, one subfolder)  [A] analyses the folder and suggests one
+  Quality   → 2  d=0.1 — near-lossless (recommended)
+  Review    → every option with its value and where it came from;
+              [r] runs it, [d] runs it dry first and comes back
 ```
 
 > **Tip:** Values shown in **blue/cyan** (Rich) or between `[brackets]`/`(parentheses)` are defaults. Just press `Enter` to accept!
->
-> Example:
-> ```
-> Workers [4]:          ← Press Enter to use 4
-> Distance [0.1]:       ← Press Enter to use 0.1
-> Execute? [y/n] (y):   ← Press Enter to accept 'y' (yes)
-> ```
 
 * * *
 
@@ -114,21 +109,20 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 
 | # | Option | Description |
 |---|--------|-------------|
-| `1` | New workflow | Start the conversion wizard |
-| `2` | Repeat last workflow | Re-run the previous conversion with same settings. **Manifest runs are repeatable too**: the entry reads `Repeat last workflow (manifest: <file>.csv)`, skips the input-folder question and re-reads the CSV, so edits you made in Excel between runs are picked up. It is disabled only while that CSV is missing. You are still asked overwrite/sync (default: sync) and dry-run every time |
-| `3` | Check dependencies again | Re-scan all tools and libraries |
-| `4` | Edit default settings | Change workers, quality, effort, export marker. The marker set here is **always** passed to every script (`--export-marker`), so the wrapper and the script anchor on the same folders even if a script's own `EXPORT_MARKER` setting was edited. The modes-6/7 output folder names shown in the delete panel are read from each script's own `EXPORT_*_FOLDER` setting |
-| `5` | Reset all settings | Delete config and start fresh |
-| `6` | Move settings file | Toggle between script folder and User Profile |
-| `7` | Presets | Save the last workflow under a name and re-run it later. See below |
-| `8` | Repair JPEG->JXL files | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG |
-| `9` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
-| `R` | Renamed or moved folders | After a folder of TIFFs was renamed or moved, the masters' path record names the old place and the overwrite guard refuses to re-encode them. This rewrites the record of every master whose TIFF is unchanged — nothing is re-encoded, file dates are kept, masters whose TIFF changed are listed and left alone. Dry run first, then asks. Runs `jxl_tiff_encoder.py <folder> --mode N --restamp-moved` ([details](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)) |
-| `C` | Reset the ICC test cache | The encoder's cautious ICC strategy remembers, per profile and cjxl version, whether a profile survives a lossy encode; clearing it makes the next lossy run test each profile again (after a libjxl update, or to re-check a profile). Runs `jxl_tiff_encoder.py --clear-icc-cache` |
-| `S` | Script settings | Change the four scripts' own settings (folder names, timeouts, memory cap, scanner software lists, thumbnail sizes, recompressor policies, ...) without editing the `.py` files. See [Script settings (menu S)](#script-settings-menu-s) |
+| `1` | New job | Pick a task (archive TIFFs, restore TIFFs, smaller/resized JXL copies, export JPEGs or PNGs, archive JPEGs bit-exact, get the original JPEGs back, re-encode JPEGs lossy), a folder, a mode and a quality, then the [review](#the-review-screen) |
+| `2` | Repeat last job | Re-run the previous job with the same settings. **Manifest runs are repeatable too**: the entry reads `Repeat last job (manifest: <file>.csv)`, skips the input-folder question and re-reads the CSV, so edits you made in Excel between runs are picked up. It is disabled only while that CSV is missing. You are still asked overwrite/sync (default: sync) and dry-run every time |
+| `3` | Presets | Save a job under a name and re-run it later (also `[s]` on the review). See below |
+| `4` | Folder list (manifest) | Pick a task, then a manifest CSV (one folder per row), then the review. A manifest is generated from a folder with `[A]` then `[P]` in the mode step of a New job — see [Running a list of folders](#running-a-list-of-folders-manifest) |
+| `5` | Renamed or moved folders | After a folder of TIFFs was renamed or moved, the masters' path record names the old place and the overwrite guard refuses to re-encode them. This rewrites the record of every master whose TIFF is unchanged — nothing is re-encoded, file dates are kept, masters whose TIFF changed are listed and left alone. Dry run first, then asks. Runs `jxl_tiff_encoder.py <folder> --mode N --restamp-moved` ([details](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)) |
+| `6` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
+| `7` | JPEG archives (jbrd) | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG |
+| `8` | Reset the ICC test cache | The encoder's cautious ICC strategy remembers, per profile and cjxl version, whether a profile survives a lossy encode; clearing it makes the next lossy run test each profile again (after a libjxl update, or to re-check a profile). Runs `jxl_tiff_encoder.py --clear-icc-cache` |
+| `9` | Settings | `1` the wrapper's defaults ([below](#settings-menu-9)), `2` the scripts' own settings ([Script settings](#script-settings-menu-s)), `3` reset all settings (delete the config and start fresh), `4` move the settings file (script folder ↔ user profile) |
+| `D` | Dependencies | Re-scan all tools and libraries |
 | `0` | Exit | Quit |
 
-Letters are taken in either case (`r`, `R`).
+Letters are taken in either case (`d`, `D`). The letters of v2.22.0_beta1's
+menus still work: `R` = 5, `C` = 8, `S` = the script settings.
 
 The stored workflow is validated before a repeat or a preset replays it: the
 config is plain JSON you can hand-edit, so not just the numbers (mode, workers,
@@ -140,9 +134,9 @@ fields that pick WHICH script runs (`last_origin_format`/`last_dest_format`):
 an unknown value there is refused instead of routing the run to the wrong
 script while the panel still shows the direction you expected.
 
-### Presets (option 7)
+### Presets (menu 3)
 
-`Repeat last workflow` only ever remembers **one** run. Presets let several
+`Repeat last job` only ever remembers **one** run. Presets let several
 recurring jobs coexist — a nightly manifest sync, a per-shoot conversion — each
 under its own name:
 
@@ -158,7 +152,7 @@ under its own name:
 - **`[S]`** snapshots whatever ran last (including a manifest run) under a name
   you choose, so it stops being affected by later runs.
 - **`[number]`** runs a preset. It goes through exactly the same questions as
-  `Repeat last workflow`: overwrite/sync (default sync) and dry-run are always
+  `Repeat last job`: overwrite/sync (default sync) and dry-run are always
   asked, never inherited.
 - Presets live in the same `~/.jxl_tools_config.json` as the rest of the settings.
 
@@ -370,68 +364,62 @@ writing anything.
 
 * * *
 
-## Workflow wizard steps
+## New job (menu 1)
 
-### Step 1 — Source Format
-Choose what type of files to convert:
-- **JPEG** — lossless transcoding to JXL
-- **TIFF** — encoding to JXL with ICC preservation
-- **JXL** — decoding to JPEG, PNG, or TIFF, or recompressing to a smaller JXL
+### Task
 
-Unavailable formats (missing dependencies) are shown with `✗` and cannot be selected.
+| Task | Converts | What it is for |
+|---|---|---|
+| Archive TIFFs as JXL masters | TIFF → JXL | The masters, lossless or near-lossless, with the original ICC and every marker the delete gates read |
+| Restore TIFFs from JXL masters | JXL → TIFF | The TIFF back, in the original profile (Roundtrip), with an optional JPEG preview |
+| Make smaller or resized JXL copies | JXL → JXL | `jxl_recompressor.py`: a new distance/effort, or a colour/resize/sharpening derivative |
+| Export JPEGs for sharing (lossy) | JXL → JPEG | Quality, colour conversion, resize, sharpening; the review can switch it to *auto* (bit-exact when the JXL holds a JPEG, else lossy) |
+| Export PNGs | JXL → PNG | 8 or 16 bits |
+| Archive JPEGs losslessly (bit-exact) | JPEG → JXL | About 20% smaller, the original JPEG comes back byte for byte |
+| Get the original JPEGs back (bit-exact) | JXL → JPEG | The bit-exact recovery of JPEG archives; the review can switch it to *auto* |
+| Re-encode JPEGs lossy | JPEG → JXL | A lossy re-encode at a chosen distance |
 
-### Step 2 — Destination
-Choose the output format based on the source:
+A task the PC cannot run is shown with what it needs (`needs tifffile`, `needs
+cjxl`) and refused.
 
-**JPEG source:**
-- JXL Lossless — Reversible transcoding, ~20% smaller
-- JXL Lossy — Smaller files, configurable distance
+The quality comes right after the mode, and only where a task has one:
+archiving TIFFs offers lossless (d=0), **your** default distance (0.1 out of
+the box; change it in Settings → wrapper defaults), d=1.0 or a custom value
+(pre-filled with the last one you used); JXL → JXL and JPEG → JXL lossy ask
+the distance; a JPEG export asks the quality. Everything else is on the
+review.
 
-**TIFF source:**
-- JXL d=0 — Lossless (exact replica)
-- JXL d=0.1 — Near-lossless (recommended, much smaller). This entry shows **your**
-  distance when you change it in option 4 (e.g. `d=0.05 — Your default`)
-- JXL d=1.0 — Visually lossless (smallest)
-- Custom distance — Any value 0-15 (pre-filled with the last distance you used)
+**Make smaller or resized JXL copies** runs `jxl_recompressor.py`: ICC,
+metadata and provenance markers carried over. Requests that cannot gain
+anything (same or lower distance than the source's recorded `cjxl d=/e=`)
+fall back to a verbatim copy or are skipped, files that were already
+lossy-recompressed once (`gen≥2` in the record — every lossy encoder output is
+born at `gen=1`, so its first recompression is the normal case) trigger the
+regeneration policy (`--on-regeneration`), and a re-encode that comes out
+*larger* keeps the original bytes. JPEG-recoverable JXLs (jbrd) are copied
+verbatim by default. Derivatives (a colour/resize/sharpening recipe) record
+their distance/effort too; the review's options screen sets whether an
+existing derivative is re-derived when those change (untouched: the
+recompressor's `REDERIVE_ON_ENCODE_CHANGE`) and whether a LOWER effort at the
+same distance re-derives too (`REDERIVE_ON_LOWER_EFFORT`).
 
-**JXL source:**
-- **JPEG Auto-Detect** — Recommended: lossless if jbrd present, else lossy
-- JPEG Lossless — Force lossless transcoding (requires jbrd box)
-- JPEG Lossy — Force lossy conversion with quality/ICC control
-- PNG — With transparency support
-- TIFF — Lossless master with optional JPEG preview
-- **JXL (smaller)** — Recompress the archive to a new distance/effort
-  (`jxl_recompressor.py`): ICC, metadata and provenance markers carried over.
-  Requests that cannot gain anything (same or lower distance than the source's
-  recorded `cjxl d=/e=`) fall back to a verbatim copy or are skipped, files
-  that were already lossy-recompressed once (`gen≥2` in the record — every
-  lossy encoder output is born at `gen=1`, so its first recompression is the
-  normal case) trigger the regeneration policy (`--on-regeneration`), and a
-  re-encode that comes out *larger* keeps the original bytes. JPEG-recoverable
-  JXLs (jbrd) are copied verbatim by default. Derivatives (a colour/resize/
-  sharpening recipe) record their distance/effort too; Step 6A asks whether an
-  existing derivative must be re-derived when those change (default: the
-  recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting) and, after a yes, whether
-  a LOWER effort at the same distance re-derives too (default: no — the
-  existing file is the smaller one; `REDERIVE_ON_LOWER_EFFORT`).
+**Modes 0 and 8 REPLACE the source JXLs** there (the recompressor writes the
+new file over the old one; nothing stays "side by side"). The mode list says
+so and the HHMM token is charged before the run, exactly like a delete;
+`--run-preset` refuses such a preset unattended. In a manifest, a mode-0 row
+whose Destination is empty or equal to its Source is the same in-place run and
+is gated the same way (mode 8 always is). A mode-2 row whose Destination equals
+its Source is refused by the recompressor (exit 2): mode 2 would flatten the
+subfolders into the root, next to the originals.
 
-  **Modes 0 and 8 REPLACE the source JXLs** here (the recompressor writes the
-  new file over the old one; nothing stays "side by side"). The wizard says so
-  in the mode list and charges the HHMM token before the run, exactly like a
-  delete; `--run-preset` refuses such a preset unattended. In a manifest, a
-  mode-0 row whose Destination is empty or equal to its Source is the same
-  in-place run and is gated the same way (mode 8 always is). A mode-2 row
-  whose Destination equals its Source is refused by the recompressor (exit 2):
-  mode 2 would flatten the subfolders into the root, next to the originals.
-
-### Step 3 — Source Directory
+### Folder
 Enter the folder path containing the files (surrounding quotes are stripped, so Explorer's "Copy as path" works).
 
-The wizard takes **one** folder here. To run a **list of folders** in a single
+A New job takes **one** folder here. To run a **list of folders** in a single
 session — `G:\2024`, `G:\2025`, `G:\2026` — use a manifest (see below).
 
 TIFF→JXL and JXL→TIFF runs — and only those; the flag lives only in the
-TIFF encoder and decoder — get one more question at the end of Step 3:
+TIFF encoder and decoder — get one more question right after the folder:
 
 ```
 Exclude folders? (';'-separated folder names, '-' = none; only affects recursive modes)
@@ -464,8 +452,8 @@ G:\2025,,3,tiff2jxl
 G:\2026,,3,tiff2jxl
 ```
 
-Then: `[1] New workflow` → pick the same direction → at Auto Mode choose
-**`[M] Run from manifest`**. The encoding settings you pick in Step 6/6A
+Then: menu **4 (Folder list)** → pick the task → the CSV (or `[M]` in the mode
+step of a New job). The encoding settings you pick on the review
 (distance, effort, multi-page policy, ...) apply to every entry; the CSV
 carries what differs per folder. `Destination` is only honored by modes 0 and
 2, and an empty `Mode` cell auto-detects.
@@ -502,7 +490,7 @@ If you just want a shell loop instead, the encoder takes one folder per call:
 foreach ($y in "G:\2024","G:\2025","G:\2026") { py jxl_tiff_encoder.py $y --mode 3 }
 ```
 
-### Step 4 — Organization Mode
+### Mode
 How output files are organized. Press `?` for detailed explanations with visual examples.
 
 | Mode | Input | How it finds files | Name | Description |
@@ -518,7 +506,7 @@ How output files are organized. Press `?` for detailed explanations with visual 
 | `8` | File or folder | Recursive — walks all subfolders | In-place recursive | Same folder as source, walks subfolders. Originals are KEPT — use `[D]` to delete them |
 | `D` | — | (follows the layout you pick) | **Convert and DELETE originals** ⚠️ | Not a layout: pick any mode `0`-`8`, then the sources are removed once each output is written to that mode's destination and verified — IRREVERSIBLE |
 
-Items shown in **green** (like `_EXPORT`) are configurable in **option 4 (Edit default settings)**.
+Items shown in **green** (like `_EXPORT`) are configurable in **Settings (menu 9 → 1)**.
 
 ### `[D]` — convert, verify, then delete the originals
 
@@ -618,7 +606,7 @@ E:\sessao\
 **Mode 6** — processes ALL files under ALL `_EXPORT` folders found recursively.
 
 **Mode 7** — like mode 6, but only files inside a SPECIFIC subfolder of `_EXPORT`.
-The wizard asks for the subfolder name in Step 5 (passed to the scripts as `--export-subfolder`). Empty (default) = processes all subfolders, same as mode 6.
+The wizard asks for the subfolder name in the mode settings (passed to the scripts as `--export-subfolder`). Empty (default) = processes all subfolders, same as mode 6.
 
 ```
 _EXPORT/
@@ -630,7 +618,7 @@ _EXPORT/
     └── img.jxl
 ```
 
-### Step 5 — Mode-specific configuration
+### Mode settings
 - Modes 6/7: Confirm or change the `_EXPORT` marker name
 - Modes 6/7, TIFF→JXL and JXL→JXL: the **output folder name under the marker**
   (default `16B_JXL` for TIFF→JXL, `16B_JXL_small` for JXL→JXL; passed as
@@ -641,116 +629,93 @@ _EXPORT/
 - Mode 2: Specify the output directory for merged files
 
 Folder exclusions are not asked again here: the question (and its default)
-is in Step 3, and the manifest's `ExcludeFolders` column overrides it per
+comes with the folder, and the manifest's `ExcludeFolders` column overrides it per
 row ([manifest reference](README_manifest.md)).
 
-### Step 6 — Parameters
-Basic parameters always shown:
-- **Workers** — parallel threads (default: 4)
-- **Quality / Distance / Effort** — context-aware based on conversion type
-- **Downgrade policy** — JXL→JXL only: what to do when the request cannot gain
-  anything (same or lower distance than the file already is): ask / copy / skip /
-  convert. The wizard decides it up front and passes `--on-downgrade` to the
-  child, which never prompts on an invisible stdin
-- **Output colour space** — JXL→JXL only: `keep` (a normal recompression),
-  `sRGB`, `AdobeRGB`, or a path to an `.icc` file. Anything but `keep` writes a
-  **colour-converted 16-bit derivative** (passed as `--output-icc`), and then
-  asks for the **rename text** (`--rename-from`/`--rename-to`, e.g.
-  `ProPhoto-g22` → `sRGB`) so the file name follows the colour space. Not
-  offered in modes 0/8: a derivative can never replace its own master, and the
-  child refuses those runs. Answering `keep` (or picking mode 0/8) also clears
-  a rename answered on an earlier pass through the step. A **manifest** run
-  with a colour space or a rename is refused up front, before any child
-  starts, when a row would run in place (mode 8, or mode 0 with Destination =
-  Source) — the rows are listed
-- **Resize** — JXL→JXL (modes 1–7) and JXL→JPEG/PNG: `none` (default), `long
-  edge`, `short edge` or `percent`, then the value and "Allow upscale?"
-  (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`).
-  The value is validated before it becomes a flag: a percentage must be
-  finite and above zero, an edge a positive integer — `nan`, `inf`, `0` and
-  negatives are re-prompted instead of handed to the child to fail per file
-  (the same domain the manifest's `Resize` column enforces). A resized
-  output is a **derivative** of its own: not offered in modes 0/8
-  for JXL→JXL, and not offered for the bit-exact JPEG recovery (which has no
-  pixels to shape). `none` clears an answer from an earlier pass
-- **Output sharpening** — the same directions: `none` (default), `screen` or
-  `print` (`--sharpen`), applied after the resize on the output pixels' size.
-  The expert overrides (`--sharpen-sigma`/`--sharpen-gain`/
-  `--sharpen-threshold`) have no wizard question: set them on the Step 7
-  options screen (`O`), which lists them once sharpening is on.
-  A run with resize and/or sharpening plus a delete option is refused up front
-  (a derivative never deletes its source), and the Step 7 summary shows a
-  `Resize:` and a `Sharpening:` line
-- **With `[D]` (delete originals) chosen in Step 4**, Step 6 does not ask the
-  derivative questions at all — output colour space, "Convert to sRGB?",
-  resize, sharpening — and says why: a derivative never deletes its source,
-  so the run could only be refused later (v2.8.1). Answers from an earlier
-  pass through the step are dropped
-- **Staging directory** — SSD staging for HDD collections
-- **ICC conversion** — for JXL → JPEG/PNG (with ImageMagick)
-- **TIFF compression** — zip / lzw / none
-- **Bit depth** — 8 or 16
-- **Overwrite guard** — asked right after "Existing file handling" (only when the
-  run does not delete): `on` (default) never overwrites an output whose
-  provenance marker names another source path; `off` (passed as
-  `--no-overwrite-guard`, saved in the preset) does, with a log line per file.
-  Choose `off` if you never delete sources and you rename or move folders —
-  otherwise re-editing a photo after renaming its folder is refused. Never
-  offered with `[D]` on: the child refuses that combination (exit 2).
-  [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
-- **Dry run** — simulate without converting
+### The review screen
 
-Optional advanced and expert flags follow.
+After the quality, every job ends on one screen:
 
-> **Tip:** The value shown in **blue** (or between `[brackets]`/`(parentheses)`) is the default. Just press `Enter` to accept!
->
-> Example:
-> ```
-> Workers [4]:          ← Press Enter to use 4
-> Distance [0.1]:       ← Press Enter to use 0.1
-> Execute? [y/n] (y):   ← Press Enter to accept 'y' (yes)
-> ```
+```
+Review — Archive TIFFs as JXL masters
+Folder    F:\Photos\2024\250118_吾妻山公園 [FINAL]\01_Z7
+Mode      6 — below the export marker
+Multi-page TIFFs: split — one JXL per page (thumbnail pages excluded)
+  [ 1] PNG in RAM               yes                     last job
+  [ 2] Workers                  16                      last job
+  [ 3] Distance                 0.1                     you
+  [ 4] Effort                   7                       settings
+  [ 5] Staging folder           E:\staging_jxl          last job
+  [ 6] Existing outputs         sync (only newer)
+  [ 7] Delete the sources       no ([b] back to the mode step for [D])   (fixed)
+  [ 8] Overwrite guard          on                      script
+  [ 9] D50 patch                auto                    script
+[number] change  [a] all options  [/text] search  [c] command line  [x] expert flags
+[d] dry run  [r] RUN  [s] save as preset  [b] back  [q] cancel
+```
 
-### Step 7 — Summary
-Full review of all settings before execution. Type `YES` to confirm, or `O`
-for **all the options of this job**.
+- **The rows** are the job's essential options, per direction: workers, RAM
+  (TIFF), distance and effort, the recompressor's policies (*already good
+  enough*, *recompressed before*, *film scans*: copy / skip / convert), the
+  JXL → JXL derivative (output colour space with its rename, resize and
+  sharpening), staging, JPEG quality, sRGB conversion and resize/sharpening
+  for JPEG/PNG exports, PNG bit depth, TIFF compression / bit depth / preview /
+  decode mode, existing outputs (sync or overwrite all), the overwrite guard
+  and the D50 patch. Each starts at the value the old wizard gave when every
+  question was answered with Enter — a job started with `[r]` right away runs
+  exactly that (a test compares the command lines of every task).
+- **The `from` column:** `you` (changed here or in the quality step), `last
+  job`, `settings` (Settings → wrapper defaults), `script` (the script's own
+  setting, or the overlay of menu S); empty for a fixed default.
+- **What is not offered** says why: no derivative (colour, sRGB,
+  resize/sharpen) in place (modes 0/8) or with `[D]` — a derivative never
+  deletes its source, so the run could only be refused later. Resize and
+  sharpening start at `none` every time they are opened.
+- **`[a]` all options / `[/text]` search:** every option the job's script
+  takes, for this direction only, grouped (existing outputs, deletion,
+  multi-page, colour, metadata, derivative, files, performance), with its
+  current value and flag: everything the old Step 6A asked (strip, encode
+  record, modular, multi-page and thumbnail pages, film-scan distance, decode
+  modes, ICC cleanup, the recompressor's unknown/jbrd/re-derive policies,
+  MD5, validation, jbrd repair, output suffix) and the flags no question
+  asked: `--buffering`, `--no-preflight`, `--clean-staging` (with staging),
+  `--icc-png-strategy`, `--scan-scope`, `--warn-thumbnail-discard`,
+  `--restamp-then-sync`, `--explorer-thumbnail`, the recompressor's
+  `--encode-tag`, `--allow-incomplete-groups`, `--compress-metadata`,
+  `--output-name` (modes 1/3 of a JPEG/PNG conversion) and the sharpening
+  overrides. A number changes one; a choice made of numbers is typed as the
+  number (`1` = `--buffering 1`, `-` = the script's value). The delete rules
+  are shown but chosen with `[D]` in the mode step, where their checks are. An
+  option that relaxes a safety check (`--allow-incomplete-groups`) asks first.
+  The review then lists what you set (`Options: --buffering 1, --scan-scope
+  raw`), and the values are saved with the last job and the presets.
+- **`[c]`** prints the exact command line the run will start (a manifest
+  prints each row's when it runs). **`[x]`** sets the expert flags, applied
+  last: they are checked against the script's own command line at once — a
+  typo, another script's flag or a value outside its choices is refused with
+  the reason, and so is a `--mode` (the mode is chosen in the mode step or the
+  manifest's Mode column, and every check before the run uses that one).
+- **`[d]`** runs the job as a dry run and comes back to the review; **`[r]`**
+  runs it for real. Both save it as the last job. A run that deletes, or a
+  JXL → JXL run in place, still asks for the current time (HHMM) first; a
+  dry run never does. **`[s]`** saves the job as a preset (and as the last
+  job) without running it. **`[b]`** goes back to the mode step (for `[D]`,
+  another mode or a manifest); **`[q]`** cancels.
 
-**`O` — all options for this job.** Every option the job's script takes, for
-this direction only, grouped (existing outputs, deletion, multi-page,
-colour, metadata, derivative, files, performance), each with its current
-value and its flag. The wizard's questions cover the common ones; the rest
-are here: `--buffering`, `--no-preflight`, `--clean-staging` (with staging),
-`--icc-png-strategy`, `--scan-scope`, `--warn-thumbnail-discard`,
-`--restamp-then-sync`, `--explorer-thumbnail`, the recompressor's
-`--encode-tag`, `--allow-incomplete-groups`, `--compress-metadata`,
-`--output-name` (modes 1/3 of a JPEG/PNG conversion) and the sharpening
-overrides. Type a number to change one (`/text` filters the list, Enter goes
-back to the summary). The options the wizard asks itself (dry run,
-overwrite/sync, distance, bit depth) and the delete rules are shown but
-changed in the wizard's steps, where their checks are. An option that relaxes
-a safety check (`--allow-incomplete-groups`) asks first. The summary then
-lists what you set (`Options: --buffering 1, --scan-scope raw`), and the
-values are saved with the workflow and with presets.
-
-Options that cannot go together are refused on the screen and again before
-the run, before any HHMM confirmation: `--restamp-then-sync` never with a
-delete or Overwrite, `--allow-incomplete-groups` only with Delete originals.
-
-**Expert flags (Step 6B) are checked before the run** against the script's
-own command line: a typo, another script's flag or a value outside its
-choices is refused with the reason, before the HHMM confirmation (the script
-used to stop on it after the confirmation). A `--mode` there is refused too:
-the mode is chosen in the wizard (or the manifest's Mode column), and every
-check before the run uses that one.
+Options that cannot go together are refused on the options screen and again
+before the run, before any HHMM confirmation: `--restamp-then-sync` never with
+a delete or Overwrite, `--allow-incomplete-groups` only with Delete originals.
 
 * * *
 
-## Edit default settings (option 4)
+## Settings (menu 9)
+
+Menu 9 → `1` (wrapper defaults):
 
 Persistent defaults saved to `~/.jxl_tools_config.json`.
 
 > Changing **workers**, **quality**, **effort** or **distance** here also updates
-> what the next run uses, including *Repeat last workflow*. Values you leave
+> what the next run uses, including *Repeat last job*. Values you leave
 > untouched keep whatever the last run used, and the screen tells you when a
 > saved session is currently overriding a default.
 
@@ -759,7 +724,7 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
 - **Quality** — JPEG quality for lossy workflows
 - **Effort** — cjxl effort level (1-10)
 - **Distance (TIFF→JXL)** — your preferred cjxl distance (default: `0.1`). This is
-  the value offered as entry `[2]` in Step 2, so if you always work at `0.05`,
+  the value offered as the second quality choice of *Archive TIFFs*, so if you always work at `0.05`,
   set it once here and pick it with a single keystroke instead of going through
   `[4] Custom` on every run. Setting it to `0` makes entry `[2]` run the
   **lossless** encoder, exactly like entry `[1]`.
@@ -781,7 +746,7 @@ Alongside these defaults the config keeps the **last-run answers** the wizard
 offers back as defaults — among them `last_exclude_folders`, the raw
 `';'`-separated string of the last TIFF↔JXL run's folder-exclusion answer
 (`-`/empty stored as no exclusion). It is not editable here; the wizard's
-Step 3 question offers it as the default, and `Repeat last workflow`/
+folder question offers it as the default, and `Repeat last job`/
 snapshots replay it as-is — but only in the TIFF↔JXL directions, where the
 flag actually exists; every other direction runs without it.
 
@@ -801,20 +766,20 @@ Use **option 6 (Move settings file)** to toggle between the two locations.
 
 Some options are available directly in the wizard, others must be edited in the script files themselves.
 
-### ✅ Available in the wizard (Step 6 / 6A)
+### ✅ Available in a New job (the review and its options screen)
 
 | Option | Location | Notes |
 |--------|----------|-------|
-| Workers | Step 6 | All workflows |
-| Quality / Distance | Step 6 | Context-aware |
-| Effort | Step 6 | All workflows |
-| Staging directory | Step 6 | TIFF→JXL, JXL→TIFF |
-| Overwrite mode (1/2) | Step 6 | Always asked (1=overwrite, 2=sync) |
-| ICC conversion (sRGB) | Step 6 | JXL→JPEG/PNG |
-| TIFF compression | Step 6 | zip/lzw/none |
-| Bit depth | Step 6 | 8 or 16 for TIFF output |
-| JPEG Preview | Step 6 | JXL→TIFF (default: yes) |
-| Dry run | Step 6 | All workflows |
+| Workers | Review | All workflows |
+| Quality / Distance | Review | Context-aware |
+| Effort | Review | All workflows |
+| Staging directory | Review | TIFF→JXL, JXL→TIFF |
+| Existing outputs | Review | sync (default) or overwrite all |
+| ICC conversion (sRGB) | Review | JXL→JPEG/PNG |
+| TIFF compression | Review | zip/lzw/none |
+| Bit depth | Review | 8 or 16 for TIFF output |
+| JPEG Preview | Review | JXL→TIFF (default: yes) |
+| Dry run | Review `[d]` | All jobs: runs dry, then back to the review |
 | Strip metadata | 6A | TIFF→JXL |
 | D50 patch mode | 6A | auto / on / off |
 | Encode tag location | 6A | xmp / software / off |
@@ -826,17 +791,17 @@ Some options are available directly in the wizard, others must be edited in the 
 | Auto-repair broken JPEG recovery | 6A | JXL→JPEG only; repairs a copy and decodes from it, the JXL is never modified (default: off) |
 | Skip validation | 6A | JPEG↔JXL (risky) |
 | Output suffix | 6A | JPEG↔JXL |
-| Downgrade policy | Step 6 | JXL→JXL: ask/copy/skip/convert |
+| Downgrade policy | Review | JXL→JXL: ask/copy/skip/convert |
 | Re-derive when distance/effort change | 6A | JXL→JXL derivatives only (colour/resize/sharpen runs): default = the recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting |
 | ...also on a lower effort (same distance) | 6A | Asked only after a yes above: default = the recompressor's `REDERIVE_ON_LOWER_EFFORT` setting (no) |
-| Output folder under the marker | Step 5 | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
-| Output colour space (derivative) | Step 6 | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
-| Rename in output file names | Step 6 | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
-| Resize (derivative) | Step 6 | JXL→JXL (modes 1–7) and JXL→JPEG/PNG: none/long/short/percent (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`) |
-| Output sharpening | Step 6 | Same directions: none/screen/print after the resize (`--sharpen`); sigma/gain/threshold only via Expert flags |
+| Output folder under the marker | Mode settings | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
+| Output colour space (derivative) | Review | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
+| Rename in output file names | Review | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
+| Resize (derivative) | Review | JXL→JXL (modes 1–7) and JXL→JPEG/PNG: none/long/short/percent (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`) |
+| Output sharpening | Review | Same directions: none/screen/print after the resize (`--sharpen`); sigma/gain/threshold on the options screen (`a`) |
 | Expert flags | 6B | Custom CLI args |
 
-### ⚙️ Available in option 4 (Edit default settings)
+### ⚙️ Available in Settings (menu 9 → 1)
 
 | Option | Notes |
 |--------|-------|
@@ -844,7 +809,7 @@ Some options are available directly in the wizard, others must be edited in the 
 | Default workers | Persisted |
 | Default quality | Persisted |
 | Default effort | Persisted |
-| Default distance (TIFF→JXL) | Drives entry `[2]` of Step 2. Default: `0.1` |
+| Default distance (TIFF→JXL) | Drives the second quality choice of *Archive TIFFs*. Default: `0.1` |
 | Confirm deletes | Safety toggle |
 | Export marker | Default: `_EXPORT` |
 | Explorer thumbnail tip | On by default; asked only when it applies |
@@ -866,7 +831,7 @@ distance) is that script's setting, so an edit here shows up as the wizard's
 default. An answer the wizard remembers from an earlier run, or a preset's
 stored value, still comes first. The wrapper's own settings above (workers,
 quality, effort, the TIFF → JXL distance, the export marker) are the
-exception: they are set in menu option 4.
+exception: they are set in Settings (menu 9 → 1).
 
 #### jxl_tiff_encoder.py
 | Variable | Default | What it does |
@@ -887,7 +852,7 @@ exception: they are set in menu option 4.
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting (`--delete-source` works in every mode) |
 | `OVERWRITE_GUARD` | `True` | `False` = overwrite an output whose provenance marker names another source path (renamed/moved folders; also `--no-overwrite-guard`); never combined with `--delete-source` (that run exits 2). [More](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard) |
 
-**Encoder flags without a wizard question (Step 7 options screen, `O`):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time). `--clear-icc-cache` (reset the cautious ICC cache) is menu C. Expert flags still work and are appended LAST, so they override earlier wizard choices.
+**Encoder flags without a wizard question (the review's options screen, `a`):** `--icc-png-strategy` (scanner-profile workaround for lossy encodes), `--buffering` (libjxl ≥ 0.12: `--buffering 1` keeps a heavy setting on the fast, low-memory streaming path — see the recompressor note below; `--buffering 0` is the opposite, best compression at a large cost in RAM and time). `--clear-icc-cache` (reset the cautious ICC cache) is menu 8. Expert flags still work and are appended LAST, so they override earlier wizard choices.
 
 #### jxl_tiff_decoder.py
 | Variable | Default | What it does |
@@ -947,7 +912,7 @@ exception: they are set in menu option 4.
 once. Each worker then needs ~3.6 GB (effort 7) or ~12.4 GB (effort 8+) on a
 45 MP photo instead of ~1.5 GB, and the run lowers `--workers` to fit in memory
 — an e9 preset can drop to a handful of workers. Setting **`--buffering 1`** on the
-Step 7 options screen (`O`, or in Expert flags) keeps those settings on the
+review's options screen (`a`, or in Expert flags) keeps those settings on the
 streaming path, with the memory and worker count of a light setting; it is
 saved with the preset.
 What it costs depends on the effort (measured with cjxl 0.12.0 on 45 MP
@@ -1046,12 +1011,12 @@ line under the status bar:
 
 ```
 Tip: Windows Explorer shows no thumbnails for JXL files on this PC. jxl-thumb adds them: https://github.com/rsilvabr/jxl-thumb
-     (Hide this tip: 4 - Edit default settings.)
+     (Hide this tip: 9 - Settings, then 1.)
 ```
 
 It is shown on every start, not once: someone new to JXL usually meets the
 problem only later, in Explorer. It is never a question, it goes away by
-itself once any handler is installed, and option 4 turns it off. It is never
+itself once any handler is installed, and Settings (menu 9 → 1) turns it off. It is never
 printed in `--run-preset` or `--list-presets` runs. The check is one registry
 read; nothing is installed or written. The environment variable
 `JXLPHOTO_THUMBNAIL_TIP` replaces the text (a packaged build names its own

@@ -755,7 +755,7 @@ remedies instead of a bare djxl failure:
 
 Also available in the wrapper: the auto-repair is a Step 6A (advanced
 options) question on the JXL→JPEG direction, and `--repair-jbrd` is main
-menu option 8.
+menu 7 (JPEG archives).
 
 * * *
 
