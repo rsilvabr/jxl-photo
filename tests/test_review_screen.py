@@ -77,7 +77,7 @@ def _norm(cmd, root):
 
 
 def _mode_step_input(monkeypatch, mode, extra=None):
-    """The mode step (and Step 5) still read input(): answer by prompt."""
+    """The OLD wizard's mode step (and Step 5) read input(): answer by prompt."""
     answers = dict(extra or {})
 
     def fake(prompt=""):
@@ -124,7 +124,12 @@ def _new_job_argv(menu, launched, monkeypatch, tmp_path, task, mode, review=("r"
     _okey, _dkey, quality = TASK_KEYS[task]
     root = _lib(tmp_path)
     tid_key = str([t[0] for t in wp.TASKS].index(task) + 1)
+    # The mode step and its settings (Step 5) are on the UI layer too: the
+    # mode is typed, every Step 5 question takes its default (None).
     answers = {"job.task": tid_key, "job.folder": str(root), "job.exclude": "-",
+               "mode.pick": [mode] * 3,
+               **{q: [None] * 3 for q in ("mode.cfg.marker", "mode.cfg.subfolder",
+                                         "mode.cfg.jxl_folder", "mode.cfg.output_dir")},
                "review.action": list(review), **quality, **(extra_answers or {})}
     menu._ui = wp.ScriptedUI(answers)
     _mode_step_input(monkeypatch, mode)

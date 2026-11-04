@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.22.0"
+TOOLKIT_VERSION = "2.22.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -3154,6 +3154,54 @@ class UI:
         """One key of `options` [(key, label)]."""
         raise NotImplementedError
 
+    # The wizard's older questions keep their exact wording in each renderer
+    # (a Rich prompt with its default shown by Rich, a plain one with the
+    # default in brackets): one call, one qid, two texts.
+    def ask_line(self, qid: str, rich: str, plain: str, default: Optional[str] = None,
+                 choices: Optional[List[str]] = None) -> str:
+        """A free answer (stripped); Enter = `default` when one is given."""
+        raise NotImplementedError
+
+    def ask_yes(self, qid: str, rich: str, plain: str, default: bool = False) -> bool:
+        raise NotImplementedError
+
+    def ask_raw(self, qid: str, prompt: str = "> ") -> str:
+        """A line typed after a prompt the caller printed (the HHMM token);
+        an end of input is an empty answer."""
+        try:
+            return input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+    def markup(self, rich: Optional[str], plain: Any = None) -> None:
+        """Text with Rich styles; the plain renderer prints `plain`, or the
+        text with its style tags removed (never a [FINAL] of a path).
+        `rich=None` shows nothing in Rich, `plain=_SILENT` nothing in plain
+        (the two renderers lay some screens out differently)."""
+        raise NotImplementedError
+
+    @property
+    def is_rich(self) -> bool:
+        """Tables and panels built by hand are drawn only by the Rich renderer."""
+        return False
+
+    def panel(self, body: str, title: str = "", style: str = "yellow",
+              plain: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+
+_SILENT = object()    # UI.markup: this renderer prints nothing
+
+
+_STYLE_TAG = re.compile(
+    r"\[/?(?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black)"
+    r"(?: (?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black))*\]")
+
+
+def _strip_styles(text: str) -> str:
+    """`text` without Rich style tags; any other [...] (a folder name) stays."""
+    return _STYLE_TAG.sub("", text)
+
 
 class PlainUI(UI):
     def section(self, title):
@@ -3183,6 +3231,27 @@ class PlainUI(UI):
                 return answer
             print(f"Choose one of: {', '.join(keys)}")
 
+    def ask_line(self, qid, rich, plain, default=None, choices=None):
+        answer = input(plain).strip()
+        return answer if answer or default is None else default
+
+    def ask_yes(self, qid, rich, plain, default=False):
+        answer = input(plain).strip().lower()
+        if not answer:
+            return default
+        return not answer.startswith('n') if default else answer.startswith('y')
+
+    def markup(self, rich, plain=None):
+        if plain is _SILENT or (plain is None and rich is None):
+            return
+        print(_strip_styles(rich) if plain is None else plain)
+
+    def panel(self, body, title="", style="yellow", plain=None):
+        print()
+        if title:
+            print(_strip_styles(title))
+        print(_strip_styles(body) if plain is None else plain)
+
 
 class RichUI(UI):
     def section(self, title):
@@ -3205,6 +3274,29 @@ class RichUI(UI):
             console.print(f"  [bold cyan]{_rich_safe(k)}[/bold cyan]  {_rich_safe(label)}")
         return Prompt.ask(_rich_safe(prompt), choices=[k for k, _l in options],
                           default=default)
+
+    def ask_line(self, qid, rich, plain, default=None, choices=None):
+        kw = {}
+        if default is not None:
+            kw["default"] = default
+        if choices:
+            kw["choices"] = choices
+        answer = Prompt.ask(rich, **kw)
+        return (answer or "").strip()
+
+    def ask_yes(self, qid, rich, plain, default=False):
+        return Confirm.ask(rich, default=default)
+
+    @property
+    def is_rich(self):
+        return True
+
+    def markup(self, rich, plain=None):
+        if rich is not None:
+            console.print(rich)
+
+    def panel(self, body, title="", style="yellow", plain=None):
+        console.print(Panel(body, title=title or None, border_style=style))
 
 
 class ScriptedUI(UI):
@@ -3247,6 +3339,33 @@ class ScriptedUI(UI):
         if v not in [k for k, _l in options]:
             raise AssertionError(f"ScriptedUI: {v!r} is not an option of {qid!r}")
         return v
+
+    def ask_line(self, qid, rich, plain, default=None, choices=None):
+        v = self._next(qid)
+        v = (default or "") if v is None else str(v)
+        if choices and v not in choices:
+            raise AssertionError(f"ScriptedUI: {v!r} is not an option of {qid!r}")
+        return v
+
+    def ask_yes(self, qid, rich, plain, default=False):
+        v = self._next(qid)
+        return default if v is None else bool(v)
+
+    def ask_raw(self, qid, prompt="> "):
+        v = self._next(qid)
+        return "" if v is None else str(v)
+
+    def markup(self, rich, plain=None):
+        if plain is _SILENT:
+            plain = None
+            if rich is None:
+                return
+        if plain is None and rich is None:
+            return
+        self.output.append(_strip_styles(rich) if plain is None else plain)
+
+    def panel(self, body, title="", style="yellow", plain=None):
+        self.output.append(_strip_styles(body) if plain is None else plain)
 
 
 def _choice_keys(values) -> Tuple[List[str], str]:
@@ -3929,7 +4048,8 @@ class InteractiveMenu:
         # The letters menus R/C/S had in v2.22.0_beta1 still work (not shown).
         aliases = {"R": "5", "C": "8", "S": "S"}
 
-        if RICH_AVAILABLE and console:
+        ui = self.ui
+        if ui.is_rich:
             table = Table(show_header=False, box=None)
             table.add_column("Key", style="bold cyan")
             table.add_column("Option")
@@ -3943,40 +4063,34 @@ class InteractiveMenu:
                 table.add_row(key, desc, status_str)
 
             console.print(Panel(table, title="Main Menu", border_style="green"))
-
-            valid_choices = [o[0] for o in options if o[2]]
-            while True:
-                # D (and the old R/C/S) are letters: either case is taken
-                # (Rich's own choices= check would refuse a lower-case 'd').
-                choice = Prompt.ask("Select option").strip().upper()
-                choice = aliases.get(choice, choice)
-                if choice in valid_choices or choice == "S":
-                    return choice
-                console.print(f"[red]Choose one of: {', '.join(valid_choices)}[/red]")
         else:
-            print("\n--- Main Menu ---")
+            ui.markup(None, "\n--- Main Menu ---")
             for key, desc, available in options:
                 if available is None:
-                    print(desc)
+                    ui.markup(None, desc)
                     continue
                 status_str = "" if available else " [UNAVAILABLE]"
-                print(f"[{key}] {desc}{status_str}")
+                ui.markup(None, f"[{key}] {desc}{status_str}")
 
-            valid_choices = [o[0] for o in options if o[2]]
-            while True:
-                choice = input("\nSelect option: ").strip().upper()
-                choice = aliases.get(choice, choice)
-                if choice in valid_choices or choice == "S":
-                    return choice
-                print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
+        valid_choices = [o[0] for o in options if o[2]]
+        while True:
+            # D (and the old R/C/S) are letters: either case is taken
+            # (Rich's own choices= check would refuse a lower-case 'd').
+            choice = ui.ask_line("menu.main", "Select option", "\nSelect option: ").upper()
+            choice = aliases.get(choice, choice)
+            if choice in valid_choices or choice == "S":
+                return choice
+            ui.markup(f"[red]Choose one of: {', '.join(valid_choices)}[/red]",
+                      f"Invalid choice. Valid options: {', '.join(valid_choices)}")
 
     @property
     def ui(self) -> "UI":
-        """The question API of the registry screens (tests set `_ui`)."""
+        """Every question of the wizard goes through this (tests set `_ui`).
+        Without one set, the renderer follows RICH_AVAILABLE at each call:
+        decided once, a run whose Rich was turned off afterwards kept it."""
         ui = self.__dict__.get('_ui')
         if ui is None:
-            ui = RichUI() if (RICH_AVAILABLE and console) else PlainUI()
-            self.__dict__['_ui'] = ui
+            return RichUI() if (RICH_AVAILABLE and console) else PlainUI()
         return ui
 
     def _all_options_screen(self, workflow: Dict, flt: str = "") -> None:
@@ -4305,7 +4419,7 @@ class InteractiveMenu:
             return
 
         default_dir = self.config.config.last_input_dir or str(Path.home())
-        if RICH_AVAILABLE and console:
+        if self.ui.is_rich:
             console.print("\n[bold cyan]Repair JPEG recovery (jbrd)[/bold cyan]")
             console.print(
                 "[dim]v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files, "
@@ -4320,9 +4434,6 @@ class InteractiveMenu:
             # every other wizard prompt strips them (_strip_surrounding_quotes)
             # and this one used to hand them to Path().is_dir() raw — "Folder
             # not found" for a folder that exists.
-            folder = _strip_surrounding_quotes(
-                Prompt.ask("Folder to scan", default=default_dir))
-            audit = Confirm.ask("Audit only (dry run, nothing written)?", default=True)
         else:
             print("\n--- Repair JPEG recovery (jbrd) ---")
             print("v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files,")
@@ -4332,10 +4443,11 @@ class InteractiveMenu:
             print("Every repair works on a COPY and only replaces a file when the copy")
             print("provably rebuilds the same JPEG — the cautious route is still to")
             print("run it on a copy of the folder first.")
-            folder = _strip_surrounding_quotes(
-                input(f"Folder to scan [{default_dir}]: ").strip() or default_dir)
-            audit_input = input("Audit only (dry run, nothing written)? [Y/n]: ").strip().lower()
-            audit = not audit_input.startswith('n')
+        folder = _strip_surrounding_quotes(self.ui.ask_line(
+            "jbrd.folder", "Folder to scan", f"Folder to scan [{default_dir}]: ",
+            default=default_dir))
+        audit = self.ui.ask_yes("jbrd.audit", "Audit only (dry run, nothing written)?",
+                                "Audit only (dry run, nothing written)? [Y/n]: ", True)
 
         if not Path(folder).is_dir():
             self._print_error(f"Folder not found: {folder}")
@@ -4365,7 +4477,8 @@ class InteractiveMenu:
             return
         policies = {"1": "auto", "2": "on", "3": "off"}
         default_dir = self.config.config.last_input_dir or str(Path.home())
-        if RICH_AVAILABLE and console:
+        ui = self.ui
+        if ui.is_rich:
             console.print("\n[bold cyan]Explorer thumbnails for existing JXLs[/bold cyan]")
             console.print(
                 "[dim]A small sRGB JPEG stored inside each file, which jxl-thumb shows "
@@ -4374,12 +4487,6 @@ class InteractiveMenu:
                 "modified date. JPEG->JXL lossless files (jbrd) are never touched. "
                 "It also moves the EXIF where IrfanView reads it, in files written "
                 "by v2.17.0 to v2.19.0.[/dim]")
-            folder = _strip_surrounding_quotes(Prompt.ask("Folder", default=default_dir))
-            recursive = Confirm.ask("Include subfolders?", default=True)
-            console.print("[1] automatic (recommended)   [2] every file   "
-                          "[3] remove them")
-            policy = policies[Prompt.ask("Which files", choices=["1", "2", "3"], default="1")]
-            dry = Confirm.ask("Dry run (only list what would change)?", default=False)
         else:
             print("\n--- Explorer thumbnails for existing JXLs ---")
             print("A small sRGB JPEG stored inside each file, which jxl-thumb shows in")
@@ -4387,13 +4494,17 @@ class InteractiveMenu:
             print("each file keeps its modified date. jbrd files are never touched.")
             print("It also moves the EXIF where IrfanView reads it, in files written")
             print("by v2.17.0 to v2.19.0.")
-            folder = _strip_surrounding_quotes(
-                input(f"Folder [{default_dir}]: ").strip() or default_dir)
-            recursive = not input("Include subfolders? [Y/n]: ").strip().lower().startswith('n')
-            print("[1] automatic (recommended)  [2] every file  "
-                  "[3] remove them")
-            policy = policies.get(input("Which files [1]: ").strip() or "1", "auto")
-            dry = input("Dry run (only list what would change)? [y/N]: ").strip().lower().startswith('y')
+        folder = _strip_surrounding_quotes(ui.ask_line(
+            "thumbs.folder", "Folder", f"Folder [{default_dir}]: ", default=default_dir))
+        recursive = ui.ask_yes("thumbs.recursive", "Include subfolders?",
+                               "Include subfolders? [Y/n]: ", True)
+        ui.markup("[1] automatic (recommended)   [2] every file   [3] remove them",
+                  "[1] automatic (recommended)  [2] every file  [3] remove them")
+        # A typo in the plain prompt keeps "automatic" (Rich asks again).
+        policy = policies.get(ui.ask_line("thumbs.policy", "Which files", "Which files [1]: ",
+                                          default="1", choices=["1", "2", "3"]), "auto")
+        dry = ui.ask_yes("thumbs.dry", "Dry run (only list what would change)?",
+                         "Dry run (only list what would change)? [y/N]: ", False)
 
         if not Path(folder).is_dir():
             self._print_error(f"Folder not found: {folder}")
@@ -4428,61 +4539,67 @@ class InteractiveMenu:
             was = f"{last_value:g}" if isinstance(last_value, float) else f"{last_value}"
             return f"{shown}  (last run used {was} — editing this adopts the new value)"
 
-        if RICH_AVAILABLE and console:
-            console.print("[bold]Current Settings:[/bold]")
-            console.print(f"Staging: {_rich_safe(current.staging_dir or 'system default')}")
-            console.print(f"Workers: {_effective(current.default_workers, current.last_workers)}")
-            console.print(f"Quality: {_effective(current.default_quality, current.last_quality)}")
-            console.print(f"Effort: {_effective(current.default_effort, current.last_effort)}")
-            console.print("Distance (TIFF->JXL): "
-                          f"{_effective(_sane_distance(current.default_distance), current.last_distance)}")
-            console.print(f"Confirm deletes: {current.confirm_delete}")
-            console.print(f"Export marker: {_rich_safe(current.export_marker)}")
+        ui = self.ui
 
-            new_staging = Prompt.ask("Staging dir (empty=keep current, 'none'=system default)", default=current.staging_dir or "")
-            new_workers = IntPrompt.ask("Workers", default=current.default_workers)
-            new_quality = IntPrompt.ask("Quality (1-100)", default=current.default_quality)
-            new_effort = IntPrompt.ask("Effort (1-10)", default=current.default_effort)
-            new_distance = Prompt.ask(
-                "Distance for TIFF->JXL (0=lossless, 0.1=near-lossless)",
-                default=f"{_sane_distance(current.default_distance):g}")
-            new_confirm = Confirm.ask("Confirm before delete?", default=current.confirm_delete)
-            new_marker = Prompt.ask("Export marker", default=current.export_marker)
-            new_tip = (Confirm.ask("Show the Explorer thumbnail tip at start?",
-                                   default=current.show_thumbnail_tip)
-                       if ask_tip else current.show_thumbnail_tip)
-        else:
-            print("\n--- Edit Settings ---")
-            print(f"Current staging: {current.staging_dir or 'system default'}")
-            new_staging = input("New staging (empty=keep, 'none'=system default): ").strip()
+        def _int_answer(text: str, keep: int) -> int:
+            # Enter or anything but a number keeps the current value.
+            text = (text or "").strip()
+            return int(text) if text.isdigit() else keep
 
-            print(f"Current workers: {_effective(current.default_workers, current.last_workers)}")
-            workers_input = input("New workers: ").strip()
-            new_workers = int(workers_input) if workers_input.isdigit() else current.default_workers
+        # Rich shows the whole block first; the plain screen shows each
+        # current value right above its question.
+        _shown_distance = _effective(_sane_distance(current.default_distance),
+                                     current.last_distance)
+        ui.markup("[bold]Current Settings:[/bold]", "\n--- Edit Settings ---")
+        for _line in (
+                f"Staging: {_rich_safe(current.staging_dir or 'system default')}",
+                f"Workers: {_effective(current.default_workers, current.last_workers)}",
+                f"Quality: {_effective(current.default_quality, current.last_quality)}",
+                f"Effort: {_effective(current.default_effort, current.last_effort)}",
+                f"Distance (TIFF->JXL): {_shown_distance}",
+                f"Confirm deletes: {current.confirm_delete}",
+                f"Export marker: {_rich_safe(current.export_marker)}"):
+            ui.markup(_line, _SILENT)
 
-            print(f"Current quality: {_effective(current.default_quality, current.last_quality)}")
-            quality_input = input("New quality (1-100): ").strip()
-            new_quality = int(quality_input) if quality_input.isdigit() else current.default_quality
+        ui.markup(None, f"Current staging: {current.staging_dir or 'system default'}")
+        new_staging = ui.ask_line(
+            "settings.staging", "Staging dir (empty=keep current, 'none'=system default)",
+            "New staging (empty=keep, 'none'=system default): ",
+            default=current.staging_dir or "")
 
-            print(f"Current effort: {_effective(current.default_effort, current.last_effort)}")
-            effort_input = input("New effort (1-10): ").strip()
-            new_effort = int(effort_input) if effort_input.isdigit() else current.default_effort
+        ui.markup(None, f"Current workers: {_effective(current.default_workers, current.last_workers)}")
+        new_workers = _int_answer(ui.ask_line(
+            "settings.workers", "Workers", "New workers: ",
+            default=str(current.default_workers)), current.default_workers)
 
-            print("Current distance (TIFF->JXL): "
-                  f"{_effective(_sane_distance(current.default_distance), current.last_distance)}")
-            new_distance = input("New distance (0=lossless, 0.1=near-lossless): ").strip()
+        ui.markup(None, f"Current quality: {_effective(current.default_quality, current.last_quality)}")
+        new_quality = _int_answer(ui.ask_line(
+            "settings.quality", "Quality (1-100)", "New quality (1-100): ",
+            default=str(current.default_quality)), current.default_quality)
 
-            confirm_input = input("Confirm before delete? (y/n): ").strip().lower()
-            new_confirm = confirm_input.startswith('y') if confirm_input else current.confirm_delete
+        ui.markup(None, f"Current effort: {_effective(current.default_effort, current.last_effort)}")
+        new_effort = _int_answer(ui.ask_line(
+            "settings.effort", "Effort (1-10)", "New effort (1-10): ",
+            default=str(current.default_effort)), current.default_effort)
 
-            print(f"Current marker: {current.export_marker}")
-            new_marker = input("New export marker: ").strip() or current.export_marker
+        ui.markup(None, f"Current distance (TIFF->JXL): {_shown_distance}")
+        # No default in the plain prompt: Enter there is "keep current".
+        new_distance = ui.ask_line(
+            "settings.distance", "Distance for TIFF->JXL (0=lossless, 0.1=near-lossless)",
+            "New distance (0=lossless, 0.1=near-lossless): ",
+            default=(f"{_sane_distance(current.default_distance):g}" if ui.is_rich else None))
 
-            new_tip = current.show_thumbnail_tip
-            if ask_tip:
-                tip_input = input("Show the Explorer thumbnail tip at start? (y/n): ").strip().lower()
-                if tip_input:
-                    new_tip = tip_input.startswith('y')
+        new_confirm = ui.ask_yes("settings.confirm_delete", "Confirm before delete?",
+                                 "Confirm before delete? (y/n): ", current.confirm_delete)
+
+        ui.markup(None, f"Current marker: {current.export_marker}")
+        new_marker = ui.ask_line("settings.marker", "Export marker", "New export marker: ",
+                                 default=current.export_marker)
+        new_tip = (ui.ask_yes("settings.thumbnail_tip",
+                              "Show the Explorer thumbnail tip at start?",
+                              "Show the Explorer thumbnail tip at start? (y/n): ",
+                              current.show_thumbnail_tip)
+                   if ask_tip else current.show_thumbnail_tip)
 
         if new_staging.lower() == 'none':
             self.config.config.staging_dir = None
@@ -5416,28 +5533,19 @@ class InteractiveMenu:
         input_dir = Path(workflow['input_dir'])
         rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
         
-        if RICH_AVAILABLE and console:
-            console.print("[bold]What to do:[/bold]")
-            options = [
-                ("Y", f"Use Mode {rec_mode} — {rec_name}", True),
-                ("P", "Generate manifest CSV (edit in Excel)", True),
-                ("V", "View manifest", True),
-                ("N", "Choose mode manually", True),
-            ]
-
-            for key, desc, avail in options:
-                console.print(f"[{key}] {desc}")
-
-            choice = Prompt.ask("Select", choices=["Y", "P", "V", "N"], default="Y")
-        else:
-            print("What to do:")
-            print("[Y] Use this mode")
-            print("[P] Generate manifest CSV")
-            print("[V] View manifest")
-            print("[N] Choose mode manually")
-            choice = input("Select [Y/P/V/N]: ").strip().upper()
-            if choice not in ["Y", "P", "V", "N"]:
-                choice = "Y"
+        ui = self.ui
+        ui.markup("[bold]What to do:[/bold]", "What to do:")
+        for key, rich_desc, plain_desc in (
+                ("Y", f"Use Mode {rec_mode} — {rec_name}", "Use this mode"),
+                ("P", "Generate manifest CSV (edit in Excel)", "Generate manifest CSV"),
+                ("V", "View manifest", "View manifest"),
+                ("N", "Choose mode manually", "Choose mode manually")):
+            ui.markup(f"[{key}] {rich_desc}", f"[{key}] {plain_desc}")
+        # A typo in the plain prompt means Y (Rich asks again).
+        choice = ui.ask_line("auto.what", "Select", "Select [Y/P/V/N]: ", default="Y",
+                             choices=["Y", "P", "V", "N"]).upper()
+        if choice not in ["Y", "P", "V", "N"]:
+            choice = "Y"
 
         if choice == "Y":
             workflow['mode'] = rec_mode
@@ -5450,10 +5558,7 @@ class InteractiveMenu:
                     workflow.setdefault('mode_config', {})['export_subfolder'] = sub_names.pop()
             workflow['auto_mode_used'] = True
 
-            if RICH_AVAILABLE and console:
-                console.print(f"[green]✓ Using Mode {rec_mode} — {rec_name}[/green]")
-            else:
-                print(f"✓ Using Mode {rec_mode} — {rec_name}")
+            self.ui.markup(f"[green]✓ Using Mode {rec_mode} — {rec_name}[/green]", f"✓ Using Mode {rec_mode} — {rec_name}")
 
             return True
 
@@ -5478,42 +5583,29 @@ class InteractiveMenu:
                 # After viewing, ask again
                 return self._wizard_auto_mode_post_manifest(workflow, analyzer, analysis, rec_mode, mode_names, mappings)
             else:
-                if RICH_AVAILABLE and console:
-                    console.print("[yellow]No manifest found. Generate one first with [P][/yellow]")
-                else:
-                    print("No manifest found. Generate one first with [P]")
+                self.ui.markup("[yellow]No manifest found. Generate one first with [P][/yellow]", "No manifest found. Generate one first with [P]")
                 # No manifest - return to same menu so user can select [P]
                 return self._wizard_auto_mode_menu(workflow, analyzer, analysis, rec_mode, mode_names, mappings)
 
         else:
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Switching to manual mode selection...[/dim]")
-            else:
-                print("Switching to manual mode selection...")
+            self.ui.markup("[dim]Switching to manual mode selection...[/dim]", "Switching to manual mode selection...")
             return self._wizard_select_mode_manual(workflow)
 
     def _wizard_auto_mode_post_manifest(self, workflow: Dict, analyzer: FolderAnalyzer, analysis: Dict, rec_mode: int, mode_names: Dict, mappings: List) -> bool:
         """Ask what to do after manifest was generated/viewed."""
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print("[bold]After manifest:[/bold]")
-            options = [
-                ("Y", f"Use Mode {rec_mode} — {mode_names.get(rec_mode, f'Mode {rec_mode}')}", True),
-                ("M", "Run from manifest", True),
-                ("N", "Choose mode manually", True),
-            ]
-            for key, desc, avail in options:
-                console.print(f"[{key}] {desc}")
-            choice = Prompt.ask("Select", choices=["Y", "M", "N"], default="Y")
-        else:
-            print()
-            print("After manifest:")
-            print("[Y] Use this mode")
-            print("[M] Run from manifest")
-            print("[N] Choose mode manually")
-            choice = input("Select [Y/M/N]: ").strip().upper()
-            if choice not in ["Y", "M", "N"]:
-                choice = "Y"
+        ui = self.ui
+        ui.markup("")
+        ui.markup("[bold]After manifest:[/bold]", "After manifest:")
+        for key, rich_desc, plain_desc in (
+                ("Y", f"Use Mode {rec_mode} — {mode_names.get(rec_mode, f'Mode {rec_mode}')}",
+                 "Use this mode"),
+                ("M", "Run from manifest", "Run from manifest"),
+                ("N", "Choose mode manually", "Choose mode manually")):
+            ui.markup(f"[{key}] {rich_desc}", f"[{key}] {plain_desc}")
+        choice = ui.ask_line("auto.after_manifest", "Select", "Select [Y/M/N]: ", default="Y",
+                             choices=["Y", "M", "N"]).upper()
+        if choice not in ["Y", "M", "N"]:
+            choice = "Y"
 
         if choice == "Y":
             workflow['mode'] = rec_mode
@@ -5530,10 +5622,7 @@ class InteractiveMenu:
             if manifest_path and Path(manifest_path).exists():
                 return self._wizard_run_from_manifest(workflow)
             else:
-                if RICH_AVAILABLE and console:
-                    console.print("[red]No manifest found![/red]")
-                else:
-                    print("No manifest found!")
+                self.ui.markup("[red]No manifest found![/red]", "No manifest found!")
                 return False
         else:
             return self._wizard_select_mode_manual(workflow)
@@ -5554,10 +5643,7 @@ class InteractiveMenu:
         mappings = analyzer.generate_manifest(analysis, mode)
 
         if not mappings:
-            if RICH_AVAILABLE and console:
-                console.print("[yellow]No folders to add to manifest.[/yellow]")
-            else:
-                print("No folders to add to manifest.")
+            self.ui.markup("[yellow]No folders to add to manifest.[/yellow]", "No folders to add to manifest.")
             return None
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5662,17 +5748,13 @@ class InteractiveMenu:
         if len(manifests) == 1:
             return str(manifests[0])
         shown = manifests[:10]
-        if RICH_AVAILABLE and console:
-            console.print("[bold]Available manifests (newest first):[/bold]")
-            for i, m in enumerate(shown, 1):
-                console.print(f"  [{i}] {_rich_safe(m.name)}")
-            choice = Prompt.ask("Which manifest?",
-                                choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
-            return str(shown[int(choice) - 1])
-        print("Available manifests (newest first):")
+        ui = self.ui
+        ui.markup("[bold]Available manifests (newest first):[/bold]",
+                  "Available manifests (newest first):")
         for i, m in enumerate(shown, 1):
-            print(f"  [{i}] {m.name}")
-        raw = input("Which manifest? [1]: ").strip() or "1"
+            ui.markup(f"  [{i}] {_rich_safe(m.name)}", f"  [{i}] {m.name}")
+        raw = ui.ask_line("manifest.pick", "Which manifest?", "Which manifest? [1]: ",
+                          default="1", choices=[str(i) for i in range(1, len(shown) + 1)])
         try:
             idx = max(1, min(int(raw), len(shown))) - 1
         except ValueError:
@@ -5712,10 +5794,7 @@ class InteractiveMenu:
                         entries.append((source, dest, mode))
 
         if not entries:
-            if RICH_AVAILABLE and console:
-                console.print("[yellow]Manifest is empty.[/yellow]")
-            else:
-                print("Manifest is empty.")
+            self.ui.markup("[yellow]Manifest is empty.[/yellow]", "Manifest is empty.")
             return
 
         if RICH_AVAILABLE and console:
@@ -5930,16 +6009,10 @@ class InteractiveMenu:
         if anchored:
             note = (f"{len(anchored)} relative path(s) in the manifest resolved "
                     f"against the manifest's own folder: {csv_dir}")
-            if RICH_AVAILABLE and console:
-                console.print(f"[dim]{_rich_safe(note)}[/dim]")
-            else:
-                print(note)
+            self.ui.markup(f"[dim]{_rich_safe(note)}[/dim]", note)
 
         if not entries:
-            if RICH_AVAILABLE and console:
-                console.print("[yellow]Manifest is empty or only has comments.[/yellow]")
-            else:
-                print("Manifest is empty or only has comments.")
+            self.ui.markup("[yellow]Manifest is empty or only has comments.[/yellow]", "Manifest is empty or only has comments.")
             return None
 
         # Direction guard: a manifest is bound to the workflow that generated
@@ -5959,10 +6032,7 @@ class InteractiveMenu:
             # Legacy manifest without a Direction column: allow, but warn.
             warn = (f"Manifest has no Direction column (pre-v1.8.1 format). "
                     f"Assuming it matches the current workflow ({current_direction}).")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(warn)}[/yellow]")
-            else:
-                print(f"WARNING: {warn}")
+            self.ui.markup(f"[yellow]{_rich_safe(warn)}[/yellow]", f"WARNING: {warn}")
 
         if opt_index:
             # Two families with OPPOSITE empty-cell semantics (docs/
@@ -5986,10 +6056,7 @@ class InteractiveMenu:
             if "excludefolders" in opt_index:
                 note += "; ExcludeFolders '-' means no exclusion on that row"
             note += ")"
-            if RICH_AVAILABLE and console:
-                console.print(f"[dim]{_rich_safe(note)}[/dim]")
-            else:
-                print(note)
+            self.ui.markup(f"[dim]{_rich_safe(note)}[/dim]", note)
 
         # Invariant: one options dict per entry. Catches a desync between the
         # entries list and row_options on the spot instead of misaligning
@@ -6033,7 +6100,6 @@ class InteractiveMenu:
                 console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
             console.print()
 
-            proceed = Confirm.ask("Proceed with manifest?", default=True)
         else:
             print(f"\nManifest: {manifest_path}")
             print(f"Entries to process: {len(entries)}\n")
@@ -6045,19 +6111,14 @@ class InteractiveMenu:
             if len(entries) > 15:
                 print(f"  ... and {len(entries) - 15} more entries")
             print()
-            proceed_input = input("Proceed with manifest? [Y/n]: ").strip().lower()
-            proceed = not proceed_input.startswith('n')
-
-        return proceed
+        return self.ui.ask_yes("manifest.proceed", "Proceed with manifest?",
+                               "Proceed with manifest? [Y/n]: ", True)
 
     def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
         """Step 4 alternative: run the workflow from a manifest CSV."""
         manifest_path = self._pick_manifest()
         if not manifest_path or not Path(manifest_path).exists():
-            if RICH_AVAILABLE and console:
-                console.print("[red]No manifest found![/red]")
-            else:
-                print("No manifest found!")
+            self.ui.markup("[red]No manifest found![/red]", "No manifest found!")
             return False
 
         row_options: List = []
@@ -6093,13 +6154,9 @@ class InteractiveMenu:
             _q = (f"Manifest contains DELETE-mode (8) entries. Deleting is a run-wide "
                   f"setting, so answering yes deletes the originals of {_scope}{_extra}. "
                   f"Delete originals after conversion? (IRREVERSIBLE)")
-            if RICH_AVAILABLE and console:
-                console.print()
-                console.print(Panel(f"[bold red]{_q}[/bold red]", border_style="red"))
-                delete = Confirm.ask("[bold red]Delete originals?[/bold red]", default=False)
-            else:
-                print(f"\n{_q}")
-                delete = input("Delete originals? [y/N]: ").strip().lower().startswith('y')
+            self.ui.panel(f"[bold red]{_q}[/bold red]", style="red", plain=_q)
+            delete = self.ui.ask_yes("manifest.delete", "[bold red]Delete originals?[/bold red]",
+                                     "Delete originals? [y/N]: ", False)
             if delete:
                 workflow['delete_source'] = True
                 # The same gates the [D] gateway charges for a single run. A
@@ -6123,10 +6180,7 @@ class InteractiveMenu:
             else:
                 console_msg = ("Every entry will run WITHOUT deleting originals "
                                "(source and output will coexist).")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{console_msg}[/yellow]")
-                else:
-                    print(console_msg)
+                self.ui.markup(f"[yellow]{console_msg}[/yellow]", console_msg)
 
         # For manifest mode, we set mode to special value 99 (manifest mode)
         workflow['mode'] = 99  # Special mode for manifest execution
@@ -6183,68 +6237,37 @@ class InteractiveMenu:
              m8_desc)
         ]
 
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Step 4: Organization Mode[/bold cyan]")
-            console.print("[dim]The export marker (e.g. '_EXPORT') is configurable in Settings (menu 9)[/dim]")
-            console.print("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') are the scripts' settings: Script settings (menu S)[/dim]")
+        ui = self.ui
+        ui.markup("\n[bold cyan]Step 4: Organization Mode[/bold cyan]",
+                  "\n--- Step 4: Organization Mode ---")
+        ui.markup("[dim]The export marker (e.g. '_EXPORT') is configurable in Settings (menu 9)[/dim]")
+        ui.markup("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') are "
+                  "the scripts' settings: Script settings (menu S)[/dim]")
+        ui.panel("[bold yellow][A] Auto Mode[/bold yellow] — analyze folder structure and "
+                 "recommend best mode", style="yellow",
+                 plain="[A] Auto Mode — analyze folder and recommend best mode\n")
+        for key, name, desc in modes:
+            # [D] below is the DELETING entry and carries the red, or the
+            # warning colour would point at the wrong option. But deletion is
+            # not the only way this menu can lose a file: for a JXL->JXL run,
+            # modes 0 and 8 OVERWRITE the source in place (their descriptions
+            # carry the red "NOT kept" warning) — the entries themselves stay
+            # green so [D] remains the one red option.
+            ui.markup(f"[{key}] [bold green]{name}[/bold green]")
+            ui.markup(f"    {desc}\n")
+        ui.markup("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
+        ui.markup(self._delete_entry_line(), self._delete_entry_line(plain=True))
+        ui.markup("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
+        ui.line()
 
-            # Highlight auto mode and manifest
-            console.print()
-            console.print(Panel.fit(
-                "[bold yellow][A] Auto Mode[/bold yellow] — analyze folder structure and recommend best mode",
-                border_style="yellow"
-            ))
-            console.print()
-
-            for key, name, desc in modes:
-                # [D] below is the DELETING entry and carries the red, or the
-                # warning colour would point at the wrong option. But deletion
-                # is not the only way this menu can lose a file: for a JXL->JXL
-                # run, modes 0 and 8 OVERWRITE the source in place (their
-                # descriptions carry the red "NOT kept" warning) — the entries
-                # themselves stay green so [D] remains the one red option.
-                console.print(f"[{key}] [bold green]{name}[/bold green]")
-                console.print(f"    {desc}\n")
-
-            console.print("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
-            console.print(self._delete_entry_line())
-            console.print("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
-            console.print()
-
-            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "D", "a", "m", "d"]
-            while True:
-                choice = Prompt.ask("Select mode", choices=valid_choices)
-                if choice:
-                    choice = choice.upper()
-                    break
-        else:
-            print(f"\n--- Step 4: Organization Mode ---")
-            print("[A] Auto Mode — analyze folder and recommend best mode")
-            print()
-            for key, name, desc in modes:
-                print(f"[{key}] {name}")
-                clean = (desc.replace("[bold green]", "").replace("[/bold green]", "")
-                         .replace("[bold red]", "").replace("[/bold red]", "")
-                         .replace("[bold blue]", "").replace("[/bold blue]", "")
-                         .replace("[bold cyan]", "").replace("[/bold cyan]", "")
-                         .replace("[bold yellow]", "").replace("[/bold yellow]", "")
-                         .replace("[bold]", "").replace("[/bold]", "")
-                         .replace("[green]", "").replace("[/green]", "")
-                         .replace("[cyan]", "").replace("[/cyan]", "")
-                         .replace("[red]", "").replace("[/red]", "")
-                         .replace("[yellow]", "").replace("[/yellow]", "")
-                         .replace("[dim]", "").replace("[/dim]", ""))
-                print(f"    {clean}\n")
-            print("[M] Run from manifest — execute a previously generated manifest CSV")
-            print(self._delete_entry_line(plain=True))
-            print("[?] See detailed mode explanation")
-            print()
-
-            valid_choices = [m[0] for m in modes] + ["?", "A", "M", "D"]
-            while True:
-                choice = input("Mode (0-8, D to delete originals, A for auto, M for manifest, ? for details): ").strip().upper()
-                if choice in valid_choices:
-                    break
+        valid_choices = [m[0] for m in modes] + ["?", "A", "M", self._DELETE_CHOICE]
+        while True:
+            choice = ui.ask_line(
+                "mode.pick", "Select mode",
+                "Mode (0-8, D to delete originals, A for auto, M for manifest, ? for details): ",
+                choices=valid_choices + ["a", "m", "d"]).upper()
+            if choice in valid_choices:
+                break
 
         # Handle "?" - show detailed explanations
         if choice == "?":
@@ -6269,27 +6292,8 @@ class InteractiveMenu:
             "in [bold cyan]Settings (menu 9)[/bold cyan]. Folder names like 'converted_jxl'",
             "are the scripts' own settings: [bold cyan]Script settings (menu S)[/bold cyan].",
         ]
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print(Panel(
-                "\n".join(note_lines),
-                title="[yellow]Tip[/yellow]",
-                border_style="yellow"
-            ))
-        else:
-            print()
-            for line in note_lines:
-                print(line.replace("[bold green]", "").replace("[/bold green]", "")
-                      .replace("[bold red]", "").replace("[/bold red]", "")
-                      .replace("[bold blue]", "").replace("[/bold blue]", "")
-                      .replace("[bold cyan]", "").replace("[/bold cyan]", "")
-                      .replace("[bold yellow]", "").replace("[/bold yellow]", "")
-                      .replace("[bold]", "").replace("[/bold]", "")
-                      .replace("[green]", "").replace("[/green]", "")
-                      .replace("[cyan]", "").replace("[/cyan]", "")
-                      .replace("[red]", "").replace("[/red]", "")
-                      .replace("[yellow]", "").replace("[/yellow]", "")
-                      .replace("[dim]", "").replace("[/dim]", ""))
+        self.ui.panel("\n".join(note_lines), title="[yellow]Tip[/yellow]",
+                      style="yellow")
 
         return True
 
@@ -6365,26 +6369,20 @@ class InteractiveMenu:
                "already converted, what ties the existing output to the original being "
                "deleted is its provenance marker (it names the source FILE and the hash "
                "of its bytes) and a structural check — nothing compares the pixels.")
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print(Panel(f"[bold red]{_rich_safe(msg)}[/bold red]", border_style="red"))
-            go = Confirm.ask("[bold red]Delete already-converted originals anyway?[/bold red]",
-                             default=False)
-        else:
-            print(f"\n{msg}")
-            try:
-                go = input("Delete already-converted originals anyway? [y/N]: "
-                           ).strip().lower().startswith('y')
-            except (EOFError, KeyboardInterrupt):
-                print()
-                go = False
+        self.ui.panel(f"[bold red]{_rich_safe(msg)}[/bold red]", style="red", plain=msg)
+        try:
+            go = self.ui.ask_yes(
+                "delete.lossy_skipped",
+                "[bold red]Delete already-converted originals anyway?[/bold red]",
+                "Delete already-converted originals anyway? [y/N]: ", False)
+        except (EOFError, KeyboardInterrupt):
+            # A closed pipe (a scheduled run) declines: the originals are kept.
+            print()
+            go = False
         if not go:
             adv['delete_skipped'] = False
             note = "Already-converted originals will be KEPT."
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(note)}[/yellow]")
-            else:
-                print(note)
+            self.ui.markup(f"[yellow]{_rich_safe(note)}[/yellow]", note)
         workflow['_lossy_skip_confirmed'] = True
 
     def _count_origin_files(self, workflow: Dict, mode: int) -> int:
@@ -6517,33 +6515,22 @@ class InteractiveMenu:
         # --- Gate 1: undo a mis-key ---------------------------------------
         warn = (f"[D] deletes your original {origin.upper()} files after converting them. "
                 f"This cannot be undone.")
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print(Panel(f"[bold red]{_rich_safe(warn)}[/bold red]", border_style="red"))
-            go = Confirm.ask("[bold]Continue?[/bold]", default=False)
-        else:
-            print(f"\n{warn}")
-            go = input("Continue? [y/N]: ").strip().lower().startswith('y')
+        ui = self.ui
+        ui.panel(f"[bold red]{_rich_safe(warn)}[/bold red]", style="red", plain=warn)
+        go = ui.ask_yes("delete.continue", "[bold]Continue?[/bold]", "Continue? [y/N]: ", False)
         if not go:
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Cancelled — back to the mode list.[/dim]")
-            else:
-                print("Cancelled — back to the mode list.")
+            ui.markup("[dim]Cancelled — back to the mode list.[/dim]")
             return self._wizard_select_mode(workflow)
 
         # --- The layout, same 0-8 as the normal path ----------------------
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]Where should the converted files go?[/bold cyan]")
-            for key, name, _desc in modes:
-                console.print(f"  [{key}] {name}")
-            layout = Prompt.ask("Layout", choices=[m[0] for m in modes], default="0")
-        else:
-            print("\nWhere should the converted files go?")
-            for key, name, _desc in modes:
-                print(f"  [{key}] {name}")
-            layout = ""
-            while layout not in [m[0] for m in modes]:
-                layout = input("Layout [0]: ").strip() or "0"
+        ui.markup("\n[bold cyan]Where should the converted files go?[/bold cyan]")
+        for key, name, _desc in modes:
+            ui.markup(f"  [{key}] {name}")
+        layouts = [m[0] for m in modes]
+        layout = ""
+        while layout not in layouts:
+            layout = ui.ask_line("delete.layout", "Layout", "Layout [0]: ", default="0",
+                                 choices=layouts)
         mode = int(layout)
 
         # --- Gate 2: the concrete consequence -----------------------------
@@ -6574,21 +6561,12 @@ class InteractiveMenu:
             f"will be converted to {dest.upper()} in {where},",
             "and then DELETED from where they are now.",
         ]
-        if RICH_AVAILABLE and console:
-            console.print()
-            console.print(Panel("\n".join(lines), title="[bold red]About to delete originals[/bold red]",
-                                border_style="red"))
-            sure = Confirm.ask("[bold red]Is that what you want?[/bold red]", default=False)
-        else:
-            print()
-            for ln in lines:
-                print(ln)
-            sure = input("Is that what you want? [y/N]: ").strip().lower().startswith('y')
+        ui.panel("\n".join(lines), title="[bold red]About to delete originals[/bold red]",
+                 style="red", plain="\n".join(lines))
+        sure = ui.ask_yes("delete.sure", "[bold red]Is that what you want?[/bold red]",
+                          "Is that what you want? [y/N]: ", False)
         if not sure:
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Cancelled — back to the mode list.[/dim]")
-            else:
-                print("Cancelled — back to the mode list.")
+            ui.markup("[dim]Cancelled — back to the mode list.[/dim]")
             return self._wizard_select_mode(workflow)
 
         workflow['mode'] = mode
@@ -6612,10 +6590,7 @@ class InteractiveMenu:
 
         msg = (f"Mode {mode} + DELETE originals. You will be asked for the current "
                f"time (HHMM) once more before anything runs — a dry run never asks.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
-        else:
-            print(msg)
+        ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", msg)
         return True
 
     def _ask_delete_options(self, workflow: Dict, collapses: bool,
@@ -6654,10 +6629,7 @@ class InteractiveMenu:
             # asking a question whose "no" would do nothing.
             _msg = ("Each JXL is decoded and compared with its TIFF before the TIFF is "
                     "deleted (VERIFY_ROUNDTRIP in jxl_tiff_encoder.py).")
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[dim]{_msg}[/dim]")
-            else:
-                print(f"\n{_msg}")
+            self.ui.markup(f"\n[dim]{_msg}[/dim]", f"\n{_msg}")
             verify = True
             workflow['verify_roundtrip'] = True
         elif (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
@@ -6666,15 +6638,11 @@ class InteractiveMenu:
                        "Lossless: the pixels must match exactly. Lossy: a brightness and "
                        "PSNR sanity check that catches a black or scrambled encode (not "
                        "quality loss — that is what you asked for). Roughly doubles the run.")
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[dim]{explain}[/dim]")
-                verify = Confirm.ask("[cyan]Verify each output before deleting its source?[/cyan]",
-                                     default=vr_default)
-            else:
-                print(f"\n{explain}")
-                _vi = input(f"Verify each output before deleting its source? "
-                            f"[{'Y/n' if vr_default else 'y/N'}]: ").strip().lower()
-                verify = (not _vi.startswith('n')) if vr_default else _vi.startswith('y')
+            self.ui.markup(f"\n[dim]{explain}[/dim]", f"\n{explain}")
+            verify = self.ui.ask_yes(
+                "delete.verify", "[cyan]Verify each output before deleting its source?[/cyan]",
+                f"Verify each output before deleting its source? "
+                f"[{'Y/n' if vr_default else 'y/N'}]: ", vr_default)
             workflow['verify_roundtrip'] = bool(verify)
             _staged['last_verify_roundtrip'] = bool(verify)
         else:
@@ -6717,16 +6685,11 @@ class InteractiveMenu:
             "can never be finished without redoing everything. Turning this on deletes "
             "them too. They are never deleted on the timestamp alone: the output must "
             "exist and be structurally valid, " + _guarantee)
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[dim]{ds_explain}[/dim]")
-            del_skipped = Confirm.ask(
-                "[cyan]Also delete originals that were already converted?[/cyan]",
-                default=ds_default)
-        else:
-            print(f"\n{ds_explain}")
-            _di = input(f"Also delete originals that were already converted? "
-                        f"[{'Y/n' if ds_default else 'y/N'}]: ").strip().lower()
-            del_skipped = (not _di.startswith('n')) if ds_default else _di.startswith('y')
+        self.ui.markup(f"\n[dim]{ds_explain}[/dim]", f"\n{ds_explain}")
+        del_skipped = self.ui.ask_yes(
+            "delete.skipped", "[cyan]Also delete originals that were already converted?[/cyan]",
+            f"Also delete originals that were already converted? "
+            f"[{'Y/n' if ds_default else 'y/N'}]: ", ds_default)
 
         if del_skipped and _lossy:
             # Same gate execute_workflow applies to repeats and presets, asked
@@ -6776,26 +6739,20 @@ class InteractiveMenu:
                     f"and then stamped, so this is a ONE-TIME pass: afterwards the strict "
                     f"check applies again.")
             _pv_list = "/".join(_pv_choices)
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[dim]{pv_explain}[/dim]")
-                provenance = Prompt.ask(
-                    "[cyan]Match existing outputs by[/cyan]",
-                    choices=_pv_choices, default=pv_default)
-            else:
-                print(f"\n{pv_explain}")
-                _pi = input(f"Match existing outputs by ({_pv_list}) "
-                            f"[{pv_default}]: ").strip().lower()
-                provenance = _pi if _pi in _pv_choices else pv_default
+            self.ui.markup(f"\n[dim]{pv_explain}[/dim]", f"\n{pv_explain}")
+            # A typo keeps the default (the plain prompt never asked again).
+            _pi = self.ui.ask_line(
+                "delete.provenance", "[cyan]Match existing outputs by[/cyan]",
+                f"Match existing outputs by ({_pv_list}) [{pv_default}]: ",
+                default=pv_default, choices=_pv_choices).lower()
+            provenance = _pi if _pi in _pv_choices else pv_default
             workflow['provenance'] = provenance
             _staged['last_provenance'] = provenance
             _staged['last_adopt_scan'] = None
             if provenance == 'content':
                 _n = ("Content matching reads every source file — expect the run to take "
                       "noticeably longer.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_n)}[/yellow]")
-                else:
-                    print(_n)
+                self.ui.markup(f"[yellow]{_rich_safe(_n)}[/yellow]", _n)
             elif provenance == 'adopt':
                 # The scan is what makes adoption safe rather than a rubber
                 # stamp, so it is ON unless the user turns it off knowingly.
@@ -6805,32 +6762,22 @@ class InteractiveMenu:
                        "do that if you know this archive was never built with a mode that "
                        "merges folders (2/4/5/6/7), which is what could have put a different "
                        "photo under that name.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"\n[dim]{_sc}[/dim]")
-                    _scan = Confirm.ask("[cyan]Verify each one before adopting?[/cyan]",
-                                        default=True)
-                else:
-                    print(f"\n{_sc}")
-                    _si = input("Verify each one before adopting? [Y/n]: ").strip().lower()
-                    _scan = not _si.startswith('n')
+                self.ui.markup(f"\n[dim]{_sc}[/dim]", f"\n{_sc}")
+                _scan = self.ui.ask_yes("delete.adopt_scan",
+                                        "[cyan]Verify each one before adopting?[/cyan]",
+                                        "Verify each one before adopting? [Y/n]: ", True)
                 workflow['adopt_scan'] = bool(_scan)
                 _staged['last_adopt_scan'] = bool(_scan)
                 if not _scan:
                     _w = ("Adopting WITHOUT verification. Every existing output will be "
                           "trusted as belonging to the source that shares its name.")
-                    if RICH_AVAILABLE and console:
-                        console.print(f"[yellow]{_rich_safe(_w)}[/yellow]")
-                    else:
-                        print(_w)
+                    self.ui.markup(f"[yellow]{_rich_safe(_w)}[/yellow]", _w)
         if del_skipped and not verify and not _provable:
             _w = ("Deleting already-converted originals with no content check: what "
                   "stands between a stale output and your original is the provenance "
                   "marker (it names the source FILE, not its pixels) and a structural "
                   "check.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(_w)}[/yellow]")
-            else:
-                print(_w)
+            self.ui.markup(f"[yellow]{_rich_safe(_w)}[/yellow]", _w)
 
         # Hand the staged answers to the wizard result; main() commits them to
         # the config next to save_last_session, so a cancelled wizard leaves
@@ -6865,28 +6812,17 @@ class InteractiveMenu:
             ("8", "In-place recursive", m8_desc),
         ]
 
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Select Mode Manually[/bold cyan]")
-            for key, name, desc in modes:
-                console.print(f"[{key}] [bold green]{name}[/bold green] — {desc}")
-            console.print(self._delete_entry_line())
-
-            valid_choices = ([m[0] for m in modes]
-                             + [self._DELETE_CHOICE, self._DELETE_CHOICE.lower()])
-            while True:
-                choice = Prompt.ask("Select mode", choices=valid_choices)
-                if choice:
-                    choice = choice.upper()
-                    break
-        else:
-            print("\n--- Select Mode Manually ---")
-            for key, name, desc in modes:
-                print(f"[{key}] {name} — {desc}")
-            print(self._delete_entry_line(plain=True))
-            valid_choices = [m[0] for m in modes] + [self._DELETE_CHOICE]
-            choice = input(f"Select ({'/'.join(valid_choices)}): ").strip().upper()
-            while choice not in valid_choices:
-                choice = input(f"Select ({'/'.join(valid_choices)}): ").strip().upper()
+        ui = self.ui
+        ui.markup("\n[bold cyan]Select Mode Manually[/bold cyan]", "\n--- Select Mode Manually ---")
+        for key, name, desc in modes:
+            ui.markup(f"[{key}] [bold green]{name}[/bold green] — {desc}")
+        ui.markup(self._delete_entry_line(), self._delete_entry_line(plain=True))
+        valid_choices = [m[0] for m in modes] + [self._DELETE_CHOICE]
+        choice = ""
+        while choice not in valid_choices:
+            choice = ui.ask_line("mode.manual", "Select mode",
+                                 f"Select ({'/'.join(valid_choices)}): ",
+                                 choices=valid_choices + [self._DELETE_CHOICE.lower()]).upper()
 
         _handled = self._handle_mode_choice(workflow, choice, modes)
         if _handled is not None:
@@ -6976,43 +6912,21 @@ class InteractiveMenu:
              f"folder, then asked for the current time (HHMM). A dry run never deletes."),
         ]
 
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]--- Mode Detailed Explanations ---[/bold cyan]\n")
-            for key, name, desc in details:
-                # Red marks what actually destroys data — which is [D], not
-                # mode 8. Mode 8 keeps your files.
-                style = "red" if key == self._DELETE_CHOICE else "blue"
-                console.print(f"[{key}] [bold {style}]{name}[/bold {style}]")
-                console.print(Panel.fit(desc, border_style=style))
-                console.print()
-
-            valid_choices = [d[0] for d in details] + ["A", "M", "a", "m",
-                                                       self._DELETE_CHOICE.lower()]
-            while True:
-                choice = Prompt.ask("Select mode", choices=valid_choices)
-                if choice in valid_choices:
-                    choice = choice.upper()
-                    break
-        else:
-            print("\n=== Mode Detailed Explanations ===\n")
-            for key, name, desc in details:
-                print(f"[{key}] {name}")
-                clean = (desc.replace("[bold green]", "").replace("[/bold green]", "")
-                         .replace("[bold red]", "").replace("[/bold red]", "")
-                         .replace("[bold blue]", "").replace("[/bold blue]", "")
-                         .replace("[bold cyan]", "").replace("[/bold cyan]", "")
-                         .replace("[bold yellow]", "").replace("[/bold yellow]", "")
-                         .replace("[bold ", "").replace("[/bold]", "")
-                         .replace("[green]", "").replace("[/green]", "")
-                         .replace("[cyan]", "").replace("[/cyan]", "")
-                         .replace("[red]", "").replace("[/red]", "")
-                         .replace("[yellow]", "").replace("[/yellow]", "")
-                         .replace("[dim]", "").replace("[/dim]", ""))
-                print(f"   {clean}\n")
-            valid_choices = [d[0] for d in details] + ["A", "M"]
-            choice = input("Select mode [0-8/D/A/M]: ").strip().upper()
-            while choice not in valid_choices:
-                choice = input("Select mode [0-8/D/A/M]: ").strip().upper()
+        ui = self.ui
+        ui.markup("\n[bold cyan]--- Mode Detailed Explanations ---[/bold cyan]\n",
+                  "\n=== Mode Detailed Explanations ===\n")
+        for key, name, desc in details:
+            # Red marks what actually destroys data — which is [D], not mode 8.
+            # Mode 8 keeps your files.
+            style = "red" if key == self._DELETE_CHOICE else "blue"
+            ui.markup(f"[{key}] [bold {style}]{name}[/bold {style}]", f"[{key}] {name}")
+            ui.panel(desc, style=style, plain=f"   {_strip_styles(desc)}\n")
+        valid_choices = [d[0] for d in details] + ["A", "M"]
+        choice = ""
+        while choice not in valid_choices:
+            choice = ui.ask_line("mode.details", "Select mode", "Select mode [0-8/D/A/M]: ",
+                                 choices=valid_choices + ["a", "m",
+                                                          self._DELETE_CHOICE.lower()]).upper()
 
         # Handle Auto and Manifest from detail view
         if choice == "A":
@@ -7054,14 +6968,12 @@ class InteractiveMenu:
 
         if mode in [6, 7]:
             current = self.config.config.export_marker
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Marker Configuration[/bold cyan]")
-                console.print(f"Current: [green]{_rich_safe(current)}[/green]")
-                new_marker = Prompt.ask("EXPORT marker", default=current)
-            else:
-                print(f"\n--- Step 5: Marker Configuration ---")
-                print(f"Current: {current}")
-                new_marker = input(f"EXPORT marker [{current}]: ").strip() or current
+            ui = self.ui
+            ui.markup("\n[bold cyan]Step 5: Marker Configuration[/bold cyan]",
+                      "\n--- Step 5: Marker Configuration ---")
+            ui.markup(f"Current: [green]{_rich_safe(current)}[/green]", f"Current: {current}")
+            new_marker = ui.ask_line("mode.cfg.marker", "EXPORT marker",
+                                     f"EXPORT marker [{current}]: ", default=current)
 
             if new_marker != current:
                 # Store per-workflow only (persisted at the end via mode_config);
@@ -7075,13 +6987,11 @@ class InteractiveMenu:
                 # then the last saved session.
                 last_sub = mode_config.get('export_subfolder') or \
                     (self.config.config.last_mode_config or {}).get('export_subfolder', '')
-                if RICH_AVAILABLE and console:
-                    sub = Prompt.ask(
-                        "Subfolder inside export marker to process (empty = all, same as mode 6)",
-                        default=last_sub
-                    )
-                else:
-                    sub = input(f"Subfolder inside export marker (empty = all) [{last_sub}]: ").strip() or last_sub
+                sub = self.ui.ask_line(
+                    "mode.cfg.subfolder",
+                    "Subfolder inside export marker to process (empty = all, same as mode 6)",
+                    f"Subfolder inside export marker (empty = all) [{last_sub}]: ",
+                    default=last_sub)
                 sub = _strip_surrounding_quotes(sub).strip().strip('/\\')
                 if sub:
                     mode_config['export_subfolder'] = sub
@@ -7105,12 +7015,10 @@ class InteractiveMenu:
                 _folder_default = (mode_config.get('export_jxl_folder')
                                    or (self.config.config.last_mode_config or {}).get('export_jxl_folder')
                                    or _script_default)
-                if RICH_AVAILABLE and console:
-                    _folder = Prompt.ask("Output folder name under the marker",
-                                         default=_folder_default)
-                else:
-                    _folder = input(f"Output folder name under the marker "
-                                    f"[{_folder_default}]: ").strip() or _folder_default
+                _folder = self.ui.ask_line(
+                    "mode.cfg.jxl_folder", "Output folder name under the marker",
+                    f"Output folder name under the marker [{_folder_default}]: ",
+                    default=_folder_default)
                 _folder = _strip_surrounding_quotes(_folder).strip().strip('/\\')
                 if _folder == _script_default:
                     mode_config.pop('export_jxl_folder', None)
@@ -7119,46 +7027,36 @@ class InteractiveMenu:
 
         elif mode == 2:
             default_out = Path(workflow['input_dir']).parent / "output"
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Flat Folder[/bold cyan]")
-                output_dir = Prompt.ask("Output directory", default=str(default_out))
-            else:
-                print(f"\n--- Step 5: Flat Folder ---")
-                output_dir = input(f"Destination [{default_out}]: ").strip() or str(default_out)
+            self.ui.markup("\n[bold cyan]Step 5: Flat Folder[/bold cyan]",
+                           "\n--- Step 5: Flat Folder ---")
+            output_dir = self.ui.ask_line("mode.cfg.output_dir", "Output directory",
+                                          f"Destination [{default_out}]: ",
+                                          default=str(default_out))
             mode_config['output_dir'] = _strip_surrounding_quotes(output_dir)
 
         elif mode == 1:
             folder_name = _dest_folder_names(origin, dest)[0]
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
-                console.print(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder")
-            else:
-                print(f"\n--- Step 5: Subfolder Name ---")
-                print(f"Will create: '{folder_name}' in each source folder")
+            self.ui.markup(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]",
+                           f"\n--- Step 5: Subfolder Name ---")
+            self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
+                           f"Will create: '{folder_name}' in each source folder")
 
         elif mode == 3:
             folder_name = _dest_folder_names(origin, dest)[1]
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]")
-                console.print(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder")
-            else:
-                print(f"\n--- Step 5: Subfolder Name ---")
-                print(f"Will create: '{folder_name}' in each source folder")
+            self.ui.markup(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]",
+                           f"\n--- Step 5: Subfolder Name ---")
+            self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
+                           f"Will create: '{folder_name}' in each source folder")
 
         elif mode in [4, 5]:
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Rename Configuration[/bold cyan]")
-                console.print(f"Example: folder_{origin} → [green]folder_{dest}[/green]")
-            else:
-                print(f"\n--- Step 5: Rename Configuration ---")
-                print(f"Example: folder_{origin} → folder_{dest}")
+            self.ui.markup("\n[bold cyan]Step 5: Rename Configuration[/bold cyan]",
+                           "\n--- Step 5: Rename Configuration ---")
+            self.ui.markup(f"Example: folder_{origin} → [green]folder_{dest}[/green]")
 
         else:
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Confirmation[/bold cyan]")
-                console.print(f"Mode {mode} - OK")
-            else:
-                print(f"\n--- Step 5: Confirmation ---")
+            self.ui.markup("\n[bold cyan]Step 5: Confirmation[/bold cyan]",
+                           "\n--- Step 5: Confirmation ---")
+            self.ui.markup(f"Mode {mode} - OK")
 
         workflow['mode_config'] = mode_config
         return True
@@ -7169,19 +7067,11 @@ class InteractiveMenu:
         now = datetime.now()
         token = now.strftime("%H%M")
 
-        if RICH_AVAILABLE and console:
-            console.print(f"[bold red]{headline}[/bold red]")
-            console.print(f"[red]{body}[/red]")
-            console.print(f"Enter current time ({token}) to confirm:")
-        else:
-            print(f"\n{headline}")
-            print(f"⚠️  {body}")
-            print(f"Enter {token} to confirm:")
-
-        try:
-            user_input = input("> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            user_input = ""
+        ui = self.ui
+        ui.markup(f"[bold red]{headline}[/bold red]", f"\n{headline}")
+        ui.markup(f"[red]{body}[/red]", f"⚠️  {body}")
+        ui.markup(f"Enter current time ({token}) to confirm:", f"Enter {token} to confirm:")
+        user_input = ui.ask_raw("gate.hhmm", "> ")
 
         if user_input != token:
             self._print_error("Confirmation failed!")
@@ -7251,10 +7141,7 @@ class InteractiveMenu:
         if ignored_dests:
             warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
                     f"Destination column (only modes 0/2 honor it) — outputs follow the mode rules.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(warn)}[/yellow]")
-            else:
-                print(f"WARNING: {warn}")
+            self.ui.markup(f"[yellow]{_rich_safe(warn)}[/yellow]", f"WARNING: {warn}")
             for s, d, m in ignored_dests[:5]:
                 print(f"  mode {m}: {d} (ignored)")
 
@@ -7357,10 +7244,7 @@ class InteractiveMenu:
                 _msg = (f"OutputICC is ignored by a bit-exact JPEG reconstruction "
                         f"(row(s): {', '.join(map(str, _icc))}) — the recovered "
                         "JPEG keeps the original bytes, colour included.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_msg)}[/yellow]")
-                else:
-                    print(f"WARNING: {_msg}")
+                self.ui.markup(f"[yellow]{_rich_safe(_msg)}[/yellow]", f"WARNING: {_msg}")
 
         # A mode-7 entry means "only <marker>/<subfolder>", and the subfolder
         # reaches the children as --export-subfolder — which comes from
@@ -7406,10 +7290,7 @@ class InteractiveMenu:
                     "— and when that is empty, they process EVERY subfolder of "
                     "the export marker: they will run as mode 6. Filling the "
                     "ExportSubfolder column on those rows resolves this.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_sub_warn)}[/yellow]")
-                else:
-                    print(f"WARNING: {_sub_warn}")
+                self.ui.markup(f"[yellow]{_rich_safe(_sub_warn)}[/yellow]", f"WARNING: {_sub_warn}")
                 for _s in underivable[:5]:
                     print(f"  mode 7, no subfolder in Source: {_s}")
                 if workflow.get('unattended'):
@@ -7420,10 +7301,7 @@ class InteractiveMenu:
                         "<marker>/<subfolder>, fill the ExportSubfolder column on "
                         "those rows, or use mode 6 if every subfolder is intended.")
                     return False
-                if RICH_AVAILABLE and console:
-                    ok_sub = Confirm.ask("Run anyway?", default=False)
-                else:
-                    ok_sub = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+                ok_sub = self.ui.ask_yes("manifest.run_anyway_subfolder", "Run anyway?", "Run anyway? [y/N]: ", False)
                 if not ok_sub:
                     return False
             elif len(derived) == 1:
@@ -7431,10 +7309,7 @@ class InteractiveMenu:
                 workflow.setdefault('mode_config', {})['export_subfolder'] = _sub
                 _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
                             f"(derived from the manifest's Source paths).")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[dim]{_rich_safe(_sub_msg)}[/dim]")
-                else:
-                    print(_sub_msg)
+                self.ui.markup(f"[dim]{_rich_safe(_sub_msg)}[/dim]", _sub_msg)
 
         # The mode-7 derivation above may have filled the run's export_subfolder.
         # Rows with their own Export* columns hold a COPY of mode_config, so
@@ -7484,10 +7359,7 @@ class InteractiveMenu:
         if overlaps:
             head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
                     f"Source folders — the same files would be processed twice:")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(head)}[/yellow]")
-            else:
-                print(f"WARNING: {head}")
+            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
             for a, b in overlaps[:10]:
                 print(f"  {a}  <->  {b}")
             if workflow.get('unattended'):
@@ -7495,10 +7367,7 @@ class InteractiveMenu:
                     "Refusing to run unattended: split the manifest so each folder "
                     "is covered by exactly one entry, or run it from the menu.")
                 return False
-            if RICH_AVAILABLE and console:
-                ok_overlap = Confirm.ask("Run anyway?", default=False)
-            else:
-                ok_overlap = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+            ok_overlap = self.ui.ask_yes("manifest.run_anyway_overlap", "Run anyway?", "Run anyway? [y/N]: ", False)
             if not ok_overlap:
                 return False
 
@@ -7525,10 +7394,7 @@ class InteractiveMenu:
         if _can_skip:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
-            if RICH_AVAILABLE and console:
-                console.print(f"[dim]{_rich_safe(_skip_msg)}[/dim]")
-            else:
-                print(_skip_msg)
+            self.ui.markup(f"[dim]{_rich_safe(_skip_msg)}[/dim]", _skip_msg)
             collisions = []
         else:
             collisions = self._manifest_output_collisions(
@@ -7554,10 +7420,7 @@ class InteractiveMenu:
             )
             for a, b, d in collisions[:10]:
                 msg = f"  {a} + {b}  ->  same name in {d}"
-                if RICH_AVAILABLE and console:
-                    console.print(f"[red]{_rich_safe(msg)}[/red]")
-                else:
-                    print(msg)
+                self.ui.markup(f"[red]{_rich_safe(msg)}[/red]", msg)
             if len(collisions) > 10:
                 print(f"  ... and {len(collisions) - 10} more")
             self._print_error(
@@ -7580,18 +7443,12 @@ class InteractiveMenu:
         if cross_collisions:
             head = (f"{len(cross_collisions)} manifest entry pair(s) chain outputs into "
                     f"inputs — one entry's OUTPUT folder is another entry's SOURCE:")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(head)}[/yellow]")
-            else:
-                print(f"WARNING: {head}")
+            self.ui.markup(f"[yellow]{_rich_safe(head)}[/yellow]", f"WARNING: {head}")
             for src_a, src_b, out in cross_collisions[:10]:
                 msg = (f"  output of [{self._truncate_path(src_a, 30)}] -> "
                        f"{self._truncate_path(out, 30)}  ==  Source of "
                        f"[{self._truncate_path(src_b, 30)}]")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
-                else:
-                    print(msg)
+                self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", msg)
             if len(cross_collisions) > 10:
                 print(f"  ... and {len(cross_collisions) - 10} more")
             if workflow.get('unattended'):
@@ -7600,10 +7457,7 @@ class InteractiveMenu:
                     "another entry of the same run writes. Run it from the menu, or "
                     "split it into separate runs.")
                 return False
-            if RICH_AVAILABLE and console:
-                ok_cross = Confirm.ask("Run anyway?", default=False)
-            else:
-                ok_cross = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+            ok_cross = self.ui.ask_yes("manifest.run_anyway_cross", "Run anyway?", "Run anyway? [y/N]: ", False)
             if not ok_cross:
                 return False
 
@@ -7684,10 +7538,7 @@ class InteractiveMenu:
         # detects for legacy manifests), so the guards and the run can never
         # disagree about what mode an entry is.
         for i, (source, dest_path, detected_mode) in enumerate(resolved_entries, 1):
-            if RICH_AVAILABLE and console:
-                console.print(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {_rich_safe(self._truncate_path(source, 40))} → {_rich_safe(self._truncate_path(dest_path, 40))}")
-            else:
-                print(f"[{i}/{total_entries}] Mode {detected_mode} | {source} → {dest_path}")
+            self.ui.markup(f"[{i}/{total_entries}] [bold]{detected_mode}[/bold] | {_rich_safe(self._truncate_path(source, 40))} → {_rich_safe(self._truncate_path(dest_path, 40))}", f"[{i}/{total_entries}] Mode {detected_mode} | {source} → {dest_path}")
 
             # Build command for this entry (the builder appends --dry-run when
             # workflow['dry_run'] is set, so the child prints the REAL output
@@ -7751,10 +7602,7 @@ class InteractiveMenu:
                 # User declined the child's confirmation prompt
                 skip_count += 1
                 state = "cancelled"
-                if RICH_AVAILABLE and console:
-                    console.print("  [yellow]Cancelled by user[/yellow]")
-                else:
-                    print("  Cancelled by user")
+                self.ui.markup("  [yellow]Cancelled by user[/yellow]", "  Cancelled by user")
             elif rc == 2:
                 # The child gave up on a condition that spans the whole run
                 # (a full output volume, a safety abort) — every remaining
@@ -8685,10 +8533,7 @@ class InteractiveMenu:
                     else:
                         # This walk is the slow part on large trees (recursive glob
                         # + per-file stat + resolver per source file) — say so.
-                        if RICH_AVAILABLE and console:
-                            console.print(f"[dim]Collision check: scanning {_rich_safe(src_root)} ...[/dim]")
-                        else:
-                            print(f"Collision check: scanning {src_root} ...")
+                        self.ui.markup(f"[dim]Collision check: scanning {_rich_safe(src_root)} ...[/dim]", f"Collision check: scanning {src_root} ...")
                         try:
                             files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
                         except OSError:
@@ -8964,10 +8809,7 @@ class InteractiveMenu:
                    f"This {origin.upper()} -> {dest.upper()} run uses the strict 'path' "
                    f"check instead: outputs with no record are REFUSED, not adopted, and "
                    f"nothing is deleted for them.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[yellow]{_rich_safe(msg)}[/yellow]")
-            else:
-                print(f"WARNING: {msg}")
+            self.ui.markup(f"[yellow]{_rich_safe(msg)}[/yellow]", f"WARNING: {msg}")
             pv = 'path'
         cmd.extend(['--provenance', pv])
         # Only the encoder has this flag, and it is inert without adopt.
@@ -9001,10 +8843,7 @@ class InteractiveMenu:
         _msg = (f"--exclude-folders is not supported for "
                 f"{origin.upper()} -> {dest.upper()} runs; the "
                 f"ExcludeFolders setting ({value}) is IGNORED here.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{_rich_safe(_msg)}[/yellow]")
-        else:
-            print(f"WARNING: {_msg}")
+        self.ui.markup(f"[yellow]{_rich_safe(_msg)}[/yellow]", f"WARNING: {_msg}")
 
     def build_child_cmd(self, script: str, origin: str, dest: str, source: str,
                         dest_path: Optional[str], mode: int, workers: int,
@@ -9106,19 +8945,13 @@ class InteractiveMenu:
             if ctx.workflow.get('icc_profile') and not ctx.derivative:
                 _note = ("Colour conversion (--icc-profile) writes a DERIVATIVE: the "
                          "originals are NOT deleted on this run.")
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
-                else:
-                    print(_note)
+                self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
             delete = not ctx.derivative and not ctx.workflow.get('icc_profile')
             _never = _lossy_decode_never_deletes(ctx.workflow) if delete else None
             if _never:
                 # T-B: the row converts, its sources stay (the child would exit 2).
                 _note = f"No delete for this row: {_never}."
-                if RICH_AVAILABLE and console:
-                    console.print(f"[yellow]{_rich_safe(_note)}[/yellow]")
-                else:
-                    print(_note)
+                self.ui.markup(f"[yellow]{_rich_safe(_note)}[/yellow]", _note)
                 delete = False
         if not delete:
             return
@@ -9542,7 +9375,8 @@ class InteractiveMenu:
             presets = dict(self.config.config.presets or {})
             names = sorted(presets)
 
-            if RICH_AVAILABLE and console:
+            ui = self.ui
+            if ui.is_rich:
                 if names:
                     table = Table(show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
                     table.add_column("#", justify="right", style="dim")
@@ -9558,17 +9392,16 @@ class InteractiveMenu:
                 console.print("[bold]\\[number][/bold] run  "
                               "[bold]\\[S][/bold] save last workflow as preset  "
                               "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
-                choice = Prompt.ask("Presets").strip()
             else:
-                print("\n--- Presets ---")
+                ui.markup(None, "\n--- Presets ---")
                 if names:
                     for i, name in enumerate(names, 1):
-                        print(f"  {i}. {name}")
-                        print(f"     {self._describe_session(_preset_session(presets[name]))}")
+                        ui.markup(None, f"  {i}. {name}")
+                        ui.markup(None, f"     {self._describe_session(_preset_session(presets[name]))}")
                 else:
-                    print("  (none saved yet)")
-                print("[number] run | [S] save last workflow as preset | [D] delete | [B] back")
-                choice = input("Presets: ").strip()
+                    ui.markup(None, "  (none saved yet)")
+                ui.markup(None, "[number] run | [S] save last workflow as preset | [D] delete | [B] back")
+            choice = ui.ask_line("presets.menu", "Presets", "Presets: ")
 
             upper = choice.upper()
             if not choice or upper == "B":
@@ -9579,21 +9412,17 @@ class InteractiveMenu:
                 if not snapshot.get('last_input_dir'):
                     self._print_error("No workflow has been run yet — run one first, then save it here.")
                     continue
-                if RICH_AVAILABLE and console:
-                    console.print(f"[dim]{_rich_safe(self._describe_session(snapshot))}[/dim]")
-                    raw_name = Prompt.ask("Preset name")
-                else:
-                    print(f"  {self._describe_session(snapshot)}")
-                    raw_name = input("Preset name: ")
+                ui.markup(f"[dim]{_rich_safe(self._describe_session(snapshot))}[/dim]",
+                          f"  {self._describe_session(snapshot)}")
+                raw_name = ui.ask_line("presets.name", "Preset name", "Preset name: ")
                 name = self._clean_preset_name(raw_name)
                 if not name:
                     self._print_error("Invalid name (empty, too long, or contains control characters).")
                     continue
                 if name in presets:
-                    if RICH_AVAILABLE and console:
-                        overwrite = Confirm.ask(f"Preset '{_rich_safe(name)}' already exists. Overwrite?", default=False)
-                    else:
-                        overwrite = input(f"Preset '{name}' exists. Overwrite? [y/N]: ").strip().lower().startswith('y')
+                    overwrite = ui.ask_yes(
+                        "presets.overwrite", f"Preset '{_rich_safe(name)}' already exists. Overwrite?",
+                        f"Preset '{name}' exists. Overwrite? [y/N]: ", False)
                     if not overwrite:
                         continue
                 self.config.save_preset(name, snapshot)
@@ -9603,18 +9432,14 @@ class InteractiveMenu:
             if upper == "D":
                 if not names:
                     continue
-                if RICH_AVAILABLE and console:
-                    target = Prompt.ask("Delete which number?").strip()
-                else:
-                    target = input("Delete which number?: ").strip()
+                target = ui.ask_line("presets.delete", "Delete which number?",
+                                     "Delete which number?: ")
                 if not target.isdigit() or not 1 <= int(target) <= len(names):
                     self._print_error("No preset with that number.")
                     continue
                 name = names[int(target) - 1]
-                if RICH_AVAILABLE and console:
-                    sure = Confirm.ask(f"Delete preset '{_rich_safe(name)}'?", default=False)
-                else:
-                    sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith('y')
+                sure = ui.ask_yes("presets.delete_sure", f"Delete preset '{_rich_safe(name)}'?",
+                                  f"Delete preset '{name}'? [y/N]: ", False)
                 if sure and self.config.delete_preset(name):
                     self._print_success(f"Preset '{name}' deleted.")
                 continue
@@ -9786,10 +9611,11 @@ class InteractiveMenu:
                 self._print_error(f"The preset's input folder is gone: {new_folder or '(not saved)'}")
                 return False
         else:
-            if RICH_AVAILABLE and console:
-                new_folder = Prompt.ask(f"\n[bold cyan]Input folder[/bold cyan]", default=last_dir).strip()
-            else:
-                new_folder = input(f"\nInput folder [{last_dir}]: ").strip()
+            # Enter keeps the stored folder (just below).
+            new_folder = self.ui.ask_line(
+                "session.folder", "\n[bold cyan]Input folder[/bold cyan]",
+                f"\nInput folder [{last_dir}]: ",
+                default=(last_dir if self.ui.is_rich else None))
 
             if not new_folder:
                 new_folder = last_dir
@@ -9797,21 +9623,20 @@ class InteractiveMenu:
             new_folder = _strip_surrounding_quotes(new_folder)
             input_path = Path(new_folder)
             if not input_path.exists():
-                if RICH_AVAILABLE and console:
-                    console.print(f"[red]Folder not found: {_rich_safe(new_folder)}[/red]")
-                else:
-                    print(f"Folder not found: {new_folder}")
+                self.ui.markup(f"[red]Folder not found: {_rich_safe(new_folder)}[/red]", f"Folder not found: {new_folder}")
                 return False
 
         origin = last_origin
 
         if unattended:
             ow_choice = "1" if answers.get('overwrite') else "2"
-        elif RICH_AVAILABLE and console:
-            console.print("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)")
-            ow_choice = Prompt.ask("If exists", choices=["1", "2"], default="2")
         else:
-            ow_choice = input("If exists (1=overwrite, 2=sync) [2]: ").strip() or "2"
+            self.ui.markup("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)",
+                           _SILENT)
+            # Anything but 1 in the plain prompt is sync, as before.
+            ow_choice = self.ui.ask_line("session.overwrite", "If exists",
+                                         "If exists (1=overwrite, 2=sync) [2]: ",
+                                         default="2", choices=["1", "2"])
 
         if ow_choice == "1":
             overwrite, sync = True, False
@@ -9823,10 +9648,9 @@ class InteractiveMenu:
         # conversion without any notice.
         if unattended:
             dry_choice = bool(answers.get('dry_run'))
-        elif RICH_AVAILABLE and console:
-            dry_choice = Confirm.ask("Dry run? (simulate without converting)", default=False)
         else:
-            dry_choice = input("Dry run? [y/N]: ").strip().lower().startswith('y')
+            dry_choice = self.ui.ask_yes("session.dry_run", "Dry run? (simulate without converting)",
+                                         "Dry run? [y/N]: ", False)
 
         if unattended:
             # A destructive preset cannot run unattended (_GATE_RULES, path
@@ -9836,11 +9660,9 @@ class InteractiveMenu:
                           origin=origin, dest=last_dest, mode=last_mode):
                 return False
             proceed = True
-        elif RICH_AVAILABLE and console:
-            proceed = Confirm.ask(f"\n[bold]Proceed with this workflow?[/bold]", default=True)
         else:
-            resp = input(f"\nProceed with this workflow? [Y/n]: ").strip().lower()
-            proceed = not resp.startswith('n')
+            proceed = self.ui.ask_yes("session.proceed", "\n[bold]Proceed with this workflow?[/bold]",
+                                      "\nProceed with this workflow? [Y/n]: ", True)
 
         if not proceed:
             return False
@@ -10014,16 +9836,10 @@ class InteractiveMenu:
         return bool(self.execute_workflow(workflow, status))
 
     def _print_success(self, message: str) -> None:
-        if RICH_AVAILABLE and console:
-            console.print(f"[green]✓[/green] {_rich_safe(message)}")
-        else:
-            print(f"✓ {message}")
+        self.ui.markup(f"[green]✓[/green] {_rich_safe(message)}", f"✓ {message}")
 
     def _print_error(self, message: str) -> None:
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]✗[/red] {_rich_safe(message)}")
-        else:
-            print(f"✗ {message}")
+        self.ui.markup(f"[red]✗[/red] {_rich_safe(message)}", f"✗ {message}")
 
 
 # Where Explorer looks up a .jxl thumbnail handler (the IThumbnailProvider
@@ -10307,14 +10123,9 @@ def _main():
             menu.display_status(status)
 
         elif choice == "_reset":
-            if RICH_AVAILABLE and console:
-                confirm = Confirm.ask(
-                    "[red]This will erase all saved settings. Continue?[/red]",
-                    default=False
-                )
-            else:
-                confirm_input = input("\nErase all settings? [y/N]: ").strip().lower()
-                confirm = confirm_input == 'y'
+            confirm = menu.ui.ask_yes(
+                "settings.reset", "[red]This will erase all saved settings. Continue?[/red]",
+                "\nErase all settings? [y/N]: ", False)
 
             if confirm:
                 try:
@@ -10356,27 +10167,20 @@ def _main():
                     print("No settings file found.")
                 continue
 
-            if RICH_AVAILABLE and console:
-                confirm = Confirm.ask(
-                    f"[yellow]Move settings to {action}?[/yellow]",
-                    default=True
-                )
-            else:
-                confirm_input = input(f"\nMove settings to {action}? [Y/n]: ").strip().lower()
-                confirm = not confirm_input.startswith('n')
+            confirm = menu.ui.ask_yes(
+                "settings.move", f"[yellow]Move settings to {action}?[/yellow]",
+                f"\nMove settings to {action}? [Y/n]: ", True)
 
             if confirm:
                 try:
                     # shutil.move falls back to copy2 when the target exists,
                     # silently overwriting an existing config there — confirm first.
                     if target.exists():
-                        if RICH_AVAILABLE and console:
-                            ow = Confirm.ask(
-                                f"[red]A settings file already exists at {_rich_safe(target.parent)}. Overwrite it?[/red]",
-                                default=False
-                            )
-                        else:
-                            ow = input(f"A settings file already exists at {target.parent}. Overwrite? [y/N]: ").strip().lower() == 'y'
+                        ow = menu.ui.ask_yes(
+                            "settings.move_overwrite",
+                            f"[red]A settings file already exists at {_rich_safe(target.parent)}. Overwrite it?[/red]",
+                            f"A settings file already exists at {target.parent}. Overwrite? [y/N]: ",
+                            False)
                         if not ow:
                             continue
                         target.unlink()

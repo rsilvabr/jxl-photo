@@ -369,10 +369,15 @@
 - **The UI layer** (`UI`, `PlainUI`, `RichUI`, `ScriptedUI`) asks by
   question id (`opt.screen`, `opt.<id>`, `restamp.*`, `icccache.confirm`,
   `settings.*`); tests answer by id with `ScriptedUI` (a question with no
-  answer left is an error). The New job's task, folder, quality and review
-  use it (`job.*`, `review.*`); the mode step (`_wizard_select_mode` with
-  `[A]`/`[M]`/`[D]`, `_wizard_mode_specific_config`), Settings and the
-  presets menu still ask through Rich/`input()`.
+  answer left is an error). Since v2.22.1 EVERY question goes through it
+  (`job.*`, `review.*`, `mode.*`, `delete.*`, `menu.main`, `presets.*`,
+  `session.*`, `manifest.*`, `auto.*`, `thumbs.*`, `jbrd.*`, `gate.hhmm`):
+  `tests/test_ui_layer_everywhere.py` fails on an `input()` or a
+  `Prompt/Confirm.ask` outside the UI classes. The older questions keep
+  their two wordings through `ask_line`/`ask_yes` (one Rich text, one plain
+  text, one qid); `markup(rich, plain)` prints per renderer (`rich=None` /
+  `plain=_SILENT` = nothing there), and a hand-built Rich table is drawn
+  only when `ui.is_rich`.
 - **The review** (`_review_init` + `_review_rows` + `_review_screen`) starts
   every job at the state the old Steps 6/6A left when every question was
   answered with Enter, so `[r]` at once runs exactly the old wizard's run:

@@ -344,8 +344,8 @@ def test_menu_s_is_off_with_an_empty_variable(tmp_path, monkeypatch):
 
 def test_main_menu_offers_s(tmp_path, monkeypatch):
     wp, menu = _menu(tmp_path, monkeypatch, {})
-    with mock.patch("builtins.input", side_effect=["s"]):
-        assert menu.show_main_menu(False) == "S"
+    menu._ui = wp.ScriptedUI({"menu.main": "s"})
+    assert menu.show_main_menu(False) == "S"
 
 
 @pytest.mark.parametrize("module,key,name,typed,expected", [
