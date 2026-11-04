@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0_beta1 | #600–#607 (8) |
+| [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0 | #600–#607 (8) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |
 | [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | v2.20.0 | #563–#567 (5) |
 | [Round-68 — the EXIF of JPEG → JXL files in IrfanView](#round-68--the-exif-of-jpeg--jxl-files-in-irfanview-2026-11-03) | 2026-11-03 | v2.19.2 | #562 (1) |

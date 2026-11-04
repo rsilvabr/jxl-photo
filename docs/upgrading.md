@@ -37,6 +37,24 @@ Per-release notes: [version_history.md](version_history.md) and the
   is refused (pick the mode in the wizard), and a flag the script does not
   know, or a value outside its choices, is refused before the HHMM time
   instead of failing after it.
+- **The wizard is organised by task, and its menu numbers changed.**
+  1 New job, 2 Repeat last job, 3 Presets, 4 Folder list (manifest),
+  5 renamed folders, 6 Explorer thumbnails, 7 JPEG archives (jbrd), 8 ICC
+  test cache, 9 Settings (wrapper defaults, script settings, reset, move),
+  D dependencies. A New job asks the task, the folder, the mode and the
+  quality, then shows one review screen: `[r]` runs it, `[d]` runs it dry
+  first, `[a]` shows every option. A job started with `[r]` right away
+  runs what the old wizard ran when every question was answered with
+  Enter.
+- **Presets and the last job carry over by themselves**: nothing to redo,
+  and `--run-preset` runs the same command lines. Presets saved from now on
+  also keep the old fields, so an older copy of the toolkit sharing the
+  same settings file (an execution copy, the Windows program) still runs
+  them.
+- **The menu checks once a day whether a newer release is out** (an
+  anonymous GitHub request; nothing is downloaded, `--run-preset` never
+  checks). Off with `"check_for_updates": false` in the settings file or
+  `JXLPHOTO_NO_UPDATE_CHECK=1`.
 
 ## v2.21.0: lossy JXL → JPEG/PNG keeps the master's profile; metadata failures keep the source
 

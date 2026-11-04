@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.0_beta1](#v2220_beta1)** | 2026-11-04 | Pre-release. The wizard reaches every script option (the summary's "all options" screen), menus for renamed folders, the ICC test cache and the scripts' own settings; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out (round 71, 8 fixes) |
+| **[v2.22.0](#v2220)** | 2026-11-04 | The wizard by task: a New job asks what to do, where and how, then one review screen with every option; presets carry over and still run on older copies; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input; a notice when a newer release is out (round 71, 8 fixes) |
+| [v2.22.0_beta1](#v2220_beta1) | 2026-11-04 | Pre-release. The wizard reaches every script option (the summary's "all options" screen), menus for renamed folders, the ICC test cache and the scripts' own settings; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out (round 71, 8 fixes) |
 | [v2.21.0](#v2210) | 2026-11-04 | The rest of the 2026-11-03 audit: a direct JXL → JPEG/PNG of a cautious-strategy master carries its real colour profile; less memory per worker in the encoder and the decoder; a failed metadata copy keeps the source (round 70, 18 fixes) |
 | [v2.20.0](#v2200) | 2026-11-03 | Hardening from a full-repo audit: an output whose provenance record exiftool could not read is refused, not overwritten; modes 6/7 of the decoder and the recompressor skip the other scripts' folders; the planning phase reports progress; the wrapper builds every command from one option registry (round 69, 5 fixes) |
 | [v2.19.2](#v2192) | 2026-11-03 | IrfanView shows the EXIF of JPEG → JXL files (plain metadata boxes; `COMPRESS_METADATA_BOXES` to keep them compressed); menu option 8 repairs older ones in place (round 68, 1 fix) |
@@ -82,9 +83,53 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.22.0
+
+**Released 2026-11-04.** Supersedes v2.22.0_beta1 and v2.21.0. Everything in
+[v2.22.0_beta1](#v2220_beta1) (every script option from the wizard, menus for
+renamed folders, the ICC cache and the scripts' own settings, round 71), plus
+the third part of the wrapper redesign. Three command lines behave
+differently and the menu numbers changed — see
+[Upgrading](upgrading.md#v2220-a-jxl--jpeg-never-deletes-the-jxl-modes-67-anchor-below-the-input-and-leave-derivatives-out).
+
+- **The wizard by task.** The main menu is grouped (convert, maintain,
+  settings): 1 New job, 2 Repeat last job, 3 Presets, 4 Folder list
+  (manifest), 5 renamed folders, 6 Explorer thumbnails, 7 JPEG archives
+  (jbrd), 8 ICC test cache, 9 Settings (wrapper defaults, script settings,
+  reset, move), D dependencies; the beta's letters R/C/S still work. A New
+  job asks what to do (archive TIFFs, restore TIFFs, smaller or resized JXL
+  copies, export JPEGs or PNGs, archive JPEGs bit-exact, get the original
+  JPEGs back, re-encode JPEGs lossy), the folder, the mode (with `[A]`, `[M]`
+  and `[D]` as before) and the quality, then shows one review screen instead
+  of Steps 6-7: every essential option with where its value came from (you,
+  the last job, the settings, the script), `[a]` all options, `[/]` search,
+  `[c]` the command line, `[x]` expert flags, `[d]` a dry run and back, `[r]`
+  run, `[s]` save as a preset, `[b]` back. Started with `[r]` right away, a
+  job runs what the old wizard ran with Enter everywhere: a test compares the
+  command lines of every task in modes 1 and 6 with the old wizard's.
+- **Presets v2.** A preset is saved as the job plus the old fields, because
+  the settings file is shared with older copies of the toolkit; existing
+  presets and the last job are read as before. The owner's six presets
+  replay the same command lines.
+- **One table of pre-run checks** for the direct run, the manifest rows and
+  unattended presets (`_GATE_RULES`), with the same messages in the same
+  order.
+- **A notice when a newer release is out**: the menu asks GitHub at most once
+  a day (3-second limit, silent without a network) and adds a line plus a `U`
+  entry that opens the release page; betas are ignored, the Windows program
+  follows its own releases, `--run-preset` never asks. Off with
+  `check_for_updates` or `JXLPHOTO_NO_UPDATE_CHECK=1`.
+- The suite runs with `-n 16` (3.5 min instead of 7.8 at `-n 8`) and the
+  real-photo battery runs its independent sections side by side (`--jobs`,
+  default 4); its report keeps the same checks in the same order.
+
+New tests for each change fail on v2.22.0_beta1, the old wizard's command
+lines and the owner's presets included. 3382 tests; the real-photo battery
+passes (132 checks, all optional fixture folders).
+
 ## v2.22.0_beta1
 
-**Pre-release, 2026-11-04.** Last stable: [v2.21.0](#v2210). The second part
+**Pre-release, 2026-11-04.** Superseded by v2.22.0. Last stable then: [v2.21.0](#v2210). The second part
 of the wrapper redesign (every option reachable from the wizard, the scripts'
 settings without editing them) and the rest of the 2026-11-03 audit. Three
 command lines behave differently — see
