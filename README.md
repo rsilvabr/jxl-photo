@@ -371,6 +371,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
 - **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **New releases:** the menu checks GitHub at most once a day and adds a line when a newer release is out; nothing is downloaded, and `--run-preset` never checks. [More](docs/README_jxl_tools.md#new-release-notice)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
 ---

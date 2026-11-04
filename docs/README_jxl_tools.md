@@ -1024,6 +1024,19 @@ install command) and an empty value turns the tip off.
 
 * * *
 
+### New release notice
+
+When the menu starts, it asks GitHub whether a newer release is out — at most
+once a day, with a 3-second limit; without a network it says nothing. A newer
+one adds a line at the top (`A new release is out: v2.23.0 (this copy is
+v2.22.0)`) and a `U` entry in the menu that opens the release page. Nothing is
+downloaded or installed. Pre-releases (betas) are ignored. The Windows program
+follows the jxl-photo-exe releases instead. `--run-preset` and
+`--list-presets` never ask. The request is a plain anonymous GitHub API call
+(`api.github.com/repos/rsilvabr/jxl-photo/releases/latest`). Turn it off with
+`"check_for_updates": false` in `.jxl_tools_config.json`, or the environment
+variable `JXLPHOTO_NO_UPDATE_CHECK=1`.
+
 ## Logs
 
 Each underlying script writes its own log:

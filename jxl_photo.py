@@ -919,6 +919,13 @@ class ToolConfig:
     # for a single file or batch slower than an hour (a huge drum scan at
     # effort 10, a very slow network share). Config file only for now.
     child_idle_timeout_minutes: int = 60
+    # The menu's "a new release is out" line (_update_notice): GitHub is
+    # asked at most once a day, only by the interactive menu (never by
+    # --run-preset or --list-presets). False turns it off; so does the
+    # environment variable JXLPHOTO_NO_UPDATE_CHECK=1. Config file only.
+    check_for_updates: bool = True
+    update_checked_on: Optional[str] = None      # YYYY-MM-DD of the last ask
+    update_latest_seen: Optional[str] = None     # the tag it answered
 
     last_input_dir: Optional[str] = None
     last_output_mode: Optional[str] = None
@@ -3912,6 +3919,11 @@ class InteractiveMenu:
             ("", "SETTINGS", None),
             ("9", "Settings: wrapper defaults, script settings, reset, move", True),
             ("D", "Dependencies: check again", True),
+        ])
+        if getattr(self, '_update_available', None):
+            options.append(("U", f"Update available: {self._update_available[0]} — "
+                                 f"open the release page", True))
+        options.extend([
             ("0", "Exit", True),
         ])
         # The letters menus R/C/S had in v2.22.0_beta1 still work (not shown).
@@ -10022,6 +10034,74 @@ _THUMBNAIL_HANDLER_KEYS = (
 )
 
 
+_UPDATE_OWNER = "rsilvabr"
+_UPDATE_TIMEOUT = 3          # seconds: a slow or absent network stays silent
+
+
+def _update_repo() -> str:
+    """The repository whose releases this copy follows: the Windows program
+    (a frozen build) follows jxl-photo-exe, the scripts follow jxl-photo."""
+    return "jxl-photo-exe" if getattr(sys, "frozen", False) else "jxl-photo"
+
+
+def _version_key(text: Optional[str]):
+    """(major, minor, patch, final) of "v2.22.0", "2.22.0_beta1" or
+    "v2.22.0-exe1" (the exe's package revision is ignored: exe2 of the same
+    release is not news here), or None. A beta sorts before its release."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+)?(?:-exe\d+)?$", (text or "").strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1)
+
+
+def _latest_release_tag(repo: str, timeout: float = _UPDATE_TIMEOUT) -> Optional[str]:
+    """The tag of the repository's latest release (GitHub leaves pre-releases
+    out of "latest"), or None on any failure: no network, a timeout, a rate
+    limit, an answer that is not what it should be. Sends no personal data:
+    a generic User-Agent, no token."""
+    import urllib.request
+    url = f"https://api.github.com/repos/{_UPDATE_OWNER}/{repo}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "jxl-photo-update-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read(65536).decode("utf-8"))
+        tag = data.get("tag_name") if isinstance(data, dict) else None
+        return tag if isinstance(tag, str) and _version_key(tag) else None
+    except Exception:
+        return None
+
+
+def _update_notice(config_manager, today: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """(the menu line, the release page URL) when a newer release than this
+    copy is out, else None. Asks GitHub at most once a day (the answer is kept
+    in the config for the rest of the day); off with check_for_updates =
+    false in the config or JXLPHOTO_NO_UPDATE_CHECK=1."""
+    cfg = config_manager.config
+    if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
+        return None
+    from datetime import date
+    today = today or date.today().isoformat()
+    repo = _update_repo()
+    if cfg.update_checked_on != today:
+        tag = _latest_release_tag(repo)
+        cfg.update_checked_on = today
+        if tag:
+            cfg.update_latest_seen = tag
+        try:
+            config_manager.save_config()
+        except Exception:
+            pass
+    latest = cfg.update_latest_seen
+    mine, theirs = _version_key(TOOLKIT_VERSION), _version_key(latest)
+    if not mine or not theirs or theirs[:3] < mine[:3] or theirs <= mine:
+        return None
+    url = f"https://github.com/{_UPDATE_OWNER}/{repo}/releases/latest"
+    return (f"A new release is out: {latest} (this copy is {TOOLKIT_VERSION}) — "
+            f"[U] in the menu opens its page.", url)
+
+
 def _jxl_thumbnail_tip() -> Optional[str]:
     """The menu's one-line tip when Windows Explorer has no thumbnail handler
     for .jxl (neither jxl-thumb nor Microsoft's JPEG XL extension), else None.
@@ -10144,6 +10224,13 @@ def _main():
         sys.exit(0 if ok else 1)
 
     # Menu runs only: a scheduled --run-preset log is no place for it.
+    # A new release? Menu runs only, like the tip: --run-preset and
+    # --list-presets have returned above and never ask the network.
+    _upd = _update_notice(config)
+    if _upd:
+        print(_upd[0])
+        menu._update_available = (config.config.update_latest_seen, _upd[1])
+
     _tip = _jxl_thumbnail_tip() if config.config.show_thumbnail_tip else None
     if _tip:
         print(_tip)
@@ -10190,6 +10277,15 @@ def _main():
 
         elif choice == "S":
             menu.script_settings_flow()
+
+        elif choice == "U" and getattr(menu, '_update_available', None):
+            _url = menu._update_available[1]
+            print(f"Release page: {_url}")
+            try:
+                import webbrowser
+                webbrowser.open(_url)
+            except Exception:
+                pass
 
         elif choice == "9":
             sub = menu.ui.choose("menu.settings", "Settings",

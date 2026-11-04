@@ -47,6 +47,8 @@ os.environ["JXLPHOTO_LOG_DIR"] = _TEST_LOG_DIR
 # in the home folder) must never change what the suite runs. Empty = off;
 # the overlay tests set their own file.
 os.environ["JXLPHOTO_SETTINGS"] = ""
+# No "new release" check: a test never asks GitHub.
+os.environ["JXLPHOTO_NO_UPDATE_CHECK"] = "1"
 
 # A wide console for rich: it wraps at the terminal width, so a phrase the
 # tests look for could be split by the wrap — and under pytest-xdist

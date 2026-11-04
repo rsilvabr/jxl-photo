@@ -1840,6 +1840,8 @@ def main():
     args = ap.parse_args()
     # A real overlay on this PC must not change what the battery checks.
     os.environ["JXLPHOTO_SETTINGS"] = str(args.settings_overlay or "")
+    # The wrapper's "new release" check never runs in the battery.
+    os.environ["JXLPHOTO_NO_UPDATE_CHECK"] = "1"
     if args.fixtures is None or not args.fixtures.is_dir():
         ap.error("pass --fixtures <folder> or set JXLPHOTO_FIXTURES "
                  "(see the module docstring for the layout)")
