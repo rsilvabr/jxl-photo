@@ -59,10 +59,21 @@ def test_no_handler_shows_the_tip(windows):
     HANDLER,
     r"SystemFileAssociations\.jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
 ])
-def test_any_handler_means_no_tip(windows, sub):
-    # jxl-thumb, or the Microsoft JPEG XL extension's WIC handler.
-    windows({sub: "{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"})
+def test_jxl_thumb_means_no_tip(windows, sub):
+    windows({sub: "{ef830030-fbd6-4b62-bfd4-0dbd590d6135}"})
     assert jxl_photo._jxl_thumbnail_tip() is None
+
+
+@pytest.mark.parametrize("sub", [
+    HANDLER,
+    r"SystemFileAssociations\.jxl\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}",
+])
+def test_microsofts_extension_gets_the_jxl_thumb_tip(windows, sub):
+    # v2.23.0: the Microsoft JPEG XL extension's WIC handler is slow and shows
+    # ProPhoto/Adobe RGB washed out; jxl-thumb is recommended over it.
+    windows({sub: "{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"})
+    tip = jxl_photo._jxl_thumbnail_tip()
+    assert tip and "Microsoft" in tip and jxl_photo.JXL_THUMB_URL in tip
 
 
 def test_an_empty_key_is_no_handler(windows):
@@ -142,20 +153,33 @@ def _settings_menu(tmp_path, monkeypatch, tip):
 def test_settings_screen_turns_the_tip_off_and_on(tmp_path, monkeypatch):
     config, menu = _settings_menu(tmp_path, monkeypatch, "a tip")
     # staging, workers, quality, effort, distance, confirm, marker, tip
-    answers = iter(["", "", "", "", "", "", "", "n"])
+    answers = iter(["", "", "", "", "", "", "", "n", ""])
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     menu.edit_settings()
     assert jxl_photo.ConfigManager().config.show_thumbnail_tip is False
     # Hidden: still asked, even though the menu no longer shows it.
     config, menu = _settings_menu(tmp_path, monkeypatch, "a tip")
-    answers = iter(["", "", "", "", "", "", "", "y"])
+    answers = iter(["", "", "", "", "", "", "", "y", ""])
     menu.edit_settings()
     assert jxl_photo.ConfigManager().config.show_thumbnail_tip is True
 
 
-def test_settings_screen_does_not_ask_with_a_handler(tmp_path, monkeypatch):
+def test_settings_screen_turns_the_update_check_off(tmp_path, monkeypatch):
+    # v2.23.0: both reminders can be turned off there (the tip on Windows).
+    monkeypatch.setattr(jxl_photo.os, "name", "nt")
     config, menu = _settings_menu(tmp_path, monkeypatch, None)
-    answers = iter(["", "", "", "", "", "", ""])   # no 8th prompt
+    answers = iter(["", "", "", "", "", "", "", "", "n"])   # ... tip, update check
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     menu.edit_settings()
     assert config.config.show_thumbnail_tip is True
+    assert jxl_photo.ConfigManager().config.check_for_updates is False
+
+
+def test_t_opens_the_jxl_thumb_page_while_the_tip_shows(tmp_path, monkeypatch):
+    # v2.23.0: the tip has a menu key; without a tip, T is no option.
+    config, menu = _settings_menu(tmp_path, monkeypatch, None)
+    menu._ui = jxl_photo.ScriptedUI({"menu.main": ["t", "0"]})
+    assert menu.show_main_menu(False) == "0"          # t refused: no tip shown
+    menu._thumb_tip = True
+    menu._ui = jxl_photo.ScriptedUI({"menu.main": ["t"]})
+    assert menu.show_main_menu(False) == "T"

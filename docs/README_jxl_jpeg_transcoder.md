@@ -545,6 +545,12 @@ Options:
   --export-marker M  Folder name marker for modes 6/7 (default: the EXPORT_MARKER
                      setting in the script). Matched case-insensitively on
                      folder names that START or END with it.
+  --export-jpeg-folder NAME
+                     [Modes 6/7, JXL -> JPEG/PNG] The folder created under the
+                     export marker (default: the EXPORT_JPEG_FOLDER setting,
+                     'JPEG_recovered'). One plain folder name: not the marker,
+                     not the input subfolder. Manifests: the ExportJxlFolder
+                     column of a jxl2jpeg/jxl2png row. Since v2.23.0.
 ```
 
 ### Exit codes

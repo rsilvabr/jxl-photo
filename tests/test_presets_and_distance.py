@@ -172,8 +172,8 @@ def test_custom_still_accepts_a_typed_value(menu, cfg):
 
 def _edit_settings(menu, distance_input):
     """Answers in prompt order: staging, workers, quality, effort, distance,
-    confirm-delete, export marker."""
-    answers = ["", "", "", "", distance_input, "", ""]
+    confirm-delete, export marker, jxl-thumb tip (Windows), update check."""
+    answers = ["", "", "", "", distance_input, "", "", "", ""]
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=answers):
         menu.edit_settings()
@@ -221,7 +221,7 @@ def test_changing_workers_in_settings_applies_to_the_next_run(menu, cfg):
     """The 'repeat resets my workers' complaint: Settings used to write
     default_workers while every run read last_workers, so editing did nothing."""
     cfg.config.last_workers = 12
-    answers = ["", "8", "", "", "", "", ""]   # staging, workers, quality, effort, distance, confirm, marker
+    answers = ["", "8", "", "", "", "", "", "", ""]   # ... marker, tip, update check
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=answers):
         menu.edit_settings()
@@ -235,7 +235,7 @@ def test_untouched_settings_do_not_clobber_the_last_run(menu, cfg):
     cfg.config.last_workers = 12
     cfg.config.last_effort = 9
     cfg.config.last_distance = 0.05
-    answers = ["", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "", "", ""]
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=answers):
         menu.edit_settings()
@@ -420,7 +420,7 @@ def test_omitting_manifest_path_keeps_the_stored_one(tmp_path, monkeypatch):
 def test_settings_screen_flags_an_overridden_default(menu, cfg, capsys):
     cfg.config.default_workers = 4
     cfg.config.last_workers = 12
-    answers = ["", "", "", "", "", "", ""]
+    answers = ["", "", "", "", "", "", "", "", ""]
     with mock.patch.object(wp, "RICH_AVAILABLE", False), \
          mock.patch("builtins.input", side_effect=answers):
         menu.edit_settings()

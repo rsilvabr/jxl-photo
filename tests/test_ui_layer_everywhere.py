@@ -83,7 +83,7 @@ def test_settings(menu):
         "settings.staging": "none", "settings.workers": "7", "settings.quality": "abc",
         "settings.effort": "9", "settings.distance": "0.05",
         "settings.confirm_delete": False, "settings.marker": "_EXPORT2",
-        "settings.thumbnail_tip": None})
+        "settings.thumbnail_tip": None, "settings.update_check": False})
     quality = menu.config.config.default_quality
     menu.edit_settings()
     cfg = menu.config.config
@@ -91,6 +91,7 @@ def test_settings(menu):
     assert cfg.default_quality == quality                  # not a number: kept
     assert cfg.confirm_delete is False and cfg.export_marker == "_EXPORT2"
     assert cfg.staging_dir is None
+    assert cfg.check_for_updates is False          # v2.23.0: can be turned off here
 
 
 def test_presets_save_and_delete(menu, tmp_path):

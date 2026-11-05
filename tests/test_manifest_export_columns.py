@@ -206,8 +206,7 @@ def test_marker_and_subfolder_are_accepted_in_every_direction(
     assert ro[0]["export_subfolder"] == "TIFF16"
 
 
-@pytest.mark.parametrize("direction", ["jxl2tiff", "jxl2jpeg", "jxl2png",
-                                       "jpeg2jxl"])
+@pytest.mark.parametrize("direction", ["jxl2tiff", "jpeg2jxl"])
 def test_export_jxl_folder_is_refused_outside_tiff2jxl_and_jxl2jxl(
         tmp_path, direction, capsys):
     src, dst = tmp_path / "A", tmp_path / "out"
@@ -539,3 +538,17 @@ def test_generated_manifest_round_trips(tmp_path, monkeypatch):
                                               row_options=ro)
     assert entries is not None
     assert ro == [{}], "the empty generated cells must not become row options"
+
+
+@pytest.mark.parametrize("direction", ["jxl2jpeg", "jxl2png"])
+def test_export_jxl_folder_names_the_jpeg_folder_of_a_decode_row(tmp_path, direction):
+    """v2.23.0: on a JXL -> JPEG/PNG row the column is the transcoder's
+    --export-jpeg-folder (it used to be refused: the transcoder had no flag)."""
+    src, dst = tmp_path / "A", tmp_path / "out"
+    m = tmp_path / "m.csv"
+    _write_manifest(m, [(src, dst, 6, direction, "", "", "JPG_mobile")],
+                    direction=direction)
+    entries, row_options = _load(_menu(), m, direction)
+    assert entries is not None
+    assert row_options[0].get("export_jxl_folder") == "JPG_mobile"
+

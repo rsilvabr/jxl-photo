@@ -459,3 +459,19 @@ def test_a_number_choice_has_a_default_key(tmp_path, monkeypatch):
     menu = _menu(tmp_path, monkeypatch, PickUI([opt], {"opt.buffering": "-"}))
     menu._all_options_screen(wf)
     assert "buffering" not in wf["extra_options"]
+
+
+@pytest.mark.parametrize("direction,flag", [("jxl2jpeg", "--export-jpeg-folder"),
+                                            ("jxl2png", "--export-jpeg-folder"),
+                                            ("jxl2jxl", "--export-jxl-folder")])
+def test_the_modes_6_7_folder_reaches_each_child_by_its_own_flag(tmp_path, monkeypatch,
+                                                                 direction, flag):
+    """v2.23.0: the output-folder name of modes 6/7 (mode_config
+    export_jxl_folder) reaches the transcoder's decode as --export-jpeg-folder."""
+    menu = _menu(tmp_path, monkeypatch)
+    wf = _workflow(tmp_path, direction, mode=7)
+    wf.setdefault("mode_config", {})["export_jxl_folder"] = "JPG mobile [x] 5%"
+    argv = _argv(menu, wf)
+    assert _has_pair(argv, flag, "JPG mobile [x] 5%")
+    other = "--export-jxl-folder" if flag == "--export-jpeg-folder" else "--export-jpeg-folder"
+    assert other not in argv

@@ -868,6 +868,26 @@ def _clean_staging(staging_dir):
     return removed, freed
 
 
+def _validate_export_folder_name(name: str, marker: str, subfolder: str):
+    """None when `name` is usable as the modes 6/7 output folder, else the reason.
+
+    The output folder is created directly under the export marker, so it must be
+    ONE plain path component; a name that itself matches the marker would be
+    read as a second anchor by every later mode 6/7 scan; and a name equal to
+    the requested input subfolder would write the outputs among the sources.
+    """
+    n = (name or "").strip()
+    if not n:
+        return "the folder name is empty"
+    if n in (".", "..") or any(c in n for c in '/\\:*?"<>|'):
+        return f"'{n}' is not a single plain folder name"
+    if marker and _marker_matches(n.lower(), marker.lower()):
+        return f"'{n}' matches the export marker '{marker}' — it would become a new anchor"
+    if subfolder and n.lower() == subfolder.lower():
+        return f"'{n}' is the input subfolder itself — outputs would land among the sources"
+    return None
+
+
 def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     """Folder-name part matches the export marker.
 
@@ -7984,6 +8004,11 @@ Examples:
     # Export marker (must match wrapper's configured marker)
     parser.add_argument("--export-marker", type=str, default=None,
                         help="Folder name marker for modes 6/7 (default: script setting EXPORT_MARKER)")
+    parser.add_argument("--export-jpeg-folder", type=str, default=None,
+                        help="[Modes 6/7, JXL -> JPEG/PNG] Output folder created under "
+                             "the export marker (default: script setting "
+                             f"EXPORT_JPEG_FOLDER, '{EXPORT_JPEG_FOLDER}'). Overrides "
+                             "EXPORT_JPEG_FOLDER.")
 
     # Force override
     parser.add_argument("--force-transcode", action="store_true",
@@ -8028,6 +8053,7 @@ Examples:
 _RUN_DEFAULTS = {
     "EXPORT_MARKER": EXPORT_MARKER,
     "EXPORT_JPEG_SUBFOLDER": EXPORT_JPEG_SUBFOLDER,
+    "EXPORT_JPEG_FOLDER": EXPORT_JPEG_FOLDER,
     "AUTO_REPAIR_JBRD": AUTO_REPAIR_JBRD,
     "COMPRESS_METADATA_BOXES": COMPRESS_METADATA_BOXES,
     "DELETE_CONFIRM": DELETE_CONFIRM,
@@ -8150,7 +8176,7 @@ def main():
         args.format = "jpeg"
 
     # Apply configurable export marker before resolving outputs
-    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5, OVERWRITE_GUARD
+    global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, EXPORT_JPEG_FOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5, OVERWRITE_GUARD
     global COMPRESS_METADATA_BOXES
     # Each global was restored to its SCRIPT setting at the top of main()
     # (_RUN_DEFAULTS); the flags override it here, one way.
@@ -8163,6 +8189,8 @@ def main():
         COMPRESS_METADATA_BOXES = True
     if args.export_subfolder is not None:
         EXPORT_JPEG_SUBFOLDER = args.export_subfolder
+    if args.export_jpeg_folder is not None:
+        EXPORT_JPEG_FOLDER = args.export_jpeg_folder.strip()
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.delete_source:
@@ -8279,6 +8307,20 @@ def main():
             args.mode = TRANSCODE_DEFAULT_MODE  # 0 = in-place
         else:
             args.mode = CONVERT_DEFAULT_MODE     # 0 = in-place
+
+    # --export-jpeg-folder is checked once the mode is known: one plain name,
+    # not the marker, not the input subfolder (the same rule as the encoder's
+    # and the recompressor's --export-jxl-folder).
+    if args.export_jpeg_folder is not None:
+        if args.mode in (6, 7):
+            _why = _validate_export_folder_name(
+                EXPORT_JPEG_FOLDER, EXPORT_MARKER,
+                EXPORT_JPEG_SUBFOLDER if args.mode == 7 else "")
+            if _why:
+                parser.error(f"--export-jpeg-folder: {_why}")
+        else:
+            print(f"WARNING: --export-jpeg-folder only applies to modes 6/7 — ignored "
+                  f"in mode {args.mode}.")
 
     # Mode 1 always writes to <source folder>/<subfolder>/, so an output
     # positional is silently discarded. Accepting it without a word looked like

@@ -165,3 +165,38 @@ def test_the_menu_offers_u_only_with_news(tmp_path, monkeypatch, asked):
     menu._update_available = ("v99.0.0", "https://example")
     answers = iter(["u"])
     assert menu.show_main_menu(False) == "U"
+
+
+def test_a_slow_network_never_holds_the_menu(cfg, monkeypatch):
+    """v2.23.0: GitHub is asked in the background; the menu waits half a
+    second at most, and the answer shows up at a later poll."""
+    import threading
+    import time
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    release = threading.Event()
+
+    def slow(repo, timeout=3):
+        release.wait(10)
+        return "v99.0.0"
+    monkeypatch.setattr(wp, "_latest_release_tag", slow)
+    poll = wp._update_check_start(cfg)
+    t0 = time.monotonic()
+    assert poll(0.5) is None                     # not in yet: no notice, no wait
+    assert time.monotonic() - t0 < 2
+    assert cfg.config.update_checked_on is None  # nothing written by the thread
+    release.set()
+    deadline = time.monotonic() + 10
+    notice = None
+    while notice is None and time.monotonic() < deadline:
+        notice = poll(0.2)
+    assert notice and "v99.0.0" in notice[0]
+    assert wp.ConfigManager().config.update_latest_seen == "v99.0.0"
+
+
+def test_already_asked_today_starts_no_thread(cfg, asked, monkeypatch):
+    from datetime import date
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    cfg.config.update_checked_on = date.today().isoformat()
+    cfg.config.update_latest_seen = "v99.0.0"
+    assert wp._update_check_start(cfg)(0)[0].startswith("A new release is out")
+    assert asked == []

@@ -576,7 +576,8 @@ _MANIFEST_OPTION_DIRECTIONS = {
     "renameto":        _MANIFEST_DERIVATIVE_DIRECTIONS,
     "exportmarker":    _MANIFEST_ALL_DIRECTIONS,
     "exportsubfolder": _MANIFEST_ALL_DIRECTIONS,
-    "exportjxlfolder": frozenset({"tiff2jxl", "jxl2jxl"}),
+    # JXL -> JPEG/PNG rows pass it as the transcoder's --export-jpeg-folder.
+    "exportjxlfolder": frozenset({"tiff2jxl", "jxl2jxl", "jxl2jpeg", "jxl2png"}),
     # --exclude-folders lives in the TIFF encoder and decoder only.
     "excludefolders":  frozenset({"tiff2jxl", "jxl2tiff"}),
 }
@@ -849,6 +850,11 @@ def _with_child_marker(child, marker: Optional[str], subfolder: Optional[str] = 
         if jxl_folder and hasattr(child, 'EXPORT_JXL_FOLDER'):
             saved['EXPORT_JXL_FOLDER'] = child.EXPORT_JXL_FOLDER
             child.EXPORT_JXL_FOLDER = jxl_folder
+        if jxl_folder and hasattr(child, 'EXPORT_JPEG_FOLDER'):
+            # The transcoder: the name reaches it only on a JXL -> JPEG/PNG
+            # run (--export-jpeg-folder), whose outputs go there.
+            saved['EXPORT_JPEG_FOLDER'] = child.EXPORT_JPEG_FOLDER
+            child.EXPORT_JPEG_FOLDER = jxl_folder
         # Like the marker above: set only when truthy, so the children's
         # default () stays the default for callers that never had the
         # question (transcoder/recompressor run-level answers). The
@@ -2335,6 +2341,13 @@ def _derivative_in_place_rows(entries: List) -> List:
     return rows
 
 
+def _export_folder_settable(origin: str, dest: str) -> bool:
+    """The directions whose child takes the modes 6/7 output folder name:
+    --export-jxl-folder (encoder, recompressor), --export-jpeg-folder
+    (transcoder, JXL -> JPEG/PNG)."""
+    return origin in ('tiff', 'jxl') and dest == 'jxl' or (origin == 'jxl' and dest in ('jpeg', 'png'))
+
+
 def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) -> str:
     """The folder modes 6/7 create under the export marker, by direction.
 
@@ -2348,11 +2361,12 @@ def _export_folder_name(origin: str, dest: str, override: Optional[str] = None) 
     somewhere they never do (16B_TIFF). The whole point of that gate is that a
     wrong destination is visible before the user types the token.
 
-    `override` is the run's `--export-jxl-folder` (the wrapper's
-    `mode_config['export_jxl_folder']`): it only means something for the two
-    directions whose child accepts the flag (TIFF -> JXL and JXL -> JXL).
+    `override` is the run's `--export-jxl-folder` / `--export-jpeg-folder` (the
+    wrapper's `mode_config['export_jxl_folder']`): it only means something for
+    the directions whose child accepts one (TIFF -> JXL, JXL -> JXL, and JXL ->
+    JPEG/PNG since v2.23.0).
     """
-    if override and dest == 'jxl' and origin in ('tiff', 'jxl'):
+    if override and _export_folder_settable(origin, dest):
         return override
     if dest == 'tiff':
         return _child_setting('jxl_tiff_decoder', 'EXPORT_TIFF_FOLDER', '16B_TIFF')
@@ -2800,6 +2814,10 @@ REGISTRY: Tuple[Opt, ...] = (
     Opt("export_jxl_folder", "--export-jxl-folder", _D({"tiff2jxl", "jxl2jxl"}), "value",
         "files", "advanced", "Modes 6/7 output folder",
         "Name of the JXL folder modes 6/7 write next to the marker.",
+        legacy_key="mode_config.export_jxl_folder"),
+    Opt("export_jpeg_folder", "--export-jpeg-folder", _D({"jxl2jpeg", "jxl2png"}), "value",
+        "files", "advanced", "Modes 6/7 output folder",
+        "Name of the JPEG/PNG folder modes 6/7 write next to the marker.",
         legacy_key="mode_config.export_jxl_folder"),
     Opt("exclude_folders", "--exclude-folders", _D({"tiff2jxl", "jxl2tiff"}), "policy",
         "files", "advanced", "Exclude folders",
@@ -4101,6 +4119,15 @@ class InteractiveMenu:
             ("9", "Settings: wrapper defaults, script settings, reset, move", True),
             ("D", "Dependencies: check again", True),
         ])
+        _poll = getattr(self, '_update_poll', None)
+        if _poll and not getattr(self, '_update_available', None):
+            _late = _poll()
+            if _late:
+                self.ui.markup(f"[yellow]{_rich_safe(_late[0])}[/yellow]", _late[0])
+                self._update_available = (self.config.config.update_latest_seen, _late[1])
+        if getattr(self, '_thumb_tip', False):
+            options.append(("T", "Get jxl-thumb: fast thumbnails in Explorer "
+                                 "(opens its page)", True))
         if getattr(self, '_update_available', None):
             options.append(("U", f"Update available: {self._update_available[0]} — "
                                  f"open the release page", True))
@@ -4589,7 +4616,9 @@ class InteractiveMenu:
         was_distance = _sane_distance(current.default_distance)
         # Asked only where the tip means something: no thumbnail handler on
         # this PC, or the tip already hidden (so it can be turned back on).
-        ask_tip = (not current.show_thumbnail_tip) or _jxl_thumbnail_tip() is not None
+        # Always asked on Windows (since v2.23.0): a reminder must be easy to
+        # turn off, and back on.
+        ask_tip = os.name == "nt"
 
         def _effective(default_value, last_value) -> str:
             """Flag a default that the saved session is currently overriding —
@@ -4658,10 +4687,14 @@ class InteractiveMenu:
         new_marker = ui.ask_line("settings.marker", "Export marker", "New export marker: ",
                                  default=current.export_marker)
         new_tip = (ui.ask_yes("settings.thumbnail_tip",
-                              "Show the Explorer thumbnail tip at start?",
-                              "Show the Explorer thumbnail tip at start? (y/n): ",
+                              "Recommend jxl-thumb (Explorer thumbnails) at start?",
+                              "Recommend jxl-thumb (Explorer thumbnails) at start? (y/n): ",
                               current.show_thumbnail_tip)
                    if ask_tip else current.show_thumbnail_tip)
+        new_update_check = ui.ask_yes(
+            "settings.update_check", "Check once a day whether a new release is out?",
+            "Check once a day whether a new release is out? (y/n): ",
+            current.check_for_updates)
 
         if new_staging.lower() == 'none':
             self.config.config.staging_dir = None
@@ -4687,6 +4720,7 @@ class InteractiveMenu:
                 self.config.config.default_distance = current_distance
         self.config.config.confirm_delete = new_confirm
         self.config.config.show_thumbnail_tip = bool(new_tip)
+        self.config.config.check_for_updates = bool(new_update_check)
 
         # Changing a default here is a statement about the NEXT run, so it also
         # adopts the saved session's value. Without this the wizard and 'Repeat
@@ -7105,11 +7139,12 @@ class InteractiveMenu:
                     # the intent is explicit, not inherited.
                     mode_config.pop('export_subfolder', None)
 
-            # The modes 6/7 output folder. Only the two directions whose child
-            # accepts --export-jxl-folder offer it; the child validates the
-            # name itself (one plain component, not the marker, not the input
-            # subfolder) and exits 2 with a clear message the wrapper shows.
-            if dest == 'jxl' and origin in ('tiff', 'jxl'):
+            # The modes 6/7 output folder. Only the directions whose child
+            # accepts --export-jxl-folder / --export-jpeg-folder offer it; the
+            # child validates the name itself (one plain component, not the
+            # marker, not the input subfolder) and exits 2 with a clear
+            # message the wrapper shows.
+            if _export_folder_settable(origin, dest):
                 _script_default = _export_folder_name(origin, dest)
                 _folder_default = (mode_config.get('export_jxl_folder')
                                    or (self.config.config.last_mode_config or {}).get('export_jxl_folder')
@@ -9949,6 +9984,10 @@ _THUMBNAIL_HANDLER_KEYS = (
 )
 
 
+# jxl-thumb's thumbnail provider (the recompressor's _JXL_THUMB_CLSID).
+_JXL_THUMB_CLSID = "{EF830030-FBD6-4B62-BFD4-0DBD590D6135}"
+
+
 _UPDATE_OWNER = "rsilvabr"
 _UPDATE_TIMEOUT = 3          # seconds: a slow or absent network stays silent
 
@@ -10017,9 +10056,50 @@ def _update_notice(config_manager, today: Optional[str] = None) -> Optional[Tupl
             f"[U] in the menu opens its page.", url)
 
 
+def _update_check_start(config_manager):
+    """The daily release lookup without making the menu wait: GitHub is asked
+    in a background thread and the answer is applied (config written) by the
+    main thread when it polls. Returns poll(wait=0.0) -> the notice or None;
+    a poll before the answer is in returns None and the next one may show it.
+    Off, or already asked today: no thread, the kept answer is used."""
+    cfg = config_manager.config
+    if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
+        return lambda wait=0.0: None
+    from datetime import date
+    today = date.today().isoformat()
+    if cfg.update_checked_on == today:
+        notice = _update_notice(config_manager, today)       # no network
+        return lambda wait=0.0: notice
+    import threading
+    answer: Dict[str, Optional[str]] = {}
+    worker = threading.Thread(
+        target=lambda: answer.__setitem__("tag", _latest_release_tag(_update_repo())),
+        name="update-check", daemon=True)
+    worker.start()
+    state: Dict[str, Any] = {"done": False, "notice": None}
+
+    def poll(wait: float = 0.0):
+        if not state["done"]:
+            worker.join(wait)
+            if worker.is_alive():
+                return None
+            state["done"] = True
+            cfg.update_checked_on = today
+            if answer.get("tag"):
+                cfg.update_latest_seen = answer["tag"]
+            try:
+                config_manager.save_config()
+            except Exception:
+                pass
+            state["notice"] = _update_notice(config_manager, today)   # kept now
+        return state["notice"]
+    return poll
+
+
 def _jxl_thumbnail_tip() -> Optional[str]:
-    """The menu's one-line tip when Windows Explorer has no thumbnail handler
-    for .jxl (neither jxl-thumb nor Microsoft's JPEG XL extension), else None.
+    """The menu's one-line tip when jxl-thumb is not Explorer's thumbnail
+    handler for .jxl: no handler at all, or Microsoft's JPEG XL extension
+    (slow, and ProPhoto/Adobe RGB look washed out). None with jxl-thumb.
 
     One registry read, nothing written; any error means no tip, never a
     blocked menu. JXLPHOTO_THUMBNAIL_TIP replaces the text (a packaged build
@@ -10027,6 +10107,7 @@ def _jxl_thumbnail_tip() -> Optional[str]:
     """
     if os.name != "nt":
         return None
+    handler = ""
     try:
         import winreg
         for sub in _THUMBNAIL_HANDLER_KEYS:
@@ -10034,17 +10115,25 @@ def _jxl_thumbnail_tip() -> Optional[str]:
                 with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, sub) as key:
                     # Stock Windows 11 has the SystemFileAssociations key with
                     # an empty value: that registers nothing.
-                    if str(winreg.QueryValue(key, None) or "").strip():
-                        return None
+                    handler = str(winreg.QueryValue(key, None) or "").strip()
             except OSError:
                 continue
+            if handler:
+                break
     except Exception:
+        return None
+    if handler.upper() == _JXL_THUMB_CLSID:
         return None
     override = os.environ.get("JXLPHOTO_THUMBNAIL_TIP")
     if override is not None:
         return override.strip() or None
+    if handler:
+        return ("Tip: Explorer's JXL thumbnails come from Microsoft's extension "
+                "here: slow, and ProPhoto/Adobe RGB photos look washed out. "
+                f"jxl-thumb is about 40x faster, with the right colours: "
+                f"{JXL_THUMB_URL} ([T] in the menu opens it)")
     return (f"Tip: Windows Explorer shows no thumbnails for JXL files on this PC. "
-            f"jxl-thumb adds them: {JXL_THUMB_URL}")
+            f"jxl-thumb adds them: {JXL_THUMB_URL} ([T] in the menu opens it)")
 
 
 def main():
@@ -10141,7 +10230,10 @@ def _main():
     # Menu runs only: a scheduled --run-preset log is no place for it.
     # A new release? Menu runs only, like the tip: --run-preset and
     # --list-presets have returned above and never ask the network.
-    _upd = _update_notice(config)
+    # Asked in the background: the menu waits half a second at most, and a
+    # late answer shows up the next time the menu is drawn.
+    menu._update_poll = _update_check_start(config)
+    _upd = menu._update_poll(0.5)
     if _upd:
         print(_upd[0])
         menu._update_available = (config.config.update_latest_seen, _upd[1])
@@ -10150,6 +10242,7 @@ def _main():
     if _tip:
         print(_tip)
         print("     (Hide this tip: 9 - Settings, then 1.)")
+        menu._thumb_tip = True
 
     # Main loop
     while True:
@@ -10193,6 +10286,13 @@ def _main():
         elif choice == "S":
             menu.script_settings_flow()
 
+        elif choice == "T" and getattr(menu, '_thumb_tip', False):
+            try:
+                import webbrowser
+                webbrowser.open(JXL_THUMB_URL)
+            except Exception:
+                pass
+            print(f"jxl-thumb: {JXL_THUMB_URL}")
         elif choice == "U" and getattr(menu, '_update_available', None):
             _url = menu._update_available[1]
             print(f"Release page: {_url}")

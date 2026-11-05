@@ -139,7 +139,7 @@ applies to every derivative row of a run.
 |--------|------------|--------------------|
 | `ExportMarker` | All six | Detect and scan that row under this export marker instead of the run's. |
 | `ExportSubfolder` | All six (only mode 7 uses it) | Passed to the child as `--export-subfolder`. A filled cell on a row whose `Mode` is present and not 7 refuses the manifest (mode 6 processes every subfolder by design); a legacy row without a Mode cell is accepted. |
-| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl` only | Names the modes-6/7 output folder for that row. The decoder and the transcoder have no such flag — a value in any other direction refuses the manifest. |
+| `ExportJxlFolder` | `tiff2jxl`, `jxl2jxl`, `jxl2jpeg`, `jxl2png` | Names the modes-6/7 output folder for that row: `--export-jxl-folder` for the encoder and the recompressor, `--export-jpeg-folder` for a JXL → JPEG/PNG row (since v2.23.0; e.g. `JPG_mobile` instead of the transcoder's `JPEG_recovered`). The decoder has no such flag — a value on a `jxl2tiff` or `jpeg2jxl` row refuses the manifest. |
 
 Values must be **one plain folder name** — no path separators, no `..`, not
 blank. The wrapper validates the effective name (against the row's own marker
@@ -236,7 +236,7 @@ G:\fotos\_EXPORT\B,,6,tiff2jxl,SCREEN_JXL
 ```
 
 Empty cells in the export family keep the run's value, so only the differing
-column needs filling. (`ExportJxlFolder` exists only for `tiff2jxl`/`jxl2jxl`.)
+column needs filling. (`ExportJxlFolder` exists for `tiff2jxl`, `jxl2jxl`, `jxl2jpeg` and `jxl2png`.)
 
 ### 4. Capture One tree: one row per output subfolder (mode 7)
 
