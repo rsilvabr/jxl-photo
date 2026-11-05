@@ -1,5 +1,15 @@
 # New Features Since v1.0
 
+## v2.24.0_beta1 (2026-11-06, pre-release)
+
+### 8-bit TIFFs are archived lossless at low distances (encoder)
+
+`EIGHT_BIT_DISTANCE = "auto"` / `--eight-bit-distance` encodes an 8-bit TIFF
+that is not a film scan lossless when the run's distance is
+`EIGHT_BIT_LOSSLESS_UP_TO` (0.1) or less; `same` follows the run, a number
+gives them their own distance. See the
+[encoder README](README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance).
+
 ## v2.17.0 (2026-10-24)
 
 ### Film scans are archived lossless (encoder, recompressor)

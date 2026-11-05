@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.23.0** (2026-11-05) · [What's new](#whats-new-in-v2230) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.24.0_beta1** (2026-11-06, pre-release; last stable: [v2.23.0](docs/version_history.md#v2230)) · [What's new](#whats-new-in-v2240_beta1) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.23.0](#whats-new-in-v2230)
+- [What's new in v2.24.0_beta1](#whats-new-in-v2240_beta1)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -401,9 +401,22 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.23.0
+## What's new in v2.24.0_beta1
 
-2026-11-05.
+2026-11-06, pre-release.
+
+- **8-bit TIFFs are archived lossless at `d=0.1` and below**: lossless is
+  small for them (43 MB for 45 MP), and `d=0.05` would come out larger.
+  `--eight-bit-distance same` keeps the old behaviour
+  ([Upgrading](docs/upgrading.md#v2240-8-bit-tiffs-are-archived-lossless-at-d01-and-below)).
+- **The wizard shows the typical file size next to every distance** (45, 24
+  and 12 MP), and "your distance" shows them all, from 0 to 25.
+- `d=0.7` (keeps the grain texture) in both distance lists, `d=5` for small
+  copies; shorter names and lighter notes.
+
+[Version history](docs/version_history.md#v2240_beta1).
+
+### In v2.23.0
 
 - **Derivatives (sRGB, resized) and JXL -> TIFF are about 35-40% faster**: a
   temp file in the pipeline is no longer compressed. Same pixels.
@@ -437,15 +450,12 @@ The wizard is organised by task, and every option is within reach.
 
 Full notes: [version history](docs/version_history.md#v2220).
 
-### In v2.21.0
-
-- **JPEG/PNG from lossy masters that keep their profile only in XMP** carry that profile instead of an sRGB label; less memory per worker; a failed metadata copy keeps the source ([Upgrading](docs/upgrading.md#v2210-lossy-jxl--jpegpng-keeps-the-masters-profile-metadata-failures-keep-the-source)).
-
 ### Recent releases
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.23.0** | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
+| **v2.24.0_beta1** | 2026-11-06 | Pre-release: 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
+| [v2.23.0](docs/version_history.md#v2230) | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
 | [v2.22.5](docs/version_history.md#v2225) | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
 | [v2.22.1](docs/version_history.md#v2221) | 2026-11-04 | Every wizard question on one question layer; same questions and command lines |
 | [v2.22.0](docs/version_history.md#v2220) | 2026-11-04 | The wizard by task: a New job and one review screen with every option; new menus; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input |

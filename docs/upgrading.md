@@ -11,6 +11,21 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.24.0: 8-bit TIFFs are archived lossless at d=0.1 and below
+
+- **An 8-bit TIFF that is not a film scan is encoded lossless** when the run's
+  `--distance` is 0.1 or less (`EIGHT_BIT_DISTANCE = "auto"`). Its JXL is
+  bigger than before (about 43 MB instead of 33 MB for 45 MP at `d=0.1`) and
+  exact. 16-bit TIFFs and runs at a higher distance do not change.
+  `--eight-bit-distance same` (or `EIGHT_BIT_DISTANCE = "same"`) keeps the
+  old behaviour.
+- **`--delete-skipped` over 8-bit masters archived at `d=0.1` or less by an
+  earlier version** now judges them as lossless and keeps their TIFFs (a
+  `KEEP` line that names `--eight-bit-distance same`). Add that flag to such
+  a run, or re-archive those TIFFs with `--overwrite`.
+
+---
+
 ## v2.22.0: a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input and leave derivatives out
 
 - **A JXL decoded to a JPEG or to an 8-bit PNG never deletes the JXL** (#600):

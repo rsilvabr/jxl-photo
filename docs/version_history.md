@@ -14,6 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **[v2.24.0_beta1](#v2240_beta1)** | 2026-11-06 | Pre-release. 8-bit TIFFs archived lossless at `d=0.1` and below (`--eight-bit-distance`); the wizard shows the typical file size next to every distance; `d=0.7` and `d=5` in the lists |
 | **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
 | [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
 | [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
@@ -88,6 +89,44 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.24.0_beta1
+
+**Pre-release, 2026-11-06.** The last stable release is v2.23.0; the stable
+v2.24.0 will also move the encode record out of the Title. One default
+changes for 8-bit TIFFs ([Upgrading](upgrading.md#v2240-8-bit-tiffs-are-archived-lossless-at-d01-and-below)).
+
+- **8-bit TIFFs are archived lossless at low distances** (encoder,
+  `EIGHT_BIT_DISTANCE = "auto"`, `EIGHT_BIT_LOSSLESS_UP_TO = 0.1`,
+  `--eight-bit-distance`). Measured on 40 photos (20 Z7+Z8, 10 Zf, 10 D700):
+  an 8-bit TIFF's lossless JXL is a quarter of a 16-bit one's (43 MB at
+  45 MP), `d=0.05` comes out larger than it (47 MB) and `d=0.1` only ~24%
+  smaller (33 MB). So an 8-bit TIFF that is not a film scan is encoded
+  lossless when the run's distance is 0.1 or less, at the run's distance
+  above it; `same` turns it off, a number gives 8-bit TIFFs their own
+  distance. Decided per TIFF at planning time like `SCAN_DISTANCE` (page 0's
+  BitsPerSample ≤ 8), so the encode, the `cjxl d=` record, the verification,
+  the delete gate and the memory cap see the same distance. The run counts
+  them before the first encode and in the summary; a `KEEP` on a master
+  archived at the run's distance before names `--eight-bit-distance same`.
+  Film scans keep `SCAN_DISTANCE`. The wizard shows an "8-bit TIFFs" row under
+  "Film scans" and a note after the distance choice when the rule applies.
+- **The wizard shows the typical file size next to every distance**, at
+  45 / 24 / 12 MP ("JXL size from a 16-bit TIFF (typical)" over the
+  columns), with an 8-bit TIFF's lossless size in the note. "Your distance"
+  first shows every distance from 0 to 25 plus the TIFF sizes (16/8-bit,
+  uncompressed/ZIP). Medians of the 40 photos above, cjxl 0.12.0 effort 7;
+  `docs/file_sizes.md` has the full table with ranges.
+- **The distance lists**: `d=0.7` "visually lossless (keeps the grain
+  texture)" in both; `d=1` "visually lossless (JPEG XL's definition)"; the
+  smaller copies name `d=2`/`3`/`5` by cjxl's `-q` scale (about quality
+  79/68/46) — `d=5` is new. Nothing above 5: from `d=10` libjxl halves the
+  resolution by itself (a sweep of 8 photos, `d=1` to `25`: the score at
+  100% drops from 48 to 17 between `d=7` and `d=10` for ~30% less size); a
+  resize makes a better small copy. Shorter names, the dashes after the
+  distances line up.
+- The wizard's notes and hints use a lighter grey (Rich's `dim` was hard to
+  read on Windows Terminal).
 
 ## v2.23.0
 
