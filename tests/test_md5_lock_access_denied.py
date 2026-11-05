@@ -77,3 +77,28 @@ def test_many_writers_lose_no_line(db, caplog):
             t.join()
     assert len(db.read_text(encoding="utf-8").splitlines()) == n * k
     assert not caplog.records
+
+
+def test_a_refused_lock_delete_is_retried(db, monkeypatch, caplog):
+    """#612: an antivirus holding the new lock file makes the first deletes
+    fail. The writer retries instead of leaving the lock behind, so the next
+    writer gets it at once (the battery of 2026-11-05 kept 12 JPEGs: every
+    other worker waited out the timeout on an orphaned lock)."""
+    real_unlink = os.unlink
+    refused = {"n": 3}
+
+    def flaky_unlink(path, *a, **k):
+        if str(path).endswith(".lock") and refused["n"]:
+            refused["n"] -= 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *a, **k)
+
+    monkeypatch.setattr(tra.os, "unlink", flaky_unlink)
+    monkeypatch.setattr(tra, "_MD5_LOCK_TIMEOUT_S", 0.3)
+    with caplog.at_level(logging.WARNING, logger=tra.logger.name):
+        assert tra._append_checksum_line(db, "0123  a (1).jxl\n")
+        assert tra._append_checksum_line(db, "4567  b (2).jxl\n")
+    assert db.read_text(encoding="utf-8") == "0123  a (1).jxl\n4567  b (2).jxl\n"
+    assert not db.with_name(db.name + ".lock").exists()
+    assert not caplog.records
+

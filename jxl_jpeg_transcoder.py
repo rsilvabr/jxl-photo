@@ -2528,8 +2528,33 @@ def md5_of_file(path: Path) -> str:
 
 CHECKSUMS_FILENAME = "checksums.md5"
 
-_MD5_LOCK_TIMEOUT_S = 10.0
+_MD5_LOCK_TIMEOUT_S = 30.0
 _MD5_LOCK_STALE_S = 120.0
+_MD5_LOCK_RELEASE_S = 5.0
+
+
+def _release_checksum_lock(lock_path: Path) -> None:
+    """Remove the lock file, retrying a refused delete (#612).
+
+    Windows refuses a delete while another program (an antivirus scanning
+    the file it just saw created) holds it open. The one-shot unlink this
+    replaces swallowed that error: the lock outlived its writer, every other
+    worker of the folder waited the whole timeout and dropped its provenance
+    line (fail closed — the JPEGs were kept, twelve at once in the real-photo
+    battery of 2026-11-05) until the lock was old enough to be reclaimed."""
+    deadline = time.monotonic() + _MD5_LOCK_RELEASE_S
+    while True:
+        try:
+            os.unlink(lock_path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            if time.monotonic() >= deadline:
+                logger.warning(f"Could not remove {lock_path} ({e}) — other writers of "
+                               f"this folder wait until it is {_MD5_LOCK_STALE_S:.0f}s old")
+                return
+            time.sleep(0.05)
 
 def _append_checksum_line(db_path: Path, entry: str):
     """Append one line to checksums.md5, serialized ACROSS PROCESSES.
@@ -2588,10 +2613,7 @@ def _append_checksum_line(db_path: Path, entry: str):
                 f.write(entry)
         return True
     finally:
-        try:
-            os.unlink(lock_path)
-        except OSError:
-            pass
+        _release_checksum_lock(lock_path)
 
 def store_md5_db(jxl_path: Path, md5: str):
     db_path = jxl_path.parent / CHECKSUMS_FILENAME

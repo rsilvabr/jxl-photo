@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 4 fixes) |
+| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
 | [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
 | [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
 | [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
@@ -136,7 +136,10 @@ one wizard detail moved (the review's rows are numbered in a new order).
 - Fixes: the review's "Existing outputs" showed no origin (#608); menus
   5/6/7 offered the whole user profile as their folder (#609); the detailed
   view's mode 4 example renamed a folder to itself (#610); Auto Mode's
-  folder preview existed only in Rich (#611).
+  folder preview existed only in Rich (#611); a deleting JPEG -> JXL run
+  under load could keep JPEGs whose JXL was fine, because a checksum lock an
+  antivirus held was never removed (#612: the delete is retried, the wait is
+  30 s).
 
 ## v2.22.5
 
