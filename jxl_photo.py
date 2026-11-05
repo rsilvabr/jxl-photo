@@ -65,7 +65,8 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    from rich.box import SIMPLE as BOX_SIMPLE
+    from rich.box import SIMPLE as BOX_SIMPLE, ROUNDED as BOX_ROUNDED
+    from rich.console import Group
     from rich.prompt import Prompt, IntPrompt, Confirm
     from rich.markup import escape as _markup_escape
     RICH_AVAILABLE = True
@@ -2576,6 +2577,21 @@ def _distance_shown(value) -> str:
     return f"{text} — {label}" if label else text
 
 
+# The review lists what the user chooses first, then where it runs, then the
+# technical switches (v2.23.0). Keys not named keep their place after these.
+_REVIEW_ROW_ORDER = (
+    "conversion", "distance", "scan_distance", "quality", "effort", "derivative",
+    "output_icc", "icc_profile", "shaping", "bit_depth", "compression", "add_preview",
+    "decode_mode", "existing", "delete", "workers", "staging", "use_ram",
+    "overwrite_guard", "d50_patch")
+
+
+def _review_order(rows):
+    rank = {k: i for i, k in enumerate(_REVIEW_ROW_ORDER)}
+    return [r for _i, r in sorted(enumerate(rows),
+                                  key=lambda t: (rank.get(t[1][0], len(rank)), t[0]))]
+
+
 def _valid_scan_distance(text: str):
     """A --scan-distance value the encoder accepts, normalised, or None."""
     t = str(text or "").strip().lower()
@@ -3263,6 +3279,42 @@ class UI:
               plain: Optional[str] = None) -> None:
         raise NotImplementedError
 
+    def table(self, title: str, columns: List[str], rows: List[Tuple[str, ...]],
+              head: Optional[List[str]] = None, notes: Optional[List[str]] = None,
+              show_header: bool = True, markup: bool = False) -> None:
+        """A framed table in Rich, aligned columns in plain text: `head` lines
+        above it (plain text), `notes` below it. Cells are plain text, or Rich
+        markup with `markup=True` (the plain renderer drops the styles)."""
+        raise NotImplementedError
+
+    def actions(self, groups: List[Tuple[str, List[Tuple[str, str]]]]) -> None:
+        """The keys of a screen, one line per intent: [("Run", [("r", "RUN"),
+        ...]), ...]."""
+        raise NotImplementedError
+
+
+def _plain_prompt(text: str) -> str:
+    """A prompt with no blank line of its own: the renderer puts exactly one
+    before every question (v2.23.0), so the eye finds where to type."""
+    return text.lstrip("\n")
+
+
+def _plain_table_lines(columns, rows, show_header=True):
+    widths = [max([len(c)] + [len(str(r[i])) for r in rows]) if show_header
+              else max([0] + [len(str(r[i])) for r in rows])
+              for i, c in enumerate(columns)]
+    out = []
+    if show_header:
+        out.append("  " + "  ".join(c.ljust(w) for c, w in zip(columns, widths)).rstrip())
+    for r in rows:
+        out.append("  " + "  ".join(str(v).ljust(w) for v, w in zip(r, widths)).rstrip())
+    return out
+
+
+def _plain_action_lines(groups):
+    return [f"{label:<8} " + "   ".join(f"[{k}] {t}" for k, t in keys)
+            for label, keys in groups]
+
 
 _SILENT = object()    # UI.markup: this renderer prints nothing
 
@@ -3286,11 +3338,13 @@ class PlainUI(UI):
 
     def ask_text(self, qid, prompt, default=""):
         shown = f" [{default}]" if default else ""
-        answer = input(f"{prompt}{shown}: ").strip()
+        print()
+        answer = input(f"{_plain_prompt(prompt)}{shown}: ").strip()
         return answer if answer else default
 
     def confirm(self, qid, prompt, default=False):
-        answer = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+        print()
+        answer = input(f"{_plain_prompt(prompt)} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
         return default if not answer else answer.startswith('y')
 
     def choose(self, qid, prompt, options, default=None, note=None):
@@ -3300,7 +3354,8 @@ class PlainUI(UI):
         if note:
             print(note)
         while True:
-            answer = input(f"{prompt}{f' [{default}]' if default else ''}: ").strip()
+            print()
+            answer = input(f"{_plain_prompt(prompt)}{f' [{default}]' if default else ''}: ").strip()
             if not answer and default is not None:
                 return default
             if answer in keys:
@@ -3308,11 +3363,13 @@ class PlainUI(UI):
             print(f"Choose one of: {', '.join(keys)}")
 
     def ask_line(self, qid, rich, plain, default=None, choices=None):
-        answer = input(plain).strip()
+        print()
+        answer = input(_plain_prompt(plain)).strip()
         return answer if answer or default is None else default
 
     def ask_yes(self, qid, rich, plain, default=False):
-        answer = input(plain).strip().lower()
+        print()
+        answer = input(_plain_prompt(plain)).strip().lower()
         if not answer:
             return default
         return not answer.startswith('n') if default else answer.startswith('y')
@@ -3328,6 +3385,26 @@ class PlainUI(UI):
             print(_strip_styles(title))
         print(_strip_styles(body) if plain is None else plain)
 
+    def table(self, title, columns, rows, head=None, notes=None, show_header=True,
+              markup=False):
+        if markup:
+            rows = [tuple(_strip_styles(str(v)) for v in r) for r in rows]
+        # Two blank lines before a new block: no frame tells it apart here.
+        print("\n")
+        if title:
+            print(f"--- {title} ---")
+        for line in head or []:
+            print(line)
+        for line in _plain_table_lines(columns, rows, show_header):
+            print(line)
+        for line in notes or []:
+            print(f"  · {line}")
+
+    def actions(self, groups):
+        print()
+        for line in _plain_action_lines(groups):
+            print(line)
+
 
 class RichUI(UI):
     def section(self, title):
@@ -3339,31 +3416,84 @@ class RichUI(UI):
     def warn(self, text):
         console.print(f"[yellow]{_rich_safe(text)}[/yellow]")
 
+    @staticmethod
+    def _default_kw(default):
+        """Prompt.ask's default: none for an empty one (Rich would show "()"),
+        and a long one (a path) on its own line above the question, where it
+        does not wrap the prompt in two."""
+        if default is None or default == "":
+            return {}
+        if len(str(default)) > 40:
+            console.print(f"  [dim]Enter = {_rich_safe(str(default))}[/dim]")
+            return {"default": default, "show_default": False}
+        return {"default": default}
+
     def ask_text(self, qid, prompt, default=""):
-        return Prompt.ask(_rich_safe(prompt), default=default or "").strip()
+        console.print()
+        return (Prompt.ask(_rich_safe(_plain_prompt(prompt)), **self._default_kw(default))
+                or default or "").strip()
 
     def confirm(self, qid, prompt, default=False):
-        return Confirm.ask(_rich_safe(prompt), default=default)
+        console.print()
+        return Confirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
 
     def choose(self, qid, prompt, options, default=None, note=None):
+        t = Table(show_header=False, box=None, padding=(0, 1))
+        t.add_column(style="bold cyan", justify="right")
+        t.add_column()
         for k, label in options:
-            console.print(f"  [bold cyan]{_rich_safe(k)}[/bold cyan]  {_rich_safe(label)}")
+            t.add_row(_rich_safe(k), _rich_safe(label))
+        console.print(Panel(t, title=f"[bold]{_rich_safe(prompt)}[/bold]",
+                            border_style="cyan", box=BOX_ROUNDED, expand=False))
         if note:
             console.print(f"[dim]{_rich_safe(note)}[/dim]")
+        console.print()
         return Prompt.ask(_rich_safe(prompt), choices=[k for k, _l in options],
                           default=default)
 
     def ask_line(self, qid, rich, plain, default=None, choices=None):
-        kw = {}
-        if default is not None:
-            kw["default"] = default
+        console.print()
+        kw = self._default_kw(default)
         if choices:
-            kw["choices"] = choices
-        answer = Prompt.ask(rich, **kw)
+            # Letters are taken in either case; each is shown once.
+            shown, seen = [], set()
+            for c in choices:
+                if c.lower() not in seen:
+                    seen.add(c.lower())
+                    shown.append(c)
+            kw["choices"] = shown
+            kw["case_sensitive"] = False
+        answer = Prompt.ask(_plain_prompt(rich), **kw)
         return (answer or "").strip()
 
     def ask_yes(self, qid, rich, plain, default=False):
-        return Confirm.ask(rich, default=default)
+        console.print()
+        return Confirm.ask(_plain_prompt(rich), default=default)
+
+    def table(self, title, columns, rows, head=None, notes=None, show_header=True,
+              markup=False):
+        t = Table(show_header=show_header, header_style="bold cyan", box=BOX_SIMPLE,
+                  padding=(0, 1))
+        for i, c in enumerate(columns):
+            t.add_column(c, style="bold cyan" if i == 0 else None,
+                         justify="right" if i == 0 else "left")
+        for r in rows:
+            t.add_row(*[str(v) if markup else _rich_safe(str(v)) for v in r])
+        parts = [_rich_safe(line) for line in head or []]
+        parts.append(t)
+        parts += [f"[dim]· {_rich_safe(line)}[/dim]" for line in notes or []]
+        console.print()
+        console.print(Panel(Group(*parts), title=f"[bold]{_rich_safe(title)}[/bold]",
+                            border_style="green", box=BOX_ROUNDED))
+
+    def actions(self, groups):
+        g = Table.grid(padding=(0, 2))
+        g.add_column(style="bold cyan")
+        g.add_column()
+        for label, keys in groups:
+            g.add_row(label, "   ".join(
+                f"[bold]\\[{_rich_safe(k)}][/bold] {_rich_safe(t)}" for k, t in keys))
+        console.print(g)
 
     @property
     def is_rich(self):
@@ -3446,6 +3576,19 @@ class ScriptedUI(UI):
 
     def panel(self, body, title="", style="yellow", plain=None):
         self.output.append(_strip_styles(body) if plain is None else plain)
+
+    def table(self, title, columns, rows, head=None, notes=None, show_header=True,
+              markup=False):
+        if markup:
+            rows = [tuple(_strip_styles(str(v)) for v in r) for r in rows]
+        if title:
+            self.output.append(f"== {title}")
+        self.output.extend(head or [])
+        self.output.extend(_plain_table_lines(columns, rows, show_header))
+        self.output.extend(f"  · {line}" for line in notes or [])
+
+    def actions(self, groups):
+        self.output.extend(_plain_action_lines(groups))
 
 
 def _choice_keys(values) -> Tuple[List[str], str]:
@@ -4300,11 +4443,16 @@ class InteractiveMenu:
                 "master whose TIFF is unchanged — nothing is re-encoded, file dates "
                 "are kept. Masters whose TIFF changed since are listed and left alone.")
         cfg = self.config.config
-        default_dir = cfg.last_input_dir or str(Path.home())
+        # The last folder used, else no default: Enter on the whole user
+        # profile would scan (and here rewrite records under) all of it.
+        default_dir = cfg.last_input_dir or ""
         folder = _strip_surrounding_quotes(
             ui.ask_text("restamp.folder", "TIFF folder (the renamed one, or above it)",
                         default_dir))
-        if not folder or not Path(folder).is_dir():
+        if not folder:
+            ui.line("No folder given — nothing done.")
+            return
+        if not Path(folder).is_dir():
             self._print_error(f"Not a folder: {folder}")
             return
         last_mode = cfg.last_output_mode if cfg.last_origin_format == 'tiff' else None
@@ -4382,9 +4530,9 @@ class InteractiveMenu:
                     "run started from here. Unset it to use one.")
             return
         ui.line(f"File: {path}")
-        ui.line("Every script run uses a change at once; the wizard's own defaults "
-                "show it from the next start of this program. Deletion, "
-                "confirmations, guards and verification stay per-run choices.")
+        ui.line("A change applies to the next run right away; the wizard shows the new "
+                "defaults the next time it starts. Deletion, confirmations, guards "
+                "and verification stay per-run choices.")
         while True:
             key = ui.choose("settings.script", "Script (0 = back)",
                             [("0", "back")] + [(str(i + 1), label) for i, (_m, label)
@@ -4507,34 +4655,39 @@ class InteractiveMenu:
             self._print_error("djxl and exiftool are required for the repair audit.")
             return
 
-        default_dir = self.config.config.last_input_dir or str(Path.home())
+        default_dir = self.config.config.last_input_dir or ""
         if self.ui.is_rich:
-            console.print("\n[bold cyan]Repair JPEG recovery (jbrd)[/bold cyan]")
+            console.print("\n[bold cyan]JPEG archives (jbrd): audit and repair[/bold cyan]")
             console.print(
-                "[dim]v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files, "
-                "which can make djxl --reconstruct_jpeg fail for sources that already "
-                "had XMP. This scans every JXL under a folder and repairs the broken "
-                "ones. It also rewrites the EXIF of JPEG->JXL files written before "
-                "v2.19.2 so IrfanView shows it (image data untouched). Every repair "
-                "works on a COPY and only replaces a file when the copy provably "
-                "rebuilds the same JPEG — the cautious route is still to run it on a "
-                "copy of the folder first.[/dim]")
+                "[dim]Checks the lossless JPEG -> JXL archives under a folder and "
+                "repairs the ones that can no longer rebuild their JPEG; it also "
+                "rewrites their EXIF so IrfanView shows it (image data untouched). "
+                "Every repair works on a COPY and only replaces a file when the copy "
+                "provably rebuilds the same JPEG — the cautious route is still to run "
+                "it on a copy of the folder first. Why: v2.0.0-v2.0.3 wrote XMP "
+                "markers that can break djxl --reconstruct_jpeg, and files before "
+                "v2.19.2 kept their EXIF where IrfanView does not look.[/dim]")
             # Explorer's "Copy as path" wraps the folder in double quotes;
             # every other wizard prompt strips them (_strip_surrounding_quotes)
             # and this one used to hand them to Path().is_dir() raw — "Folder
             # not found" for a folder that exists.
         else:
-            print("\n--- Repair JPEG recovery (jbrd) ---")
-            print("v2.0.0-v2.0.3 wrote XMP markers into lossless JPEG->JXL files,")
-            print("which can make djxl --reconstruct_jpeg fail for sources that")
-            print("already had XMP. It also rewrites the EXIF of JPEG->JXL files")
-            print("written before v2.19.2 so IrfanView shows it (image data untouched).")
-            print("Every repair works on a COPY and only replaces a file when the copy")
-            print("provably rebuilds the same JPEG — the cautious route is still to")
-            print("run it on a copy of the folder first.")
+            print("\n--- JPEG archives (jbrd): audit and repair ---")
+            print("Checks the lossless JPEG -> JXL archives under a folder and repairs")
+            print("the ones that can no longer rebuild their JPEG; it also rewrites")
+            print("their EXIF so IrfanView shows it (image data untouched). Every repair")
+            print("works on a COPY and only replaces a file when the copy provably")
+            print("rebuilds the same JPEG — the cautious route is still to run it on a")
+            print("copy of the folder first. Why: v2.0.0-v2.0.3 wrote XMP markers that")
+            print("can break djxl --reconstruct_jpeg; files before v2.19.2 kept their")
+            print("EXIF where IrfanView does not look.")
         folder = _strip_surrounding_quotes(self.ui.ask_line(
-            "jbrd.folder", "Folder to scan", f"Folder to scan [{default_dir}]: ",
-            default=default_dir))
+            "jbrd.folder", "Folder to scan",
+            f"Folder to scan [{default_dir}]: " if default_dir else "Folder to scan: ",
+            default=default_dir or None))
+        if not folder:
+            self.ui.line("No folder given — nothing done.")
+            return
         audit = self.ui.ask_yes("jbrd.audit", "Audit only (dry run, nothing written)?",
                                 "Audit only (dry run, nothing written)? [Y/n]: ", True)
 
@@ -4565,7 +4718,7 @@ class InteractiveMenu:
             self._print_error("djxl, exiftool and ImageMagick (magick) are required.")
             return
         policies = {"1": "auto", "2": "on", "3": "off"}
-        default_dir = self.config.config.last_input_dir or str(Path.home())
+        default_dir = self.config.config.last_input_dir or ""
         ui = self.ui
         if ui.is_rich:
             console.print("\n[bold cyan]Explorer thumbnails for existing JXLs[/bold cyan]")
@@ -4584,7 +4737,12 @@ class InteractiveMenu:
             print("It also moves the EXIF where IrfanView reads it, in files written")
             print("by v2.17.0 to v2.19.0.")
         folder = _strip_surrounding_quotes(ui.ask_line(
-            "thumbs.folder", "Folder", f"Folder [{default_dir}]: ", default=default_dir))
+            "thumbs.folder", "Folder",
+            f"Folder [{default_dir}]: " if default_dir else "Folder: ",
+            default=default_dir or None))
+        if not folder:
+            ui.line("No folder given — nothing done.")
+            return
         recursive = ui.ask_yes("thumbs.recursive", "Include subfolders?",
                                "Include subfolders? [Y/n]: ", True)
         ui.markup("[1] automatic (recommended)   [2] every file   [3] remove them",
@@ -4795,11 +4953,12 @@ class InteractiveMenu:
         }
         return wf
 
-    def _job_pick_task(self, status: Dict[str, bool]) -> Optional[str]:
+    def _job_pick_task(self, status: Dict[str, bool],
+                       title: str = "New job — what do you want to do?") -> Optional[str]:
         """'job.task': what the run does. Each task is the (source, output,
         conversion) the old Steps 1-2 picked."""
         ui = self.ui
-        ui.section("New job — what do you want to do?")
+        ui.section(title)
         keys = {}
         options = []
         for i, (tid, label, origin, dest, convs) in enumerate(TASKS, 1):
@@ -5111,10 +5270,10 @@ class InteractiveMenu:
                     adv['scan_distance'] = value
                     you('scan_distance')
                 _sd = adv.get('scan_distance') or _child_scan_distance()
+                # Unless changed here, it is the encoder's SCAN_DISTANCE.
+                frm.setdefault('scan_distance', 'script')
                 _sd_shown = ("same as Distance" if _sd == "same" else _distance_shown(_sd))
-                rows.append(("scan_distance", "Film scans",
-                             f"{_sd_shown} (scanner software, IR page, TIFF without camera EXIF)",
-                             _scan_distance))
+                rows.append(("scan_distance", "Film scans", _sd_shown, _scan_distance))
         if not (origin == 'jxl' and dest == 'tiff'):
             def _effort():
                 workflow['effort'] = int(self._ask_number("review.effort", "Effort (1-10, higher = smaller)",
@@ -5259,6 +5418,7 @@ class InteractiveMenu:
             workflow['overwrite_mode'] = key
             adv['overwrite'], adv['sync'] = (key == "1"), (key != "1")
             you('overwrite_mode')
+            you('existing')
         rows.append(("existing", "Existing outputs",
                      "overwrite all" if workflow.get('overwrite_mode') == "1" else "sync (only newer)",
                      _existing))
@@ -5280,7 +5440,7 @@ class InteractiveMenu:
                 else:
                     adv['overwrite_guard'] = False
                 you('overwrite_guard')
-            rows.append(("delete", "Delete the sources", "no ([b] back to the mode step for [D])", None))
+            rows.append(("delete", "Delete the sources", "no — to delete, go back [b] and pick [D]", None))
             rows.append(("overwrite_guard", "Overwrite guard",
                          "on" if workflow.get('overwrite_guard', True) else "off", _guard))
         if origin == 'tiff' and dest == 'jxl':
@@ -5298,8 +5458,6 @@ class InteractiveMenu:
         "Config:" line): staging, delete scope and gates, guard, options,
         expert flags, exclusions, dry run."""
         info = []
-        if workflow.get('use_ram') and workflow.get('origin_format') == 'tiff':
-            info.append("RAM: Yes")
         if workflow.get('icc_profile'):
             info.append(f"ICC: {workflow['icc_profile']}")
         if workflow.get('auto_mode_used'):
@@ -5365,33 +5523,47 @@ class InteractiveMenu:
             f"{(workflow.get('origin_format') or '?').upper()} → "
             f"{(workflow.get('dest_format') or '?').upper()}")
         while True:
-            rows = self._review_rows(workflow, status)
+            rows = _review_order(self._review_rows(workflow, status))
             frm = workflow.get('_from') or {}
-            ui.section(f"Review — {title}")
+            head = []
             if workflow.get('mode') == 99:
-                ui.line(f"Manifest  {workflow.get('manifest_path')}  "
-                        f"({len(workflow.get('manifest_entries') or [])} entries)")
+                head.append(f"Manifest  {workflow.get('manifest_path')}  "
+                            f"({len(workflow.get('manifest_entries') or [])} entries)")
             else:
-                ui.line(f"Folder    {workflow.get('input_dir')}")
-            ui.line(f"Mode      {workflow.get('mode')} — "
-                    f"{self._MODE_NAMES.get(workflow.get('mode'), '?')}")
+                _folder = str(workflow.get('input_dir'))
+                # A long path gets its own line instead of wrapping the label.
+                head += (["Folder", f"  {_folder}"] if len(_folder) > 60
+                         else [f"Folder    {_folder}"])
+            head.append(f"Mode      {workflow.get('mode')} — "
+                        f"{self._MODE_NAMES.get(workflow.get('mode'), '?')}")
             if (workflow.get('origin_format'), workflow.get('dest_format')) == ('tiff', 'jxl'):
                 _mp = self._multipage_summary(workflow)
                 if _mp:
-                    ui.line(f"Multi-page TIFFs: {_mp[0]}")
+                    head.append(f"Multi-page TIFFs: {_mp[0]}")
             numbered = {}
+            table_rows = []
             for key, label, value, editor in rows:
                 n = str(len(numbered) + 1)
                 numbered[n] = (key, label, editor)
-                src = frm.get(key, "")
-                tag = "" if editor else "   (fixed)"
-                ui.line(f"  [{n:>2}] {label:24} {value:34} {src}{tag}")
-            for line in self._summary_info(workflow):
-                ui.line(f"  · {line}")
-            ui.line("[number] change  [a] all options  [/text] search  [c] command line  "
-                    "[x] expert flags")
-            ui.line("[d] dry run  [r] RUN  [s] save as preset  [b] back  [q] cancel")
-            answer = ui.ask_text("review.action", "Review", "").strip()
+                src = frm.get(key) or "default"
+                table_rows.append((n, label, value, src if editor else "fixed"))
+            notes = list(self._summary_info(workflow))
+            if any(r[0] == "scan_distance" for r in rows):
+                notes.insert(0, "Film scans: scanner software, an IR page, or a TIFF "
+                                "without camera EXIF.")
+            ui.table(f"Review — {title}", ["#", "Option", "Value", "From"], table_rows,
+                     head=head, notes=notes)
+            last = len(numbered)
+            ui.actions([
+                ("Change", [(f"1-{last}", "edit an option listed above"),
+                            ("a", "show all options"), ("/text", "search options")]),
+                ("See", [("c", "command line"), ("x", "expert flags")]),
+                ("Run", [("r", "RUN"), ("d", "dry run first"), ("s", "save as preset")]),
+                ("Leave", [("b", "back"), ("q", "cancel")]),
+            ])
+            answer = ui.ask_text("review.action",
+                                 "Review — type a key, [r] to run "
+                                 "(Enter shows this screen again)", "").strip()
             low = answer.lower()
             if low in ("", "?"):
                 continue
@@ -5513,7 +5685,9 @@ class InteractiveMenu:
         manifest), the mode with its [A]/[M]/[D], the quality, then the
         review. [b] on the review goes back to the mode step."""
         import copy
-        tid = self._job_pick_task(status)
+        tid = self._job_pick_task(
+            status, "Folder list (manifest) — which task do its rows run?" if manifest
+            else "New job — what do you want to do?")
         if not tid:
             return False
         _tid, _label, origin, dest, convs = _TASK_BY_ID[tid]
@@ -5547,8 +5721,7 @@ class InteractiveMenu:
         exclude ('job.exclude')."""
         ui = self.ui
         default_dir = self.config.config.last_input_dir or os.getcwd()
-        ui.section("Folder")
-        input_dir = ui.ask_text("job.folder", "Directory containing files", default_dir)
+        input_dir = ui.ask_text("job.folder", "Folder with the files", default_dir)
         path = Path(_strip_surrounding_quotes(input_dir or default_dir)).expanduser().resolve()
         if not path.exists() or not path.is_dir():
             self._print_error(f"Invalid directory: {path}")
@@ -6365,29 +6538,25 @@ class InteractiveMenu:
             ("6", f"Marker [green]{export_marker}[/green] (full)",
              f"ONLY files INSIDE folders matching '{export_marker}' — ignores everything outside"),
             ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
-             f"Like mode 6, but only one subfolder of the export marker (asked in Step 5; empty = all = mode 6)"),
+             f"Like mode 6, but only one subfolder of the export marker (asked next; empty = all = mode 6)"),
             ("8", "In-place recursive",
              m8_desc)
         ]
 
         ui = self.ui
-        ui.markup("\n[bold cyan]Step 4: Organization Mode[/bold cyan]",
-                  "\n--- Step 4: Organization Mode ---")
-        ui.markup("[dim]The export marker (e.g. '_EXPORT') is configurable in Settings (menu 9)[/dim]")
-        ui.markup("[dim]Other folder names (e.g. 'converted_jxl', 'JXL_16bits', '16B_TIFF') are "
-                  "the scripts' settings: Script settings (menu S)[/dim]")
-        ui.panel("[bold yellow][A] Auto Mode[/bold yellow] — analyze folder structure and "
-                 "recommend best mode", style="yellow",
-                 plain="[A] Auto Mode — analyze folder and recommend best mode\n")
-        for key, name, desc in modes:
-            # [D] below is the DELETING entry and carries the red, or the
-            # warning colour would point at the wrong option. But deletion is
-            # not the only way this menu can lose a file: for a JXL->JXL run,
-            # modes 0 and 8 OVERWRITE the source in place (their descriptions
-            # carry the red "NOT kept" warning) — the entries themselves stay
-            # green so [D] remains the one red option.
-            ui.markup(f"[{key}] [bold green]{name}[/bold green]")
-            ui.markup(f"    {desc}\n")
+        # [D] below is the DELETING entry and carries the red, or the warning
+        # colour would point at the wrong option. But deletion is not the only
+        # way this menu can lose a file: for a JXL->JXL run, modes 0 and 8
+        # OVERWRITE the source in place (their descriptions carry the red "NOT
+        # kept" warning) — the entries themselves stay green so [D] remains
+        # the one red option.
+        ui.table("Where the outputs go", ["Key", "Mode", "What it does"],
+                 [(key, f"[bold green]{name}[/bold green]", desc.replace("\n", " "))
+                  for key, name, desc in modes],
+                 head=["[A] Auto Mode — analyses the folder and recommends a mode"],
+                 notes=["The export marker (e.g. '_EXPORT'): Settings, menu 9 → 1. Other "
+                        "folder names ('converted_jxl', '16B_TIFF'…): Settings, menu 9 → 2."],
+                 markup=True)
         ui.markup("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
         ui.markup(self._delete_entry_line(), self._delete_entry_line(plain=True))
         ui.markup("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
@@ -6420,13 +6589,8 @@ class InteractiveMenu:
 
         workflow['mode'] = int(choice)
 
-        note_lines = [
-            "[bold yellow]Configurable items:[/bold yellow] the export marker (e.g. '_EXPORT') can be customized",
-            "in [bold cyan]Settings (menu 9)[/bold cyan]. Folder names like 'converted_jxl'",
-            "are the scripts' own settings: [bold cyan]Script settings (menu S)[/bold cyan].",
-        ]
-        self.ui.panel("\n".join(note_lines), title="[yellow]Tip[/yellow]",
-                      style="yellow")
+        # (Where the marker and the folder names are set is the note under
+        # the mode table; v2.23.0 no longer repeats it in a panel here.)
 
         return True
 
@@ -7031,7 +7195,7 @@ class InteractiveMenu:
 
             ("7", f"Marker {export_marker} (specific subfolder)",
              f"Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
-             f"The subfolder name is asked in Step 5 (empty = all subfolders = same as mode 6).\n"
+             f"The subfolder name is asked next (empty = all subfolders = same as mode 6).\n"
              f"Files in other subfolders within export folders are ignored.\n"
              f"Use when you keep different color-space variants in separate subfolders."),
 
@@ -7080,7 +7244,7 @@ class InteractiveMenu:
         return True
 
     def _wizard_mode_specific_config(self, workflow: Dict) -> bool:
-        """Step 5: Mode-specific configuration"""
+        """Mode settings: Mode-specific configuration"""
         mode = workflow['mode']
         # Preserve anything the Auto Mode already seeded (export_subfolder
         # detection for mode 7) — a fresh dict would silently drop it and the
@@ -7092,18 +7256,18 @@ class InteractiveMenu:
         # Manifest mode (99) doesn't need mode-specific config
         if mode == 99:
             if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]Step 5: Manifest Mode[/bold cyan]")
+                console.print(f"\n[bold cyan]Mode settings: Manifest Mode[/bold cyan]")
                 console.print(f"[dim]Running {len(workflow.get('manifest_entries', []))} entries from manifest[/dim]")
             else:
-                print(f"\n--- Step 5: Manifest Mode ---")
+                print(f"\n--- Mode settings: Manifest Mode ---")
             workflow['mode_config'] = mode_config
             return True
 
         if mode in [6, 7]:
             current = self.config.config.export_marker
             ui = self.ui
-            ui.markup("\n[bold cyan]Step 5: Marker Configuration[/bold cyan]",
-                      "\n--- Step 5: Marker Configuration ---")
+            ui.markup("\n[bold cyan]Mode settings: Marker Configuration[/bold cyan]",
+                      "\n--- Mode settings: Marker Configuration ---")
             ui.markup(f"Current: [green]{_rich_safe(current)}[/green]", f"Current: {current}")
             new_marker = ui.ask_line("mode.cfg.marker", "EXPORT marker",
                                      f"EXPORT marker [{current}]: ", default=current)
@@ -7161,8 +7325,8 @@ class InteractiveMenu:
 
         elif mode == 2:
             default_out = Path(workflow['input_dir']).parent / "output"
-            self.ui.markup("\n[bold cyan]Step 5: Flat Folder[/bold cyan]",
-                           "\n--- Step 5: Flat Folder ---")
+            self.ui.markup("\n[bold cyan]Mode settings: Flat Folder[/bold cyan]",
+                           "\n--- Mode settings: Flat Folder ---")
             output_dir = self.ui.ask_line("mode.cfg.output_dir", "Output directory",
                                           f"Destination [{default_out}]: ",
                                           default=str(default_out))
@@ -7170,26 +7334,26 @@ class InteractiveMenu:
 
         elif mode == 1:
             folder_name = _dest_folder_names(origin, dest)[0]
-            self.ui.markup(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]",
-                           f"\n--- Step 5: Subfolder Name ---")
+            self.ui.markup(f"\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
+                           f"\n--- Mode settings: Subfolder Name ---")
             self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
                            f"Will create: '{folder_name}' in each source folder")
 
         elif mode == 3:
             folder_name = _dest_folder_names(origin, dest)[1]
-            self.ui.markup(f"\n[bold cyan]Step 5: Subfolder Name[/bold cyan]",
-                           f"\n--- Step 5: Subfolder Name ---")
+            self.ui.markup(f"\n[bold cyan]Mode settings: Subfolder Name[/bold cyan]",
+                           f"\n--- Mode settings: Subfolder Name ---")
             self.ui.markup(f"Will create: [green]'{_rich_safe(folder_name)}'[/green] in each source folder",
                            f"Will create: '{folder_name}' in each source folder")
 
         elif mode in [4, 5]:
-            self.ui.markup("\n[bold cyan]Step 5: Rename Configuration[/bold cyan]",
-                           "\n--- Step 5: Rename Configuration ---")
+            self.ui.markup("\n[bold cyan]Mode settings: Rename Configuration[/bold cyan]",
+                           "\n--- Mode settings: Rename Configuration ---")
             self.ui.markup(f"Example: folder_{origin} → [green]folder_{dest}[/green]")
 
         else:
-            self.ui.markup("\n[bold cyan]Step 5: Confirmation[/bold cyan]",
-                           "\n--- Step 5: Confirmation ---")
+            self.ui.markup("\n[bold cyan]Mode settings: Confirmation[/bold cyan]",
+                           "\n--- Mode settings: Confirmation ---")
             self.ui.markup(f"Mode {mode} - OK")
 
         workflow['mode_config'] = mode_config
@@ -9524,7 +9688,7 @@ class InteractiveMenu:
                 else:
                     console.print("\n[dim]No presets saved yet.[/dim]")
                 console.print("[bold]\\[number][/bold] run  "
-                              "[bold]\\[S][/bold] save last workflow as preset  "
+                              "[bold]\\[s][/bold] save the last job as a preset  "
                               "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
             else:
                 ui.markup(None, "\n--- Presets ---")
@@ -9534,7 +9698,7 @@ class InteractiveMenu:
                         ui.markup(None, f"     {self._describe_session(_preset_session(presets[name]))}")
                 else:
                     ui.markup(None, "  (none saved yet)")
-                ui.markup(None, "[number] run | [S] save last workflow as preset | [D] delete | [B] back")
+                ui.markup(None, "[number] run | [s] save the last job as a preset | [d] delete | [b] back")
             choice = ui.ask_line("presets.menu", "Presets", "Presets: ")
 
             upper = choice.upper()
@@ -10304,10 +10468,10 @@ def _main():
 
         elif choice == "9":
             sub = menu.ui.choose("menu.settings", "Settings",
-                                 [("1", "wrapper defaults (workers, staging, marker, distance...)"),
-                                  ("2", "script settings (the four scripts' own defaults)"),
-                                  ("3", "reset all settings"),
-                                  ("4", "move the settings file"), ("0", "back")], "0")
+                                 [("1", "Wrapper defaults (workers, staging, marker, distance…)"),
+                                  ("2", "Script settings (the four scripts' own defaults)"),
+                                  ("3", "Reset all settings"),
+                                  ("4", "Move the settings file"), ("0", "Back")], "0")
             if sub == "1":
                 menu.edit_settings()
             elif sub == "2":

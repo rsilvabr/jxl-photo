@@ -175,11 +175,12 @@ def test_b_goes_back_to_the_mode_step(menu, launched, monkeypatch, tmp_path):
 
 
 def test_rows_reach_the_command_line(menu, launched, monkeypatch, tmp_path):
-    # rows of an archive job: 1 RAM, 2 workers, 3 distance, 4 film scans, 5 effort, 6 staging, ...
+    # rows of an archive job (v2.23.0 order): 1 distance, 2 film scans, 3 effort,
+    # 4 existing outputs, 5 delete, 6 workers, 7 staging, 8 RAM, ...
     stg = tmp_path / "stg [x] 5%"
     runs = _new_job_argv(
         menu, launched, monkeypatch, tmp_path, "archive_tiff", "1",
-        review=("2", "3", "5", "6", "r"),
+        review=("6", "1", "3", "7", "r"),
         extra_answers={"review.workers": "3", "review.distance": "0.05",
                        "review.effort": "9", "review.staging": str(stg)})
     cmd = runs[-1]
@@ -192,7 +193,7 @@ def test_rows_reach_the_command_line(menu, launched, monkeypatch, tmp_path):
 def test_the_guard_row_turns_the_guard_off(menu, launched, monkeypatch, tmp_path):
     menu._ui = None
     wf = _review_workflow(menu, tmp_path, "export_png")
-    rows = menu._review_rows(wf, STATUS)
+    rows = wp._review_order(menu._review_rows(wf, STATUS))
     n = str([r[0] for r in rows].index("overwrite_guard") + 1)
     menu._ui = wp.ScriptedUI({"review.action": [n, "r"], "review.overwrite_guard": False})
     assert menu._review_screen(wf, STATUS) == "ran"
@@ -260,7 +261,7 @@ def test_x_refuses_an_expert_flag_the_script_does_not_know(menu, launched, tmp_p
 
 def test_the_conversion_row_switches_export_jpeg_to_auto(menu, launched, tmp_path):
     wf = _review_workflow(menu, tmp_path, "export_jpeg")
-    rows = menu._review_rows(wf, STATUS)
+    rows = wp._review_order(menu._review_rows(wf, STATUS))
     n = str([r[0] for r in rows].index("conversion") + 1)
     menu._ui = wp.ScriptedUI({"review.action": [n, "r"], "review.conversion": "2"})
     assert menu._review_screen(wf, STATUS) == "ran"
@@ -312,10 +313,10 @@ def test_the_film_scan_row(menu, launched, tmp_path):
     """v2.22.2: film scans' own distance sits under the run's, editable."""
     menu._ui = None
     wf = _review_workflow(menu, tmp_path, "archive_tiff")
-    rows = menu._review_rows(wf, STATUS)
+    rows = wp._review_order(menu._review_rows(wf, STATUS))
     ids = [r[0] for r in rows]
     i = ids.index("scan_distance")
-    assert ids[i - 1] == "distance" and rows[i][2].startswith("0 — lossless")
+    assert ids[i - 1] == "distance" and rows[i][2] == "0 — lossless"
     assert " — " in rows[i - 1][2]                       # the distance is named too
     menu._ui = wp.ScriptedUI({"review.action": [str(i + 1), "r"],
                               "review.scan_distance": "0.05"})

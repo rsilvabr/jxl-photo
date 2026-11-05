@@ -397,4 +397,5 @@ def test_the_wizard_no_longer_sends_users_into_the_scripts():
     src = (SCRIPTS / "jxl_photo.py").read_text(encoding="utf-8")
     assert "edit the scripts directly" not in src
     assert "require editing the scripts directly" not in src
-    assert src.count("Script settings (menu S)") >= 2
+    # v2.23.0: the scripts' settings are named by their menu path (9 → 2).
+    assert src.count("menu 9 → 2") >= 1

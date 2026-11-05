@@ -270,7 +270,7 @@ def test_summary_lists_the_options_and_O_opens_the_screen(tmp_path, monkeypatch,
     assert menu._review_screen(wf, STATUS) == "quit"
     assert wf["extra_options"] == {"buffering": 1, "scan_scope": "raw"}
     out = "\n".join(ui.output)
-    assert "[a] all options" in out
+    assert "[a] show all options" in out
     assert "Options: --buffering 1, --scan-scope raw" in out, out
 
 
