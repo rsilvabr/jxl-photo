@@ -69,13 +69,18 @@ class PickUI(wp.ScriptedUI):
         super().section(title)
         self.screens.append(len(self.output))
 
+    def table(self, title, *a, **k):
+        # v2.23.0: the options screen is a table (# / Option / Value / Flag).
+        self.screens.append(len(self.output))
+        super().table(title, *a, **k)
+
     def _rows(self):
         start = self.screens[-1] if self.screens else 0
         rows = {}
         for line in self.output[start:]:
-            m = re.match(r"\s*\[\s*(\d+)\] (.*?)(?: \(!\))?: .*   (--[\w-]+)", line)
+            m = re.match(r"\s*(\d+)\s{2,}(.*?)(?: \(!\))?\s{2,}.*?\s{2,}(--[\w-]+)", line)
             if m:
-                rows[(m.group(2), m.group(3))] = m.group(1)
+                rows[(m.group(2).strip(), m.group(3))] = m.group(1)
         return rows
 
     def ask_text(self, qid, prompt, default=""):
@@ -232,8 +237,8 @@ def test_wizard_entries_are_shown_but_not_changed_here(tmp_path, monkeypatch):
     menu = _menu(tmp_path, monkeypatch, ui)
     menu._all_options_screen(wf)
     assert wf["advanced_options"] == {"overwrite": False}
-    assert any("set in the wizard" in line for line in ui.output)
-    assert any("is set in the wizard's own steps" in line for line in ui.output)
+    assert any("(in the review)" in line for line in ui.output)
+    assert any("is changed in the review" in line for line in ui.output)
 
 
 def test_filter_narrows_the_screen(tmp_path, monkeypatch):
@@ -241,8 +246,8 @@ def test_filter_narrows_the_screen(tmp_path, monkeypatch):
     ui = PickUI(["/buffering"])
     menu = _menu(tmp_path, monkeypatch, ui)
     menu._all_options_screen(wf)
-    last = ui.output[ui.screens[-1] - 1:]
-    rows = [line for line in last if re.match(r"\s*\[\s*\d+\]", line)]
+    last = ui.output[ui.screens[-1]:]
+    rows = [line for line in last if re.match(r"\s*\d+\s{2,}", line)]
     assert rows and all("buffering" in r.lower() for r in rows), rows
 
 

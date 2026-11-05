@@ -1703,16 +1703,9 @@ class FolderAnalyzer:
         # folders no script creates (same class as bugs #161/#169, which fixed
         # the wizard tables and missed the analyzer).
         _sub1, _sub3 = _dest_folder_names(self.origin, self.dest)
-        mode_names = {
-            0: "In-place (same folder)",
-            1: f"Subfolder ({_sub1})",
-            2: "Flat (all to one folder)",
-            3: f"Recursive subfolders ({_sub3})",
-            4: "Folder rename (suffix swap)",
-            5: "Sibling folder",
-            6: f"Marker export (full)",
-            7: f"Marker export (specific subfolder)",
-        }
+        mode_names = {m: _mode_title(m, self.export_marker) for m in range(9)}
+        mode_names[1] += f" ({_sub1})"
+        mode_names[3] += f" ({_sub3})"
 
         lines.append(f"\n{'='*60}")
         if analysis['recommended_mode'] is not None:
@@ -2527,6 +2520,60 @@ def _child_scan_distance() -> str:
     return "same" if value is None else f"{float(value):g}"
 
 
+def _mode_title(mode, marker: str = "_EXPORT") -> str:
+    """The one name of each mode, on every screen (the mode table, the review,
+    Auto Mode, the [D] layouts, the detailed view): there were five lists of
+    names, and mode 6 was "Marker _EXPORT (full)", "Marker export (full)",
+    "Export (full)" and "below the export marker" depending on the screen."""
+    try:
+        mode = int(mode)
+    except (TypeError, ValueError):
+        return "?"
+    return {
+        0: "In-place",
+        1: "Subfolder",
+        2: "Flat → one output folder",
+        3: "Recursive subfolders",
+        4: "Folder rename (suffix swap)",
+        5: "Sibling folder",
+        6: f"Marker {marker} (full)",
+        7: f"Marker {marker} (one subfolder)",
+        8: "In-place recursive",
+        99: "Manifest (each row its own mode)",
+    }.get(mode, f"Mode {mode}")
+
+
+def _setting_shown(value) -> str:
+    """A script setting as a person reads it: no JSON quotes, none for null,
+    a list as comma-separated words."""
+    if value is None:
+        return "(none)"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value) or "(empty list)"
+    if value == "":
+        return "(empty)"
+    return str(value)
+
+
+def _option_shown(text) -> str:
+    """The options screen's values in the review's words."""
+    return {"True": "yes", "False": "no", "None": "—"}.get(str(text), str(text))
+
+
+def _task_label(origin, dest, conv=None) -> str:
+    """The New job task a stored run belongs to ("Archive TIFFs as JXL
+    masters"), else its direction ("TIFF → JXL")."""
+    for _tid, label, o, d, convs in TASKS:
+        if o == origin and d == dest and (not conv or conv in convs):
+            return label
+    for _tid, label, o, d, _convs in TASKS:
+        if o == origin and d == dest:
+            return label
+    return f"{(origin or '?').upper()} → {(dest or '?').upper()}"
+
+
 # The distances the "Archive TIFFs" quality step offers, with their names.
 # 0.05 is the floor of cjxl 0.12: every lossy distance below it gives the
 # same file (the encoder's _MIN_EFFECTIVE_DISTANCE).
@@ -2582,7 +2629,8 @@ def _distance_shown(value) -> str:
 _REVIEW_ROW_ORDER = (
     "conversion", "distance", "scan_distance", "quality", "effort", "derivative",
     "output_icc", "icc_profile", "shaping", "bit_depth", "compression", "add_preview",
-    "decode_mode", "existing", "delete", "workers", "staging", "use_ram",
+    "decode_mode", "existing", "on_downgrade", "on_regeneration", "on_scan",
+    "delete", "workers", "staging", "use_ram",
     "overwrite_guard", "d50_patch")
 
 
@@ -3239,9 +3287,10 @@ class UI:
         raise NotImplementedError
 
     def choose(self, qid: str, prompt: str, options: List[Tuple[str, str]],
-               default: Optional[str] = None, note: Optional[str] = None) -> str:
+               default: Optional[str] = None, note: Optional[str] = None,
+               title: Optional[str] = None) -> str:
         """One key of `options` [(key, label)]; `note` is printed under the
-        list, before the prompt."""
+        list, before the prompt; `title` heads the list (else the prompt)."""
         raise NotImplementedError
 
     # The wizard's older questions keep their exact wording in each renderer
@@ -3347,8 +3396,10 @@ class PlainUI(UI):
         answer = input(f"{_plain_prompt(prompt)} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
         return default if not answer else answer.startswith('y')
 
-    def choose(self, qid, prompt, options, default=None, note=None):
+    def choose(self, qid, prompt, options, default=None, note=None, title=None):
         keys = [k for k, _l in options]
+        if title:
+            print(f"\n--- {title} ---")
         for k, label in options:
             print(f"  [{k}] {label}")
         if note:
@@ -3437,13 +3488,13 @@ class RichUI(UI):
         console.print()
         return Confirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
 
-    def choose(self, qid, prompt, options, default=None, note=None):
+    def choose(self, qid, prompt, options, default=None, note=None, title=None):
         t = Table(show_header=False, box=None, padding=(0, 1))
         t.add_column(style="bold cyan", justify="right")
         t.add_column()
         for k, label in options:
             t.add_row(_rich_safe(k), _rich_safe(label))
-        console.print(Panel(t, title=f"[bold]{_rich_safe(prompt)}[/bold]",
+        console.print(Panel(t, title=f"[bold]{_rich_safe(title or prompt)}[/bold]",
                             border_style="cyan", box=BOX_ROUNDED, expand=False))
         if note:
             console.print(f"[dim]{_rich_safe(note)}[/dim]")
@@ -3475,8 +3526,9 @@ class RichUI(UI):
         t = Table(show_header=show_header, header_style="bold cyan", box=BOX_SIMPLE,
                   padding=(0, 1))
         for i, c in enumerate(columns):
-            t.add_column(c, style="bold cyan" if i == 0 else None,
-                         justify="right" if i == 0 else "left")
+            _key = i == 0 and c in ("#", "Key")
+            t.add_column(c, style="bold cyan" if _key else ("cyan" if i == 0 else None),
+                         justify="right" if _key else "left")
         for r in rows:
             t.add_row(*[str(v) if markup else _rich_safe(str(v)) for v in r])
         parts = [_rich_safe(line) for line in head or []]
@@ -3484,7 +3536,7 @@ class RichUI(UI):
         parts += [f"[dim]· {_rich_safe(line)}[/dim]" for line in notes or []]
         console.print()
         console.print(Panel(Group(*parts), title=f"[bold]{_rich_safe(title)}[/bold]",
-                            border_style="green", box=BOX_ROUNDED))
+                            border_style="green", box=BOX_ROUNDED, expand=False))
 
     def actions(self, groups):
         g = Table.grid(padding=(0, 2))
@@ -3541,7 +3593,9 @@ class ScriptedUI(UI):
         v = self._next(qid)
         return default if v is None else bool(v)
 
-    def choose(self, qid, prompt, options, default=None, note=None):
+    def choose(self, qid, prompt, options, default=None, note=None, title=None):
+        if title:
+            self.output.append(f"== {title}")
         if note:
             self.output.append(note)
         v = self._next(qid)
@@ -4202,13 +4256,13 @@ class InteractiveMenu:
             grid.add_column()
             grid.add_row(Panel(
                 status_line,
-                title="[bold blue]JXL Tools Environment[/bold blue]",
+                title=f"[bold blue]jxl-photo {TOOLKIT_VERSION} — tools found[/bold blue]",
                 border_style="blue"
             ))
             console.print(grid)
         else:
             print("=" * 60)
-            print(f"JXL Tools Environment: {status_line}")
+            print(f"jxl-photo {TOOLKIT_VERSION} — tools found: {status_line}")
             print("=" * 60)
 
     def show_main_menu(self, has_last_session: bool) -> str:
@@ -4217,7 +4271,12 @@ class InteractiveMenu:
 
         options.append(("", "CONVERT", None))
         if has_last_session:
-            last_info = f"({self.config.config.last_output_mode or 'unknown'})"
+            _c = self.config.config
+            _what = _task_label(_c.last_origin_format, _c.last_dest_format,
+                                _c.last_conversion_type)
+            _where = Path(_c.last_input_dir).name if _c.last_input_dir else ""
+            last_info = (f": {_what}, mode {_c.last_output_mode or '?'}"
+                         + (f", {_where}" if _where else ""))
             options.append(("1", "New job: archive, restore, export, recompress...", True))
             # A manifest workflow is repeatable as long as its CSV is still
             # there — the repeat re-reads the file. Offering an entry whose CSV
@@ -4238,14 +4297,14 @@ class InteractiveMenu:
             if _last_is_manifest:
                 saved_manifest = self.config.config.last_manifest_path
                 if saved_manifest and Path(saved_manifest).exists():
-                    options.append(("2", f"Repeat last job (manifest: {Path(saved_manifest).name})", True))
+                    options.append(("2", f"Repeat last job: folder list (manifest: {Path(saved_manifest).name})", True))
                 else:
-                    options.append(("2", "Repeat last job [manifest CSV no longer available]", False))
+                    options.append(("2", "Repeat last job (its folder list CSV is gone)", False))
             else:
-                options.append(("2", f"Repeat last job {last_info}", True))
+                options.append(("2", f"Repeat last job{last_info}", True))
         else:
             options.append(("1", "New job: archive, restore, export, recompress...", True))
-            options.append(("2", "Repeat last job (none saved)", False))
+            options.append(("2", "Repeat last job", False))
 
         preset_count = len(self.config.config.presets or {})
         preset_label = (f"Presets ({preset_count} saved)" if preset_count
@@ -4350,24 +4409,29 @@ class InteractiveMenu:
                 if flt and flt not in f"{o.label} {o.flag} {o.help}".lower():
                     continue
                 rows.append(o)
-            ui.section(f"All options — {origin.upper()} -> {dest.upper()}"
-                       + (f" (filter: {flt})" if flt else ""))
             numbered = {}
+            table_rows = []
             for gid, title in GROUPS:
                 mine = [o for o in rows if o.group == gid]
                 if not mine:
                     continue
-                ui.line(title)
+                table_rows.append(("", f"[bold]{_rich_safe(title)}[/bold]", "", ""))
                 for o in mine:
                     n = str(len(numbered) + 1)
                     numbered[n] = o
-                    tag = "" if _screen_editable(o) else "  (set in the wizard)"
-                    mark = " (!)" if o.danger else ""
-                    ui.line(f"  [{n:>2}] {o.label}{mark}: {_display_value(o, ctx)}"
-                            f"   {o.flag}{tag}")
+                    tag = "" if _screen_editable(o) else " (in the review)"
+                    mark = " [red](!)[/red]" if o.danger else ""
+                    table_rows.append((n, f"{_rich_safe(o.label)}{mark}",
+                                       _rich_safe(_option_shown(_display_value(o, ctx))),
+                                       f"[dim]{_rich_safe(o.flag + tag)}[/dim]"))
+            ui.table(f"All options — {origin.upper()} → {dest.upper()}"
+                     + (f" (filter: {flt})" if flt else ""),
+                     ["#", "Option", "Value", "Flag"], table_rows,
+                     notes=["(!) relaxes a safety check: it asks before turning on."],
+                     markup=True)
             answer = ui.ask_text("opt.screen", "Number to change, /text to filter, "
-                                 "Enter to go back", "").strip()
-            if not answer:
+                                 "Enter or 0 to go back", "").strip()
+            if not answer or answer.lower() in ("0", "b"):
                 return
             if answer.startswith("/"):
                 flt = answer[1:].strip().lower()
@@ -4377,7 +4441,7 @@ class InteractiveMenu:
                 ui.warn(f"No option {answer!r}.")
                 continue
             if not _screen_editable(o):
-                ui.warn(f"'{o.label}' is set in the wizard's own steps.")
+                ui.warn(f"'{o.label}' is changed in the review (its own row) or the mode step.")
                 continue
             before = _opt_value(o, ctx)
             new = self._ask_option_value(o, before)
@@ -4458,15 +4522,15 @@ class InteractiveMenu:
         last_mode = cfg.last_output_mode if cfg.last_origin_format == 'tiff' else None
         mode = ui.choose("restamp.mode", "Mode the masters were written with",
                          [(str(m), name) for m, name in (
-                             (0, "next to the TIFFs, this folder only (or an output folder)"),
-                             (1, "a subfolder next to the TIFFs, this folder only"),
-                             (2, "one flat output folder"),
-                             (3, "a subfolder inside each TIFF folder"),
-                             (4, "a renamed copy of each TIFF folder"),
-                             (5, "a sibling folder of each TIFF folder"),
-                             (6, "below the export marker"),
-                             (7, "below the export marker, one subfolder"),
-                             (8, "next to the TIFFs, every subfolder"))],
+                             (0, "Next to the TIFFs, this folder only (or an output folder)"),
+                             (1, "A subfolder next to the TIFFs, this folder only"),
+                             (2, "One flat output folder"),
+                             (3, "A subfolder inside each TIFF folder"),
+                             (4, "A renamed copy of each TIFF folder"),
+                             (5, "A sibling folder of each TIFF folder"),
+                             (6, "Below the export marker"),
+                             (7, "Below the export marker, one subfolder"),
+                             (8, "Next to the TIFFs, every subfolder"))],
                          last_mode if last_mode in [str(m) for m in range(9)] else "8")
         cmd = [sys.executable, str(script), folder]
         if mode in ("0", "2"):
@@ -4479,13 +4543,16 @@ class InteractiveMenu:
                 cfg.export_marker or ToolConfig.export_marker]
         if mode == "7":
             sub = ui.ask_text("restamp.subfolder",
-                              "Export subfolder (empty = the script setting)", "").strip()
+                              "Export subfolder (Enter = the encoder's setting: "
+                              f"{_child_setting('jxl_tiff_encoder', 'EXPORT_TIFF_SUBFOLDER', '') or 'all subfolders'})",
+                              "").strip()
             if sub:
                 cmd += ["--export-subfolder", sub]
         if mode in ("6", "7"):
             jf = ui.ask_text("restamp.jxl_folder",
-                             "Masters' folder below the marker (empty = the script "
-                             "setting)", "").strip()
+                             "Masters' folder below the marker (Enter = the encoder's "
+                             f"setting: {_child_setting('jxl_tiff_encoder', 'EXPORT_JXL_FOLDER', '16B_JXL')})",
+                             "").strip()
             if jf:
                 cmd += ["--export-jxl-folder", jf]
         cmd.append("--restamp-moved")
@@ -4534,9 +4601,10 @@ class InteractiveMenu:
                 "defaults the next time it starts. Deletion, confirmations, guards "
                 "and verification stay per-run choices.")
         while True:
-            key = ui.choose("settings.script", "Script (0 = back)",
-                            [("0", "back")] + [(str(i + 1), label) for i, (_m, label)
-                                               in enumerate(_OVERLAY_SCRIPTS)], "0")
+            key = ui.choose("settings.script", "Which script's settings",
+                            [(str(i + 1), label.replace("<->", "↔").replace("->", "→"))
+                             for i, (_m, label) in enumerate(_OVERLAY_SCRIPTS)]
+                            + [("0", "Back")], "0")
             if key == "0":
                 return
             module = _OVERLAY_SCRIPTS[int(key) - 1][0]
@@ -4565,8 +4633,8 @@ class InteractiveMenu:
                         f"the scripts ignore it meanwhile.")
                 return
             section = data.get(module) if isinstance(data.get(module), dict) else {}
-            ui.section(f"{module}" + (f" (filter: {flt})" if flt else ""))
             numbered = {}
+            table_rows = []
             for name in specs:
                 script_value, help_text = literals.get(name, (getattr(mod, name, None), ""))
                 if flt and flt not in f"{name} {help_text}".lower():
@@ -4575,14 +4643,18 @@ class InteractiveMenu:
                 numbered[n] = name
                 if name in section:
                     ok, _v = mod._overlay_value(specs[name], section[name])
-                    shown = (f"{json.dumps(section[name], ensure_ascii=False)}  (overlay"
-                             + ("" if ok else ", REFUSED by the script") + ")")
+                    shown = _setting_shown(section[name])
+                    where = "changed here" if ok else "REFUSED by the script"
                 else:
-                    shown = f"{json.dumps(_overlay_json(script_value), ensure_ascii=False)}"
-                ui.line(f"  [{n:>2}] {name} = {shown}")
+                    shown, where = _setting_shown(_overlay_json(script_value)), "script"
+                table_rows.append((n, name, shown, where))
+            _label = dict(_OVERLAY_SCRIPTS).get(module, module)
+            ui.table(f"{_label.replace('<->', '↔').replace('->', '→')} — its settings"
+                     + (f" (filter: {flt})" if flt else ""),
+                     ["#", "Setting", "Value", "From"], table_rows)
             answer = ui.ask_text("settings.pick", "Number to change, /text to filter, "
-                                 "Enter to go back", "").strip()
-            if not answer:
+                                 "Enter or 0 to go back", "").strip()
+            if not answer or answer.lower() in ("0", "b"):
                 return
             if answer.startswith("/"):
                 flt = answer[1:].strip().lower()
@@ -4745,13 +4817,13 @@ class InteractiveMenu:
             return
         recursive = ui.ask_yes("thumbs.recursive", "Include subfolders?",
                                "Include subfolders? [Y/n]: ", True)
-        ui.markup("[1] automatic (recommended)   [2] every file   [3] remove them",
-                  "[1] automatic (recommended)  [2] every file  [3] remove them")
-        # A typo in the plain prompt keeps "automatic" (Rich asks again).
-        policy = policies.get(ui.ask_line("thumbs.policy", "Which files", "Which files [1]: ",
-                                          default="1", choices=["1", "2", "3"]), "auto")
-        dry = ui.ask_yes("thumbs.dry", "Dry run (only list what would change)?",
-                         "Dry run (only list what would change)? [y/N]: ", False)
+        policy = policies.get(ui.choose(
+            "thumbs.policy", "Which files",
+            [("1", "automatic (recommended): lossless files; every file when jxl-thumb "
+                   "is installed"),
+             ("2", "every file"), ("3", "remove them")], "1"), "auto")
+        dry = ui.ask_yes("thumbs.dry", "Dry run first (only list what would change)?",
+                         "Dry run first (only list what would change)? [y/N]: ", False)
 
         if not Path(folder).is_dir():
             self._print_error(f"Folder not found: {folder}")
@@ -4799,20 +4871,26 @@ class InteractiveMenu:
         # current value right above its question.
         _shown_distance = _effective(_sane_distance(current.default_distance),
                                      current.last_distance)
-        ui.markup("[bold]Current Settings:[/bold]", "\n--- Edit Settings ---")
-        for _line in (
-                f"Staging: {_rich_safe(current.staging_dir or 'system default')}",
-                f"Workers: {_effective(current.default_workers, current.last_workers)}",
-                f"Quality: {_effective(current.default_quality, current.last_quality)}",
-                f"Effort: {_effective(current.default_effort, current.last_effort)}",
-                f"Distance (TIFF->JXL): {_shown_distance}",
-                f"Confirm deletes: {current.confirm_delete}",
-                f"Export marker: {_rich_safe(current.export_marker)}"):
-            ui.markup(_line, _SILENT)
+        if ui.is_rich:
+            _yn = lambda v: "yes" if v else "no"
+            ui.table("Wizard defaults", ["Setting", "Now"], [
+                ("Staging folder", current.staging_dir or "system default"),
+                ("Workers", _effective(current.default_workers, current.last_workers)),
+                ("JPEG quality", _effective(current.default_quality, current.last_quality)),
+                ("Effort", _effective(current.default_effort, current.last_effort)),
+                ("Distance for TIFF → JXL", _shown_distance),
+                ("Confirm deletes", _yn(current.confirm_delete)),
+                ("Export marker", current.export_marker),
+                ("Recommend jxl-thumb", _yn(current.show_thumbnail_tip)),
+                ("Check for new releases", _yn(current.check_for_updates)),
+            ], notes=["Enter keeps a value. These are the wizard's own defaults; the "
+                      "scripts' settings are under Settings → 2."])
+        else:
+            ui.markup(None, "\n--- Edit Settings ---")
 
         ui.markup(None, f"Current staging: {current.staging_dir or 'system default'}")
         new_staging = ui.ask_line(
-            "settings.staging", "Staging dir (empty=keep current, 'none'=system default)",
+            "settings.staging", "Staging folder (Enter = keep, 'none' = system default)",
             "New staging (empty=keep, 'none'=system default): ",
             default=current.staging_dir or "")
 
@@ -4823,7 +4901,7 @@ class InteractiveMenu:
 
         ui.markup(None, f"Current quality: {_effective(current.default_quality, current.last_quality)}")
         new_quality = _int_answer(ui.ask_line(
-            "settings.quality", "Quality (1-100)", "New quality (1-100): ",
+            "settings.quality", "JPEG quality (1-100)", "New JPEG quality (1-100): ",
             default=str(current.default_quality)), current.default_quality)
 
         ui.markup(None, f"Current effort: {_effective(current.default_effort, current.last_effort)}")
@@ -4834,7 +4912,7 @@ class InteractiveMenu:
         ui.markup(None, f"Current distance (TIFF->JXL): {_shown_distance}")
         # No default in the plain prompt: Enter there is "keep current".
         new_distance = ui.ask_line(
-            "settings.distance", "Distance for TIFF->JXL (0=lossless, 0.05=finest lossy, 0.1=near-lossless)",
+            "settings.distance", "Distance for TIFF → JXL (0 = lossless, 0.05 = finest lossy, 0.1 = near-lossless)",
             "New distance (0=lossless, 0.05=finest lossy, 0.1=near-lossless): ",
             default=(f"{_sane_distance(current.default_distance):g}" if ui.is_rich else None))
 
@@ -4958,7 +5036,6 @@ class InteractiveMenu:
         """'job.task': what the run does. Each task is the (source, output,
         conversion) the old Steps 1-2 picked."""
         ui = self.ui
-        ui.section(title)
         keys = {}
         options = []
         for i, (tid, label, origin, dest, convs) in enumerate(TASKS, 1):
@@ -4968,7 +5045,7 @@ class InteractiveMenu:
             keys[str(i)] = (tid, why)
         options.append(("0", "back"))
         while True:
-            key = ui.choose("job.task", "Task", options, "1")
+            key = ui.choose("job.task", "Task", options, "1", title=title)
             if key == "0":
                 return None
             tid, why = keys[key]
@@ -5028,10 +5105,12 @@ class InteractiveMenu:
             except (TypeError, ValueError):
                 _differs = False
             if _differs:
-                ui.line(f"  Film scans use distance {_sd}"
-                        f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, an IR "
-                        f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
-                        f"those folders). The review's Film scans row changes it.")
+                _note = (f"Film scans use distance {_sd}"
+                         f"{' (lossless)' if float(_sd) == 0 else ''} — scanner software, an IR "
+                         f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
+                         f"those folders). The review's Film scans row changes it.")
+                ui.line()
+                ui.markup(f"[dim]  {_rich_safe(_note)}[/dim]", f"  {_note}")
         elif tid == 'derive_jxl':
             current = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
             opts = [(str(i), f"d={v:g} — {name} ({note})")
@@ -5274,7 +5353,8 @@ class InteractiveMenu:
                 frm.setdefault('scan_distance', 'script')
                 _sd_shown = ("same as Distance" if _sd == "same" else _distance_shown(_sd))
                 rows.append(("scan_distance", "Film scans", _sd_shown, _scan_distance))
-        if not (origin == 'jxl' and dest == 'tiff'):
+        # A JXL -> TIFF/JPEG/PNG decode encodes no JXL: the effort is unused.
+        if not (origin == 'jxl' and dest in ('tiff', 'jpeg', 'png')):
             def _effort():
                 workflow['effort'] = int(self._ask_number("review.effort", "Effort (1-10, higher = smaller)",
                                                           workflow['effort'], 1, 10, int))
@@ -5289,7 +5369,7 @@ class InteractiveMenu:
                     ("on_regeneration", "Recompressed before",
                      "If a file was already lossy-recompressed once (generation >= 2) and this "
                      "run would add another generation (each adds ~0.2-0.6 dB of loss)"),
-                    ("on_scan", "Film scans",
+                    ("on_scan", "Film scans (re-encode)",
                      "If a file is a film scan (a lossy re-encode loses what only a new scan "
                      "brings back)")):
                 if key == "on_scan" and not (workflow.get('distance') and float(workflow['distance']) > 0):
@@ -5522,6 +5602,7 @@ class InteractiveMenu:
         title = _TASK_BY_ID[tid][1] if tid in _TASK_BY_ID else (
             f"{(workflow.get('origin_format') or '?').upper()} → "
             f"{(workflow.get('dest_format') or '?').upper()}")
+        message = None
         while True:
             rows = _review_order(self._review_rows(workflow, status))
             frm = workflow.get('_from') or {}
@@ -5535,7 +5616,7 @@ class InteractiveMenu:
                 head += (["Folder", f"  {_folder}"] if len(_folder) > 60
                          else [f"Folder    {_folder}"])
             head.append(f"Mode      {workflow.get('mode')} — "
-                        f"{self._MODE_NAMES.get(workflow.get('mode'), '?')}")
+                        f"{_mode_title(workflow.get('mode'), (workflow.get('mode_config') or {}).get('export_marker') or getattr(getattr(getattr(self, 'config', None), 'config', None), 'export_marker', None) or ToolConfig.export_marker)}")
             if (workflow.get('origin_format'), workflow.get('dest_format')) == ('tiff', 'jxl'):
                 _mp = self._multipage_summary(workflow)
                 if _mp:
@@ -5551,6 +5632,8 @@ class InteractiveMenu:
             if any(r[0] == "scan_distance" for r in rows):
                 notes.insert(0, "Film scans: scanner software, an IR page, or a TIFF "
                                 "without camera EXIF.")
+            notes.append("From: you · last job · settings (menu 9 → 1) · script (its own "
+                         "setting) · default (the wizard's) · fixed (the mode step)")
             ui.table(f"Review — {title}", ["#", "Option", "Value", "From"], table_rows,
                      head=head, notes=notes)
             last = len(numbered)
@@ -5561,6 +5644,12 @@ class InteractiveMenu:
                 ("Run", [("r", "RUN"), ("d", "dry run first"), ("s", "save as preset")]),
                 ("Leave", [("b", "back"), ("q", "cancel")]),
             ])
+            if message:
+                # Shown under the review, where it stays on screen (printed
+                # before the redraw it scrolled away above the table).
+                ui.panel(_rich_safe(message[1]), title=message[0], style="cyan",
+                         plain=f"{message[0]}: {message[1]}")
+                message = None
             answer = ui.ask_text("review.action",
                                  "Review — type a key, [r] to run "
                                  "(Enter shows this screen again)", "").strip()
@@ -5579,10 +5668,9 @@ class InteractiveMenu:
                 continue
             if low == "c":
                 cmd = self._review_command(workflow)
-                if cmd is None:
-                    ui.line("A manifest builds one command per row; the run prints each one.")
-                else:
-                    ui.line(" ".join(_display_cmd(cmd)))
+                message = ("Command line",
+                           "A manifest builds one command per row; the run prints each one."
+                           if cmd is None else " ".join(_display_cmd(cmd)))
                 continue
             if low == "x":
                 flags = ui.ask_text("review.expert", "Expert flags (applied last; empty = none)",
@@ -5590,7 +5678,7 @@ class InteractiveMenu:
                 problem = _expert_flags_problem(workflow['origin_format'],
                                                 workflow['dest_format'], flags)
                 if problem:
-                    ui.warn(f"Not changed: {problem}.")
+                    message = ("Expert flags not changed", f"{problem}.")
                 else:
                     workflow['expert_flags'] = flags
                 continue
@@ -5742,8 +5830,8 @@ class InteractiveMenu:
             # Enter keeps the displayed default (the last run's exclusion);
             # '-'/'none' mean "no exclusion".
             _excl_raw = ui.ask_text(
-                "job.exclude", "Exclude folders? (';'-separated folder names, '-' = none; "
-                "only affects recursive modes)", _excl_default or "-")
+                "job.exclude", "Folders to skip (names separated by ';', '-' = none; "
+                "recursive modes only)", _excl_default or "-")
             _excl_raw = (_excl_raw or "").strip()
             # Staged in the workflow ONLY: persistence happens when the run
             # starts, so cancelling later must not leave this answer on disk
@@ -5779,10 +5867,11 @@ class InteractiveMenu:
 
         # Print analysis report
         report = analyzer.format_report(analysis)
-        if RICH_AVAILABLE and console:
-            console.print(report)
-        else:
-            print(report)
+        # The report's own "====" rules and title become a panel.
+        _body = [ln for ln in report.splitlines()
+                 if ln.strip() and set(ln.strip()) != {"="} and ln.strip() != "FOLDER ANALYSIS"]
+        self.ui.panel(_rich_safe("\n".join(_body)), title="[bold]Folder analysis[/bold]",
+                      style="cyan", plain="\n".join(_body))
 
         if analysis['recommended_mode'] is None:
             self._print_error("Could not analyze folder structure.")
@@ -5795,40 +5884,23 @@ class InteractiveMenu:
         mappings = analyzer.compute_folder_mappings(analysis, rec_mode)
 
         # Build recommendation options
-        mode_names = {
-            0: "In-place", 1: "Subfolder", 2: "Flat", 3: "Recursive subfolders",
-            4: "Rename (suffix)", 5: "Sibling", 6: f"Export (full)", 7: f"Export (specific subfolder)"
-        }
+        mode_names = {m: _mode_title(m, export_marker) for m in range(9)}
 
         rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
 
-        if RICH_AVAILABLE and console:
-            confidence_label = {
-                'high': '[green](high confidence)[/green]',
-                'medium': '[yellow](medium confidence)[/yellow]',
-                'low': '[dim](low confidence — verify)[/dim]'
-            }.get(confidence, '')
-
-            console.print(f"Auto Mode recommends: [bold cyan]Mode {rec_mode} — {rec_name}[/bold cyan] {confidence_label}")
-            console.print()
-
-            # Show folder preview
-            if mappings:
-                console.print("[bold]Folder preview:[/bold]")
-                for src, dst, count in mappings[:10]:
-                    rel_src = Path(src).relative_to(input_dir) if _is_relative_to(Path(src), input_dir) else Path(src)
-                    rel_dst = Path(dst).relative_to(input_dir) if _is_relative_to(Path(dst), input_dir) else Path(dst)
-                    src_display = self._truncate_path(str(rel_src))
-                    dst_display = self._truncate_path(str(rel_dst))
-                    console.print(f"  [dim]{_rich_safe(src_display)}[/dim]")
-                    console.print(f"    → [green]{_rich_safe(dst_display)}[/green] ({count} file(s))")
-                    console.print()
-                if len(mappings) > 10:
-                    console.print(f"  [dim]... and {len(mappings) - 10} more folder(s)[/dim]")
-                    console.print()
-            else:
-                console.print("[dim]No folders to process with this mode.[/dim]")
-                console.print()
+        if mappings:
+            _rows = []
+            for src, dst, count in mappings[:10]:
+                rel_src = Path(src).relative_to(input_dir) if _is_relative_to(Path(src), input_dir) else Path(src)
+                rel_dst = Path(dst).relative_to(input_dir) if _is_relative_to(Path(dst), input_dir) else Path(dst)
+                _rows.append((self._truncate_path(str(rel_src)),
+                              self._truncate_path(str(rel_dst)), str(count)))
+            self.ui.table(f"Mode {rec_mode} would write", ["From", "To", "Files"], _rows,
+                          notes=([f"… and {len(mappings) - 10} more folder(s)"]
+                                 if len(mappings) > 10 else []))
+        else:
+            self.ui.markup("[dim]No folders to process with this mode.[/dim]",
+                           "No folders to process with this mode.")
 
         # Show menu and handle choice
         return self._wizard_auto_mode_menu(workflow, analyzer, analysis, rec_mode, mode_names, mappings)
@@ -5840,13 +5912,11 @@ class InteractiveMenu:
         rec_name = mode_names.get(rec_mode, f"Mode {rec_mode}")
         
         ui = self.ui
-        ui.markup("[bold]What to do:[/bold]", "What to do:")
-        for key, rich_desc, plain_desc in (
-                ("Y", f"Use Mode {rec_mode} — {rec_name}", "Use this mode"),
-                ("P", "Generate manifest CSV (edit in Excel)", "Generate manifest CSV"),
-                ("V", "View manifest", "View manifest"),
-                ("N", "Choose mode manually", "Choose mode manually")):
-            ui.markup(f"[{key}] {rich_desc}", f"[{key}] {plain_desc}")
+        ui.table("What to do", ["Key", ""],
+                 [("Y", f"Use mode {rec_mode} — {rec_name}"),
+                  ("P", "Write a folder list (manifest CSV, editable in Excel)"),
+                  ("V", "View that folder list"),
+                  ("N", "Choose the mode myself")], show_header=False)
         # A typo in the plain prompt means Y (Rich asks again).
         choice = ui.ask_line("auto.what", "Select", "Select [Y/P/V/N]: ", default="Y",
                              choices=["Y", "P", "V", "N"]).upper()
@@ -5928,7 +5998,12 @@ class InteractiveMenu:
             if manifest_path and Path(manifest_path).exists():
                 return self._wizard_run_from_manifest(workflow)
             else:
-                self.ui.markup("[red]No manifest found![/red]", "No manifest found!")
+                self.ui.markup(
+                f"[yellow]No folder list (manifest CSV) in {_rich_safe(SCRIPT_DIR / 'manifests')}.[/yellow] "
+                "Make one with a New job → [A] Auto Mode → [P], or write it by hand "
+                "(docs/README_manifest.md).",
+                f"No folder list (manifest CSV) in {SCRIPT_DIR / 'manifests'}. Make one with a "
+                "New job -> [A] Auto Mode -> [P], or write it by hand (docs/README_manifest.md).")
                 return False
         else:
             return self._wizard_select_mode_manual(workflow)
@@ -6385,26 +6460,20 @@ class InteractiveMenu:
         _summaries = ([_row_options_summary(o) for o in row_options]
                       if row_options else None)
         _show_opts = bool(_summaries) and any(_summaries)
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[bold cyan]Manifest:[/bold cyan] {_rich_safe(manifest_path)}")
-            console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
-            table = Table(show_header=True, header_style="bold cyan")
-            table.add_column("#", justify="right", style="dim")
-            table.add_column("Source", style="red")
-            table.add_column("Destination", style="green")
-            table.add_column("Mode", style="magenta")
-            if _show_opts:
-                table.add_column("Options", style="cyan")
+        if self.ui.is_rich:
+            rows = []
             for i, (src, dst, mode) in enumerate(entries[:15], 1):
-                row = [str(i), _rich_safe(self._truncate_path(src)), _rich_safe(self._truncate_path(dst)),
-                       str(mode)]
+                row = [str(i), self._truncate_path(src), self._truncate_path(dst),
+                       "auto" if mode is None else str(mode)]
                 if _show_opts:
-                    row.append(_summaries[i - 1])
-                table.add_row(*row)
-            console.print(table)
-            if len(entries) > 15:
-                console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
-            console.print()
+                    row.append(_summaries[i - 1] or "")
+                rows.append(tuple(row))
+            self.ui.table(f"Folder list — {Path(manifest_path).name}",
+                          ["#", "Source", "Destination", "Mode"]
+                          + (["Options"] if _show_opts else []), rows,
+                          head=[f"File: {manifest_path}", f"{len(entries)} row(s)"],
+                          notes=([f"… and {len(entries) - 15} more rows"]
+                                 if len(entries) > 15 else []))
 
         else:
             print(f"\nManifest: {manifest_path}")
@@ -6417,14 +6486,19 @@ class InteractiveMenu:
             if len(entries) > 15:
                 print(f"  ... and {len(entries) - 15} more entries")
             print()
-        return self.ui.ask_yes("manifest.proceed", "Proceed with manifest?",
-                               "Proceed with manifest? [Y/n]: ", True)
+        return self.ui.ask_yes("manifest.proceed", "Run this folder list?",
+                               "Run this folder list? [Y/n]: ", True)
 
     def _wizard_run_from_manifest(self, workflow: Dict) -> bool:
         """Step 4 alternative: run the workflow from a manifest CSV."""
         manifest_path = self._pick_manifest()
         if not manifest_path or not Path(manifest_path).exists():
-            self.ui.markup("[red]No manifest found![/red]", "No manifest found!")
+            self.ui.markup(
+                f"[yellow]No folder list (manifest CSV) in {_rich_safe(SCRIPT_DIR / 'manifests')}.[/yellow] "
+                "Make one with a New job → [A] Auto Mode → [P], or write it by hand "
+                "(docs/README_manifest.md).",
+                f"No folder list (manifest CSV) in {SCRIPT_DIR / 'manifests'}. Make one with a "
+                "New job -> [A] Auto Mode -> [P], or write it by hand (docs/README_manifest.md).")
             return False
 
         row_options: List = []
@@ -6519,28 +6593,21 @@ class InteractiveMenu:
             m8_desc = ("Like mode 0, RECURSIVE: every source JXL is REPLACED in "
                        "place, all subfolders (originals [bold red]NOT kept[/bold red])")
         else:
-            m0_desc = f"{origin.upper()} and {dest.upper()} side by side in same folder"
+            m0_desc = f"{origin.upper()} and {dest.upper()} side by side in the same folder"
             m8_desc = ("JXL next to each source file, all subfolders "
                        "(originals kept — use [D] to delete)")
         modes = [
-            ("0", "In-place",
-             m0_desc),
-            ("1", "Subfolder",
-             f"Creates [green]'{m1_name}'[/green] subfolder"),
-            ("2", "Flat -> output folder",
-             f"All files from subfolders merged to single output folder (recursive)"),
-            ("3", "Recursive subfolders",
-             f"Creates [green]'{m3_name}'[/green] in each subfolder"),
-            ("4", "Folder rename (suffix swap)",
-             f"Replaces {origin.upper()} with {dest.upper()} in folder name"),
-            ("5", "Sibling folder",
-             f"Creates a sibling folder (e.g. [green]JXL_16bits[/green]) next to each source folder"),
-            ("6", f"Marker [green]{export_marker}[/green] (full)",
-             f"ONLY files INSIDE folders matching '{export_marker}' — ignores everything outside"),
-            ("7", f"Marker [green]{export_marker}[/green] (specific subfolder)",
-             f"Like mode 6, but only one subfolder of the export marker (asked next; empty = all = mode 6)"),
-            ("8", "In-place recursive",
-             m8_desc)
+            ("0", _mode_title(0), m0_desc),
+            ("1", _mode_title(1), f"Creates a [green]'{m1_name}'[/green] subfolder"),
+            ("2", _mode_title(2), "Every file from every subfolder in one folder (recursive)"),
+            ("3", _mode_title(3), f"Creates [green]'{m3_name}'[/green] in each subfolder"),
+            ("4", _mode_title(4), f"Replaces {origin.upper()} with {dest.upper()} in the folder name"),
+            ("5", _mode_title(5), "Creates a sibling folder next to each source folder"),
+            ("6", _mode_title(6, export_marker),
+             f"ONLY the files INSIDE folders matching '{export_marker}' — nothing outside"),
+            ("7", _mode_title(7, export_marker),
+             "Like mode 6, but only one subfolder of the marker (asked next; empty = all = mode 6)"),
+            ("8", _mode_title(8), m8_desc),
         ]
 
         ui = self.ui
@@ -6551,16 +6618,18 @@ class InteractiveMenu:
         # kept" warning) — the entries themselves stay green so [D] remains
         # the one red option.
         ui.table("Where the outputs go", ["Key", "Mode", "What it does"],
-                 [(key, f"[bold green]{name}[/bold green]", desc.replace("\n", " "))
-                  for key, name, desc in modes],
-                 head=["[A] Auto Mode — analyses the folder and recommends a mode"],
+                 [("A", "[bold yellow]Auto Mode[/bold yellow]",
+                   "analyses the folder and recommends a mode")]
+                 + [(key, f"[bold green]{_rich_safe(name)}[/bold green]", desc.replace("\n", " "))
+                    for key, name, desc in modes]
+                 + [("M", "[bold]Folder list[/bold]", "run a manifest CSV made before"),
+                    (self._DELETE_CHOICE, "[bold red]Convert and DELETE the originals ⚠️[/bold red]",
+                     "pick a layout above, then the sources are removed once each output "
+                     "is written and verified"),
+                    ("?", "[bold]Details[/bold]", "each mode explained, with examples")],
                  notes=["The export marker (e.g. '_EXPORT'): Settings, menu 9 → 1. Other "
                         "folder names ('converted_jxl', '16B_TIFF'…): Settings, menu 9 → 2."],
                  markup=True)
-        ui.markup("[M] [bold]Run from manifest[/bold] — execute a previously generated manifest CSV")
-        ui.markup(self._delete_entry_line(), self._delete_entry_line(plain=True))
-        ui.markup("[?] [bold yellow]See detailed mode explanation[/bold yellow]")
-        ui.line()
 
         valid_choices = [m[0] for m in modes] + ["?", "A", "M", self._DELETE_CHOICE]
         while True:
@@ -6820,9 +6889,8 @@ class InteractiveMenu:
             return self._wizard_select_mode(workflow)
 
         # --- The layout, same 0-8 as the normal path ----------------------
-        ui.markup("\n[bold cyan]Where should the converted files go?[/bold cyan]")
-        for key, name, _desc in modes:
-            ui.markup(f"  [{key}] {name}")
+        ui.table("Where should the converted files go?", ["Key", "Mode"],
+                 [(key, name) for key, name, _desc in modes])
         layouts = [m[0] for m in modes]
         layout = ""
         while layout not in layouts:
@@ -7098,22 +7166,24 @@ class InteractiveMenu:
             m0_desc = f"{origin.upper()} and {dest.upper()} side by side"
             m8_desc = "Output next to each source, all subfolders"
         modes = [
-            ("0", "In-place", m0_desc),
-            ("1", "Subfolder", f"Creates '{m1_name}' subfolder"),
-            ("2", "Flat", "All to one folder (recursive)"),
-            ("3", "Recursive", f"'{m3_name}' in each subfolder"),
-            ("4", "Rename", f"Renames folder {origin}→{dest}"),
-            ("5", "Sibling", f"Creates sibling folder next to source"),
-            ("6", f"Marker {export_marker} (full)", f"Only inside folders matching '{export_marker}'"),
-            ("7", f"Marker {export_marker} (subfolder)", f"Only one subfolder of '{export_marker}'"),
-            ("8", "In-place recursive", m8_desc),
+            ("0", _mode_title(0), m0_desc),
+            ("1", _mode_title(1), f"Creates a '{m1_name}' subfolder"),
+            ("2", _mode_title(2), "Every file in one folder (recursive)"),
+            ("3", _mode_title(3), f"'{m3_name}' in each subfolder"),
+            ("4", _mode_title(4), f"Renames the folder {origin.upper()} → {dest.upper()}"),
+            ("5", _mode_title(5), "A sibling folder next to each source folder"),
+            ("6", _mode_title(6, export_marker), f"Only inside folders matching '{export_marker}'"),
+            ("7", _mode_title(7, export_marker), f"Only one subfolder of '{export_marker}'"),
+            ("8", _mode_title(8), m8_desc),
         ]
 
         ui = self.ui
-        ui.markup("\n[bold cyan]Select Mode Manually[/bold cyan]", "\n--- Select Mode Manually ---")
-        for key, name, desc in modes:
-            ui.markup(f"[{key}] [bold green]{name}[/bold green] — {desc}")
-        ui.markup(self._delete_entry_line(), self._delete_entry_line(plain=True))
+        ui.table("Choose the mode", ["Key", "Mode", "What it does"],
+                 [(k, f"[bold green]{_rich_safe(n)}[/bold green]", d) for k, n, d in modes]
+                 + [(self._DELETE_CHOICE, "[bold red]Convert and DELETE the originals[/bold red]",
+                     "pick a layout, then the sources are removed once each output is "
+                     "written and verified")],
+                 markup=True)
         valid_choices = [m[0] for m in modes] + [self._DELETE_CHOICE]
         choice = ""
         while choice not in valid_choices:
@@ -7142,7 +7212,7 @@ class InteractiveMenu:
                 "REPLACES each source JXL with the recompressed one, in the SAME\n"
                 "folder. The original bytes cannot be recovered afterwards.\n"
                 "[bold red]Input file/folder determines output location.[/bold red]\n"
-                "Single file -> same folder; folder -> every file replaced in place.\n"
+                "Single file → same folder; folder → every file replaced in place.\n"
                 "[bold green]Non-recursive[/bold green] - subfolders are NOT processed.")
             inplace_rec_desc = (
                 "Like mode 0, RECURSIVE: walks every subfolder and REPLACES each\n"
@@ -7152,7 +7222,7 @@ class InteractiveMenu:
             inplace_desc = (
                 f"{origin.upper()} and {dest.upper()} stay side by side in the SAME folder.\n"
                 f"Input file/folder determines output location.\n"
-                f"Single file -> same folder; folder -> flat output in that folder.\n"
+                f"Single file → same folder; folder → flat output in that folder.\n"
                 f"[bold green]Non-recursive[/bold green] - subfolders are NOT processed.")
             inplace_rec_desc = (
                 "Like mode 0, but RECURSIVE: walks every subfolder and writes each output\n"
@@ -7161,45 +7231,45 @@ class InteractiveMenu:
                 "below — it is not a mode.")
 
         details = [
-            ("0", "In-place", inplace_desc),
+            ("0", _mode_title(0), inplace_desc),
 
-            ("1", "Subfolder",
+            ("1", _mode_title(1),
              f"Creates a [green]'{_dest_folder_names(origin, dest)[0]}'[/green] subfolder next to each source folder.\n"
-             f"Example: [cyan]F:/Photos/2024/[/cyan] -> [cyan]F:/Photos/2024/{_dest_folder_names(origin, dest)[0]}/[/cyan]\n"
+             f"Example: [cyan]F:/Photos/2024/[/cyan] → [cyan]F:/Photos/2024/{_dest_folder_names(origin, dest)[0]}/[/cyan]\n"
              f"Works on folder input only. Non-recursive."),
 
-            ("2", "Flat -> output folder",
+            ("2", _mode_title(2),
              f"All {origin.upper()} files from ALL subfolders are merged into a single output folder.\n"
              f"Fully recursive — every subfolder is scanned.\n"
              f"If you specify an output root, files land there.\n"
              f"Otherwise uses the input root as output root."),
 
-            ("3", "Recursive subfolders",
+            ("3", _mode_title(3),
              f"Each subfolder gets its own [green]'{_dest_folder_names(origin, dest)[1]}'[/green] subfolder.\n"
-             f"Preserves folder structure: [cyan]F:/Photos/2024/A/[/cyan] -> [cyan]F:/Photos/2024/A/{_dest_folder_names(origin, dest)[1]}/[/cyan]"),
+             f"Preserves folder structure: [cyan]F:/Photos/2024/A/[/cyan] → [cyan]F:/Photos/2024/A/{_dest_folder_names(origin, dest)[1]}/[/cyan]"),
 
-            ("4", "Folder rename (suffix swap)",
+            ("4", _mode_title(4),
              f"Renames the folder, replacing [green]{origin.upper()}[/green] with [green]{dest.upper()}[/green] in the folder name.\n"
-             f"[cyan]F:/Photos/JXL_raw/[/cyan] -> [cyan]F:/Photos/{dest.upper()}_raw/[/cyan]\n"
+             f"[cyan]F:/Photos/{origin.upper()}_raw/[/cyan] → [cyan]F:/Photos/{dest.upper()}_raw/[/cyan]\n"
              f"If {origin.upper()} is not found, appends {dest.upper()} and logs a warning."),
 
-            ("5", "Sibling folder",
+            ("5", _mode_title(5),
              f"Creates a sibling folder next to each source folder, without renaming it.\n"
-             f"[cyan]F:/Photos/Raw/[/cyan] -> [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
+             f"[cyan]F:/Photos/Raw/[/cyan] → [cyan]F:/Photos/JXL_16bits/[/cyan] (or TIFF_16bits / JXL_jpeg / JPEG_recovered, by direction)"),
 
-            ("6", f"Marker {export_marker} (full)",
+            ("6", _mode_title(6, export_marker),
              f"ONLY processes files INSIDE folders matching '{export_marker}' (prefix/suffix token).\n"
              f"Recursively finds ALL matching folders and processes everything under each.\n"
              f"Ignores ALL files outside matching folders.\n"
              f"Works with _EXPORT, Export_Lightroom, Lightroom_Export, etc. (case-insensitive)."),
 
-            ("7", f"Marker {export_marker} (specific subfolder)",
+            ("7", _mode_title(7, export_marker),
              f"Like mode 6, but ONLY processes files inside one subfolder of the export marker.\n"
              f"The subfolder name is asked next (empty = all subfolders = same as mode 6).\n"
              f"Files in other subfolders within export folders are ignored.\n"
-             f"Use when you keep different color-space variants in separate subfolders."),
+             f"Use when you keep different colour-space variants in separate subfolders."),
 
-            ("8", "In-place recursive", inplace_rec_desc),
+            ("8", _mode_title(8), inplace_rec_desc),
 
             ("D", "Convert and DELETE the originals",
              f"[bold red]IRREVERSIBLE.[/bold red] Not a layout: you pick any mode 0-8 above, and the\n"
@@ -7210,14 +7280,13 @@ class InteractiveMenu:
         ]
 
         ui = self.ui
-        ui.markup("\n[bold cyan]--- Mode Detailed Explanations ---[/bold cyan]\n",
-                  "\n=== Mode Detailed Explanations ===\n")
+        ui.section("Each mode in detail")
         for key, name, desc in details:
             # Red marks what actually destroys data — which is [D], not mode 8.
             # Mode 8 keeps your files.
             style = "red" if key == self._DELETE_CHOICE else "blue"
-            ui.markup(f"[{key}] [bold {style}]{name}[/bold {style}]", f"[{key}] {name}")
-            ui.panel(desc, style=style, plain=f"   {_strip_styles(desc)}\n")
+            ui.panel(desc, title=f"[bold {style}][{key}] {_rich_safe(name)}[/bold {style}]",
+                     style=style, plain=f"[{key}] {name}\n   {_strip_styles(desc)}\n")
         valid_choices = [d[0] for d in details] + ["A", "M"]
         choice = ""
         while choice not in valid_choices:
@@ -7268,9 +7337,10 @@ class InteractiveMenu:
             ui = self.ui
             ui.markup("\n[bold cyan]Mode settings: Marker Configuration[/bold cyan]",
                       "\n--- Mode settings: Marker Configuration ---")
-            ui.markup(f"Current: [green]{_rich_safe(current)}[/green]", f"Current: {current}")
-            new_marker = ui.ask_line("mode.cfg.marker", "EXPORT marker",
-                                     f"EXPORT marker [{current}]: ", default=current)
+            new_marker = ui.ask_line("mode.cfg.marker",
+                                     "Export marker (the folder name modes 6/7 look for)",
+                                     f"Export marker (the folder name modes 6/7 look for) [{current}]: ",
+                                     default=current)
 
             if new_marker != current:
                 # Store per-workflow only (persisted at the end via mode_config);
@@ -7313,9 +7383,12 @@ class InteractiveMenu:
                 _folder_default = (mode_config.get('export_jxl_folder')
                                    or (self.config.config.last_mode_config or {}).get('export_jxl_folder')
                                    or _script_default)
+                _hint = (" (e.g. JPG_web — the script's own name is the recovery's)"
+                         if origin == 'jxl' and dest in ('jpeg', 'png')
+                         and _folder_default == _script_default else "")
                 _folder = self.ui.ask_line(
-                    "mode.cfg.jxl_folder", "Output folder name under the marker",
-                    f"Output folder name under the marker [{_folder_default}]: ",
+                    "mode.cfg.jxl_folder", f"Output folder name under the marker{_hint}",
+                    f"Output folder name under the marker{_hint} [{_folder_default}]: ",
                     default=_folder_default)
                 _folder = _strip_surrounding_quotes(_folder).strip().strip('/\\')
                 if _folder == _script_default:
@@ -9587,10 +9660,12 @@ class InteractiveMenu:
         returncode = self._stream_child(cmd)
 
         if returncode == 0:
-            self._print_success("✓ Conversion completed successfully!\n")
+            self._print_success("Dry run finished — nothing was written.\n"
+                                if workflow.get('dry_run')
+                                else "Conversion completed successfully!\n")
             return True
         elif returncode == 3:
-            self._print_error("\n✗ Conversion cancelled (confirmation declined)")
+            self._print_error("Conversion cancelled (confirmation declined)")
             return False
         elif returncode == 2:
             if self._last_child_usage_error:
@@ -9602,10 +9677,10 @@ class InteractiveMenu:
                     "built a command this script does not accept — not a problem with "
                     "your files. Please report it with the 'Executing:' line above.")
             else:
-                self._print_error("\n✗ Aborted by a safety check (see log above — e.g. duplicate output destinations or output/input collisions)")
+                self._print_error("Aborted by a safety check (see log above — e.g. duplicate output destinations or output/input collisions)")
             return False
         else:
-            self._print_error(f"\n✗ Conversion failed (code {returncode})")
+            self._print_error(f"Conversion failed (code {returncode})")
             return False
 
     @staticmethod
@@ -9618,14 +9693,15 @@ class InteractiveMenu:
         # or the row advertises "mode 99" for a run that replays a CSV.
         raw_mode = session.get('last_output_mode')
         mode = _session_int(session, 'last_output_mode', -1)
-        bits = [f"{origin}->{dest}"]
+        bits = [_task_label(session.get('last_origin_format'), session.get('last_dest_format'),
+                            session.get('last_conversion_type'))]
         if mode == 99:
             manifest = session.get('last_manifest_path')
             bits.append(f"manifest: {Path(manifest).name}" if manifest else "manifest: (missing)")
         else:
             bits.append(f"mode {mode if mode >= 0 else (raw_mode or '?')}")
-            if session.get('last_input_dir'):
-                bits.append(str(session['last_input_dir']))
+        _folder_bit = (str(session['last_input_dir'])
+                       if mode != 99 and session.get('last_input_dir') else None)
         bits.append(f"workers {_session_int(session, 'last_workers', 4)}")
         # Which number this workflow is actually steered by, decided by the
         # DIRECTION — not by which field happens to be set. save_last_session
@@ -9651,7 +9727,9 @@ class InteractiveMenu:
             bits.append(f"q={session['last_quality']}")
         if session.get('last_exclude_folders'):
             bits.append(f"excl: {session['last_exclude_folders']}")
-        return " | ".join(bits)
+        if _folder_bit:
+            bits.append(_folder_bit)
+        return " · ".join(bits)
 
     @staticmethod
     def _clean_preset_name(raw: str) -> Optional[str]:
@@ -9679,7 +9757,7 @@ class InteractiveMenu:
                     table = Table(show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
                     table.add_column("#", justify="right", style="dim")
                     table.add_column("Name", style="bold")
-                    table.add_column("Workflow")
+                    table.add_column("Job")
                     table.add_column("Saved", style="dim")
                     for i, name in enumerate(names, 1):
                         table.add_row(str(i), _rich_safe(name), _rich_safe(self._describe_session(_preset_session(presets[name]))),
@@ -9687,9 +9765,9 @@ class InteractiveMenu:
                     console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
                 else:
                     console.print("\n[dim]No presets saved yet.[/dim]")
-                console.print("[bold]\\[number][/bold] run  "
-                              "[bold]\\[s][/bold] save the last job as a preset  "
-                              "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
+                ui.actions([("Run", [(f"1-{len(names)}" if names else "number", "run a preset")]),
+                            ("Save", [("s", "save the last job as a preset")]),
+                            ("Leave", [("d", "delete a preset"), ("b", "back")])])
             else:
                 ui.markup(None, "\n--- Presets ---")
                 if names:
@@ -9850,7 +9928,7 @@ class InteractiveMenu:
                 settings.append(["Distance", f"{last_distance}"])
             elif not _distance_driven and _quality_driven and last_quality is not None:
                 settings.append(["Quality", str(last_quality)])
-            settings.append(["Staging", last_staging or "(none)"])
+            settings.append(["Staging", last_staging or "system default"])
             # Surface silently-reapplied dangerous settings (they are NOT
             # re-asked on this path, so the user must see them here).
             _last_adv = session.get('last_advanced_options') or {}
@@ -9866,9 +9944,9 @@ class InteractiveMenu:
             t.add_column("")
             for row in settings:
                 t.add_row(*(_rich_safe(c) for c in row))
-            console.print(Panel(t, title="[bold]Last Workflow Settings[/bold]", border_style="green"))
+            console.print(Panel(t, title="[bold]Last job[/bold]", border_style="green"))
         else:
-            print("\n=== Last Workflow Settings ===")
+            print("\n=== Last job ===")
             if is_manifest_repeat:
                 print(f"  Manifest:     {Path(manifest_path).name} ({len(manifest_entries)} entries)")
             else:
@@ -9929,11 +10007,11 @@ class InteractiveMenu:
         if unattended:
             ow_choice = "1" if answers.get('overwrite') else "2"
         else:
-            self.ui.markup("Existing file handling: [1] overwrite all | [2] sync (reconvert if newer)",
+            self.ui.markup("Existing outputs: [1] overwrite all   [2] sync (only the newer sources)",
                            _SILENT)
             # Anything but 1 in the plain prompt is sync, as before.
-            ow_choice = self.ui.ask_line("session.overwrite", "If exists",
-                                         "If exists (1=overwrite, 2=sync) [2]: ",
+            ow_choice = self.ui.ask_line("session.overwrite", "Existing outputs",
+                                         "Existing outputs (1=overwrite all, 2=sync) [2]: ",
                                          default="2", choices=["1", "2"])
 
         if ow_choice == "1":
@@ -9947,8 +10025,8 @@ class InteractiveMenu:
         if unattended:
             dry_choice = bool(answers.get('dry_run'))
         else:
-            dry_choice = self.ui.ask_yes("session.dry_run", "Dry run? (simulate without converting)",
-                                         "Dry run? [y/N]: ", False)
+            dry_choice = self.ui.ask_yes("session.dry_run", "Dry run first (nothing written)?",
+                                         "Dry run first (nothing written)? [y/N]: ", False)
 
         if unattended:
             # A destructive preset cannot run unattended (_GATE_RULES, path
@@ -9959,8 +10037,8 @@ class InteractiveMenu:
                 return False
             proceed = True
         else:
-            proceed = self.ui.ask_yes("session.proceed", "\n[bold]Proceed with this workflow?[/bold]",
-                                      "\nProceed with this workflow? [Y/n]: ", True)
+            proceed = self.ui.ask_yes("session.proceed", "[bold]Run this job?[/bold]",
+                                      "Run this job? [Y/n]: ", True)
 
         if not proceed:
             return False

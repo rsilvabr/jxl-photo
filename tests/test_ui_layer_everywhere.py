@@ -151,7 +151,7 @@ def test_mode_details_view(menu):
     wf = {"origin_format": "tiff", "dest_format": "jxl", "input_dir": "."}
     assert menu._show_mode_details_and_select(wf) is True
     assert wf["mode"] == 3 and menu._ui.asked == ["mode.details"]
-    assert any("Mode Detailed Explanations" in line for line in menu._ui.output)
+    assert any("Each mode in detail" in line for line in menu._ui.output)
 
 
 def test_mode_step_settings(menu, tmp_path):

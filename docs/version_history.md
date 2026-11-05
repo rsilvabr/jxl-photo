@@ -14,7 +14,7 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 2 fixes) |
+| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 4 fixes) |
 | [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
 | [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
 | [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
@@ -123,8 +123,20 @@ one wizard detail moved (the review's rows are numbered in a new order).
   makes the thumbnails (slow, washed-out ProPhoto/Adobe RGB), with a `[T]`
   key that opens jxl-thumb's page. Settings (menu 9 -> 1) can turn both
   reminders off.
+- **One name per mode on every screen** (mode 6 was "Marker _EXPORT
+  (full)", "Marker export (full)", "Export (full)" and "below the export
+  marker" depending on where you looked), arrows written as →, "job"
+  instead of "workflow", lower-case keys, yes/no instead of True/False.
+  The main menu says which job "Repeat last job" repeats; the presets, the
+  last job, the folder list, the [D] layouts, Auto Mode's analysis and
+  preview, the wizard defaults, the scripts' settings and the options
+  screen are tables; the review explains its From column, and the command
+  line or a refused expert flag stays on screen under it. A dry run ends
+  with "Dry run finished — nothing was written".
 - Fixes: the review's "Existing outputs" showed no origin (#608); menus
-  5/6/7 offered the whole user profile as their folder (#609).
+  5/6/7 offered the whole user profile as their folder (#609); the detailed
+  view's mode 4 example renamed a folder to itself (#610); Auto Mode's
+  folder preview existed only in Rich (#611).
 
 ## v2.22.5
 

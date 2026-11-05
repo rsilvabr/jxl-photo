@@ -190,7 +190,7 @@ def _answer_exclude(tmp_path, monkeypatch, answer, default_saved):
 
     monkeypatch.setattr("builtins.input", fake_input)
     menu._wizard_select_files(workflow)
-    assert any("Exclude folders" in p for p in seen), f"prompts: {seen}"
+    assert any("Folders to skip" in p for p in seen), f"prompts: {seen}"
     return workflow.get('exclude_folders'), menu.config.config.last_exclude_folders
 
 

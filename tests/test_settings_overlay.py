@@ -19,6 +19,7 @@ commit> — no script there reads an overlay.
 
 import ast
 import json
+import re
 import os
 import subprocess
 import sys
@@ -303,7 +304,8 @@ def test_menu_s_writes_checks_and_reverts(tmp_path, monkeypatch):
     assert not path.exists() or json.loads(path.read_text(encoding="utf-8")) == {}, \
         path.read_text(encoding="utf-8")
     text = "\n".join(ui.output)
-    assert "EXPLORER_THUMBNAIL_SIZE = 512  (overlay)" in text, text
+    # v2.23.0: a table row "#  NAME  value  changed here"
+    assert re.search(r"EXPLORER_THUMBNAIL_SIZE\s+512\s+changed here", text), text
     assert "must be a whole number from 64 to 2048" in text, text
     assert "back to the script's value" in text
 
@@ -331,8 +333,9 @@ def test_menu_s_never_lists_a_safety_setting(tmp_path, monkeypatch):
     text = "\n".join(menu._ui.output)
     for name in ("DELETE_SOURCE", "DELETE_CONFIRM", "OVERWRITE_GUARD", "VERIFY_ROUNDTRIP",
                  "PROVENANCE_CHECK", "SRC_PREFIX"):
-        assert f"] {name} =" not in text, name
-    assert "] EXPORT_JXL_FOLDER =" in text and "] JPEG_PREVIEW_SIZE =" in text
+        assert not re.search(rf"^\s*\d+\s+{name}\s", text, re.M), name
+    assert re.search(r"^\s*\d+\s+EXPORT_JXL_FOLDER\s", text, re.M)
+    assert re.search(r"^\s*\d+\s+JPEG_PREVIEW_SIZE\s", text, re.M)
 
 
 def test_menu_s_is_off_with_an_empty_variable(tmp_path, monkeypatch):

@@ -409,8 +409,9 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
   temp file in the pipeline is no longer compressed. Same pixels.
 - **`--export-jpeg-folder`** names the folder a JXL -> JPEG/PNG run of modes
   6/7 writes (e.g. `JPG_mobile`); the wizard and the manifests use it too.
-- **The wizard reads better**: choices and the review in tables, actions
-  grouped by what they do, a blank line before every question.
+- **The wizard reads better**: choices, lists and the review in tables, one
+  name per mode everywhere, actions grouped by what they do, a blank line
+  before every question.
 - The update check never makes the menu wait; jxl-thumb is recommended when
   Microsoft's extension makes the thumbnails; both reminders can be turned
   off in Settings.

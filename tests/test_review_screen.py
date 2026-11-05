@@ -256,7 +256,7 @@ def test_x_refuses_an_expert_flag_the_script_does_not_know(menu, launched, tmp_p
     menu._ui = wp.ScriptedUI({"review.action": ["x", "q"], "review.expert": "--no-such-flag"})
     menu._review_screen(wf, STATUS)
     assert not wf.get("expert_flags")
-    assert any("Not changed" in line for line in menu._ui.output)
+    assert any("not changed" in line.lower() for line in menu._ui.output)
 
 
 def test_the_conversion_row_switches_export_jpeg_to_auto(menu, launched, tmp_path):

@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #610.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #612.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#609 (2) |
+| [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#611 (4) |
 | [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0 | #600–#607 (8) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |
 | [Round-69 — the 261103 full-repo audit](#round-69--the-261103-full-repo-audit-2026-11-03) | 2026-11-03 | v2.20.0 | #563–#567 (5) |
@@ -98,6 +98,8 @@ after v2.22.5. Regression tests: `tests/test_review_screen.py`
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
 | 608 | **The review never said where "Existing outputs" came from** — its row is `existing` but the choice was recorded as `overwrite_mode`, so the From column stayed empty (since v2.22.0) | jxl_photo | ✅ FIXED (both keys recorded; an unset origin reads "default") |
+| 610 | **The detailed view's mode 4 example renamed a folder to itself** — "F:/Photos/JXL_raw/ -> F:/Photos/JXL_raw/" on a TIFF -> JXL run: the source name was a literal JXL | jxl_photo | ✅ FIXED (the source's own format: TIFF_raw -> JXL_raw) |
+| 611 | **Auto Mode's folder preview existed only in Rich** — the plain-text screen said nothing about which folders the recommended mode would write | jxl_photo | ✅ FIXED (one table for both) |
 | 609 | **Menus 5, 6 and 7 offered the whole user profile as their folder** when no job had run yet: Enter audited (menu 7) or edited (menus 5/6) every JXL under it; an empty answer was read as the current folder | jxl_photo | ✅ FIXED (the last folder used, else no default; an empty answer does nothing) |
 
 ## Round-71 — delivery B of the wrapper redesign (2026-11-04)

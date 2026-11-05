@@ -192,9 +192,10 @@ def test_advanced_encoder_questions_offer_the_encoder_settings(menu, monkeypatch
     assert adv["thumbnail_suffix"] == "_thumb"
     shown = _options_screen_text(menu, wf)
     assert "thumbnail? (~20KB)" not in shown
-    assert "Encode record: software" in shown
-    assert "Multi-page TIFFs: split_all" in shown
-    assert "Thumbnail suffix: _thumb" in shown
+    # v2.23.0: the options screen is a table (Option, Value, Flag)
+    assert re.search(r"Encode record\s+software", shown)
+    assert re.search(r"Multi-page TIFFs\s+split_all", shown)
+    assert re.search(r"Thumbnail suffix\s+_thumb", shown)
 
 
 def test_advanced_decoder_questions_offer_the_decoder_settings(menu, monkeypatch, edited_decoder):
