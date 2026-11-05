@@ -12,6 +12,7 @@ The traps these tests exist for:
   * the config file is hand-editable JSON with no type checking.
 """
 
+import re
 import sys
 import unittest.mock as mock
 from pathlib import Path
@@ -33,6 +34,12 @@ def cfg(tmp_path, monkeypatch):
 @pytest.fixture
 def menu(cfg):
     return wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
+
+
+def _squeeze(text):
+    """The lists pad each distance so their dashes line up ("d=0    — lossless");
+    the assertions read it as "d=0 — lossless"."""
+    return re.sub(r"(d=[0-9.]+) +—", r"\1 —", text)
 
 
 def _select_destination(menu, answers):
@@ -88,14 +95,15 @@ def test_enter_takes_the_configured_distance(menu, cfg):
 
 def test_the_menu_names_each_distance(menu, cfg, capsys):
     _select_destination(menu, ["", ""])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     # v2.22.3: the tip sits under the list, the scan line names the review row
-    assert printed.index("Tip: 8-bit TIFFs") > printed.index("[7] your distance")
+    assert printed.index("lossy about the same as above") > printed.index("[7] your distance")
     assert "Film scans row" in printed
-    for text in ("d=0 — lossless", "d=0.05 — finest lossy", "d=0.1 — near-lossless (recommended)",
-                 "d=0.5 — high-quality lossy", "d=0.7 — visually lossless at 100%",
-                 "d=1 — visually lossless at a normal viewing distance",
-                 "your distance", "Tip: 8-bit TIFFs"):
+    for text in ("d=0 — lossless", "d=0.05 — finest lossy available",
+                 "d=0.1 — near-lossless (recommended)", "d=0.5 — high-quality lossy",
+                 "d=0.7 — visually lossless (keeps the grain texture)",
+                 "d=1 — visually lossless (JPEG XL's definition)",
+                 "your distance", "lossy about the same as above"):
         assert text in printed, text
 
 
@@ -717,7 +725,7 @@ def test_copies_offer_distance_5(menu, capsys):
     """d=5 sits after d=3 and before the custom entry; above 5 there is no
     named entry (libjxl halves the resolution itself from d=10)."""
     workflow = _derive_quality(menu, ["6"])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     assert workflow['distance'] == 5.0
     assert "[6] d=5 — about quality 46" in printed
     assert "[7] your distance (0-25)" in printed
@@ -726,14 +734,15 @@ def test_copies_offer_distance_5(menu, capsys):
 
 
 def test_both_lists_offer_0_7_and_name_the_quality_scale(menu, capsys):
-    """The texts agreed on 2026-11-05: 0.7 in both lists, d=1 named by its
-    viewing distance, d=2/3 by cjxl's -q scale."""
+    """0.7 in both lists (2026-11-05); 0.7 and 1 share "visually lossless",
+    so the review names them with their note; d=2/3/5 by cjxl's -q scale."""
     assert 0.7 in [v for v, _n, _x in wp._DISTANCE_CHOICES]
-    assert wp._distance_label(0.7) == "visually lossless at 100%"
-    assert wp._distance_label(1) == "visually lossless at a normal viewing distance"
+    assert wp._distance_label(0.7) == "visually lossless (keeps the grain texture)"
+    assert wp._distance_label(1) == "visually lossless (JPEG XL's definition)"
+    assert wp._distance_label(0.5) == "high-quality lossy"      # unique: no note
     _derive_quality(menu, [""])
-    printed = capsys.readouterr().out
-    assert "[4] d=2 — about quality 79 (phones, sharing at good quality)" in printed
+    printed = _squeeze(capsys.readouterr().out)
+    assert "[4] d=2 — about quality 79 (phones, sharing)" in printed
     assert "[5] d=3 — about quality 68" in printed
     # q = 100 - (d - 0.1) / 0.09, cjxl's own mapping
     for d, q in ((2.0, 79), (3.0, 68), (5.0, 46)):
@@ -764,28 +773,29 @@ def test_every_offered_distance_has_a_measured_size():
 
 def test_the_quality_list_shows_sizes_per_resolution(menu, cfg, capsys):
     _select_destination(menu, ["", ""])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     lines = printed.splitlines()
     header = next(l for l in lines if "45 MP" in l)
     assert "24 MP" in header and "12 MP" in header
     lossless = next(l for l in lines if "[1] d=0 — lossless" in l)
     assert lossless.rstrip().endswith("43 MB") and "173 MB" in lossless
-    assert "Tip: 8-bit TIFFs" in printed
+    assert "lossy about the same as above" in printed
 
 
 def test_your_distance_shows_every_distance_first(menu, cfg, capsys):
     workflow = _select_destination(menu, ["7", "0.3"])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     assert workflow['distance'] == 0.3
     table = printed[printed.index("Typical file size"):]
-    for row in ("TIFF 16-bit, ZIP", "from an 8-bit TIFF", "JXL d=0.3", "JXL d=25",
+    for row in ("TIFF 16-bit, ZIP", "JXL sizes from a 16-bit TIFF", "d=0.05 47 / 23 / 11 MB",
+                "JXL d=0.3", "JXL d=25",
                 "JXL d=10 — libjxl halves the resolution"):
         assert row in table, row
 
 
 def test_copies_list_shows_sizes_without_tiff_rows(menu, capsys):
     workflow = _derive_quality(menu, ["7", "7"])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     assert workflow['distance'] == 7.0
     assert "[6] d=5 — about quality 46" in printed and "1.1 MB" in printed
     assert "Typical file size" in printed and "TIFF 16-bit" not in printed
@@ -793,17 +803,37 @@ def test_copies_list_shows_sizes_without_tiff_rows(menu, capsys):
 
 
 def test_lossless_shows_its_8bit_size_on_the_list(menu, cfg, capsys):
-    """173 MB is a 16-bit TIFF's lossless file; the 8-bit one (43 MB) sits right
-    under it as a line to read, so the keys stay 1..7 and Enter keeps 0.1."""
+    """173 MB is a 16-bit TIFF's lossless file: a title over the size columns
+    says 16-bit, and the note gives an 8-bit TIFF's lossless size, so it does
+    not scare someone who exports 8-bit TIFFs."""
     workflow = _select_destination(menu, ["", ""])
-    printed = capsys.readouterr().out
+    printed = _squeeze(capsys.readouterr().out)
     lines = printed.splitlines()
+    h = next(n for n, l in enumerate(lines) if "45 MP" in l)
+    title = lines[h - 1]
+    assert title.strip() == "JXL size from a 16-bit TIFF (typical)"
+    assert len(title.rstrip()) == len(lines[h].rstrip())      # flush right, over the sizes
     i = next(n for n, l in enumerate(lines) if "[1] d=0 — lossless" in l)
-    assert "from a 16-bit TIFF" in lines[i] and "173 MB" in lines[i]
-    assert "from an 8-bit TIFF" in lines[i + 1] and "43 MB" in lines[i + 1]
-    assert "[" not in lines[i + 1]          # no key of its own
-    assert "[2] d=0.05" in lines[i + 2]
+    assert "173 MB" in lines[i] and "*" not in printed
+    assert ("From an 8-bit TIFF: lossless is 43 / 21 / 10 MB (about the size of d=0.05), "
+            "lossy about the same as above.") in " ".join(printed.split())
     assert workflow['distance'] == 0.1
+
+
+def test_the_dashes_line_up(menu, capsys):
+    """Each list pads its distances to the longest one, so every dash sits in
+    the same column (the owner's request, 2026-11-06)."""
+    _derive_quality(menu, [""])
+    out = capsys.readouterr().out
+    cols = {l.index("—") for l in out.splitlines() if re.match(r"\s*\[\d\] d=", l)}
+    assert len(cols) == 1, cols
+
+
+def test_copies_title_their_sizes(menu, capsys):
+    _derive_quality(menu, [""])
+    lines = _squeeze(capsys.readouterr().out).splitlines()
+    h = next(n for n, l in enumerate(lines) if "45 MP" in l)
+    assert lines[h - 1].strip() == "JXL size of a full-size copy (typical)"
 
 
 def test_the_8bit_line_is_not_an_answer(menu, cfg):

@@ -125,8 +125,8 @@ MB, with the middle 80% of the photos in brackets.
   `d=0.1` the 8-bit one is 6% larger.
 - **An 8-bit TIFF is small lossless:** a quarter of the 16-bit lossless file. At
   `d=0.05` it comes out *larger* than its own lossless file, and at `d=0.1` it
-  is about a quarter smaller. That is why the wizard suggests keeping 8-bit
-  TIFFs lossless.
+  is about a quarter smaller. That is why lossless is the better choice for 8-bit
+  TIFFs.
 - **From `d=10`, libjxl halves the resolution by itself** and scales the image
   back up when it is decoded. The file barely shrinks after that, and fine
   detail goes soft (a sweep of 8 photos, d=1 to 25, on 2026-11-06). For a

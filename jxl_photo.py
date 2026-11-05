@@ -2578,12 +2578,12 @@ def _task_label(origin, dest, conv=None) -> str:
 # 0.05 is the floor of cjxl 0.12: every lossy distance below it gives the
 # same file (the encoder's _MIN_EFFECTIVE_DISTANCE).
 _DISTANCE_CHOICES = [
-    (0.0, "lossless", "exact replica"),
-    (0.05, "finest lossy", "cjxl rounds any lower lossy distance to this"),
+    (0.0, "lossless", ""),
+    (0.05, "finest lossy available", ""),
     (0.1, "near-lossless", "recommended"),
-    (0.5, "high-quality lossy", "some headroom for later edits"),
-    (0.7, "visually lossless at 100%", "keeps the grain texture"),
-    (1.0, "visually lossless at a normal viewing distance", "JPEG XL's definition"),
+    (0.5, "high-quality lossy", "headroom for later edits"),
+    (0.7, "visually lossless", "keeps the grain texture"),
+    (1.0, "visually lossless", "JPEG XL's definition"),
 ]
 # "Make smaller or resized JXL copies": copies of masters, so cjxl's own
 # recommended range (0.5 .. 3.0, `cjxl --help`), plus d=5 for screen-only
@@ -2592,12 +2592,12 @@ _DISTANCE_CHOICES = [
 # copy is better made with a resize (sweep of 2026-11-06, 8 photos).
 # "quality" is cjxl's -q scale (distance = 0.1 + (100 - q) * 0.09).
 _RECOMPRESS_CHOICES = [
-    (0.5, "high-quality lossy", "some headroom for later edits"),
-    (0.7, "visually lossless at 100%", "keeps the grain texture"),
-    (1.0, "visually lossless at a normal viewing distance", "JPEG XL's definition"),
-    (2.0, "about quality 79", "phones, sharing at good quality"),
-    (3.0, "about quality 68", "web and social media; the end of cjxl's recommended range"),
-    (5.0, "about quality 46", "screens only: textures smear at 100%"),
+    (0.5, "high-quality lossy", "headroom for later edits"),
+    (0.7, "visually lossless", "keeps the grain texture"),
+    (1.0, "visually lossless", "JPEG XL's definition"),
+    (2.0, "about quality 79", "phones, sharing"),
+    (3.0, "about quality 68", "web and social media"),
+    (5.0, "about quality 46", "screens only"),
 ]
 # Typical file sizes shown next to the distances (MB at 45 / 24 / 12 MP):
 # medians of 20 Z7+Z8, 10 Zf and 10 D700 photos (Capture One exports,
@@ -2631,6 +2631,16 @@ def _size_text(mb: float) -> str:
     return f"{mb * 1000:.0f} KB"
 
 
+def _choice_label(v, name, note, width: int = 0) -> str:
+    """"d=0.1  — near-lossless (recommended)": the distance padded to `width`,
+    so the dashes of one list line up."""
+    return f"d={v:g}".ljust(width) + f" — {name}" + (f" ({note})" if note else "")
+
+
+def _label_width(choices) -> int:
+    return max(len(f"d={v:g}") for v, _n, _x in choices)
+
+
 def _size_cells(distance) -> Tuple[str, ...]:
     """The typical sizes of `distance` ("" for one that was not measured)."""
     try:
@@ -2642,18 +2652,15 @@ def _size_cells(distance) -> Tuple[str, ...]:
             else ("",) * len(_SIZE_COLUMNS))
 
 
-_SIZE_NOTE = ("Typical sizes, median of 10-20 photos (a 16-bit TIFF is 273 / 146 / "
-              "72 MB); from d=0.1 on an 8-bit TIFF gives about the same. Detail and "
-              "noise make a file larger, smooth skies smaller (half to twice these at d=1).")
-_SIZE_NOTE_COPIES = ("Typical sizes of a full-size copy, median of 10-20 photos; detail "
-                     "and noise make a file larger, smooth skies smaller (half to twice "
-                     "these at d=1). A resized copy (Resize, in the options) is smaller.")
-_SIZE_NOTE_8BIT = ("Tip: 8-bit TIFFs are small lossless and d=0.05 comes out larger, so "
-                   "keep them lossless (8-bit gray scans grow even at d=0.1; "
-                   "docs/file_sizes.md).")
+_SIZE_TITLE = "JXL size from a 16-bit TIFF (typical)"
+_SIZE_TITLE_COPIES = "JXL size of a full-size copy (typical)"
+_SIZE_NOTE = "A photo can be half or twice these, depending on its detail and noise."
+_SIZE_NOTE_COPIES = (f"{_SIZE_NOTE} A resized copy (Resize, in the options) is smaller.")
+_SIZE_NOTE_8BIT = ("From an 8-bit TIFF: lossless is 43 / 21 / 10 MB (about the size of "
+                   "d=0.05), lossy about the same as above.")
 
 _DISTANCE_PROMPT = ("Distance (0 = lossless, 0.05 = finest lossy, 0.1 = near-lossless, "
-                    "0.7 = visually lossless at 100%, 1 = at a normal viewing distance)")
+                    "0.7-1 = visually lossless)")
 
 
 def _distance_label(value) -> str:
@@ -2668,8 +2675,12 @@ def _distance_label(value) -> str:
         return "finest lossy"
     if d <= 0.1:
         return "near-lossless"
-    for v, name, _note in _DISTANCE_CHOICES + _RECOMPRESS_CHOICES:
+    choices = _DISTANCE_CHOICES + _RECOMPRESS_CHOICES
+    for v, name, note in choices:
         if d == v:
+            # two entries share "visually lossless": the note tells them apart
+            if note and any(n == name and x != v for x, n, _y in choices):
+                return f"{name} ({note})"
             return name
     return ""
 
@@ -3348,13 +3359,15 @@ class UI:
     def choose(self, qid: str, prompt: str, options: List[Tuple[str, str]],
                default: Optional[str] = None, note: Optional[str] = None,
                title: Optional[str] = None,
-               columns: Optional[List[str]] = None) -> str:
+               columns: Optional[List[str]] = None,
+               columns_title: Optional[str] = None) -> str:
         """One key of `options` [(key, label)]; `note` is printed under the
         list, before the prompt; `title` heads the list (else the prompt).
         With `columns` (the headers of extra cells: ["45 MP", "24 MP"]) each
-        option is (key, label, cell, ...) and the list gets a header row.
+        option is (key, label, cell, ...) and the list gets a header row;
+        `columns_title` is a line over those headers, flush right.
         An option with an empty key is a line to read, not to choose (shown
-        dim, never accepted as an answer)."""
+        grey, never accepted as an answer)."""
         raise NotImplementedError
 
     # The wizard's older questions keep their exact wording in each renderer
@@ -3432,9 +3445,11 @@ def _plain_action_lines(groups):
 _SILENT = object()    # UI.markup: this renderer prints nothing
 
 
+# grey70: the wizard's notes (v2.23.x). Rich's `dim` was too dark to read on
+# Windows Terminal; a named colour needs no theme, so any Console renders it.
 _STYLE_TAG = re.compile(
-    r"\[/?(?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black)"
-    r"(?: (?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black))*\]")
+    r"\[/?(?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black|grey70)"
+    r"(?: (?:bold|dim|italic|underline|red|green|yellow|blue|cyan|magenta|white|black|grey70))*\]")
 
 
 def _strip_styles(text: str) -> str:
@@ -3461,14 +3476,17 @@ class PlainUI(UI):
         return default if not answer else answer.startswith('y')
 
     def choose(self, qid, prompt, options, default=None, note=None, title=None,
-               columns=None):
+               columns=None, columns_title=None):
         keys = [o[0] for o in options if o[0]]
         if title:
             print(f"\n--- {title} ---")
         if columns:
             rows = [(f"[{o[0]}] {o[1]}" if o[0] else f"    {o[1]}",) + tuple(o[2:])
                     for o in options]
-            for line in _plain_table_lines([""] + list(columns), rows):
+            lines = _plain_table_lines([""] + list(columns), rows)
+            if columns_title:
+                print(columns_title.rjust(len(lines[0].rstrip())))
+            for line in lines:
                 print(line)
         else:
             for k, label in options:
@@ -3546,7 +3564,7 @@ class RichUI(UI):
         if default is None or default == "":
             return {}
         if len(str(default)) > 40:
-            console.print(f"  [dim]Enter = {_rich_safe(str(default))}[/dim]")
+            console.print(f"  [grey70]Enter = {_rich_safe(str(default))}[/grey70]")
             return {"default": default, "show_default": False}
         return {"default": default}
 
@@ -3560,19 +3578,20 @@ class RichUI(UI):
         return Confirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
 
     def choose(self, qid, prompt, options, default=None, note=None, title=None,
-               columns=None):
+               columns=None, columns_title=None):
         t = Table(show_header=bool(columns), header_style="bold cyan", box=None,
-                  padding=(0, 1))
+                  padding=(0, 1), title=_rich_safe(columns_title) if columns_title else None,
+                  title_justify="right", title_style="cyan")
         t.add_column(style="bold cyan", justify="right")
         t.add_column()
         for c in columns or []:
             t.add_column(_rich_safe(c), justify="right")
         for o in options:
-            t.add_row(*[_rich_safe(str(v)) for v in o], style=None if o[0] else "dim")
+            t.add_row(*[_rich_safe(str(v)) for v in o], style=None if o[0] else "grey70")
         console.print(Panel(t, title=f"[bold]{_rich_safe(title or prompt)}[/bold]",
                             border_style="cyan", box=BOX_ROUNDED, expand=False))
         if note:
-            console.print(f"[dim]{_rich_safe(note)}[/dim]")
+            console.print(f"[grey70]{_rich_safe(note)}[/grey70]")
         console.print()
         return Prompt.ask(_rich_safe(prompt), choices=[o[0] for o in options if o[0]],
                           default=default)
@@ -3608,7 +3627,7 @@ class RichUI(UI):
             t.add_row(*[str(v) if markup else _rich_safe(str(v)) for v in r])
         parts = [_rich_safe(line) for line in head or []]
         parts.append(t)
-        parts += [f"[dim]· {_rich_safe(line)}[/dim]" for line in notes or []]
+        parts += [f"[grey70]· {_rich_safe(line)}[/grey70]" for line in notes or []]
         console.print()
         console.print(Panel(Group(*parts), title=f"[bold]{_rich_safe(title)}[/bold]",
                             border_style="green", box=BOX_ROUNDED, expand=False))
@@ -3669,7 +3688,7 @@ class ScriptedUI(UI):
         return default if v is None else bool(v)
 
     def choose(self, qid, prompt, options, default=None, note=None, title=None,
-               columns=None):
+               columns=None, columns_title=None):
         if title:
             self.output.append(f"== {title}")
         if note:
@@ -4426,7 +4445,7 @@ class InteractiveMenu:
                 if available is None:
                     table.add_row("", f"[bold]{desc}[/bold]", "")
                     continue
-                status_str = "" if available else "[dim](unavailable)[/dim]"
+                status_str = "" if available else "[grey70](unavailable)[/grey70]"
                 table.add_row(key, desc, status_str)
 
             console.print(Panel(table, title="Main Menu", border_style="green"))
@@ -4499,7 +4518,7 @@ class InteractiveMenu:
                     mark = " [red](!)[/red]" if o.danger else ""
                     table_rows.append((n, f"{_rich_safe(o.label)}{mark}",
                                        _rich_safe(_option_shown(_display_value(o, ctx))),
-                                       f"[dim]{_rich_safe(o.flag + tag)}[/dim]"))
+                                       f"[grey70]{_rich_safe(o.flag + tag)}[/grey70]"))
             ui.table(f"All options — {origin.upper()} → {dest.upper()}"
                      + (f" (filter: {flt})" if flt else ""),
                      ["#", "Option", "Value", "Flag"], table_rows,
@@ -4807,14 +4826,14 @@ class InteractiveMenu:
         if self.ui.is_rich:
             console.print("\n[bold cyan]JPEG archives (jbrd): audit and repair[/bold cyan]")
             console.print(
-                "[dim]Checks the lossless JPEG -> JXL archives under a folder and "
+                "[grey70]Checks the lossless JPEG -> JXL archives under a folder and "
                 "repairs the ones that can no longer rebuild their JPEG; it also "
                 "rewrites their EXIF so IrfanView shows it (image data untouched). "
                 "Every repair works on a COPY and only replaces a file when the copy "
                 "provably rebuilds the same JPEG — the cautious route is still to run "
                 "it on a copy of the folder first. Why: v2.0.0-v2.0.3 wrote XMP "
                 "markers that can break djxl --reconstruct_jpeg, and files before "
-                "v2.19.2 kept their EXIF where IrfanView does not look.[/dim]")
+                "v2.19.2 kept their EXIF where IrfanView does not look.[/grey70]")
             # Explorer's "Copy as path" wraps the folder in double quotes;
             # every other wizard prompt strips them (_strip_surrounding_quotes)
             # and this one used to hand them to Path().is_dir() raw — "Folder
@@ -4871,12 +4890,12 @@ class InteractiveMenu:
         if ui.is_rich:
             console.print("\n[bold cyan]Explorer thumbnails for existing JXLs[/bold cyan]")
             console.print(
-                "[dim]A small sRGB JPEG stored inside each file, which jxl-thumb shows "
+                "[grey70]A small sRGB JPEG stored inside each file, which jxl-thumb shows "
                 "in Windows Explorer without decoding the photo (most useful for "
                 "lossless files). Nothing is re-encoded; each file keeps its "
                 "modified date. JPEG->JXL lossless files (jbrd) are never touched. "
                 "It also moves the EXIF where IrfanView reads it, in files written "
-                "by v2.17.0 to v2.19.0.[/dim]")
+                "by v2.17.0 to v2.19.0.[/grey70]")
         else:
             print("\n--- Explorer thumbnails for existing JXLs ---")
             print("A small sRGB JPEG stored inside each file, which jxl-thumb shows in")
@@ -5144,11 +5163,17 @@ class InteractiveMenu:
             label = _distance_label(d)
             if d == 10.0:
                 label = "libjxl halves the resolution from here"
-            name = f"JXL d={d:g}" + (f" — {label}" if label else "")
+            name = f"JXL d={d:g}".ljust(4 + max(len(f"d={x:g}") for x in _TYPICAL_SIZE_MB)) \
+                + (f" — {label}" if label else "")
             rows.append((name, *cells(_TYPICAL_SIZE_MB[d])))
-            if masters and d in _TYPICAL_8BIT_MB:
-                rows.append(("      from an 8-bit TIFF", *cells(_TYPICAL_8BIT_MB[d])))
-        notes = [_SIZE_NOTE if masters else _SIZE_NOTE_COPIES]
+        if masters:
+            eight = {d: " / ".join(_size_text(x)[:-3] for x in v) + " MB"
+                     for d, v in _TYPICAL_8BIT_MB.items()}
+            notes = ["JXL sizes from a 16-bit TIFF. " + _SIZE_NOTE,
+                     f"From an 8-bit TIFF: lossless {eight[0.0]} (about the size of "
+                     f"d=0.05), d=0.05 {eight[0.05]}, lossy about the same from d=0.1 on."]
+        else:
+            notes = [_SIZE_NOTE_COPIES]
         self.ui.table("Typical file size", [""] + [c.rjust(6) for c in _SIZE_COLUMNS],
                       rows, notes=notes)
 
@@ -5173,7 +5198,8 @@ class InteractiveMenu:
         frm = workflow.setdefault('_from', {})
         if tid == 'archive_tiff':
             preferred = _sane_distance(self.config.config.default_distance)
-            opts = [(str(i), f"d={v:g} — {name} ({note})") + _size_cells(v)
+            _w = _label_width(_DISTANCE_CHOICES)
+            opts = [(str(i), _choice_label(v, name, note, _w)) + _size_cells(v)
                     for i, (v, name, note) in enumerate(_DISTANCE_CHOICES, 1)]
             custom = str(len(opts) + 1)
             opts.append((custom, "your distance (0-25) — shows every distance's size")
@@ -5182,16 +5208,13 @@ class InteractiveMenu:
             default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
                                                              _DISTANCE_CHOICES)
                                 if v == preferred), custom)
-            # Lossless is the one size that depends on the TIFF's bit depth:
-            # its 8-bit size under it (a line to read, no key), so 173 MB
+            # The sizes are a 16-bit TIFF's (the title says so); the note gives
+            # an 8-bit TIFF's lossless size, the one that differs, so 173 MB
             # does not scare someone who exports 8-bit TIFFs.
-            _i = next(i for i, (v, _n, _x) in enumerate(_DISTANCE_CHOICES) if v == 0.0)
-            opts[_i] = (opts[_i][0], opts[_i][1] + ", from a 16-bit TIFF") + opts[_i][2:]
-            opts.insert(_i + 1, ("", "   from an 8-bit TIFF")
-                        + tuple(_size_text(s).rjust(6) for s in _TYPICAL_8BIT_MB[0.0]))
             key = ui.choose(
                 "job.quality", "Quality", opts, default_key,
-                note=f"  {_SIZE_NOTE}\n  {_SIZE_NOTE_8BIT}", columns=_SIZE_COLUMNS)
+                note=f"  {_SIZE_NOTE}\n  {_SIZE_NOTE_8BIT}",
+                columns=_SIZE_COLUMNS, columns_title=_SIZE_TITLE)
             if key != custom:
                 workflow['distance'] = _DISTANCE_CHOICES[int(key) - 1][0]
             else:
@@ -5215,10 +5238,11 @@ class InteractiveMenu:
                          f"page, or a TIFF with no Software tag and no camera EXIF (the run lists "
                          f"those folders). The review's Film scans row changes it.")
                 ui.line()
-                ui.markup(f"[dim]  {_rich_safe(_note)}[/dim]", f"  {_note}")
+                ui.markup(f"[grey70]  {_rich_safe(_note)}[/grey70]", f"  {_note}")
         elif tid == 'derive_jxl':
             current = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
-            opts = [(str(i), f"d={v:g} — {name} ({note})") + _size_cells(v)
+            _w = _label_width(_RECOMPRESS_CHOICES)
+            opts = [(str(i), _choice_label(v, name, note, _w)) + _size_cells(v)
                     for i, (v, name, note) in enumerate(_RECOMPRESS_CHOICES, 1)]
             custom = str(len(opts) + 1)
             opts.append((custom, "your distance (0-25) — shows every distance's size")
@@ -5232,7 +5256,7 @@ class InteractiveMenu:
                                 if v == _cur), custom)
             key = ui.choose("job.quality", "Distance", opts, default_key,
                             note=f"  {_SIZE_NOTE_COPIES}",
-                            columns=_SIZE_COLUMNS)
+                            columns=_SIZE_COLUMNS, columns_title=_SIZE_TITLE_COPIES)
             if key != custom:
                 workflow['distance'] = _RECOMPRESS_CHOICES[int(key) - 1][0]
             else:
@@ -5961,7 +5985,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Auto Mode: Analyzing folder structure...[/bold cyan]")
-            console.print("[dim]This may take a moment for large folders...[/dim]")
+            console.print("[grey70]This may take a moment for large folders...[/grey70]")
         else:
             print("\n--- Auto Mode: Analyzing folder structure... ---")
             print("(This may take a moment for large folders...)")
@@ -6008,7 +6032,7 @@ class InteractiveMenu:
                           notes=([f"… and {len(mappings) - 10} more folder(s)"]
                                  if len(mappings) > 10 else []))
         else:
-            self.ui.markup("[dim]No folders to process with this mode.[/dim]",
+            self.ui.markup("[grey70]No folders to process with this mode.[/grey70]",
                            "No folders to process with this mode.")
 
         # Show menu and handle choice
@@ -6053,7 +6077,7 @@ class InteractiveMenu:
             if manifest_path:
                 if RICH_AVAILABLE and console:
                     console.print(f"[green]✓ Manifest saved to:[/green] {_rich_safe(manifest_path)}")
-                    console.print("[dim]Edit in Excel, then run with [M] Run from manifest[/dim]")
+                    console.print("[grey70]Edit in Excel, then run with [M] Run from manifest[/grey70]")
                 else:
                     print(f"✓ Manifest saved to: {manifest_path}")
                     print("Edit in Excel, then run with [M] Run from manifest")
@@ -6073,7 +6097,7 @@ class InteractiveMenu:
                 return self._wizard_auto_mode_menu(workflow, analyzer, analysis, rec_mode, mode_names, mappings)
 
         else:
-            self.ui.markup("[dim]Switching to manual mode selection...[/dim]", "Switching to manual mode selection...")
+            self.ui.markup("[grey70]Switching to manual mode selection...[/grey70]", "Switching to manual mode selection...")
             return self._wizard_select_mode_manual(workflow)
 
     def _wizard_auto_mode_post_manifest(self, workflow: Dict, analyzer: FolderAnalyzer, analysis: Dict, rec_mode: int, mode_names: Dict, mappings: List) -> bool:
@@ -6300,7 +6324,7 @@ class InteractiveMenu:
                 table.add_row(str(i), _rich_safe(src_display), _rich_safe(dst_display), mode)
 
             console.print(Panel(table, title=f"[bold]Manifest[/bold] — {_rich_safe(manifest_path)}", border_style="blue"))
-            console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
+            console.print(f"[grey70]Total: {len(entries)} entry(ies)[/grey70]")
         else:
             print(f"\n=== Manifest: {manifest_path} ===")
             print(f"Total: {len(entries)} entry(ies)\n")
@@ -6499,7 +6523,7 @@ class InteractiveMenu:
         if anchored:
             note = (f"{len(anchored)} relative path(s) in the manifest resolved "
                     f"against the manifest's own folder: {csv_dir}")
-            self.ui.markup(f"[dim]{_rich_safe(note)}[/dim]", note)
+            self.ui.markup(f"[grey70]{_rich_safe(note)}[/grey70]", note)
 
         if not entries:
             self.ui.markup("[yellow]Manifest is empty or only has comments.[/yellow]", "Manifest is empty or only has comments.")
@@ -6546,7 +6570,7 @@ class InteractiveMenu:
             if "excludefolders" in opt_index:
                 note += "; ExcludeFolders '-' means no exclusion on that row"
             note += ")"
-            self.ui.markup(f"[dim]{_rich_safe(note)}[/dim]", note)
+            self.ui.markup(f"[grey70]{_rich_safe(note)}[/grey70]", note)
 
         # Invariant: one options dict per entry. Catches a desync between the
         # entries list and row_options on the spot instead of misaligning
@@ -6994,7 +7018,7 @@ class InteractiveMenu:
         ui.panel(f"[bold red]{_rich_safe(warn)}[/bold red]", style="red", plain=warn)
         go = ui.ask_yes("delete.continue", "[bold]Continue?[/bold]", "Continue? [y/N]: ", False)
         if not go:
-            ui.markup("[dim]Cancelled — back to the mode list.[/dim]")
+            ui.markup("[grey70]Cancelled — back to the mode list.[/grey70]")
             return self._wizard_select_mode(workflow)
 
         # --- The layout, same 0-8 as the normal path ----------------------
@@ -7040,7 +7064,7 @@ class InteractiveMenu:
         sure = ui.ask_yes("delete.sure", "[bold red]Is that what you want?[/bold red]",
                           "Is that what you want? [y/N]: ", False)
         if not sure:
-            ui.markup("[dim]Cancelled — back to the mode list.[/dim]")
+            ui.markup("[grey70]Cancelled — back to the mode list.[/grey70]")
             return self._wizard_select_mode(workflow)
 
         workflow['mode'] = mode
@@ -7103,7 +7127,7 @@ class InteractiveMenu:
             # asking a question whose "no" would do nothing.
             _msg = ("Each JXL is decoded and compared with its TIFF before the TIFF is "
                     "deleted (VERIFY_ROUNDTRIP in jxl_tiff_encoder.py).")
-            self.ui.markup(f"\n[dim]{_msg}[/dim]", f"\n{_msg}")
+            self.ui.markup(f"\n[grey70]{_msg}[/grey70]", f"\n{_msg}")
             verify = True
             workflow['verify_roundtrip'] = True
         elif (origin == 'tiff' and dest == 'jxl') or workflow.get('conversion_type') == 'jxl_recompress':
@@ -7112,7 +7136,7 @@ class InteractiveMenu:
                        "Lossless: the pixels must match exactly. Lossy: a brightness and "
                        "PSNR sanity check that catches a black or scrambled encode (not "
                        "quality loss — that is what you asked for). Roughly doubles the run.")
-            self.ui.markup(f"\n[dim]{explain}[/dim]", f"\n{explain}")
+            self.ui.markup(f"\n[grey70]{explain}[/grey70]", f"\n{explain}")
             verify = self.ui.ask_yes(
                 "delete.verify", "[cyan]Verify each output before deleting its source?[/cyan]",
                 f"Verify each output before deleting its source? "
@@ -7159,7 +7183,7 @@ class InteractiveMenu:
             "can never be finished without redoing everything. Turning this on deletes "
             "them too. They are never deleted on the timestamp alone: the output must "
             "exist and be structurally valid, " + _guarantee)
-        self.ui.markup(f"\n[dim]{ds_explain}[/dim]", f"\n{ds_explain}")
+        self.ui.markup(f"\n[grey70]{ds_explain}[/grey70]", f"\n{ds_explain}")
         del_skipped = self.ui.ask_yes(
             "delete.skipped", "[cyan]Also delete originals that were already converted?[/cyan]",
             f"Also delete originals that were already converted? "
@@ -7213,7 +7237,7 @@ class InteractiveMenu:
                     f"and then stamped, so this is a ONE-TIME pass: afterwards the strict "
                     f"check applies again.")
             _pv_list = "/".join(_pv_choices)
-            self.ui.markup(f"\n[dim]{pv_explain}[/dim]", f"\n{pv_explain}")
+            self.ui.markup(f"\n[grey70]{pv_explain}[/grey70]", f"\n{pv_explain}")
             # A typo keeps the default (the plain prompt never asked again).
             _pi = self.ui.ask_line(
                 "delete.provenance", "[cyan]Match existing outputs by[/cyan]",
@@ -7236,7 +7260,7 @@ class InteractiveMenu:
                        "do that if you know this archive was never built with a mode that "
                        "merges folders (2/4/5/6/7), which is what could have put a different "
                        "photo under that name.")
-                self.ui.markup(f"\n[dim]{_sc}[/dim]", f"\n{_sc}")
+                self.ui.markup(f"\n[grey70]{_sc}[/grey70]", f"\n{_sc}")
                 _scan = self.ui.ask_yes("delete.adopt_scan",
                                         "[cyan]Verify each one before adopting?[/cyan]",
                                         "Verify each one before adopting? [Y/n]: ", True)
@@ -7435,7 +7459,7 @@ class InteractiveMenu:
         if mode == 99:
             if RICH_AVAILABLE and console:
                 console.print(f"\n[bold cyan]Mode settings: Manifest Mode[/bold cyan]")
-                console.print(f"[dim]Running {len(workflow.get('manifest_entries', []))} entries from manifest[/dim]")
+                console.print(f"[grey70]Running {len(workflow.get('manifest_entries', []))} entries from manifest[/grey70]")
             else:
                 print(f"\n--- Mode settings: Manifest Mode ---")
             workflow['mode_config'] = mode_config
@@ -7789,7 +7813,7 @@ class InteractiveMenu:
                 workflow.setdefault('mode_config', {})['export_subfolder'] = _sub
                 _sub_msg = (f"Mode-7 entries: processing only subfolder {_sub!r} "
                             f"(derived from the manifest's Source paths).")
-                self.ui.markup(f"[dim]{_rich_safe(_sub_msg)}[/dim]", _sub_msg)
+                self.ui.markup(f"[grey70]{_rich_safe(_sub_msg)}[/grey70]", _sub_msg)
 
         # The mode-7 derivation above may have filled the run's export_subfolder.
         # Rows with their own Export* columns hold a COPY of mode_config, so
@@ -7874,7 +7898,7 @@ class InteractiveMenu:
         if _can_skip:
             _skip_msg = ("Collision check: skipped (no two entries can share an "
                          "output folder).")
-            self.ui.markup(f"[dim]{_rich_safe(_skip_msg)}[/dim]", _skip_msg)
+            self.ui.markup(f"[grey70]{_rich_safe(_skip_msg)}[/grey70]", _skip_msg)
             collisions = []
         else:
             collisions = self._manifest_output_collisions(
@@ -8002,7 +8026,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing manifest: {total_entries} entry(ies)[/bold cyan]")
-            console.print(f"[dim]Script: {_rich_safe(script)} | Workers: {workers}[/dim]")
+            console.print(f"[grey70]Script: {_rich_safe(script)} | Workers: {workers}[/grey70]")
             if dry_run:
                 console.print("[yellow]DRY RUN MODE[/yellow]")
             console.print()
@@ -8255,8 +8279,8 @@ class InteractiveMenu:
         if log_path:
             if RICH_AVAILABLE and console:
                 from rich.markup import escape as _escape
-                console.print("[dim]Combined log:[/dim]")
-                console.print(f"[dim]  {_escape(str(log_path))}[/dim]", soft_wrap=True)
+                console.print("[grey70]Combined log:[/grey70]")
+                console.print(f"[grey70]  {_escape(str(log_path))}[/grey70]", soft_wrap=True)
             else:
                 print("Combined log:")
                 print(f"  {log_path}")
@@ -9013,7 +9037,7 @@ class InteractiveMenu:
                     else:
                         # This walk is the slow part on large trees (recursive glob
                         # + per-file stat + resolver per source file) — say so.
-                        self.ui.markup(f"[dim]Collision check: scanning {_rich_safe(src_root)} ...[/dim]", f"Collision check: scanning {src_root} ...")
+                        self.ui.markup(f"[grey70]Collision check: scanning {_rich_safe(src_root)} ...[/grey70]", f"Collision check: scanning {src_root} ...")
                         try:
                             files = sorted(src_root.rglob('*') if mode >= 2 else src_root.iterdir())
                         except OSError:
@@ -9762,7 +9786,7 @@ class InteractiveMenu:
 
         if RICH_AVAILABLE and console:
             console.print(f"\n[bold cyan]Executing:[/bold cyan]")
-            console.print(f"[dim]{_rich_safe(' '.join(_display_cmd(cmd)))}[/dim]\n")
+            console.print(f"[grey70]{_rich_safe(' '.join(_display_cmd(cmd)))}[/grey70]\n")
         else:
             print(f"\nExecuting: {' '.join(_display_cmd(cmd))}\n")
 
@@ -9873,7 +9897,7 @@ class InteractiveMenu:
                                       presets[name].get('saved_at', ''))
                     console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
                 else:
-                    console.print("\n[dim]No presets saved yet.[/dim]")
+                    console.print("\n[grey70]No presets saved yet.[/grey70]")
                 ui.actions([("Run", [(f"1-{len(names)}" if names else "number", "run a preset")]),
                             ("Save", [("s", "save the last job as a preset")]),
                             ("Leave", [("d", "delete a preset"), ("b", "back")])])
@@ -9897,7 +9921,7 @@ class InteractiveMenu:
                 if not snapshot.get('last_input_dir'):
                     self._print_error("No workflow has been run yet — run one first, then save it here.")
                     continue
-                ui.markup(f"[dim]{_rich_safe(self._describe_session(snapshot))}[/dim]",
+                ui.markup(f"[grey70]{_rich_safe(self._describe_session(snapshot))}[/grey70]",
                           f"  {self._describe_session(snapshot)}")
                 raw_name = ui.ask_line("presets.name", "Preset name", "Preset name: ")
                 name = self._clean_preset_name(raw_name)
