@@ -90,10 +90,11 @@ def test_the_menu_names_each_distance(menu, cfg, capsys):
     _select_destination(menu, ["", ""])
     printed = capsys.readouterr().out
     # v2.22.3: the tip sits under the list, the scan line names the review row
-    assert printed.index("Tip: 8-bit TIFFs") > printed.index("[6] your distance")
+    assert printed.index("Tip: 8-bit TIFFs") > printed.index("[7] your distance")
     assert "Film scans row" in printed
     for text in ("d=0 — lossless", "d=0.05 — finest lossy", "d=0.1 — near-lossless (recommended)",
-                 "d=0.5 — high-quality lossy", "d=1 — visually lossless for viewing",
+                 "d=0.5 — high-quality lossy", "d=0.7 — visually lossless at 100%",
+                 "d=1 — visually lossless at a normal viewing distance",
                  "your distance", "Tip: 8-bit TIFFs"):
         assert text in printed, text
 
@@ -124,7 +125,8 @@ def test_corrupt_stored_distance_does_not_break_the_menu(menu, cfg):
 
 def test_fixed_entries(menu, cfg):
     cfg.config.default_distance = 0.05
-    for key, d in (("1", 0.0), ("2", 0.05), ("3", 0.1), ("4", 0.5), ("5", 1.0)):
+    for key, d in (("1", 0.0), ("2", 0.05), ("3", 0.1), ("4", 0.5), ("5", 0.7),
+                   ("6", 1.0)):
         assert _select_destination(menu, [key, ""])['distance'] == d
 
 
@@ -141,7 +143,7 @@ def test_a_distance_off_the_list_is_the_custom_default(menu, cfg):
 def test_custom_defaults_to_last_used_distance(menu, cfg):
     cfg.config.last_distance = 0.03
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["6", "", ""])   # accept the default
+    workflow = _select_destination(menu, ["7", "", ""])   # accept the default
     assert workflow['distance'] == 0.03
 
 
@@ -149,20 +151,20 @@ def test_custom_default_survives_a_zero_last_distance(menu, cfg):
     """0.0 is falsy: an `or`-based default would silently convert it to 0.1
     and turn a lossless habit into a lossy run."""
     cfg.config.last_distance = 0.0
-    workflow = _select_destination(menu, ["6", "", ""])
+    workflow = _select_destination(menu, ["7", "", ""])
     assert workflow['distance'] == 0.0
 
 
 def test_custom_falls_back_to_the_setting_when_nothing_was_used_yet(menu, cfg):
     cfg.config.last_distance = None
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["6", "", ""])
+    workflow = _select_destination(menu, ["7", "", ""])
     assert workflow['distance'] == 0.05
 
 
 def test_custom_still_accepts_a_typed_value(menu, cfg):
     cfg.config.default_distance = 0.05
-    workflow = _select_destination(menu, ["6", "2.5", ""])
+    workflow = _select_destination(menu, ["7", "2.5", ""])
     assert workflow['distance'] == 2.5
 
 
@@ -695,3 +697,123 @@ def test_flags_without_run_preset_are_rejected(tmp_path, monkeypatch, argv):
     for someone who believed they asked for a simulation."""
     code, _ = _run_cli(monkeypatch, _config_with_preset(tmp_path), argv)
     assert code == 2, "argparse must reject it instead of ignoring it"
+
+
+# ─────────────────────────────────────────────
+# "Make smaller or resized JXL copies" offers d=5 (2026-11-06)
+# ─────────────────────────────────────────────
+
+def _derive_quality(menu, answers):
+    workflow = {'origin_format': 'jxl', 'dest_format': 'jxl', '_task': 'derive_jxl',
+                'conversion_type': 'jxl_recompressor'}
+    with mock.patch.object(wp, "RICH_AVAILABLE", False), \
+         mock.patch("builtins.input", side_effect=answers):
+        menu._ui = wp.PlainUI()
+        assert menu._job_quality(workflow)
+    return workflow
+
+
+def test_copies_offer_distance_5(menu, capsys):
+    """d=5 sits after d=3 and before the custom entry; above 5 there is no
+    named entry (libjxl halves the resolution itself from d=10)."""
+    workflow = _derive_quality(menu, ["6"])
+    printed = capsys.readouterr().out
+    assert workflow['distance'] == 5.0
+    assert "[6] d=5 — about quality 46" in printed
+    assert "[7] your distance (0-25)" in printed
+    assert [v for v, _n, _x in wp._RECOMPRESS_CHOICES] == [0.5, 0.7, 1.0, 2.0, 3.0, 5.0]
+    assert wp._distance_label(5) == "about quality 46"
+
+
+def test_both_lists_offer_0_7_and_name_the_quality_scale(menu, capsys):
+    """The texts agreed on 2026-11-05: 0.7 in both lists, d=1 named by its
+    viewing distance, d=2/3 by cjxl's -q scale."""
+    assert 0.7 in [v for v, _n, _x in wp._DISTANCE_CHOICES]
+    assert wp._distance_label(0.7) == "visually lossless at 100%"
+    assert wp._distance_label(1) == "visually lossless at a normal viewing distance"
+    _derive_quality(menu, [""])
+    printed = capsys.readouterr().out
+    assert "[4] d=2 — about quality 79 (phones, sharing at good quality)" in printed
+    assert "[5] d=3 — about quality 68" in printed
+    # q = 100 - (d - 0.1) / 0.09, cjxl's own mapping
+    for d, q in ((2.0, 79), (3.0, 68), (5.0, 46)):
+        assert round(100 - (d - 0.1) / 0.09) == q
+
+
+def test_copies_custom_entry_still_takes_any_distance(menu):
+    workflow = _derive_quality(menu, ["7", "25"])
+    assert workflow['distance'] == 25.0
+
+
+# ─────────────────────────────────────────────
+# Typical file sizes next to the distances (2026-11-06)
+# ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("mb, text", [
+    (172.9, "173 MB"), (10.0, "10 MB"), (5.46, "5.5 MB"), (1.0, "1.0 MB"),
+    (0.57, "570 KB"), (0.08, "80 KB")])
+def test_size_text(mb, text):
+    assert wp._size_text(mb) == text
+
+
+def test_every_offered_distance_has_a_measured_size():
+    for v, _n, _x in wp._DISTANCE_CHOICES + wp._RECOMPRESS_CHOICES:
+        assert v in wp._TYPICAL_SIZE_MB, v
+        assert all(c.strip() for c in wp._size_cells(v))
+
+
+def test_the_quality_list_shows_sizes_per_resolution(menu, cfg, capsys):
+    _select_destination(menu, ["", ""])
+    printed = capsys.readouterr().out
+    lines = printed.splitlines()
+    header = next(l for l in lines if "45 MP" in l)
+    assert "24 MP" in header and "12 MP" in header
+    lossless = next(l for l in lines if "[1] d=0 — lossless" in l)
+    assert lossless.rstrip().endswith("43 MB") and "173 MB" in lossless
+    assert "Tip: 8-bit TIFFs" in printed
+
+
+def test_your_distance_shows_every_distance_first(menu, cfg, capsys):
+    workflow = _select_destination(menu, ["7", "0.3"])
+    printed = capsys.readouterr().out
+    assert workflow['distance'] == 0.3
+    table = printed[printed.index("Typical file size"):]
+    for row in ("TIFF 16-bit, ZIP", "from an 8-bit TIFF", "JXL d=0.3", "JXL d=25",
+                "JXL d=10 — libjxl halves the resolution"):
+        assert row in table, row
+
+
+def test_copies_list_shows_sizes_without_tiff_rows(menu, capsys):
+    workflow = _derive_quality(menu, ["7", "7"])
+    printed = capsys.readouterr().out
+    assert workflow['distance'] == 7.0
+    assert "[6] d=5 — about quality 46" in printed and "1.1 MB" in printed
+    assert "Typical file size" in printed and "TIFF 16-bit" not in printed
+    assert "full-size copy" in printed
+
+
+def test_lossless_shows_its_8bit_size_on_the_list(menu, cfg, capsys):
+    """173 MB is a 16-bit TIFF's lossless file; the 8-bit one (43 MB) sits right
+    under it as a line to read, so the keys stay 1..7 and Enter keeps 0.1."""
+    workflow = _select_destination(menu, ["", ""])
+    printed = capsys.readouterr().out
+    lines = printed.splitlines()
+    i = next(n for n, l in enumerate(lines) if "[1] d=0 — lossless" in l)
+    assert "from a 16-bit TIFF" in lines[i] and "173 MB" in lines[i]
+    assert "from an 8-bit TIFF" in lines[i + 1] and "43 MB" in lines[i + 1]
+    assert "[" not in lines[i + 1]          # no key of its own
+    assert "[2] d=0.05" in lines[i + 2]
+    assert workflow['distance'] == 0.1
+
+
+def test_the_8bit_line_is_not_an_answer(menu, cfg):
+    """An empty key is a line to read: typing nothing takes the default and a
+    key past the list is asked again."""
+    workflow = _select_destination(menu, ["8", "2", ""])
+    assert workflow['distance'] == 0.05
+
+
+def test_scripted_ui_refuses_the_display_line():
+    ui = wp.ScriptedUI({"q": ""})
+    with pytest.raises(AssertionError):
+        ui.choose("q", "Q", [("1", "a", "x"), ("", "b", "y")], columns=["c"])

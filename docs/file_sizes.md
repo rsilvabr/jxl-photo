@@ -87,6 +87,52 @@ Per photo (MB; "Size" is what is left after cropping):
 | Zf #9 | 200 | 24 MP | 143 | 102 | 30.0 | 22.5 | 10.0 | 6.4 |
 | Zf #10 | 4000 | 24 MP | 142 | 101 | 26.2 | 20.1 | 9.3 | 6.1 |
 
+## Every distance, from a 16-bit and an 8-bit TIFF
+
+The wizard shows this table when you choose a distance (the medians only). It
+uses the photos above plus 10 from a Nikon D700 (12 MP). 45 MP is the Z7 and
+the Z8 together (20 photos), 24 MP the Zf, 12 MP the D700. The 8-bit TIFFs are
+the same exports rounded to 8 bits, with the same ICC profile. ZIP is
+ImageMagick's `-compress zip`, the one tiff-workflow writes; it is smaller than
+Capture One's own zip. Measured on 2026-11-06 with `jxl_tiff_encoder.py`
+v2.23.0, effort 7, without the Explorer thumbnail. Each cell is the median in
+MB, with the middle 80% of the photos in brackets.
+
+| | 45 MP | 24 MP | 12 MP |
+|---|---|---|---|
+| TIFF 16-bit, uncompressed | 273 | 146 | 72 |
+| TIFF 16-bit, ZIP | 227 (216–241) | 120 (115–132) | 60 (56–61) |
+| TIFF 8-bit, uncompressed | 136 | 73 | 36 |
+| TIFF 8-bit, ZIP | 61 (50–78) | 30 (24–45) | 16 (12–22) |
+| Lossless, from 16-bit | 173 (152–187) | 89 (82–101) | 43 (40–46) |
+| Lossless, from 8-bit | 43 (33–54) | 21 (18–29) | 10 (7.7–12) |
+| `d=0.05`, from 16-bit | 42 (36–51) | 21 (19–26) | 9.9 (7.9–12) |
+| `d=0.05`, from 8-bit | 47 (39–54) | 23 (22–27) | 11 (8.8–13) |
+| `d=0.1` | 31 (24–38) | 15 (13–20) | 7.2 (5.4–9.2) |
+| `d=0.2` | 21 (15–27) | 10 (8.2–15) | 4.8 (3.7–6.9) |
+| `d=0.3` | 16 (11–22) | 7.6 (5.8–12) | 3.5 (2.5–5.7) |
+| `d=0.5` | 11 (7.0–16) | 4.9 (3.5–9.3) | 2.4 (1.4–4.3) |
+| `d=0.7` | 7.8 (4.4–13) | 3.7 (2.2–8.1) | 1.7 (0.9–3.5) |
+| `d=1` | 5.5 (3.0–10) | 2.7 (1.4–6.2) | 1.2 (0.6–2.8) |
+| `d=2` | 2.8 (1.6–6.2) | 1.4 (0.6–3.0) | 0.57 (0.33–1.6) |
+| `d=3` | 1.8 (1.0–4.4) | 0.94 (0.43–1.8) | 0.37 (0.23–1.1) |
+| `d=5` | 1.1 (0.6–2.8) | 0.64 (0.33–1.0) | 0.26 (0.15–0.80) |
+| `d=10` | 0.56 (0.23–1.8) | 0.41 (0.17–0.73) | 0.15 (0.08–0.60) |
+| `d=25` | 0.29 (0.11–0.88) | 0.16 (0.10–0.32) | 0.08 (0.05–0.24) |
+
+- **From `d=0.2` on, the bit depth of the TIFF does not matter.** The encoder works
+  in its own colour space, and an 8-bit TIFF gives the same file within 2%. At
+  `d=0.1` the 8-bit one is 6% larger.
+- **An 8-bit TIFF is small lossless:** a quarter of the 16-bit lossless file. At
+  `d=0.05` it comes out *larger* than its own lossless file, and at `d=0.1` it
+  is about a quarter smaller. That is why the wizard suggests keeping 8-bit
+  TIFFs lossless.
+- **From `d=10`, libjxl halves the resolution by itself** and scales the image
+  back up when it is decoded. The file barely shrinks after that, and fine
+  detail goes soft (a sweep of 8 photos, d=1 to 25, on 2026-11-06). For a
+  smaller copy, resizing it (`--resize-long`) works better than a higher
+  distance.
+
 ## Film scans
 
 Scans are archived lossless by default (`SCAN_DISTANCE = 0`): a scan can only

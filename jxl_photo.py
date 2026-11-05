@@ -2582,19 +2582,78 @@ _DISTANCE_CHOICES = [
     (0.05, "finest lossy", "cjxl rounds any lower lossy distance to this"),
     (0.1, "near-lossless", "recommended"),
     (0.5, "high-quality lossy", "some headroom for later edits"),
-    (1.0, "visually lossless for viewing",
-     "JPEG XL's definition: for final copies, not further editing"),
+    (0.7, "visually lossless at 100%", "keeps the grain texture"),
+    (1.0, "visually lossless at a normal viewing distance", "JPEG XL's definition"),
 ]
 # "Make smaller or resized JXL copies": copies of masters, so cjxl's own
-# recommended range (0.5 .. 3.0, `cjxl --help`).
+# recommended range (0.5 .. 3.0, `cjxl --help`), plus d=5 for screen-only
+# copies. Nothing above 5: from d=10 libjxl halves the resolution itself
+# (enc_frame.cc), so quality drops a step there for little saving; a smaller
+# copy is better made with a resize (sweep of 2026-11-06, 8 photos).
+# "quality" is cjxl's -q scale (distance = 0.1 + (100 - q) * 0.09).
 _RECOMPRESS_CHOICES = [
     (0.5, "high-quality lossy", "some headroom for later edits"),
-    (1.0, "visually lossless for viewing", "for final copies, not further editing"),
-    (2.0, "smaller", "for phones and sharing"),
-    (3.0, "smallest recommended", "cjxl's recommended range ends here"),
+    (0.7, "visually lossless at 100%", "keeps the grain texture"),
+    (1.0, "visually lossless at a normal viewing distance", "JPEG XL's definition"),
+    (2.0, "about quality 79", "phones, sharing at good quality"),
+    (3.0, "about quality 68", "web and social media; the end of cjxl's recommended range"),
+    (5.0, "about quality 46", "screens only: textures smear at 100%"),
 ]
+# Typical file sizes shown next to the distances (MB at 45 / 24 / 12 MP):
+# medians of 20 Z7+Z8, 10 Zf and 10 D700 photos (Capture One exports,
+# ProPhoto, cropped ones scaled to the full sensor), cjxl 0.12.0 effort 7,
+# no Explorer thumbnail box; measured 2026-11-06 (docs/file_sizes.md).
+# From d=0.2 on a 16-bit and an 8-bit TIFF give the same size; lossless and
+# d=0.05 differ, so those have an 8-bit row of their own.
+_SIZE_COLUMNS = ["45 MP", "24 MP", "12 MP"]
+_TYPICAL_SIZE_MB = {
+    0.0: (172.9, 89.0, 43.1), 0.05: (42.3, 20.6, 9.9), 0.1: (31.0, 14.8, 7.2),
+    0.2: (21.2, 10.1, 4.8), 0.3: (16.0, 7.6, 3.5), 0.5: (10.7, 4.9, 2.4),
+    0.7: (7.8, 3.7, 1.7), 1.0: (5.5, 2.7, 1.2), 2.0: (2.8, 1.4, 0.57),
+    3.0: (1.75, 0.94, 0.37), 5.0: (1.11, 0.64, 0.26), 10.0: (0.56, 0.41, 0.15),
+    25.0: (0.29, 0.16, 0.08),
+}
+_TYPICAL_TIFF_MB = [
+    ("TIFF 16-bit, uncompressed", (272.7, 146.3, 72.3)),
+    ("TIFF 16-bit, ZIP", (227.47, 119.6, 59.9)),
+    ("TIFF 8-bit, uncompressed", (136.3, 73.2, 36.2)),
+    ("TIFF 8-bit, ZIP", (61.3, 30.1, 16.0)),
+]
+_TYPICAL_8BIT_MB = {0.0: (43.4, 20.9, 10.2), 0.05: (46.7, 23.0, 11.1)}
+
+
+def _size_text(mb: float) -> str:
+    """12 MB, 5.5 MB, 290 KB: two figures are all a median of ten photos holds."""
+    if mb >= 10:
+        return f"{mb:.0f} MB"
+    if mb >= 1:
+        return f"{mb:.1f} MB"
+    return f"{mb * 1000:.0f} KB"
+
+
+def _size_cells(distance) -> Tuple[str, ...]:
+    """The typical sizes of `distance` ("" for one that was not measured)."""
+    try:
+        sizes = _TYPICAL_SIZE_MB.get(float(distance))
+    except (TypeError, ValueError):
+        sizes = None
+    # right-aligned, so the plain renderer lines the numbers up too
+    return (tuple(_size_text(s).rjust(6) for s in sizes) if sizes
+            else ("",) * len(_SIZE_COLUMNS))
+
+
+_SIZE_NOTE = ("Typical sizes, median of 10-20 photos (a 16-bit TIFF is 273 / 146 / "
+              "72 MB); from d=0.1 on an 8-bit TIFF gives about the same. Detail and "
+              "noise make a file larger, smooth skies smaller (half to twice these at d=1).")
+_SIZE_NOTE_COPIES = ("Typical sizes of a full-size copy, median of 10-20 photos; detail "
+                     "and noise make a file larger, smooth skies smaller (half to twice "
+                     "these at d=1). A resized copy (Resize, in the options) is smaller.")
+_SIZE_NOTE_8BIT = ("Tip: 8-bit TIFFs are small lossless and d=0.05 comes out larger, so "
+                   "keep them lossless (8-bit gray scans grow even at d=0.1; "
+                   "docs/file_sizes.md).")
+
 _DISTANCE_PROMPT = ("Distance (0 = lossless, 0.05 = finest lossy, 0.1 = near-lossless, "
-                    "1 = visually lossless for viewing)")
+                    "0.7 = visually lossless at 100%, 1 = at a normal viewing distance)")
 
 
 def _distance_label(value) -> str:
@@ -3288,9 +3347,14 @@ class UI:
 
     def choose(self, qid: str, prompt: str, options: List[Tuple[str, str]],
                default: Optional[str] = None, note: Optional[str] = None,
-               title: Optional[str] = None) -> str:
+               title: Optional[str] = None,
+               columns: Optional[List[str]] = None) -> str:
         """One key of `options` [(key, label)]; `note` is printed under the
-        list, before the prompt; `title` heads the list (else the prompt)."""
+        list, before the prompt; `title` heads the list (else the prompt).
+        With `columns` (the headers of extra cells: ["45 MP", "24 MP"]) each
+        option is (key, label, cell, ...) and the list gets a header row.
+        An option with an empty key is a line to read, not to choose (shown
+        dim, never accepted as an answer)."""
         raise NotImplementedError
 
     # The wizard's older questions keep their exact wording in each renderer
@@ -3396,12 +3460,19 @@ class PlainUI(UI):
         answer = input(f"{_plain_prompt(prompt)} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
         return default if not answer else answer.startswith('y')
 
-    def choose(self, qid, prompt, options, default=None, note=None, title=None):
-        keys = [k for k, _l in options]
+    def choose(self, qid, prompt, options, default=None, note=None, title=None,
+               columns=None):
+        keys = [o[0] for o in options if o[0]]
         if title:
             print(f"\n--- {title} ---")
-        for k, label in options:
-            print(f"  [{k}] {label}")
+        if columns:
+            rows = [(f"[{o[0]}] {o[1]}" if o[0] else f"    {o[1]}",) + tuple(o[2:])
+                    for o in options]
+            for line in _plain_table_lines([""] + list(columns), rows):
+                print(line)
+        else:
+            for k, label in options:
+                print(f"  [{k}] {label}" if k else f"      {label}")
         if note:
             print(note)
         while True:
@@ -3488,18 +3559,22 @@ class RichUI(UI):
         console.print()
         return Confirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
 
-    def choose(self, qid, prompt, options, default=None, note=None, title=None):
-        t = Table(show_header=False, box=None, padding=(0, 1))
+    def choose(self, qid, prompt, options, default=None, note=None, title=None,
+               columns=None):
+        t = Table(show_header=bool(columns), header_style="bold cyan", box=None,
+                  padding=(0, 1))
         t.add_column(style="bold cyan", justify="right")
         t.add_column()
-        for k, label in options:
-            t.add_row(_rich_safe(k), _rich_safe(label))
+        for c in columns or []:
+            t.add_column(_rich_safe(c), justify="right")
+        for o in options:
+            t.add_row(*[_rich_safe(str(v)) for v in o], style=None if o[0] else "dim")
         console.print(Panel(t, title=f"[bold]{_rich_safe(title or prompt)}[/bold]",
                             border_style="cyan", box=BOX_ROUNDED, expand=False))
         if note:
             console.print(f"[dim]{_rich_safe(note)}[/dim]")
         console.print()
-        return Prompt.ask(_rich_safe(prompt), choices=[k for k, _l in options],
+        return Prompt.ask(_rich_safe(prompt), choices=[o[0] for o in options if o[0]],
                           default=default)
 
     def ask_line(self, qid, rich, plain, default=None, choices=None):
@@ -3593,14 +3668,15 @@ class ScriptedUI(UI):
         v = self._next(qid)
         return default if v is None else bool(v)
 
-    def choose(self, qid, prompt, options, default=None, note=None, title=None):
+    def choose(self, qid, prompt, options, default=None, note=None, title=None,
+               columns=None):
         if title:
             self.output.append(f"== {title}")
         if note:
             self.output.append(note)
         v = self._next(qid)
         v = default if v is None else str(v)
-        if v not in [k for k, _l in options]:
+        if v not in [o[0] for o in options if o[0]]:
             raise AssertionError(f"ScriptedUI: {v!r} is not an option of {qid!r}")
         return v
 
@@ -5054,6 +5130,28 @@ class InteractiveMenu:
                 continue
             return tid
 
+    def _show_size_table(self, masters: bool) -> None:
+        """Every measured distance with its typical size, before the user
+        types one (masters: the TIFF and 8-bit rows first)."""
+        def cells(sizes):
+            return tuple(_size_text(s).rjust(6) for s in sizes)
+
+        rows = []
+        if masters:
+            rows += [(name, *cells(sizes)) for name, sizes in _TYPICAL_TIFF_MB]
+            rows.append(("",) * (len(_SIZE_COLUMNS) + 1))
+        for d in sorted(_TYPICAL_SIZE_MB):
+            label = _distance_label(d)
+            if d == 10.0:
+                label = "libjxl halves the resolution from here"
+            name = f"JXL d={d:g}" + (f" — {label}" if label else "")
+            rows.append((name, *cells(_TYPICAL_SIZE_MB[d])))
+            if masters and d in _TYPICAL_8BIT_MB:
+                rows.append(("      from an 8-bit TIFF", *cells(_TYPICAL_8BIT_MB[d])))
+        notes = [_SIZE_NOTE if masters else _SIZE_NOTE_COPIES]
+        self.ui.table("Typical file size", [""] + [c.rjust(6) for c in _SIZE_COLUMNS],
+                      rows, notes=notes)
+
     def _ask_number(self, qid: str, prompt: str, default, lo, hi, kind=float):
         """A number from self.ui, clamped to [lo, hi]; the default on a typo."""
         text = self.ui.ask_text(qid, prompt, f"{default:g}" if isinstance(default, float)
@@ -5075,22 +5173,29 @@ class InteractiveMenu:
         frm = workflow.setdefault('_from', {})
         if tid == 'archive_tiff':
             preferred = _sane_distance(self.config.config.default_distance)
-            opts = [(str(i), f"d={v:g} — {name} ({note})")
+            opts = [(str(i), f"d={v:g} — {name} ({note})") + _size_cells(v)
                     for i, (v, name, note) in enumerate(_DISTANCE_CHOICES, 1)]
             custom = str(len(opts) + 1)
-            opts.append((custom, "your distance (0-25)"))
+            opts.append((custom, "your distance (0-25) — shows every distance's size")
+                        + ("",) * len(_SIZE_COLUMNS))
             # Enter = the default distance of Settings (0.1 unless changed).
             default_key = next((k for k, (v, _n, _x) in zip([o[0] for o in opts],
                                                              _DISTANCE_CHOICES)
                                 if v == preferred), custom)
+            # Lossless is the one size that depends on the TIFF's bit depth:
+            # its 8-bit size under it (a line to read, no key), so 173 MB
+            # does not scare someone who exports 8-bit TIFFs.
+            _i = next(i for i, (v, _n, _x) in enumerate(_DISTANCE_CHOICES) if v == 0.0)
+            opts[_i] = (opts[_i][0], opts[_i][1] + ", from a 16-bit TIFF") + opts[_i][2:]
+            opts.insert(_i + 1, ("", "   from an 8-bit TIFF")
+                        + tuple(_size_text(s).rjust(6) for s in _TYPICAL_8BIT_MB[0.0]))
             key = ui.choose(
                 "job.quality", "Quality", opts, default_key,
-                note=("  Tip: 8-bit TIFFs gain little from d=0.05/0.1 over lossless (8-bit "
-                      "gray comes out larger), so keep them lossless; 16-bit TIFFs get much "
-                      "smaller lossy (docs/file_sizes.md)."))
+                note=f"  {_SIZE_NOTE}\n  {_SIZE_NOTE_8BIT}", columns=_SIZE_COLUMNS)
             if key != custom:
                 workflow['distance'] = _DISTANCE_CHOICES[int(key) - 1][0]
             else:
+                self._show_size_table(masters=True)
                 last = self.config.config.last_distance
                 start = _sane_distance(last, fallback=preferred) if last is not None else preferred
                 workflow['distance'] = self._ask_number("job.distance", "Distance (0-25, lower = better)",
@@ -5113,10 +5218,11 @@ class InteractiveMenu:
                 ui.markup(f"[dim]  {_rich_safe(_note)}[/dim]", f"  {_note}")
         elif tid == 'derive_jxl':
             current = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
-            opts = [(str(i), f"d={v:g} — {name} ({note})")
+            opts = [(str(i), f"d={v:g} — {name} ({note})") + _size_cells(v)
                     for i, (v, name, note) in enumerate(_RECOMPRESS_CHOICES, 1)]
             custom = str(len(opts) + 1)
-            opts.append((custom, "your distance (0-25)"))
+            opts.append((custom, "your distance (0-25) — shows every distance's size")
+                        + ("",) * len(_SIZE_COLUMNS))
             try:
                 _cur = float(current)
             except (TypeError, ValueError):
@@ -5124,10 +5230,13 @@ class InteractiveMenu:
             # Enter = the recompressor's own setting (CJXL_DISTANCE, 1.0).
             default_key = next((str(i) for i, (v, _n, _x) in enumerate(_RECOMPRESS_CHOICES, 1)
                                 if v == _cur), custom)
-            key = ui.choose("job.quality", "Distance", opts, default_key)
+            key = ui.choose("job.quality", "Distance", opts, default_key,
+                            note=f"  {_SIZE_NOTE_COPIES}",
+                            columns=_SIZE_COLUMNS)
             if key != custom:
                 workflow['distance'] = _RECOMPRESS_CHOICES[int(key) - 1][0]
             else:
+                self._show_size_table(masters=False)
                 workflow['distance'] = self._ask_number(
                     "job.distance", "Target distance (0-25, lower = better)", current, 0.0, _MAX_DISTANCE)
             frm['distance'] = 'you'
