@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.22.5** (2026-11-04) · [What's new](#whats-new-in-v2225) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.23.0** (2026-11-05) · [What's new](#whats-new-in-v2230) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.22.5](#whats-new-in-v2225)
+- [What's new in v2.23.0](#whats-new-in-v2230)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -401,20 +401,29 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.22.5
+## What's new in v2.23.0
 
-2026-11-04. Distances up to 25 (cjxl's own limit) are accepted, not only up to 15. The wizard names each distance it offers: for masters (lossless,
+2026-11-05.
+
+- **Derivatives (sRGB, resized) and JXL -> TIFF are about 35-40% faster**: a
+  temp file in the pipeline is no longer compressed. Same pixels.
+- **`--export-jpeg-folder`** names the folder a JXL -> JPEG/PNG run of modes
+  6/7 writes (e.g. `JPG_mobile`); the wizard and the manifests use it too.
+- **The wizard reads better**: choices and the review in tables, actions
+  grouped by what they do, a blank line before every question.
+- The update check never makes the menu wait; jxl-thumb is recommended when
+  Microsoft's extension makes the thumbnails; both reminders can be turned
+  off in Settings.
+
+[Version history](docs/version_history.md#v2230).
+
+### In v2.22.1–v2.22.5
+
+2026-11-04. Every wizard question goes through one question layer. Distances up to 25 (cjxl's own limit) are accepted, not only up to 15. The wizard names each distance it offers: for masters (lossless,
 finest lossy, near-lossless, high-quality lossy, visually lossless for
 viewing) and for smaller copies (cjxl's recommended 0.5 to 3). The review
 screen shows the distance film scans get, right below the run's. Enter still
 takes your default distance. [Version history](docs/version_history.md#v2225).
-
-### In v2.22.1
-
-Internal: every wizard question now goes through the same
-question layer as the New job (the mode step, Settings, presets, manifests,
-the maintenance menus). Same questions, same order, same command lines —
-nothing to do. [Version history](docs/version_history.md#v2221).
 
 ### In v2.22.0
 
@@ -435,7 +444,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.22.5** | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
+| **v2.23.0** | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
+| [v2.22.5](docs/version_history.md#v2225) | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
 | [v2.22.1](docs/version_history.md#v2221) | 2026-11-04 | Every wizard question on one question layer; same questions and command lines |
 | [v2.22.0](docs/version_history.md#v2220) | 2026-11-04 | The wizard by task: a New job and one review screen with every option; new menus; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input |
 | [v2.21.0](docs/version_history.md#v2210) | 2026-11-04 | JPEG/PNG of cautious-strategy masters carry their real profile; less memory per worker; a failed metadata copy keeps the source |

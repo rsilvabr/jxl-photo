@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.22.5](#v2225)** | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
+| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 2 fixes) |
+| [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
 | [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
 | [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
 | [v2.22.2](#v2222) | 2026-11-04 | The wizard names each distance (lossless, finest lossy, near-lossless, high-quality lossy, visually lossless for viewing) and shows the film-scan distance on the review screen |
@@ -88,9 +89,46 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.23.0
+
+**Released 2026-11-05.** Supersedes v2.22.5. Nothing to do when upgrading;
+one wizard detail moved (the review's rows are numbered in a new order).
+
+- **Faster derivatives and JXL -> TIFF.** The 16-bit PNG ImageMagick hands to
+  the next step is a temp file; it is now written without zlib, which cost
+  ~6.5 s of one CPU thread per 45 MP photo. An sRGB derivative of seven Z8
+  masters on an SSD: 124 s -> 74.6 s with one worker, 26.7 s -> 17.9 s with
+  eight; the JXLs have the same pixels. Measured on the owner's library of
+  2026-11-04: the SRGB preset (5944 masters) took about 4 h, of which ~35 min
+  planning on a hard disk.
+- **`--export-jpeg-folder`** (transcoder): the folder a JXL -> JPEG/PNG run
+  of modes 6/7 writes under the export marker. It was always
+  `EXPORT_JPEG_FOLDER` (`JPEG_recovered`, the bit-exact recovery's folder),
+  with no flag. The wizard's "Output folder name under the marker" and the
+  manifest's `ExportJxlFolder` column now reach it on `jxl2jpeg`/`jxl2png`
+  rows (they were refused there).
+- **The wizard in tables.** Every choice list (task, quality, settings…) and
+  the mode list are framed tables in Rich; the review is one table (#,
+  Option, Value, From) with the actions grouped by intent ("Change [1-10]
+  edit an option listed above", "Run [r] RUN [d] dry run first"…) and
+  "type a key, [r] to run (Enter shows this screen again)". The rows are
+  ordered by what is chosen first (distance, film scans, effort, existing
+  outputs), then where it runs, then the technical switches. One blank line
+  before every question; a long default (a path) on its own line; no empty
+  "()". No "Step 4/5" titles any more; the scripts' folder names are named
+  under Settings, menu 9 -> 2.
+- **Start-up.** The once-a-day release check runs in the background: the
+  menu waits half a second at most, and a late answer shows at the next
+  menu. The jxl-thumb tip also shows when Microsoft's JPEG XL extension
+  makes the thumbnails (slow, washed-out ProPhoto/Adobe RGB), with a `[T]`
+  key that opens jxl-thumb's page. Settings (menu 9 -> 1) can turn both
+  reminders off.
+- Fixes: the review's "Existing outputs" showed no origin (#608); menus
+  5/6/7 offered the whole user profile as their folder (#609).
+
 ## v2.22.5
 
-**Released 2026-11-04.** Supersedes v2.22.4. Distances from 15 to 25 are
+**Released 2026-11-04.** Superseded by v2.23.0. Supersedes v2.22.4. Distances from 15 to 25 are
 accepted everywhere: `--distance` of the encoder, the transcoder and the
 recompressor, `--scan-distance`, the wizard's questions and the settings
 file. 25 is cjxl's own limit ("Allowed range: 0.0 ... 25.0", checked on
