@@ -504,6 +504,12 @@
   are the owner's local photos (ask for the folder, or read
   `JXLPHOTO_FIXTURES`; the layout is in the script's docstring) and are never
   modified.
+- **Wizard screens by eye** — `python tools/ui_tour.py [--out FOLDER]` walks
+  every screen of `jxl_photo.py` with Rich (22 sessions: menus, every task to
+  its review, [a]/[c]/[x]/[d]/[s], Auto Mode, [D], settings, the maintenance
+  menus) in a throw-away home and a hostile library folder, and saves each
+  screen to `FOLDER/screens/`. Read them after any change to what the wizard
+  shows (rc 130 = that session ran out of answers: see where in its file).
 - **Run the tool twice and feed it its own output** when testing a sync,
   skip or delete path: the second run over files the toolkit wrote itself is
   where the delete-skipped, provenance and in-place bugs live (the sibling
