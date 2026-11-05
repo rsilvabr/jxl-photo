@@ -899,6 +899,12 @@ def _argfile_via_stdin(cmd):
     return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
 
 
+# The PNG ImageMagick hands to the next step is a temp file, read once and
+# deleted: zlib on 45 MP of 16-bit pixels cost ~6.5 s per photo, single-
+# threaded (measured 2026-11-05: 9.0 s -> 2.4 s, same pixels in the JXL).
+_TEMP_PNG_ARGS = ["-define", "png:compression-level=0"]
+
+
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     """subprocess.run with stdout/stderr captured through temp FILES.
 
@@ -3668,7 +3674,7 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
                                "-profile", str(float_icc),
                                "-intent", "Relative",
                                "-profile", str(target_path),
-                               "-depth", "16", "png:" + str(conv_png)],
+                               "-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + str(conv_png)],
                               DJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
                 err = _stderr_tail(r.stderr)
