@@ -621,6 +621,12 @@ Options:
   --scan-scope all|raw
                     Which film scans --scan-distance covers: all (default) or
                     raw ones only (SCAN_SCOPE)
+  --eight-bit-distance D
+                    Distance for 8-bit TIFFs that are not film scans: 'auto'
+                    (default, EIGHT_BIT_DISTANCE) = lossless when --distance is
+                    EIGHT_BIT_LOSSLESS_UP_TO (0.1) or less, 'same' = the run's
+                    --distance, or a number (0 = lossless). See "8-bit TIFFs
+                    are archived lossless at low distances"
   --explorer-thumbnail auto|on|off
                     Thumbnail stored for jxl-thumb (EXPLORER_THUMBNAIL): auto =
                     every output when jxl-thumb is installed, lossless only
@@ -1419,6 +1425,33 @@ which the recompressor reads: it never re-encodes a scan lossy unless asked
 (`--on-scan`, see its README). The delete gate and `--verify-roundtrip` check each output
 at the distance it was encoded at (bit-exact for a lossless scan), and the
 space preflight counts the scans at their full size.
+
+### 8-bit TIFFs are archived lossless at low distances (`EIGHT_BIT_DISTANCE`)
+
+An 8-bit TIFF is small lossless: about 43 MB for 45 MP, a quarter of a 16-bit
+one. At `d=0.05` it comes out *larger* than that, and at `d=0.1` lossy saves
+only about a quarter ([measured on 40 photos](file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff)).
+So an 8-bit TIFF that is not a film scan gets its own distance, in the same
+run as the other TIFFs, like a scan does:
+
+- `EIGHT_BIT_DISTANCE = "auto"` (default): **lossless** when the run's
+  distance is `EIGHT_BIT_LOSSLESS_UP_TO` (0.1) or less, the run's distance
+  above it. A run at `d=0.1` archives its 16-bit TIFFs at 0.1 and its 8-bit
+  ones lossless; a run at `d=0.5` archives both at 0.5.
+- `--eight-bit-distance same` (or `EIGHT_BIT_DISTANCE = "same"`): 8-bit TIFFs
+  follow `--distance` like any TIFF.
+- `--eight-bit-distance 0.3` (a number): that distance for every 8-bit TIFF,
+  whatever `--distance` the run uses (0 = always lossless).
+
+"8-bit" is page 0's BitsPerSample (8 or less). Film scans keep
+`SCAN_DISTANCE`, whatever their bit depth. Before the first encode (only the
+TIFFs it will write) and again in the summary, the run counts the 8-bit TIFFs
+encoded at another distance than `--distance`; the encode record
+(`cjxl d=0.0`) says what each file got. The delete gate and
+`--verify-roundtrip` check each output at that distance (bit-exact when
+lossless). A master archived at the run's distance before this setting is
+judged at the new one by `--delete-skipped`: the refusal names
+`--eight-bit-distance same`.
 
 ### Examples
 

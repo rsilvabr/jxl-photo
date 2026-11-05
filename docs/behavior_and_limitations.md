@@ -99,6 +99,8 @@ Since v2.17.0 a **SilverFast** scan (image, thumbnail, IR page) archived with th
 
 Film scans are also archived **lossless** by default since v2.17.0, whatever `--distance` the rest of the run uses (`SCAN_DISTANCE = 0`, `--scan-distance`), and the recompressor never re-encodes them lossy unless asked (`--on-scan`). A raw negative's later processing magnifies even a small loss, and a scan can only be redone by scanning again. `--scan-distance same` treats them like any TIFF; `--scan-scope raw` keeps only raw scans lossless. [Details](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)
 
+8-bit TIFFs that are not scans are archived **lossless** when the run's distance is 0.1 or less (`EIGHT_BIT_DISTANCE = "auto"`, `EIGHT_BIT_LOSSLESS_UP_TO`): lossless is small for them, and `d=0.05` would come out larger. `--eight-bit-distance same` treats them like any TIFF, a number gives them their own distance. [Details](README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
+
 ## Scanner ICC profiles and lossy encoding
 
 Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF (see `--icc-png-strategy`). The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat **JXL as the backup container and the reconstructed TIFF as the final image**.

@@ -1561,6 +1561,43 @@ def tagless_checks(folder):
     check("camera TIFFs without tags: no guessed-scan warning",
           "only a guess" not in out, "")
 
+    # 8-bit TIFFs that are not film scans are archived lossless at low
+    # distances (EIGHT_BIT_DISTANCE "auto", up to EIGHT_BIT_LOSSLESS_UP_TO):
+    # the E990 TIFFs are real 8-bit camera TIFFs, one of them without tags.
+    e8 = B / "tagless_8bit"
+    depth = {}
+    for s in srcs:
+        cp(s, e8 / s.parent.name / s.name)
+        with tifffile.TiffFile(s) as t:
+            b = t.pages[0].bitspersample
+        depth[s] = max(b) if isinstance(b, tuple) else int(b)
+    rc8, out8 = run("tagless_enc_8bit", [ENC, e8, "--mode", "8", "--distance", "0.1",
+                                         "--effort", "2", "--no-preflight"])
+    n8 = sum(1 for b in depth.values() if b <= 8)
+    wrong8 = []
+    for s, b in depth.items():
+        j = e8 / s.parent.name / (s.stem + ".jxl")
+        desc = exif(["-s3", "-XMP-dc:Description", j]).strip() if j.exists() else ""
+        want = "cjxl d=0.0 e=2" if b <= 8 else "cjxl d=0.1 e=2"
+        if not desc.endswith(want):
+            wrong8.append(f"{s.name} ({b}-bit): {desc[-16:]!r}")
+            continue
+        if b <= 8:
+            png = e8 / f"{s.stem}_check.png"
+            djxl(j, png)
+            with tifffile.TiffFile(s) as t:
+                a = t.pages[0].asarray()
+            back = raw_rgb16(png, a.shape) if png.exists() else None
+            if back is None or not np.array_equal(back, a.astype(np.uint16) * 257):
+                wrong8.append(f"{s.name}: pixels differ")
+    check("8-bit camera TIFFs at --distance 0.1: archived lossless and bit-exact "
+          "(EIGHT_BIT_DISTANCE auto), 16-bit ones at 0.1",
+          rc8 == 0 and n8 > 0 and not wrong8,
+          f"rc={rc8} {n8} 8-bit of {len(depth)}, wrong={wrong8}")
+    check("8-bit camera TIFFs: the run announces the lossless ones",
+          f"8-bit TIFFs: {n8} TIFF(s) to encode at distance 0 (lossless)" in " ".join(out8.split()),
+          "")
+
 
 def jpeg_checks(jpegs):
     """Every file in <fixtures>/JPEG_varied (baseline/progressive, 4:2:0 to

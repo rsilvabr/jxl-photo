@@ -2520,6 +2520,51 @@ def _child_scan_distance() -> str:
     return "same" if value is None else f"{float(value):g}"
 
 
+def _child_eight_bit():
+    """The encoder's EIGHT_BIT_DISTANCE as the wizard offers it ('auto',
+    'same' or a number) and its EIGHT_BIT_LOSSLESS_UP_TO. The shipped
+    defaults only when the encoder cannot be imported."""
+    try:
+        mod = importlib.import_module('jxl_tiff_encoder')
+    except Exception:
+        return "auto", 0.1
+    try:
+        value = mod._parse_eight_bit_distance(getattr(mod, 'EIGHT_BIT_DISTANCE', "auto"))
+        up_to = float(getattr(mod, 'EIGHT_BIT_LOSSLESS_UP_TO'))
+    except Exception:
+        return "auto", 0.1
+    return (value if isinstance(value, str) else f"{value:g}"), up_to
+
+
+def _valid_eight_bit_distance(text: str):
+    """An --eight-bit-distance value the encoder accepts, normalised, or None."""
+    t = str(text or "").strip().lower()
+    if t in ("auto", "same"):
+        return t
+    try:
+        d = float(t)
+    except ValueError:
+        return None
+    return f"{d:g}" if 0 <= d <= _MAX_DISTANCE else None
+
+
+def _eight_bit_shown(value, up_to) -> str:
+    if value == "auto":
+        return f"lossless up to d={up_to:g}, then the Distance"
+    if value == "same":
+        return "same as Distance"
+    return _distance_shown(value)
+
+
+def _eight_bit_effective(value, up_to, distance):
+    """The distance an 8-bit TIFF (not a scan) gets in a run at `distance`."""
+    if value == "same":
+        return float(distance)
+    if value == "auto":
+        return 0.0 if float(distance) <= float(up_to) else float(distance)
+    return float(value)
+
+
 def _mode_title(mode, marker: str = "_EXPORT") -> str:
     """The one name of each mode, on every screen (the mode table, the review,
     Auto Mode, the [D] layouts, the detailed view): there were five lists of
@@ -2697,7 +2742,8 @@ def _distance_shown(value) -> str:
 # The review lists what the user chooses first, then where it runs, then the
 # technical switches (v2.23.0). Keys not named keep their place after these.
 _REVIEW_ROW_ORDER = (
-    "conversion", "distance", "scan_distance", "quality", "effort", "derivative",
+    "conversion", "distance", "scan_distance", "eight_bit_distance", "quality", "effort",
+    "derivative",
     "output_icc", "icc_profile", "shaping", "bit_depth", "compression", "add_preview",
     "decode_mode", "existing", "on_downgrade", "on_regeneration", "on_scan",
     "delete", "workers", "staging", "use_ram",
@@ -3033,6 +3079,10 @@ REGISTRY: Tuple[Opt, ...] = (
     Opt("scan_distance", "--scan-distance", _TIFF2JXL, "value", "colour", "advanced",
         "Film-scan distance", "Distance for film scans ('same' = the run's).",
         legacy_key="advanced.scan_distance"),
+    Opt("eight_bit_distance", "--eight-bit-distance", _TIFF2JXL, "value", "colour", "advanced",
+        "8-bit TIFF distance", "Distance for 8-bit TIFFs that are not film scans ('auto' = "
+        "lossless at low distances, 'same' = the run's).",
+        legacy_key="advanced.eight_bit_distance"),
     # -- JXL -> TIFF -----------------------------------------------------------
     Opt("compression", "--compression", _JXL2TIFF, "always", "essentials", "advanced",
         "TIFF compression", "Compression of the decoded TIFF.",
@@ -5239,6 +5289,14 @@ class InteractiveMenu:
                          f"those folders). The review's Film scans row changes it.")
                 ui.line()
                 ui.markup(f"[grey70]  {_rich_safe(_note)}[/grey70]", f"  {_note}")
+            _eb, _up = _child_eight_bit()
+            _ed = _eight_bit_effective(_eb, _up, workflow['distance'])
+            if _ed != float(workflow['distance']):
+                _note = (f"8-bit TIFFs (not film scans) use distance {_ed:g}"
+                         f"{' (lossless): an 8-bit TIFF is small lossless' if _ed == 0 else ''}"
+                         f". The review's 8-bit TIFFs row changes it.")
+                ui.line()
+                ui.markup(f"[grey70]  {_rich_safe(_note)}[/grey70]", f"  {_note}")
         elif tid == 'derive_jxl':
             current = workflow.get('distance', _child_default('jxl_recompressor', 'distance'))
             _w = _label_width(_RECOMPRESS_CHOICES)
@@ -5486,6 +5544,27 @@ class InteractiveMenu:
                 frm.setdefault('scan_distance', 'script')
                 _sd_shown = ("same as Distance" if _sd == "same" else _distance_shown(_sd))
                 rows.append(("scan_distance", "Film scans", _sd_shown, _scan_distance))
+
+                # 8-bit TIFFs that are not scans: the encoder's
+                # EIGHT_BIT_DISTANCE (lossless at low distances by default).
+                _eb_child, _eb_up = _child_eight_bit()
+
+                def _eight_bit_distance():
+                    current = adv.get('eight_bit_distance') or _eb_child
+                    typed = self.ui.ask_text(
+                        "review.eight_bit_distance",
+                        f"8-bit TIFF distance ('auto' = lossless up to d={_eb_up:g}, "
+                        f"'same' = the Distance above, or a number)", str(current))
+                    value = _valid_eight_bit_distance(typed)
+                    if value is None:
+                        self._print_error(f"Not a distance: {typed!r} — kept {current}")
+                        return
+                    adv['eight_bit_distance'] = value
+                    you('eight_bit_distance')
+                _eb = adv.get('eight_bit_distance') or _eb_child
+                frm.setdefault('eight_bit_distance', 'script')
+                rows.append(("eight_bit_distance", "8-bit TIFFs", _eight_bit_shown(_eb, _eb_up),
+                             _eight_bit_distance))
         # A JXL -> TIFF/JPEG/PNG decode encodes no JXL: the effort is unused.
         if not (origin == 'jxl' and dest in ('tiff', 'jpeg', 'png')):
             def _effort():

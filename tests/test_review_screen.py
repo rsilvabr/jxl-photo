@@ -175,12 +175,12 @@ def test_b_goes_back_to_the_mode_step(menu, launched, monkeypatch, tmp_path):
 
 
 def test_rows_reach_the_command_line(menu, launched, monkeypatch, tmp_path):
-    # rows of an archive job (v2.23.0 order): 1 distance, 2 film scans, 3 effort,
-    # 4 existing outputs, 5 delete, 6 workers, 7 staging, 8 RAM, ...
+    # rows of an archive job: 1 distance, 2 film scans, 3 8-bit TIFFs, 4 effort,
+    # 5 existing outputs, 6 delete, 7 workers, 8 staging, 9 RAM, ...
     stg = tmp_path / "stg [x] 5%"
     runs = _new_job_argv(
         menu, launched, monkeypatch, tmp_path, "archive_tiff", "1",
-        review=("6", "1", "3", "7", "r"),
+        review=("7", "1", "4", "8", "r"),
         extra_answers={"review.workers": "3", "review.distance": "0.05",
                        "review.effort": "9", "review.staging": str(stg)})
     cmd = runs[-1]
@@ -323,3 +323,36 @@ def test_the_film_scan_row(menu, launched, tmp_path):
     assert menu._review_screen(wf, STATUS) == "ran"
     cmd = launched[-1]
     assert cmd[cmd.index("--scan-distance") + 1] == "0.05"
+
+
+def test_the_8bit_tiff_row(menu, launched, tmp_path):
+    """8-bit TIFFs that are not scans keep their own distance (the encoder's
+    EIGHT_BIT_DISTANCE): shown under Film scans, editable, and only on the
+    command line when changed."""
+    menu._ui = None
+    wf = _review_workflow(menu, tmp_path, "archive_tiff")
+    rows = wp._review_order(menu._review_rows(wf, STATUS))
+    ids = [r[0] for r in rows]
+    i = ids.index("eight_bit_distance")
+    assert ids[i - 1] == "scan_distance"
+    assert rows[i][1] == "8-bit TIFFs" and rows[i][2] == "lossless up to d=0.1, then the Distance"
+    menu._ui = wp.ScriptedUI({"review.action": ["r"]})
+    assert menu._review_screen(wf, STATUS) == "ran"
+    assert "--eight-bit-distance" not in launched[-1]
+    menu._ui = wp.ScriptedUI({"review.action": [str(i + 1), "r"],
+                              "review.eight_bit_distance": "same"})
+    assert menu._review_screen(wf, STATUS) == "ran"
+    cmd = launched[-1]
+    assert cmd[cmd.index("--eight-bit-distance") + 1] == "same"
+
+
+def test_the_8bit_row_follows_the_encoder_setting(menu, tmp_path, monkeypatch):
+    import jxl_tiff_encoder as enc
+    monkeypatch.setattr(enc, "EIGHT_BIT_LOSSLESS_UP_TO", 0.15)
+    menu._ui = None
+    wf = _review_workflow(menu, tmp_path, "archive_tiff")
+    rows = dict((r[0], r[2]) for r in menu._review_rows(wf, STATUS))
+    assert rows["eight_bit_distance"] == "lossless up to d=0.15, then the Distance"
+    monkeypatch.setattr(enc, "EIGHT_BIT_DISTANCE", "same")
+    rows = dict((r[0], r[2]) for r in menu._review_rows(wf, STATUS))
+    assert rows["eight_bit_distance"] == "same as Distance"

@@ -1432,6 +1432,21 @@ SCAN_SCOPE = "all"
 #          profile at 16 bits, or an IR page. A "final" scan (converted to an
 #          output profile such as sRGB or Adobe RGB) then uses CJXL_DISTANCE.
 
+EIGHT_BIT_DISTANCE = "auto"
+# Distance for 8-bit TIFFs that are not film scans (also --eight-bit-distance).
+# An 8-bit TIFF is small lossless (about 43 MB for 45 MP, a quarter of a
+# 16-bit one) and d=0.05 comes out LARGER than that (docs/file_sizes.md):
+# "auto"   -> lossless when the run's distance is EIGHT_BIT_LOSSLESS_UP_TO or
+#             less, the run's distance above it (default);
+# "same"   -> the run's distance, like any other TIFF;
+# a number -> that distance for every 8-bit TIFF (0 = always lossless).
+# Film scans keep SCAN_DISTANCE.
+
+EIGHT_BIT_LOSSLESS_UP_TO = 0.1
+# The highest run distance at which EIGHT_BIT_DISTANCE = "auto" still
+# archives an 8-bit TIFF lossless. At 0.1 lossy is only ~24% smaller than
+# lossless (33 vs 43 MB at 45 MP); at 0.2 it is half.
+
 THUMBNAIL_SUFFIX = "_thumbnail"
 # Suffix appended to the output name when THUMBNAIL_MODE="include".
 # Example: photo_page1_thumbnail.jxl
@@ -2029,6 +2044,8 @@ _RUN_DEFAULTS = {
     "SCANNER_SOFTWARE": SCANNER_SOFTWARE,
     "SCAN_DISTANCE": SCAN_DISTANCE,
     "SCAN_SCOPE": SCAN_SCOPE,
+    "EIGHT_BIT_DISTANCE": EIGHT_BIT_DISTANCE,
+    "EIGHT_BIT_LOSSLESS_UP_TO": EIGHT_BIT_LOSSLESS_UP_TO,
     "THUMBNAIL_SUFFIX": THUMBNAIL_SUFFIX,
     "WARN_DISCARDED_THUMBNAILS": WARN_DISCARDED_THUMBNAILS,
     "ICC_PNG_STRATEGY": ICC_PNG_STRATEGY,
@@ -4554,11 +4571,59 @@ def _scan_distance_applies(kind) -> bool:
             and (str(SCAN_SCOPE).lower() == "all" or kind == "raw"))
 
 
-def _record_scan(tiff_path, kind, reason=None) -> None:
-    d = SCAN_DISTANCE if _scan_distance_applies(kind) else CJXL_DISTANCE
+def _parse_eight_bit_distance(value):
+    """EIGHT_BIT_DISTANCE normalised: "auto", "same" or a float in 0..25.
+    ValueError for anything else (None reads as "same")."""
+    if value is None:
+        return "same"
+    t = str(value).strip().lower()
+    if t in ("auto", "same"):
+        return t
+    d = float(t)
+    if not 0 <= d <= 25:
+        raise ValueError(value)
+    return d
+
+
+def _eight_bit_distance() -> float:
+    """The distance this run gives an 8-bit TIFF that is not a film scan."""
+    try:
+        v = _parse_eight_bit_distance(EIGHT_BIT_DISTANCE)
+    except (TypeError, ValueError):
+        return CJXL_DISTANCE          # main() refuses a bad value before any encode
+    if v == "same":
+        return CJXL_DISTANCE
+    if v == "auto":
+        return 0.0 if CJXL_DISTANCE <= float(EIGHT_BIT_LOSSLESS_UP_TO) else CJXL_DISTANCE
+    return float(v)
+
+
+# normcase(tiff path) of the 8-bit TIFFs this run encodes at
+# _eight_bit_distance() instead of CJXL_DISTANCE (for the notices and hints).
+_EIGHT_BIT_PLAN = set()
+
+
+def _record_scan(tiff_path, kind, reason=None, bits=0) -> None:
+    """Decide, at planning time, the distance `tiff_path` is encoded at:
+    SCAN_DISTANCE for a film scan it covers, _eight_bit_distance() for an
+    8-bit TIFF that is not a scan (`bits`: page 0's BitsPerSample), the run's
+    distance otherwise."""
+    key = os.path.normcase(str(tiff_path))
+    eight = False
+    if _scan_distance_applies(kind):
+        d = SCAN_DISTANCE
+    elif kind is None and 0 < int(bits or 0) <= 8:
+        d = _eight_bit_distance()
+        eight = float(d) != float(CJXL_DISTANCE)
+    else:
+        d = CJXL_DISTANCE
     with _SCAN_PLAN_LOCK:
-        _SCAN_PLAN[os.path.normcase(str(tiff_path))] = (kind, float(d))
-        _SCAN_REASON[os.path.normcase(str(tiff_path))] = reason
+        _SCAN_PLAN[key] = (kind, float(d))
+        _SCAN_REASON[key] = reason
+        if eight:
+            _EIGHT_BIT_PLAN.add(key)
+        else:
+            _EIGHT_BIT_PLAN.discard(key)
 
 
 def _distance_for(tiff_path) -> float:
@@ -4578,6 +4643,12 @@ def _scan_distance_hint(tiff_path) -> str:
     d = _distance_for(tiff_path)
     if d == CJXL_DISTANCE:
         return ""
+    with _SCAN_PLAN_LOCK:
+        eight = os.path.normcase(str(tiff_path)) in _EIGHT_BIT_PLAN
+    if eight:
+        return (f" (an 8-bit TIFF: this run judges it at EIGHT_BIT_DISTANCE {d:g}"
+                f"{' (lossless)' if d == 0 else ''}, not --distance {CJXL_DISTANCE:g}; "
+                f"if it was archived at the run's distance, add --eight-bit-distance same)")
     return (f" (a film scan: this run judges it at SCAN_DISTANCE {d:g}, not "
             f"--distance {CJXL_DISTANCE:g}; if it was archived at the run's distance, "
             f"add --scan-distance same)")
@@ -4648,6 +4719,27 @@ def _log_scans_at_scan_distance(by_reason: dict, done: bool) -> None:
     else:
         logger.warning("  Not film scans? Stop now (Ctrl+C) and run those folders with "
                        "--scan-distance same.")
+
+
+def _eight_bit_at_other_distance(tiff_paths) -> list:
+    """The 8-bit TIFFs among `tiff_paths` this run encodes at
+    _eight_bit_distance() instead of CJXL_DISTANCE."""
+    with _SCAN_PLAN_LOCK:
+        return [Path(t) for t in tiff_paths
+                if os.path.normcase(str(t)) in _EIGHT_BIT_PLAN]
+
+
+def _log_eight_bit_at_other_distance(paths, done: bool) -> None:
+    """Before the first encode (done=False: what this run will write) and in
+    the summary (done=True: what it wrote), like the film-scan notice."""
+    if not paths:
+        return
+    d = _eight_bit_distance()
+    _d = f"{d:g}{' (lossless)' if d == 0 else ''}"
+    logger.info(f"8-bit TIFFs: {len(paths)} TIFF(s) {'encoded' if done else 'to encode'} "
+                f"at distance {_d} instead of {CJXL_DISTANCE:g} (EIGHT_BIT_DISTANCE "
+                f"{EIGHT_BIT_DISTANCE}) — an 8-bit TIFF is small lossless; "
+                f"--eight-bit-distance same keeps the run's distance")
 
 
 # (normcase(tiff path), page index) -> width*height, filled by
@@ -6527,7 +6619,8 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                 extra_pages = max(0, len(tif.pages) - 1)
                 # Film scan or not (SCAN_DISTANCE): header fields only.
                 _facts = {i: _page_facts(i, pg) for i, pg in enumerate(tif.pages)}
-                _record_scan(tiff_path, _scan_kind(_facts), _scan_reason(_facts))
+                _record_scan(tiff_path, _scan_kind(_facts), _scan_reason(_facts),
+                             (_facts.get(0) or {}).get('bits'))
         except UnreadableTiff:
             raise
         except Exception:
@@ -6550,7 +6643,8 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
         return [(tiff_path, final_jxl, 0, False, subfiletype, samples)]
 
     real_pages, thumb_pages, page_info = _analyze_tiff_pages(tiff_path)
-    _record_scan(tiff_path, _scan_kind(page_info), _scan_reason(page_info))
+    _record_scan(tiff_path, _scan_kind(page_info), _scan_reason(page_info),
+                 ((page_info or {}).get(0) or {}).get('bits'))
 
     pages_to_encode = []
 
@@ -7619,6 +7713,11 @@ def build_parser():
     parser.add_argument("--scan-scope", type=str, default=None, choices=["all", "raw"],
                         help="Which film scans --scan-distance covers: all (default) or "
                              "raw only (scanner profile, no profile at 16 bits, or IR)")
+    parser.add_argument("--eight-bit-distance", type=str, default=None, metavar="D",
+                        help="Distance for 8-bit TIFFs that are not film scans: 'auto' "
+                             "(default, EIGHT_BIT_DISTANCE) = lossless when --distance is "
+                             "EIGHT_BIT_LOSSLESS_UP_TO or less, 'same' = the run's "
+                             "--distance, or a number (0 = lossless)")
     parser.add_argument("--thumbnail-suffix", type=str, default=None,
                         help="Suffix for thumbnail outputs when --thumbnail-mode=include (default: _thumbnail)")
     parser.add_argument("--warn-thumbnail-discard", action="store_true",
@@ -7684,7 +7783,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, EIGHT_BIT_DISTANCE, EIGHT_BIT_LOSSLESS_UP_TO, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
     global _gen_divergence_logged
     _gen_divergence_logged = False
 
@@ -7873,6 +7972,15 @@ def main():
                 parser.error("--scan-distance must be between 0 and 25")
     if args.scan_scope is not None:
         SCAN_SCOPE = args.scan_scope
+    if args.eight_bit_distance is not None:
+        EIGHT_BIT_DISTANCE = args.eight_bit_distance
+    # The flag or the setting edited in the file: checked the same way.
+    try:
+        EIGHT_BIT_DISTANCE = _parse_eight_bit_distance(EIGHT_BIT_DISTANCE)
+        EIGHT_BIT_LOSSLESS_UP_TO = float(EIGHT_BIT_LOSSLESS_UP_TO)
+    except (TypeError, ValueError):
+        parser.error("--eight-bit-distance / EIGHT_BIT_DISTANCE takes 'auto', 'same' or a "
+                     "distance from 0 to 25 (and EIGHT_BIT_LOSSLESS_UP_TO a number)")
     if args.thumbnail_mode is not None:
         THUMBNAIL_MODE = args.thumbnail_mode
     if args.thumbnail_suffix is not None:
@@ -7923,6 +8031,7 @@ def main():
     with _SCAN_PLAN_LOCK:
         _SCAN_PLAN.clear()
         _SCAN_REASON.clear()
+        _EIGHT_BIT_PLAN.clear()
     for _k in _delete_stats:
         _delete_stats[_k] = 0
 
@@ -8475,9 +8584,10 @@ def main():
 
     # Film scans at their own distance, by reason — before the first encode,
     # so a wrong guess can be stopped (dry runs included).
-    _log_scans_at_scan_distance(_scans_at_scan_distance(
-        {os.path.normcase(str(t)): t for t, j, *_ in all_items
-         if not _would_skip(t, j)}.values()), done=False)
+    _to_write = {os.path.normcase(str(t)): t for t, j, *_ in all_items
+                 if not _would_skip(t, j)}.values()
+    _log_scans_at_scan_distance(_scans_at_scan_distance(_to_write), done=False)
+    _log_eight_bit_at_other_distance(_eight_bit_at_other_distance(_to_write), done=False)
 
     # Dry run
     if args.dry_run:
@@ -8675,6 +8785,8 @@ def main():
     _written = [r for r in results if r[1] in ("ok", "overwrite")]
     _scans_written = _scans_at_scan_distance(
         {os.path.normcase(str(r[0][0])): r[0][0] for r in _written}.values())
+    _eight_written = _eight_bit_at_other_distance(
+        {os.path.normcase(str(r[0][0])): r[0][0] for r in _written}.values())
     _thumbs_written = {}
     for r in _written:
         if Path(str(r[2])).stem.endswith(THUMBNAIL_SUFFIX):
@@ -8735,6 +8847,7 @@ def main():
 
     _log_discard_summary()
     _log_scans_at_scan_distance(_scans_written, done=True)
+    _log_eight_bit_at_other_distance(_eight_written, done=True)
     if _thumbs_written and MULTIPAGE_TIFF_MODE.lower() == "split":
         # Kept by the mode (auto keeps every thumbnail page but Capture One's),
         # so no surprise extra *_thumbnail.jxl files.
