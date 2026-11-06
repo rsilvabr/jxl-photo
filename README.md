@@ -57,11 +57,13 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 
 Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
 
-Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB). On 8-bit scans, `d=0.05`/`0.1` save little or nothing over lossless, so keep those lossless. Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0` for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
+Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB).
+
+Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0`, for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
 
 The numbers behind these settings are measured and posted on r/jpegxl, on 16-bit ProPhoto exports from Capture One:
 
-- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR from `d=0.01` to `d=10` on a 45 MP photo. `d=1.0` is the sweet spot for pixels above 30 dB, `d=0.3–0.5` for 40 dB, and `d=0.05` for 50 dB: over 90% of the pixels stay above 50 dB, and not one pixel falls below 20 dB. That is where the archival setting comes from. A stress test in the same post pushed Shadows +100 and Blacks +100 in Capture One on decoded files: at `d=0.1` the grain in the lifted shadows changes very slightly, visible only at 400% when flipping quickly between the lossless and the lossy file; at `d=0.05` not even that.
+- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR from `d=0.01` to `d=10` on a 45 MP photo. `d=1.0` is the sweet spot for pixels above 30 dB, `d=0.3–0.5` for 40 dB, and `d=0.05` for 50 dB: over 90% of the pixels stay above 50 dB, and not one pixel falls below 20 dB. That is where the archival setting comes from; the stress test above is from the same post.
 - [16-bit vs 8-bit, and JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/): for lossy JXL an 8-bit file is **not** smaller than a 16-bit one, and it keeps less signal, so there is no reason to go 8-bit. JPEG needs 5–15× the file size to get close to JXL.
 - [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/): one recompression from an archived `d=0.1` down to `d=1.0` costs 0.02 dB, but reaching the same file size in many small steps costs up to 9 dB. That is why the recompressor goes to the target in one shot, counts generations, and refuses counterproductive re-encodes.
 
@@ -79,7 +81,7 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 
 **JXL → JXL** — shrink an archive to a new distance in one step, with counterproductive re-encodes refused and metadata carried over; light 16-bit derivatives (sRGB, resized, sharpened) made from the master.
 
-**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
+**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance)).
 
 **Viewer compatibility** — every JXL keeps its EXIF where IrfanView reads it: in a plain box, before the XMP and the image data. cjxl compresses it by default, which saves a median 2.3 KB per photo (0.19 %) and hides the EXIF from IrfanView; one setting turns that compression on if you prefer the smallest file ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
 
@@ -155,7 +157,7 @@ Restart PowerShell, then:
 cjxl --version          # cjxl v0.XX.X
 exiftool -ver           # 12.XX or 13.XX
 magick -version         # ImageMagick version
-python -c "import tifffile, PIL, rich; print('All Python packages OK')"
+python -c "import tifffile, numpy, PIL, rich, imagecodecs; print('All Python packages OK')"
 py jxl_photo.py         # from the repository folder
 ```
 
@@ -168,7 +170,7 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
 | `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
-| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich` |
+| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich imagecodecs` with the Python you run the scripts with |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
 
 Setup feels heavy? [tiff-workflow](#related-project-a-simpler-tiff-only-alternative) needs no libjxl at all.
@@ -250,15 +252,14 @@ The whole manifest is checked before anything runs: two rows writing the same fi
 ```
 Capture One
     ↓ Export 16-bit TIFF (sRGB, AdobeRGB, ProPhoto RGB)
-jxl_tiff_encoder.py      TIFF → JXL  (archive, stays 16-bit, lossless or lossy)
-    ↓
-    JXLs on disk — ~5–42MB each for lossy, ~173MB for lossless (45MP example)
-    ↓
-jxl_tiff_decoder.py      JXL → TIFF  (when master TIFF is needed again)
-    ↓ OR
-jxl_jpeg_transcoder.py   JXL → JPEG/PNG  (when needed for print or delivery)
-                                   ICC profile conversion applied here
+jxl_tiff_encoder.py      TIFF → JXL      the master: 16-bit, lossless or near-lossless
+    ↓                                    (~31 MB at d=0.1, ~173 MB lossless, 45 MP)
+    ├─ jxl_recompressor.py    JXL → JXL       lighter 16-bit copies: sRGB, resized, a higher distance
+    ├─ jxl_jpeg_transcoder.py JXL → JPEG/PNG  for sharing or print: colour conversion, resize, sharpening
+    └─ jxl_tiff_decoder.py    JXL → TIFF      the TIFF back, in its original profile, to edit again
 ```
+
+The copies are made from the master, never from the TIFF, so the TIFF can go once its master is verified.
 
 ### TIFF → JXL
 
@@ -398,7 +399,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
-- **8-bit TIFFs** are archived lossless when the distance is 0.1 or less, where lossy would not be smaller; `--eight-bit-distance same` turns it off. [More](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
+- **8-bit TIFFs** are archived lossless when the distance is 0.1 or less, where lossy saves little (`d=0.1`) or comes out larger (`d=0.05`); `--eight-bit-distance same` turns it off. [More](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
 - **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **New releases:** the menu checks GitHub at most once a day and adds a line when a newer release is out; nothing is downloaded, and `--run-preset` never checks. [More](docs/README_jxl_tools.md#new-release-notice)
@@ -499,6 +500,7 @@ Full notes: [version history](docs/version_history.md#v2220).
 | [v2.19.1](docs/version_history.md#v2191) | 2026-11-02 | IrfanView shows the EXIF of new JXLs again; menu option 9 repairs files written by v2.17.0–v2.19.0 in place |
 | [v2.18.1](docs/version_history.md#v2181) | 2026-11-01 | A recompressor sync plans only what it will process: up-to-date files are skipped without being read |
 | [v2.17.0](docs/version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
+
 Every release since v1.0: [docs/version_history.md](docs/version_history.md#release-history).
 
 ---
@@ -514,7 +516,7 @@ I am sharing these scripts because getting all of this to work correctly was une
 - Sync mode — reconverting only re-exported photos in existing folders
 - Performance — RAM usage, parallelism, and staging to minimize I/O
 
-Getting there required finding and fixing several bugs that appears because of the specific combination of softwares I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
+Getting there required finding and fixing several bugs that appear because of the specific combination of programs I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
 ---
 
@@ -522,7 +524,7 @@ Getting there required finding and fixing several bugs that appears because of t
 
 [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe) packages this toolkit as `jxl-photo.exe`: no Python to install, and cjxl/djxl, ExifTool, ImageMagick and jxl-thumb come in the same folder. Unzip and double-click for the wizard, or use the same command lines as here (`jxl-photo.exe encode ...`). The five scripts inside are byte-for-byte those of a jxl-photo release, and it passes the same real-photo battery.
 
-This Python version, the one the author runs on their own archive every day, remains by far the more tested. Use the program if you would rather not install Python; otherwise use the scripts here.
+This Python version, the one I run on my own archive every day, remains by far the more tested. Use the program if you would rather not install Python; otherwise use the scripts here.
 
 ---
 
@@ -539,12 +541,14 @@ If this toolkit's setup is more than you want to deal with, [tiff-workflow](http
 - **What you need:** PowerShell 7 (or Windows PowerShell 5.1), ImageMagick, ExifTool — Python 3.9+ with `rich` only if you want the wizard UI
 - **What's NOT needed:** Python or Python packages for the direct PowerShell usage, libjxl (cjxl/djxl)
 
-| Format | 16-bit Size | 8-bit Size |
-|--------|-------------|------------|
-| Uncompressed TIFF | ~260 MB | ~130 MB |
-| **ZIP/Deflate (PowerShell)** | ~220 MB (~15% smaller) | ~65 MB (~50% smaller) |
-| JXL lossless (this toolkit) | ~173 MB (~35% smaller) | ~43 MB (~67% smaller) |
-| **JXL lossy d=0.1 (this toolkit)** | ~34 MB (~87% smaller) | ~34 MB (~74% smaller) — no smaller than 16-bit: [lossy JXL gains nothing from 8 bits](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/) |
+A 45 MP photo (medians, MB):
+
+| Format | 16-bit | 8-bit |
+|--------|:------:|:-----:|
+| Uncompressed TIFF | 273 | 136 |
+| **ZIP/Deflate (tiff-workflow)** | 227 (~17% smaller) | 61 (~55% smaller) |
+| JXL lossless (this toolkit) | 173 (~37% smaller) | 43 (~68% smaller) |
+| **JXL `d=0.1` (this toolkit)** | 31 (~89% smaller) | 43 — kept lossless: lossy would save only ~10 MB |
 
 **Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
 
@@ -555,7 +559,7 @@ If this toolkit's setup is more than you want to deal with, [tiff-workflow](http
 These tools were made for my personal workflow.
 Use at your own risk — I am not responsible for any issues you may encounter.
 
-However, If you find any bugs, feel free to report to me - I will gladly try my best to improve this project.
+However, if you find any bugs, feel free to report them to me — I will gladly try my best to improve this project.
 
 Always test with a small batch before processing important archives.
 

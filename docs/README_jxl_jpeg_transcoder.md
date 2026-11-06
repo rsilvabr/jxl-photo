@@ -16,58 +16,17 @@ This eliminates the need to remember multiple scripts or command structures — 
 ## Requirements
 
 ```
-Python 3.9+
-cjxl / djxl → https://github.com/libjxl/libjxl/releases
-exiftool → https://exiftool.org
-magick → https://imagemagick.org (optional, for ICC conversion only)
+Python 3.9+, pip install pillow
+cjxl, djxl   →  https://github.com/libjxl/libjxl/releases (the -static zip)
+exiftool     →  https://exiftool.org
+magick       →  https://imagemagick.org (colour conversion, resize, sharpening)
 ```
 
-Both `cjxl.exe`, `djxl.exe`, and `exiftool.exe` must be on your PATH. ImageMagick is required for colour conversion (`--icc-profile`/`--to-srgb`) and for `--resize-long/-short/-percent`/`--sharpen`.
+ImageMagick is needed for colour conversion (`--icc-profile`/`--to-srgb`) and
+for `--resize-long/-short/-percent`/`--sharpen`; the lossless JPEG ↔ JXL path
+works without it.
 
-### Download the Correct Files
-
-| Tool | Download | What to Get |
-|------|----------|-------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
-| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
-
-### exiftool Setup
-
-> **Note:** The scripts automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
-
-The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
-
-```powershell
-# Option A: Rename
-Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
-
-# Option B: Duplicate and rename (keeps original)
-Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
-```
-
-### Add to PATH
-
-**Replace with YOUR actual paths:**
-
-```powershell
-$myPaths = @(
-    "C:\tools\libjxl\bin",                           # cjxl.exe, djxl.exe
-    "C:\tools\exiftool",                              # exiftool.exe / exiftool(-k).exe
-    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # magick.exe
-)
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
-# Restart PowerShell after this!
-```
-
-### Verify
-```powershell
-cjxl --version  # JPEG XL encoder v0.11.x
-djxl --version  # JPEG XL decoder v0.11.x
-exiftool -ver   # 13.xx
-magick -version # ImageMagick 7.x (optional)
-```
+Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation) in the main README — the same tools serve all four scripts.
 
 * * *
 
@@ -588,8 +547,8 @@ lossless JPEG → JXL archive (`djxl --reconstruct_jpeg` + the checksum), and a
 ## Script settings overlay
 
 The settings at the top of this script can also be changed without editing
-it, in the JSON file the wrapper's menu S writes
-([details](README_jxl_tools.md#script-settings-menu-s)):
+it, in the JSON file the wrapper's script settings write (Settings, menu 9 → 2;
+[details](README_jxl_tools.md#script-settings-menu-9-option-2)):
 
 ```json
 {"jxl_jpeg_transcoder": {"JPEG_DEFAULT_QUALITY": 92, "EXPORT_JXL_FOLDER": "JXL_jpeg"}}
@@ -719,7 +678,7 @@ py jxl_jpeg_transcoder.py "F:\Photos\2024" --repair-jbrd
 **Every JPEG→JXL archive made with v2.0.0+ should pass through this check
 once** before the source JPEGs are discarded.
 
-### EXIF for IrfanView (v2.19.2)
+### EXIF for IrfanView
 
 The same run also rewrites the metadata layout of every `jbrd` JXL that
 IrfanView cannot read the EXIF from (see *IrfanView and the EXIF* under

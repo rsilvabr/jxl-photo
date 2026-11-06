@@ -8,9 +8,9 @@ How the tools behave by default, where other software does not follow along, and
 
 `--multipage-mode` defaults to **`split`** — one JXL per page (`photo.jxl`, `photo_page1.jxl`, ...), rejoined into a multi-page TIFF on decode. A TIFF with a single real page produces exactly `photo.jxl`, so for ordinary photos this is indistinguishable from the old default.
 
-**This default changed.** It used to be `ignore` (page 0 only, everything else discarded), which caught people out: plenty of TIFFs are multi-page without looking like it — Capture One and many scanners append an embedded preview, and film scanners add an IR/mask page. Worse, mode 8 then deleted the source after encoding page 0, destroying the other pages permanently.
+Why every page: plenty of TIFFs are multi-page without looking like it — Capture One and many scanners append an embedded preview, and film scanners add an IR/mask page. Keeping only page 0 (`ignore`, the default of early versions) silently threw those pages away, and a run that deleted its sources made the loss permanent.
 
-Embedded **thumbnail/preview** pages are kept by default since v2.17.0 (`--thumbnail-mode auto`), as `photo_page1_thumbnail.jxl`, except the tiny preview Capture One adds to every export (the programs left out are listed in `THUMBNAIL_DROP_SOFTWARE`). Scanner software can need that page: SilverFast shows "Loading..." instead of the picture for a scan without it. `--thumbnail-mode scans` keeps it only for film scans (a scanner program in `SCANNER_SOFTWARE`, an IR page, or no Software tag and no camera EXIF); `exclude` drops every thumbnail, as before v2.17.0. An archive written without the thumbnails keeps that layout on a sync run; run once with `--overwrite` to add them ([details](README_jxl_tiff_encoder.md#thumbnail-pages---thumbnail-mode-v2170)).
+Embedded **thumbnail/preview** pages are kept by default since v2.17.0 (`--thumbnail-mode auto`), as `photo_page1_thumbnail.jxl`, except the tiny preview Capture One adds to every export (the programs left out are listed in `THUMBNAIL_DROP_SOFTWARE`). Scanner software can need that page: SilverFast shows "Loading..." instead of the picture for a scan without it. `--thumbnail-mode scans` keeps it only for film scans (a scanner program in `SCANNER_SOFTWARE`, an IR page, or no Software tag and no camera EXIF); `exclude` drops every thumbnail, as before v2.17.0. An archive written without the thumbnails keeps that layout on a sync run; run once with `--overwrite` to add them ([details](README_jxl_tiff_encoder.md#thumbnail-pages---thumbnail-mode)).
 
 ```powershell
 py jxl_tiff_encoder.py "F:\Photos"                             # split, thumbnails kept (not Capture One's)
@@ -18,13 +18,13 @@ py jxl_tiff_encoder.py "F:\Photos" --thumbnail-mode exclude    # drop every prev
 py jxl_tiff_encoder.py "F:\Photos" --multipage-mode ignore     # old behavior: page 0 only
 ```
 
-In the wizard the setting lives under **Advanced Options** (Step 6A — answer `y` when asked "Configure advanced options?"), and the Step 7 summary spells out the policy before you type YES. If you do choose a page-dropping policy, the encoder reports the totals in the run summary — and **mode 8 refuses to delete any source whose pages were dropped**, so you cannot lose them by accident.
+In the wizard the review screen shows the multi-page policy on its own line, and `[a]` (all options) changes it. If you do choose a page-dropping policy, the encoder reports the totals in the run summary — and **a run that deletes its sources refuses to delete any TIFF whose pages were dropped**, so you cannot lose them by accident.
 
 ## The decoder never overwrites an original TIFF
 
 The encoder's default mode 0 leaves `photo.tif` and `photo.jxl` side by side, and the JXL is newer. A sync decode into that same folder used to overwrite the **original master** with the decode. The decoder now only overwrites TIFFs it wrote itself (they carry its `jxlphoto-src` marker); any other TIFF is **refused** — not decoded over, and its JXL never deleted — and listed at the end of the run. Decode into another folder (`--mode 1`/`3`) or pass `--overwrite` if replacing it is really intended. Details: [decoder README](README_jxl_tiff_decoder.md#original-tiff-masters-are-never-overwritten).
 
-The same goes for a decode you **edited** after decoding it (Photoshop keeps the marker): since v2.8.1 each decode records its pixels, and one whose pixels changed is refused like a master. See [A decode you edited afterwards is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over-v281).
+The same goes for a decode you **edited** after decoding it (Photoshop keeps the marker): since v2.8.1 each decode records its pixels, and one whose pixels changed is refused like a master. See [A decode you edited afterwards is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over).
 
 ## Lossy is the default: `--distance 0.1`
 
@@ -56,7 +56,7 @@ The spread across photos at one distance is 1.1×–2.1×, so treat any single n
 
 ### 8-bit sources: lossless can be *smaller* than lossy
 
-Counter-intuitive but reproducible across four real photos: at 8 bits, `--distance 0` produced a **smaller** file than `--distance 0.05` (38.6% vs 46.4% of source on one, 42.6% vs 47.8% on another). JXL's lossless mode is very efficient at 8 bits, while VarDCT at a very low distance carries overhead it cannot amortise. If your source is 8-bit and you want small files, measure before assuming lossy wins.
+Counter-intuitive but reproducible: at 8 bits, `--distance 0` produces a **smaller** file than `--distance 0.05` (43 against 47 MB, the median of 20 photos at 45 MP), and `d=0.1` is only about a quarter smaller than lossless. JXL's lossless mode is very efficient at 8 bits, while VarDCT at a very low distance carries overhead it cannot amortise. The encoder therefore archives an 8-bit TIFF lossless whenever the run's distance is 0.1 or less ([details](README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)).
 
 ## Renamed folders and the overwrite guard
 
@@ -87,7 +87,7 @@ The anchor is the first folder matching the marker at or below the input folder;
 
 ## The scripts' settings: in the file, or in the overlay
 
-Each script's settings are the variables at the top of the file. `jxl_photo.py`'s menu S changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA`, the encoder's copy of the original profile (`EMBED_ICC_IN_JXL`) — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-s)
+Each script's settings are the variables at the top of the file. `jxl_photo.py`'s Settings → script settings (menu 9 → 2) changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA`, the encoder's copy of the original profile (`EMBED_ICC_IN_JXL`) — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-9-option-2)
 
 ## Default re-run behavior differs per script
 
@@ -95,9 +95,9 @@ The TIFF encoder/decoder default to **smart sync** (reconvert when the source is
 
 ## Film scanners: IR channel / Digital ICE
 
-Since v2.17.0 a **SilverFast** scan (image, thumbnail, IR page) archived with the defaults and decoded back opens in SilverFast with its IR channel and dust removal (iSRD) recognised and its browser icon — checked on a slide and a negative, also after recompressing the master. It takes the IR page's role (`SubfileType` 4), the thumbnail page (`--thumbnail-mode auto`), SilverFast's own XMP settings (now copied as one block) and its private TIFF tags (now kept); before v2.17.0 the XMP settings and the thumbnail were lost and SilverFast saw no IR channel. Masters archived before v2.17.0 do not carry them: re-archive those scans from their TIFFs with `--overwrite`. Other scanner programs (VueScan, Epson Scan, ...) were not tested; **test one file before converting a whole archive.** [Details](README_jxl_tiff_encoder.md#film-scans-and-their-scanner-software-v2170)
+Since v2.17.0 a **SilverFast** scan (image, thumbnail, IR page) archived with the defaults and decoded back opens in SilverFast with its IR channel and dust removal (iSRD) recognised and its browser icon — checked on a slide and a negative, also after recompressing the master. It takes the IR page's role (`SubfileType` 4), the thumbnail page (`--thumbnail-mode auto`), SilverFast's own XMP settings (now copied as one block) and its private TIFF tags (now kept); before v2.17.0 the XMP settings and the thumbnail were lost and SilverFast saw no IR channel. Masters archived before v2.17.0 do not carry them: re-archive those scans from their TIFFs with `--overwrite`. Other scanner programs (VueScan, Epson Scan, ...) were not tested; **test one file before converting a whole archive.** [Details](README_jxl_tiff_encoder.md#film-scans-and-their-scanner-software)
 
-Film scans are also archived **lossless** by default since v2.17.0, whatever `--distance` the rest of the run uses (`SCAN_DISTANCE = 0`, `--scan-distance`), and the recompressor never re-encodes them lossy unless asked (`--on-scan`). A raw negative's later processing magnifies even a small loss, and a scan can only be redone by scanning again. `--scan-distance same` treats them like any TIFF; `--scan-scope raw` keeps only raw scans lossless. [Details](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)
+Film scans are also archived **lossless** by default since v2.17.0, whatever `--distance` the rest of the run uses (`SCAN_DISTANCE = 0`, `--scan-distance`), and the recompressor never re-encodes them lossy unless asked (`--on-scan`). A raw negative's later processing magnifies even a small loss, and a scan can only be redone by scanning again. `--scan-distance same` treats them like any TIFF; `--scan-scope raw` keeps only raw scans lossless. [Details](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance)
 
 8-bit TIFFs that are not scans are archived **lossless** when the run's distance is 0.1 or less (`EIGHT_BIT_DISTANCE = "auto"`, `EIGHT_BIT_LOSSLESS_UP_TO`): lossless is small for them, and `d=0.05` would come out larger. `--eight-bit-distance same` treats them like any TIFF, a number gives them their own distance. [Details](README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
 

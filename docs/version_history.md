@@ -1472,7 +1472,7 @@ JPEG XL stores a TIFF's 2nd/4th channel as alpha and keeps no TIFF role for it, 
 
 ### An edited decode is left alone (#522)
 
-Photoshop keeps a file's XMP when it saves, so a decode you retouched still carried the marker naming its JXL: when the JXL later became newer, a sync decoded over the edit, and `--delete-skipped` could delete the JXL on the strength of the edited TIFF. Each decode now records its pixels (`jxlphoto-pixsum:`); before overwriting one of its own TIFFs, or letting one vouch for a deletion, the decoder compares. An edited TIFF is refused like an original master — `--overwrite` still replaces it. See [An edited decode is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over-v281).
+Photoshop keeps a file's XMP when it saves, so a decode you retouched still carried the marker naming its JXL: when the JXL later became newer, a sync decoded over the edit, and `--delete-skipped` could delete the JXL on the strength of the edited TIFF. Each decode now records its pixels (`jxlphoto-pixsum:`); before overwriting one of its own TIFFs, or letting one vouch for a deletion, the decoder compares. An edited TIFF is refused like an original master — `--overwrite` still replaces it. See [An edited decode is not decoded over](README_jxl_tiff_decoder.md#a-decode-you-edited-afterwards-is-not-decoded-over).
 
 ### Smaller items
 

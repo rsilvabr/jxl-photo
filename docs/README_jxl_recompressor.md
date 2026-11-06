@@ -921,8 +921,8 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
 ## Script settings overlay
 
 The settings at the top of this script can also be changed without editing
-it, in the JSON file the wrapper's menu S writes
-([details](README_jxl_tools.md#script-settings-menu-s)):
+it, in the JSON file the wrapper's script settings write (Settings, menu 9 → 2;
+[details](README_jxl_tools.md#script-settings-menu-9-option-2)):
 
 ```json
 {"jxl_recompressor": {"ON_DOWNGRADE": "skip", "WORKER_MEMORY_FRACTION": 0.8}}

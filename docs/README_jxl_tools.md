@@ -2,7 +2,7 @@
 
 Interactive wrapper for the JPEG XL processing toolkit. Provides a **wizard-style menu interface** that guides you through all conversion options — no need to remember CLI flags for each script.
 
-Handles TIFF → JXL, JXL → TIFF, JPEG → JXL, JXL → JPEG, and JXL → PNG conversions through a unified menu system with persistent configuration.
+Handles TIFF → JXL, JXL → TIFF, JXL → JXL (smaller or colour-converted copies), JPEG → JXL, JXL → JPEG and JXL → PNG conversions through one menu, with settings that persist between runs.
 
 * * *
 
@@ -14,48 +14,16 @@ rich            (optional — enables fancy UI, auto-detected)
 tifffile        (for TIFF workflows)
 numpy           (tifffile dependency)
 imagecodecs     (for LZW/ZIP compressed TIFFs)
+pillow          (JPEG preview in decoded TIFFs, derivatives)
 cjxl / djxl →  https://github.com/libjxl/libjxl/releases
 exiftool    →  https://exiftool.org
 ImageMagick →  https://imagemagick.org  (for JXL -> JPEG/PNG ICC conversion)
 ```
 
-Quick setup (PowerShell, then reopen terminal):
-```powershell
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", "$p;C:\tools\libjxl\bin;C:\tools\exiftool;C:\Program Files\ImageMagick-7.1.1-Q16-HDRI", "User")
-```
-
 If `rich` is not installed, the tool falls back to plain text mode automatically.
 
-### Download the Correct Files
-
-| Tool | Download | What to Get |
-|------|----------|-------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
-| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) |
-
-### exiftool Setup
-
-> **Note:** The scripts (including the wrapper `jxl_photo.py`) automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
-
-The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
-
-```powershell
-# Option A: Rename
-Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
-
-# Option B: Duplicate and rename (keeps original)
-Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
-```
-
-### Verify
-```powershell
-cjxl --version
-djxl --version
-exiftool -ver
-magick --version
-```
+Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation)
+in the main README. The menu's status bar then shows what it found.
 
 * * *
 
@@ -117,7 +85,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 | `6` | Explorer thumbnails for existing JXLs | Stores or renews the small thumbnail [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) shows in Explorer, in JXLs that already exist (a folder, with or without subfolders): automatic (recommended: every file when jxl-thumb is installed, lossless files only otherwise), every file, or remove them. Re-encodes nothing; each file keeps its modified date, so syncs are not fooled. Runs `jxl_recompressor.py --refresh-explorer-thumbnails` ([details](README_jxl_recompressor.md#explorer-thumbnails-for-existing-files---refresh-explorer-thumbnails)) |
 | `7` | JPEG archives (jbrd) | Audit/repair lossless JPEG → JXL files: those whose bit-exact JPEG recovery broke (v2.0.0–v2.0.3 wrote XMP markers into jbrd containers), and those whose EXIF IrfanView cannot read (compressed, as the transcoder wrote it before v2.19.2). Audit (dry run) is the default; every repair works on a copy and only replaces a file when the copy provably rebuilds the same JPEG |
 | `8` | Reset the ICC test cache | The encoder's cautious ICC strategy remembers, per profile and cjxl version, whether a profile survives a lossy encode; clearing it makes the next lossy run test each profile again (after a libjxl update, or to re-check a profile). Runs `jxl_tiff_encoder.py --clear-icc-cache` |
-| `9` | Settings | `1` the wrapper's defaults ([below](#settings-menu-9)), `2` the scripts' own settings ([Script settings](#script-settings-menu-s)), `3` reset all settings (delete the config and start fresh), `4` move the settings file (script folder ↔ user profile) |
+| `9` | Settings | `1` the wrapper's defaults ([below](#settings-menu-9)), `2` the scripts' own settings ([Script settings](#script-settings-menu-9-option-2)), `3` reset all settings (delete the config and start fresh), `4` move the settings file (script folder ↔ user profile) |
 | `D` | Dependencies | Re-scan all tools and libraries |
 | `0` | Exit | Quit |
 
@@ -382,12 +350,37 @@ writing anything.
 A task the PC cannot run is shown with what it needs (`needs tifffile`, `needs
 cjxl`) and refused.
 
-The quality comes right after the mode, and only where a task has one:
-archiving TIFFs offers lossless (d=0), **your** default distance (0.1 out of
-the box; change it in Settings → wrapper defaults), d=1.0 or a custom value
-(pre-filled with the last one you used); JXL → JXL and JPEG → JXL lossy ask
-the distance; a JPEG export asks the quality. Everything else is on the
-review.
+The quality comes right after the mode, and only where a task has one.
+Archiving TIFFs shows a named list with the typical file size of each
+distance at 45, 24 and 12 MP:
+
+```
+                                                             JXL size from a 16-bit TIFF (typical)
+                                                               45 MP    24 MP    12 MP
+  1  d=0    — lossless                                        173 MB    89 MB    43 MB
+  2  d=0.05 — finest lossy available                           42 MB    21 MB   9.9 MB
+  3  d=0.1  — near-lossless (recommended)                      31 MB    15 MB   7.2 MB
+  4  d=0.5  — high-quality lossy (headroom for later edits)    11 MB   4.9 MB   2.4 MB
+  5  d=0.7  — visually lossless (keeps the grain texture)     7.8 MB   3.7 MB   1.7 MB
+  6  d=1    — visually lossless (JPEG XL's definition)        5.5 MB   2.7 MB   1.2 MB
+  7  your distance (0-25) — shows every distance's size
+  A photo can be half or twice these, depending on its detail and noise.
+  From an 8-bit TIFF: lossless is 43 / 21 / 10 MB (about the size of d=0.05), lossy about the same as above.
+```
+
+`Enter` takes your default distance (0.1 out of the box; Settings → wrapper
+defaults changes it). "Your distance" first shows every distance from 0 to
+25 with its size, then asks for the number, pre-filled with the last one you
+used. Below the list, a note says when film scans or 8-bit TIFFs will get
+another distance in this run (lossless, by default).
+
+Making smaller JXL copies shows the same kind of list for copies: d=0.5,
+0.7 and 1 as above, then d=2 (about quality 79: phones, sharing), d=3 (about
+quality 68: web and social media) and d=5 (about quality 46: screens only).
+Nothing higher: from d=10 libjxl halves the resolution by itself, so a
+smaller copy is better made with a resize.
+JPEG → JXL lossy asks the distance; a JPEG export asks the quality.
+Everything else is on the review.
 
 **Make smaller or resized JXL copies** runs `jxl_recompressor.py`: ICC,
 metadata and provenance markers carried over. Requests that cannot gain
@@ -584,7 +577,7 @@ JXL and compares it with the source before deleting. With `--distance 0` the pix
 must match **exactly**; on a lossy run it is a brightness + PSNR **sanity** check
 that catches a black or scrambled encode — not a quality check, since quality loss
 is what you asked for. It roughly doubles the run, which is why it is opt-in — but
-it is the only gate that looks at pixels rather than at file structure. Other folder names (like `converted_jxl`, `16B_JXL`, `16B_TIFF`) must be edited directly in the scripts.
+it is the only gate that looks at pixels rather than at file structure.
 
 ### Modes 6 and 7
 
@@ -666,7 +659,7 @@ Multi-page TIFFs: split — one JXL per page (thumbnail pages excluded)
   exactly that (a test compares the command lines of every task).
 - **The `from` column:** `you` (changed here or in the quality step), `last
   job`, `settings` (Settings → wrapper defaults), `script` (the script's own
-  setting, or the overlay of menu S); empty for a fixed default.
+  setting, or the script settings of menu 9 → 2); empty for a fixed default.
 - **What is not offered** says why: no derivative (colour, sRGB,
   resize/sharpen) in place (modes 0/8) or with `[D]` — a derivative never
   deletes its source, so the run could only be refused later. Resize and
@@ -723,11 +716,11 @@ Persistent defaults saved to `~/.jxl_tools_config.json`.
 - **Workers** — default thread count
 - **Quality** — JPEG quality for lossy workflows
 - **Effort** — cjxl effort level (1-10)
-- **Distance (TIFF→JXL)** — your preferred cjxl distance (default: `0.1`). This is
-  the value offered as the second quality choice of *Archive TIFFs*, so if you always work at `0.05`,
-  set it once here and pick it with a single keystroke instead of going through
-  `[4] Custom` on every run. Setting it to `0` makes entry `[2]` run the
-  **lossless** encoder, exactly like entry `[1]`.
+- **Distance (TIFF→JXL)** — your preferred cjxl distance (default: `0.1`). It is
+  what `Enter` picks in the quality list of *Archive TIFFs*, so if you always
+  work at `0.05`, set it once here and accept it with `Enter` on every run. A
+  value that is not in the list (`0.2`, say) is offered as "your distance",
+  pre-filled.
 - **Confirm deletes** — safety confirmation before destructive operations
 - **Export marker** — the folder name anchor for modes 6/7 (default: `_EXPORT`)
 - **Explorer thumbnail tip** — whether the menu shows the
@@ -758,7 +751,7 @@ The config file is stored at:
 - **Script folder** — `jxl_photo/.jxl_tools_config.json` (if existing there)
 - **User Profile** — `~/.jxl_tools_config.json` (portable, follows the user)
 
-Use **option 6 (Move settings file)** to toggle between the two locations.
+Use **Settings (menu 9) → 4, move the settings file** to toggle between the two locations.
 
 * * *
 
@@ -780,26 +773,26 @@ Some options are available directly in the wizard, others must be edited in the 
 | Bit depth | Review | 8 or 16 for TIFF output |
 | JPEG Preview | Review | JXL→TIFF (default: yes) |
 | Dry run | Review `[d]` | All jobs: runs dry, then back to the review |
-| Strip metadata | 6A | TIFF→JXL |
-| D50 patch mode | 6A | auto / on / off |
-| Encode tag location | 6A | xmp / software / off |
-| Force Modular encoder (lossy) | 6A | TIFF→JXL; NOT for photos — screenshots/graphics only (default off: VarDCT) |
-| ICC matrix mode | 6A | JXL→TIFF |
-| Target ICC profile | 6A | JXL→TIFF |
-| Skip ICC cleanup | 6A | JXL→TIFF |
-| Skip MD5 verification | 6A | JPEG↔JXL |
-| Auto-repair broken JPEG recovery | 6A | JXL→JPEG only; repairs a copy and decodes from it, the JXL is never modified (default: off) |
-| Skip validation | 6A | JPEG↔JXL (risky) |
-| Output suffix | 6A | JPEG↔JXL |
+| Strip metadata | Review `[a]` | TIFF→JXL |
+| D50 patch mode | Review | auto / on / off |
+| Encode record, visible copy | Review `[a]` | history (none, default) / comment / title / software / off |
+| Force Modular encoder (lossy) | Review `[a]` | TIFF→JXL; NOT for photos — screenshots/graphics only (default off: VarDCT) |
+| ICC matrix mode | Review `[a]` | JXL→TIFF |
+| Target ICC profile | Review `[a]` | JXL→TIFF |
+| Skip ICC cleanup | Review `[a]` | JXL→TIFF |
+| Skip MD5 verification | Review `[a]` | JPEG↔JXL |
+| Auto-repair broken JPEG recovery | Review `[a]` | JXL→JPEG only; repairs a copy and decodes from it, the JXL is never modified (default: off) |
+| Skip validation | Review `[a]` | JPEG↔JXL (risky) |
+| Output suffix | Review `[a]` | JPEG↔JXL |
 | Downgrade policy | Review | JXL→JXL: ask/copy/skip/convert |
-| Re-derive when distance/effort change | 6A | JXL→JXL derivatives only (colour/resize/sharpen runs): default = the recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting |
-| ...also on a lower effort (same distance) | 6A | Asked only after a yes above: default = the recompressor's `REDERIVE_ON_LOWER_EFFORT` setting (no) |
+| Re-derive when distance/effort change | Review `[a]` | JXL→JXL derivatives only (colour/resize/sharpen runs): default = the recompressor's `REDERIVE_ON_ENCODE_CHANGE` setting |
+| ...also on a lower effort (same distance) | Review `[a]` | Offered after a yes above: default = the recompressor's `REDERIVE_ON_LOWER_EFFORT` setting (no) |
 | Output folder under the marker | Mode settings | Modes 6/7, TIFF→JXL and JXL→JXL (`--export-jxl-folder`) |
 | Output colour space (derivative) | Review | JXL→JXL: keep/sRGB/AdobeRGB/.icc — 16-bit, never in place, never deletes (`--output-icc`) |
 | Rename in output file names | Review | JXL→JXL with an output colour space: e.g. ProPhoto→sRGB (`--rename-from`/`--rename-to`) |
 | Resize (derivative) | Review | JXL→JXL (modes 1–7) and JXL→JPEG/PNG: none/long/short/percent (`--resize-long`/`--resize-short`/`--resize-percent`, `--allow-upscale`) |
 | Output sharpening | Review | Same directions: none/screen/print after the resize (`--sharpen`); sigma/gain/threshold on the options screen (`a`) |
-| Expert flags | 6B | Custom CLI args |
+| Expert flags | Review `[x]` | Any flag of the job's script, checked at once |
 
 ### ⚙️ Available in Settings (menu 9 → 1)
 
@@ -814,13 +807,13 @@ Some options are available directly in the wizard, others must be edited in the 
 | Export marker | Default: `_EXPORT` |
 | Explorer thumbnail tip | On by default; asked only when it applies |
 
-### 🔧 The scripts' own settings (menu S, or the script file)
+### 🔧 The scripts' own settings (menu 9 → 2, or the script file)
 
 These are global variables at the top of each script. Change them in
-[menu S](#script-settings-menu-s) (an overlay file, the `.py` files stay as
+[Settings → script settings](#script-settings-menu-9-option-2) (an overlay file, the `.py` files stay as
 they are), or open the script and edit the variable at the top. The safety
 settings (`DELETE_CONFIRM`, `OVERWRITE_GUARD`, the verification thresholds,
-...) are not in menu S: they are per-run choices, or a deliberate edit of the
+...) are not offered there: they are per-run choices, or a deliberate edit of the
 script.
 
 The wizard reads them too: its default for every option it passes to a script
@@ -931,12 +924,12 @@ with 8 + `--buffering 1`, 0.73 with 16 + `--buffering 1`. Details:
 [Memory and --workers](README_jxl_recompressor.md#memory-and---workers) and
 [the whole-image threshold](README_jxl_tiff_encoder.md#exception-the-whole-image-threshold).
 
-### Script settings (menu S)
+### Script settings (menu 9, option 2)
 
-Menu **S** edits the settings at the top of the four scripts without touching
+**Settings (menu 9) → 2** edits the settings at the top of the four scripts without touching
 the `.py` files: pick a script, then a setting (`/text` filters), and type the
 new value; `-` puts it back to the script's own value. The list shows each
-setting's value, `(overlay)` where menu S changed it, and the comment the
+setting's value, `(overlay)` where it was changed here, and the comment the
 script has under it.
 
 The values go to a JSON file the scripts read when they start:
@@ -949,8 +942,8 @@ The values go to a JSON file the scripts read when they start:
 3. else `.jxl_script_settings.json` in your user profile (`%USERPROFILE%`).
 
 Each script checks every value again (type, range, the allowed choices,
-folder names without path separators) and takes only the settings menu S
-offers; anything else in the file is ignored with a warning in the run's
+folder names without path separators) and takes only the settings this
+menu offers; anything else in the file is ignored with a warning in the run's
 log. Every run logs the file and the settings it changed, e.g.
 `Script settings overlay: C:\Users\me\.jxl_script_settings.json: 1 value(s): EXPLORER_THUMBNAIL_SIZE`.
 **Never** taken from it, in any script: deletion (`DELETE_SOURCE`,
@@ -997,7 +990,8 @@ The top bar shows which tools and libraries are available:
 | `exiftool` | Metadata preservation |
 | `magick` | ICC color conversion (JXL → JPEG/PNG) |
 | `tifffile` | TIFF workflows (TIFF ↔ JXL) |
-| `pillow` | JPEG preview embedding in TIFF |
+| `pillow` | JPEG preview embedding in TIFF, derivatives |
+| `imagecodecs` | Reading LZW/ZIP-compressed TIFFs; the round-trip check |
 | `rich` | Fancy UI with colors/panels |
 
 If `rich` is missing, the tool runs in plain-text mode with the same functionality.

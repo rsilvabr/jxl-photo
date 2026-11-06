@@ -28,7 +28,7 @@ gives them their own distance. See the
 the same run, `--scan-scope raw` narrows it to raw scans, and the
 recompressor's `--on-scan` (default `copy`) never re-encodes a scan lossy
 unless asked. Scans are marked `jxlphoto-scan:raw|final`. See the
-[encoder README](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170).
+[encoder README](README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance).
 
 ## v2.17.0_beta1 (2026-10-23, pre-release)
 
@@ -38,7 +38,7 @@ Thumbnail pages of multi-page TIFFs are archived by default, except those of
 the programs in `THUMBNAIL_DROP_SOFTWARE` (Capture One). `scans` keeps them
 only for the programs in `SCANNER_SOFTWARE` or a TIFF with an IR page. Both
 lists are settings at the top of the encoder. See the
-[encoder README](README_jxl_tiff_encoder.md#thumbnail-pages---thumbnail-mode-v2170).
+[encoder README](README_jxl_tiff_encoder.md#thumbnail-pages---thumbnail-mode).
 
 ## v2.15.0 (unreleased)
 

@@ -1,73 +1,32 @@
 # jxl_tiff_encoder.py
 
-Batch TIFF 16-bit → JPEG XL converter. Encodes TIFF files to JXL format with 
-configurable quality (lossless or lossy), preserves full EXIF/XMP metadata, 
-and **embeds the original ICC color profile as XMP metadata** for perfect 
-round-trip preservation.
+Batch TIFF → JPEG XL converter: it writes the **masters**. Encodes TIFF files
+to JXL, lossless or lossy, keeps the full EXIF/XMP metadata, and **embeds the
+original ICC color profile as XMP metadata** for a perfect round trip.
 
-Works with any 16-bit TIFF — Capture One exports, NX Studio, Photoshop, or 
-standard uncompressed TIFFs from various sources.
+Works with 16-bit and 8-bit TIFFs — Capture One, Lightroom, NX Studio and
+Photoshop exports, film scans (IR channel included), multi-page TIFFs.
 
-**Key feature:** ICC profile embedding. 
-```
-When paired with `jxl_tiff_decoder.py`, the exact original ICC profile is 
-preserved even for **lossy JXL files**, which would otherwise lose 
-the detailed ICC information (gamma curves, copyright, etc.).
-```
+**Key feature: the ICC profile comes back.** With `jxl_tiff_decoder.py`, the
+exact original ICC profile (curves, copyright and all) is restored even from a
+**lossy** JXL, which on its own would decode with a generic profile.
 
 ---
 
 ## Requirements
 
 ```
-Python 3.9+
-pip install tifffile numpy imagecodecs
-cjxl  →  https://github.com/libjxl/libjxl/releases
-exiftool  →  https://exiftool.org
+Python 3.9+, pip install tifffile numpy pillow imagecodecs
+cjxl, djxl   →  https://github.com/libjxl/libjxl/releases (the -static zip)
+exiftool     →  https://exiftool.org
+magick       →  https://imagemagick.org (the Explorer thumbnail inside the JXL)
 ```
 
-Both `cjxl.exe` and `exiftool.exe` must be on your PATH.
+djxl decodes each output for the round-trip check (`VERIFY_ROUNDTRIP`, on by
+default) and for the Explorer thumbnail; without ImageMagick the thumbnail is
+left out, nothing else changes.
 
-### Download the Correct Files
-
-| Tool | Download | What to Get |
-|------|----------|-------------|
-| **cjxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip`  **(NOT `jxl-x64-windows.zip` which has only DLLs)** |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip`  **(Windows .zip, NOT .tar.gz source)** |
-
-### exiftool Setup
-
-> **Note:** The scripts automatically detect both `exiftool.exe` and `exiftool(-k).exe`. **Renaming is no longer required**, but still works if you prefer.
-
-The Windows download comes as `exiftool(-k).exe`. If you want to rename it anyway:
-
-```powershell
-# Option A: Rename
-Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
-
-# Option B: Duplicate and rename (keeps original)
-Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
-```
-
-### Add to PATH
-
-**Replace with YOUR actual paths:**
-
-```powershell
-$myPaths = @(
-    "C:\tools\libjxl\bin",    # where cjxl.exe is
-    "C:\tools\exiftool"        # where exiftool.exe / exiftool(-k).exe is
-)
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
-# Restart PowerShell after this!
-```
-
-### Verify
-```powershell
-cjxl --version      # JPEG XL encoder v0.11.x
-exiftool -ver       # 13.xx
-```
+Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation) in the main README — the same tools serve all four scripts.
 
 ---
 
@@ -109,13 +68,13 @@ Edit at the top of the script:
 
 ```python
 CJXL_DISTANCE = 0.1
-# 0   = mathematically lossless (pixel-perfect, ~173MB for 45MP)
-# 0.05 = near-lossless (~42MB, imperceptible difference) ⭐ RECOMMENDED for archive
-# 0.1 = near-lossless (~31MB, imperceptible difference)  ⭐ ALSO RECOMMENDED for archive
-# 0.5 = high quality lossy (~11MB) — recommended starting point (libjxl authors)
-# 1.0 = "visually lossless" per libjxl documentation (~5.5MB)
+# 0    = lossless, pixel-perfect (~173 MB for 45 MP)
+# 0.05 = finest lossy available (~42 MB)
+# 0.1  = near-lossless (~31 MB) — the default and the recommendation for masters
+# 0.5  = high-quality lossy (~11 MB), headroom for later edits
+# 0.7  = visually lossless, keeps the grain texture (~7.8 MB)
+# 1.0  = visually lossless, JPEG XL's definition (~5.5 MB)
 # Sizes: medians of 20 Z7/Z8 photos; per camera and for scans see docs/file_sizes.md
-
 CJXL_EFFORT = 7   # effort 9 gains nothing on large files below d=1.0 (docs/file_sizes.md)
 # Compression effort (1-10). Controls file size, NOT quality.
 # 7 is the sweet spot for camera photos.
@@ -264,18 +223,15 @@ DELETE_CONFIRM = True
 
 #### Safety confirmation (DELETE_SOURCE)
 
-> **Changed in v2.0.0 — read this if you have a saved command.** `--delete-source`
-> used to be honoured **in mode 8 only**: outside it the flag was accepted and
-> silently ignored. It now works in **every** mode, so a stored command or
-> scheduled task using it with any other mode deleted nothing before and deletes
-> the originals now. Deleting is a separate opt-in from the output layout, which
-> is what makes "convert into a separate tree and drop the masters" possible at
-> all — but it means the flag has to be read as written.
-```
-When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
+Deleting is a separate opt-in from the output layout: `--delete-source` works
+in **every** mode, so "convert into a separate tree and drop the TIFFs" is one
+command. When `DELETE_SOURCE = True` and `DELETE_CONFIRM = True`:
+
 - **Lossless:** type `yes` to confirm
-- **Lossy:** type the current time in `HHMM` format (forces conscious decision)
-```
+- **Lossy:** type the current time in `HHMM` format (forces a conscious decision)
+
+(Up to v1.9.1 the flag worked in mode 8 only; a command line saved from then
+deletes in other modes now — [upgrading](upgrading.md#coming-from-v191-or-earlier-two-things-changed-under-existing-command-lines-in-v200).)
 
 The confirmation is only charged when the plan can actually delete something: a
 re-run of an already-archived folder produces only skips, deletes nothing and
@@ -403,8 +359,8 @@ py jxl_tiff_encoder.py "F:\Photos\2025" --mode 7 --export-subfolder Print --expo
 ## Script settings overlay
 
 The settings at the top of this script can also be changed without editing
-it, in the JSON file the wrapper's menu S writes
-([details](README_jxl_tools.md#script-settings-menu-s)):
+it, in the JSON file the wrapper's script settings write (Settings, menu 9 → 2;
+[details](README_jxl_tools.md#script-settings-menu-9-option-2)):
 
 ```json
 {"jxl_tiff_encoder": {"EXPLORER_THUMBNAIL_SIZE": 512, "SCANNER_SOFTWARE": ["SilverFast", "VueScan"]}}
@@ -1209,7 +1165,7 @@ by `jxlinfo` and by every other viewer (GIMP, Darktable, browsers, etc.).
 ```
 ---
 
-## Multi-Page TIFF Support (v1.7.0+)
+## Multi-Page TIFF Support
 
 Multi-page TIFFs are handled explicitly instead of silently discarding extra pages:
 
@@ -1217,7 +1173,7 @@ Multi-page TIFFs are handled explicitly instead of silently discarding extra pag
   (`photo.jxl`, `photo_page1.jxl`, ...). A TIFF with one real page yields exactly
   `photo.jxl`, identical to the old `ignore` default. Thumbnail pages follow
   `--thumbnail-mode` (`auto` default, `scans`, `exclude` or `include` — see
-  [Thumbnail pages](#thumbnail-pages---thumbnail-mode-v2170) below).
+  [Thumbnail pages](#thumbnail-pages---thumbnail-mode) below).
 - `--multipage-mode ignore` — encode only page 0, drop the rest (the pre-v1.8.2
   default). Not silent: files whose extra pages are dropped are logged as warnings
   (capped at 20 lines per run) and the run summary repeats the total
@@ -1245,12 +1201,12 @@ alpha.
 
 Thumbnail pages are detected via standard TIFF `SubfileType` flags (`is_reduced` / `is_subifd`). When splitting, a kept thumbnail gets a configurable suffix (`--thumbnail-suffix`, default `_thumbnail`). The suffix must be a plain filename suffix — an empty value, a path separator, or `..` is rejected at startup (a thumbnail name must never point outside the destination).
 
-### Thumbnail pages (`--thumbnail-mode`, v2.17.0)
+### Thumbnail pages (`--thumbnail-mode`)
 
 | Mode | Keeps the thumbnail page of |
 |---|---|
 | `auto` (default) | every TIFF, except those whose Software tag contains a name in `THUMBNAIL_DROP_SOFTWARE` (default: `Capture One`, which adds a tiny preview to every export) |
-| `scans` | scans only: the Software tag contains a name in `SCANNER_SOFTWARE` (SilverFast, VueScan, Epson Scan, Nikon Scan, FlexColor, Frontier, EZ Controller, ScanGear, Plustek), or the TIFF has an IR channel, or neither a Software tag nor camera EXIF — the film-scan rule of [`SCAN_DISTANCE`](#film-scans-are-archived-lossless-scan_distance-v2170) |
+| `scans` | scans only: the Software tag contains a name in `SCANNER_SOFTWARE` (SilverFast, VueScan, Epson Scan, Nikon Scan, FlexColor, Frontier, EZ Controller, ScanGear, Plustek), or the TIFF has an IR channel, or neither a Software tag nor camera EXIF — the film-scan rule of [`SCAN_DISTANCE`](#film-scans-are-archived-lossless-scan_distance) |
 | `exclude` | none (the default before v2.17.0) |
 | `include` | every TIFF |
 
@@ -1359,17 +1315,17 @@ previous run of the toolkit) are kept; nothing in the toolkit ever reads it back
 differences and how to read it yourself:
 [What jxl-photo writes into your photos](metadata_written.md#processing-history-xmpmmhistory).
 
-### Per-Page ICC Preservation (v1.7.0)
+### Per-Page ICC Preservation
 
 When splitting, each page is encoded with its own effective ICC profile (read from the page's own ICC tag 34675; if absent, page N > 0 inherits IFD0's profile for color interpretation). Pages that inherit the ICC are flagged with `jxlphoto-icc:inherited` in `dc:Relation`, so the decoder can reconstruct them without an ICC tag when the original page also had none.
 
-### Grayscale and SubfileType Preservation (v1.7.0)
+### Grayscale and SubfileType Preservation
 
 Single-channel pages are encoded as grayscale and flagged with `jxlphoto-grayscale` in `dc:Relation`. The original `SubfileType` value (e.g. `2` for PAGE, `4` for MASK) is also recorded so the decoder can restore the page's role. Inherited RGB ICC is not applied to grayscale pages, which prevents libpng iCCP errors on scanner IR/mask pages.
 
 A page with a 2nd or 4th **channel** (grey + extra, RGB + extra — e.g. VueScan's RGBI layout) reaches cjxl as alpha. Its TIFF `ExtraSamples` value is recorded as `jxlphoto-extrasamples:<v>` (`0` unspecified, e.g. IR; `1` associated alpha; `2` unassociated alpha) so the decoder gives the channel back its role (v2.8.1); lossy encodes keep the colour under it with cjxl's `keep_invisible` option (v2.8.0).
 
-### Film scans and their scanner software (v2.17.0)
+### Film scans and their scanner software
 
 A SilverFast scan (image, 1:8 thumbnail, IR page) archived with the defaults
 and decoded back opens in SilverFast with its IR channel and dust removal
@@ -1393,7 +1349,7 @@ recompressed. What that takes:
 Other scanner programs were not tested. If yours relies on something else,
 test one file before converting a whole archive.
 
-### Film scans are archived lossless (`SCAN_DISTANCE`, v2.17.0)
+### Film scans are archived lossless (`SCAN_DISTANCE`)
 
 A film scan gets its own distance, in the same run as every other TIFF:
 `SCAN_DISTANCE = 0` (lossless) by default, `--scan-distance` per run. A scan
