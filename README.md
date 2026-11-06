@@ -365,7 +365,7 @@ Plain cjxl/djxl:   TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIF
 With this toolkit: TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
 ```
 
-The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. `dc:Description` carries the encode record (`gen=1 | cjxl d=0.1 e=7`), which the recompressor reads. To check a round trip:
+The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. The encode record (`gen=1 | cjxl d=0.1 e=7`), which the recompressor reads, goes into the file's `xmpMM:History` since v2.24.0, so the Title (`dc:Description`) stays yours; `--encode-tag comment` or `title` also shows it where Explorer can see it, and files written before still have it in the Title, which is still read ([details](docs/metadata_written.md#the-encode-record)). To check a round trip:
 
 ```powershell
 exiftool -ProfileDescription -ProfileCopyright original.tif roundtrip.tif   # should match
