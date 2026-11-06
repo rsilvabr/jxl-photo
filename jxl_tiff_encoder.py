@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0"
+TOOLKIT_VERSION = "2.25.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1064,10 +1064,13 @@ CJXL_EFFORT = 7
 # increase file size for high-ISO or texture-heavy images.
 
 CJXL_DISTANCE = 0.1
-# 0   = mathematically lossless (pixel-perfect)
-# 0.1 = near-lossless (~25MB for 36MP), imperceptible difference
-# 0.5 = high quality lossy — recommended starting point (libjxl authors)
-# 1.0 = "visually lossless" per libjxl documentation
+# 0    = lossless, pixel-perfect (~173 MB for 45 MP)
+# 0.05 = finest lossy available (~42 MB)
+# 0.1  = near-lossless (~31 MB) — the default and the recommendation for masters
+# 0.5  = high-quality lossy (~11 MB), headroom for later edits
+# 0.7  = visually lossless, keeps the grain texture (~7.8 MB)
+# 1.0  = visually lossless, JPEG XL's definition (~5.5 MB)
+# Sizes: medians of 20 Z7/Z8 photos; more in docs/file_sizes.md
 
 CJXL_BUFFERING = None
 # [libjxl >= 0.12 only] Encoder buffering level passed to cjxl.
@@ -1360,7 +1363,8 @@ MULTIPAGE_TIFF_MODE = "split"
 #
 # "ignore"    -> Always encode page 0 (series[0]) and ignore extra pages.
 #                This is the original behavior; dropped pages are reported, and
-#                mode 8 refuses to delete a source whose pages were dropped.
+#                a run that deletes refuses to delete a source whose pages
+#                were dropped.
 # "skip"      -> If the TIFF has more than one "real" page (non-thumbnail),
 #                skip the entire file and log a warning.
 # "split"     -> [DEFAULT] Encode each real page to a separate JXL:
@@ -2823,6 +2827,18 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                 pass
 
 
+def _tiff_byte_order(tiff_path) -> str:
+    """'Big-endian' for a Motorola (MM) TIFF, else 'Little-endian' — the
+    ExifByteOrder value that keeps the master's EXIF in the TIFF's own byte
+    order (v2.25.0). Read from the file's first two bytes; an unreadable
+    header gives the TIFF default, little-endian."""
+    try:
+        with open(tiff_path, "rb") as f:
+            return "Big-endian" if f.read(2) == b"MM" else "Little-endian"
+    except OSError:
+        return "Little-endian"
+
+
 def extract_exif_raw(tiff_path, tmp_dir):
     arg_file = tmp_dir / "exif_extract.args"
     arg_file.write_text(f"{_ARGFILE_CHARSET}-b\n-Exif\n{tiff_path}\n", encoding="utf-8")
@@ -4170,8 +4186,10 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append("-xmp-icc:all=")  # Clear any XMP ICC tags if present
         args_lines.append("-xmp-photoshop:ICCProfile=")  # Clear Photoshop ICC refs if any
     
-    # 6. Ensure byte order consistency
-    args_lines.append("-ExifByteOrder=Little-endian")
+    # 6. The EXIF keeps the TIFF's own byte order (II or MM). Until v2.24.x
+    #    every master was forced to little-endian. Set explicitly because
+    #    exiftool writes a NEW EXIF block (no raw block extracted) big-endian.
+    args_lines.append(f"-ExifByteOrder={_tiff_byte_order(tiff_path)}")
     
     # 7. Target file
     args_lines.append(str(write_path))

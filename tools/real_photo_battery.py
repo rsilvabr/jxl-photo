@@ -1558,6 +1558,15 @@ def silverfast_checks(folder):
         small = {c for c, v in priv_a.items() if len(v if isinstance(v, bytes) else str(v)) <= 4096}
     check("SilverFast scan: every page, SubfileType and pixel back", rc == 0 and not bad,
           f"rc={rc} {bad[:4]}")
+    # v2.25.0: SilverFast writes big-endian (MM) TIFFs; the master's EXIF and
+    # the decoded TIFF keep that order (until v2.24.x both came out II).
+    with tifffile.TiffFile(src) as ta, tifffile.TiffFile(out) as tb:
+        bo_src, bo_out = ta.byteorder, tb.byteorder
+    bo_master = exif(["-s3", "-ExifByteOrder", main_jxl])
+    want = "Big-endian" if bo_src == ">" else "Little-endian"
+    check("SilverFast scan: the TIFF's byte order is kept in the master and the decoded TIFF",
+          bo_out == bo_src and bo_master.startswith(want),
+          f"TIFF {bo_src} master {bo_master!r} decoded {bo_out}")
     lost = [c for c in sorted(small) if priv_b.get(c) != priv_a[c]]
     check("SilverFast scan: its private TIFF tags come back byte for byte",
           bool(small) and not lost, f"tags {sorted(small)} lost/changed={lost}")

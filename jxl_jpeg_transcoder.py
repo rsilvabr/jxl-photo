@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0"
+TOOLKIT_VERSION = "2.25.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -2072,7 +2072,10 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         with tempfile.TemporaryDirectory(prefix="jxltr_meta_", dir=TEMP_DIR) as _mt:
             r_copy = _run_exiftool_argfile(
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
-                 "-exif:all", "-xmp:all", "-iptc:all", str(dst_path)],
+                 # ExifByteOrder: the output's EXIF keeps the source's II/MM
+                 # (a new EXIF block is big-endian by default).
+                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-xmp:all", "-iptc:all",
+                 str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
         if r_copy.returncode != 0:
@@ -2394,6 +2397,7 @@ RESIZE_MODE = None           # "long" / "short" / "percent" / None
 RESIZE_VALUE = None
 ALLOW_UPSCALE = False
 SHARPEN = "none"             # none / screen / print
+LABEL_QUALITY = None         # JPEG quality in the label (/q<N>): JPEG derivatives only
 SHARPEN_SIGMA = None         # expert overrides (deliberately OUTSIDE the label)
 SHARPEN_GAIN = None
 SHARPEN_THRESHOLD = None
@@ -6276,8 +6280,32 @@ def _output_icc_label(output_icc):
 
 
 def _current_derived_label(output_icc) -> str:
-    return _derived_label(_output_icc_label(output_icc), RESIZE_MODE,
-                          RESIZE_VALUE, ALLOW_UPSCALE, SHARPEN)
+    """The recipe this run writes: _derived_label (parity-pinned with the
+    recompressor) plus, for a JPEG, its quality (`/q70`, v2.25.0)."""
+    label = _derived_label(_output_icc_label(output_icc), RESIZE_MODE,
+                           RESIZE_VALUE, ALLOW_UPSCALE, SHARPEN)
+    return label + (f"/q{LABEL_QUALITY}" if LABEL_QUALITY else "")
+
+
+_LABEL_QUALITY_RE = re.compile(r"/q(\d+)$")
+
+
+def _recipe_changed(stored: str, wanted: str) -> bool:
+    """Does an existing derivative's recorded recipe ask for a new one?
+    A different colour/size/sharpening always does; a different JPEG
+    quality does too. A label without a quality (written before v2.25.0, or
+    a PNG) is not compared on it: the quality it was made with is unknown,
+    so an update never redoes every existing JPEG."""
+    if stored == wanted:
+        return False
+    s_q, w_q = _LABEL_QUALITY_RE.search(stored), _LABEL_QUALITY_RE.search(wanted)
+    s_base = stored[:s_q.start()] if s_q else stored
+    w_base = wanted[:w_q.start()] if w_q else wanted
+    if s_base != w_base:
+        return True
+    if s_q is None or w_q is None:
+        return False
+    return s_q.group(1) != w_q.group(1)
 
 
 def _check_derivative_targets(pairs, output_icc, dry_run=False):
@@ -6311,7 +6339,7 @@ def _check_derivative_targets(pairs, output_icc, dry_run=False):
                 logger.info(f" DRY | would REFUSE | {s.name} | {why}")
             else:
                 logger.error(f"REFUSED | {s.name} | {why}")
-        elif lab != wanted:
+        elif _recipe_changed(lab, wanted):
             _FORCE_REDERIVE.add(os.path.normcase(str(o)))
             logger.info(f" derivative recipe changed ({lab} -> {wanted}): "
                         f"re-deriving | {s.name}")
@@ -8110,11 +8138,12 @@ def main():
     _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
 
     global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
-    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD
+    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD, LABEL_QUALITY
     RESIZE_MODE = None
     RESIZE_VALUE = None
     ALLOW_UPSCALE = False
     SHARPEN = "none"
+    LABEL_QUALITY = None
     SHARPEN_SIGMA = None
     SHARPEN_GAIN = None
     SHARPEN_THRESHOLD = None
@@ -8143,6 +8172,10 @@ def main():
         print("WARNING: --allow-upscale has no effect without --resize-long/"
               "--resize-short/--resize-percent: nothing to enlarge.")
     SHARPEN = args.sharpen
+    # A JPEG derivative records its quality in the recipe, so a new quality
+    # re-derives it like a new size does (PNG: no quality).
+    LABEL_QUALITY = (args.quality if (args.format or "jpeg").lower() in ("jpeg", "jpg")
+                     else None)
     SHARPEN_SIGMA = args.sharpen_sigma
     SHARPEN_GAIN = args.sharpen_gain
     SHARPEN_THRESHOLD = args.sharpen_threshold

@@ -42,7 +42,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0"
+TOOLKIT_VERSION = "2.25.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -5804,7 +5804,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             _collapse_list_reset(
                 ["-overwrite_original", "-api", "Compress=0",
                  "-tagsfromfile", _src,
-                 "-exif:all", "-iptc:all"]
+                 # ExifByteOrder: the output's EXIF keeps the source's II/MM
+                 # (cjxl wrote none, and a new EXIF block is MM by default).
+                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-iptc:all"]
                 + _restamp_args(desc, software, label=jxl_path.name, history=history,
                                 comment=comment, record=_record)
                 + _extra

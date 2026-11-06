@@ -40,7 +40,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0"
+TOOLKIT_VERSION = "2.25.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -3419,7 +3419,13 @@ def add_jpeg_preview(tiff_path, tmp_dir, icc_data, extratags=None):
         # Page 1: 8-bit preview with subfiletype=1 (thumbnail flag)
         # This ensures Windows Explorer uses the correct ICC from page 0
 
-        with tifffile.TiffWriter(str(temp_tiff)) as tif_writer:
+        # Same byte order as the TIFF being rebuilt (the master's, v2.25.0).
+        try:
+            with open(tiff_path, "rb") as _bf:
+                _byteorder = ">" if _bf.read(2) == b"MM" else "<"
+        except OSError:
+            _byteorder = "<"
+        with tifffile.TiffWriter(str(temp_tiff), byteorder=_byteorder) as tif_writer:
             try:
                 write_method = tif_writer.write
             except AttributeError:
@@ -3810,6 +3816,44 @@ def _decode_output_is_ours(tiff_path: Path, src_paths=None) -> bool:
     return (not OVERWRITE_GUARD) and bool(info.get("src") or info.get("srcsum"))
 
 
+def _jxl_exif_byteorder(jxl_path) -> str:
+    """'>' when the JXL's Exif box holds big-endian (MM) EXIF, else '<' — the
+    tifffile byteorder that gives the decoded TIFF the master's byte order
+    (v2.25.0; the encoder keeps the TIFF's own). Read from the box headers
+    with seeks; a bare codestream, no Exif box, a compressed (brob) one or
+    an unreadable file give '<', tifffile's default."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            pos = 0
+            while pos + 8 <= end:
+                f.seek(pos)
+                size, typ = struct.unpack(">I4s", f.read(8))
+                hdr = 8
+                if size == 1:
+                    size = struct.unpack(">Q", f.read(8))[0]
+                    hdr = 16
+                elif size == 0:
+                    size = end - pos
+                if size < hdr or pos + size > end:
+                    break
+                if typ == b"Exif":
+                    # 4-byte offset to the TIFF header, then "II" or "MM".
+                    f.seek(pos + hdr)
+                    head = f.read(4)
+                    if len(head) == 4:
+                        off = struct.unpack(">I", head)[0]
+                        f.seek(pos + hdr + 4 + off)
+                        return ">" if f.read(2) == b"MM" else "<"
+                    break
+                if typ in (b"jxlc", b"jxlp"):
+                    break        # metadata boxes come before the codestream
+                pos += size
+    except (OSError, struct.error):
+        pass
+    return "<"
+
+
 def _pixel_sum(arrays) -> str:
     """PIXSUM_PREFIX value for pixel pages, in page order: "<pages>:<md5>".
 
@@ -4154,7 +4198,9 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
             # EXIF/XMP to overwrite them (e.g. consumer JXLs, None mode).
             # The pages exactly as written, for the PIXSUM_PREFIX record.
             _written_pages = []
-            with tifffile.TiffWriter(str(write_path)) as tif_writer:
+            # The TIFF in the master's byte order (II/MM, v2.25.0).
+            with tifffile.TiffWriter(str(write_path),
+                                     byteorder=_jxl_exif_byteorder(main_jxl)) as tif_writer:
                 try:
                     write_method = tif_writer.write
                 except AttributeError:

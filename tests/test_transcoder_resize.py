@@ -155,7 +155,8 @@ def test_decode_resize_long_to_jpeg(tmp_path):
     assert prof_desc and "srgb" in prof_desc.lower(), prof_desc
 
     tokens = _relation_tokens(out)
-    assert "jxlphoto-derived:sRGB@long320" in tokens, tokens
+    # A JPEG records its quality too (v2.25.0); 95 is the default.
+    assert "jxlphoto-derived:sRGB@long320/q95" in tokens, tokens
     assert not any(t.startswith("jxlphoto-src:") for t in tokens), tokens
     assert not any(t.startswith("jxlphoto-srcsum:") for t in tokens), tokens
 
@@ -242,7 +243,7 @@ def test_recipe_change_re_derives_without_overwrite(tmp_path):
                         "--to-srgb", "--resize-long", "320", "--format", "jpeg")
     assert r.returncode == 0, r.stdout + r.stderr
     out = tmp_path / "recovered_jpeg" / "master.jpg"
-    assert "jxlphoto-derived:sRGB@long320" in _relation_tokens(out)
+    assert "jxlphoto-derived:sRGB@long320/q95" in _relation_tokens(out)
 
     # Same command again: SKIP (the recipe is unchanged).
     r = _run_transcoder(master, "--decode", "--force-convert", "--mode", "1",
@@ -254,7 +255,7 @@ def test_recipe_change_re_derives_without_overwrite(tmp_path):
                         "--to-srgb", "--resize-long", "200", "--format", "jpeg")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "re-deriving" in r.stdout + r.stderr
-    assert "jxlphoto-derived:sRGB@long200" in _relation_tokens(out)
+    assert "jxlphoto-derived:sRGB@long200/q95" in _relation_tokens(out)
     from PIL import Image
     with Image.open(out) as im:
         assert im.size == (200, 150), im.size
