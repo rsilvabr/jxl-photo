@@ -50,7 +50,12 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 | JXL `d=1.0` (visually lossless) | 5.5 | 2.7 | 1.2 |
 | JXL `d=3.0` (web) | 1.8 | 0.9 | 0.4 |
 
-`d=0.1` is the default and the recommendation for masters. `d=0.5` still leaves headroom for later edits; `d=1.0` is JPEG XL's own "visually lossless" — fine to look at, less room to edit. Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
+`d=0.1` is the default and the recommendation for masters. Two tests of the grain ([details](docs/file_sizes.md#grain-after-heavy-editing-and-as-it-is)):
+
+- **After heavy editing.** The worst case: the unlit black background of a flash photo — nothing there but grain (little noise reduction) — decoded back to TIFF and pulled up hard in Capture One (shadows +100, blacks +100, exposure unchanged). In that lifted black, at 100%, `d=0.1` matched lossless; at 300–800% its grain differed slightly, and only when flipping between the two files. `d=0.05` closes even that gap for about a third more space (42 against 31 MB at 45 MP, still a quarter of lossless); I use it for my own masters, out of caution. `d=0.5` softened that grain a little at 100% and `d=1.0` showed artifacts, while the lit subject looked clean even at `d=1.0`.
+- **Without editing**, the photo as it is: `d=0.7` keeps the grain at 200%, where `d=1.0` starts to smooth it — a light file for copies you only look at.
+
+Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
 
 Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB). On 8-bit scans, `d=0.05`/`0.1` save little or nothing over lossless, so keep those lossless. Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0` for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
 

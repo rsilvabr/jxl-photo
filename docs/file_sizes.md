@@ -134,6 +134,47 @@ MB, with the middle 80% of the photos in brackets.
   smaller copy, resizing it (`--resize-long`) works better than a higher
   distance.
 
+## Grain: after heavy editing and as it is
+
+Two different questions, so two different tests: how a lossy master holds up
+when it is edited hard later, and how much grain a copy keeps when it is only
+looked at.
+
+### After heavy editing (stress test)
+
+Everything in this test is about one area of one photo, AFTER a heavy edit.
+The photo is a 16-bit TIFF of a flash shot, encoded at `d=0.05`, `0.1`, `0.5`
+and `1.0` (effort 7) and decoded back to TIFF. The area compared is its unlit
+background: no light reached it, so it holds nothing but grain (little noise
+reduction was applied). Each TIFF was then edited the same way in Capture
+One — shadows +100, blacks +100, exposure unchanged — to pull that black up
+as far as it goes. It is the worst place on purpose: the encoder treats
+near-black as unimportant and compresses it more.
+
+That lifted black, against the lossless file:
+
+| Zoom, after the edit | `d=0.05`, `d=0.1` | `d=0.5` | `d=1.0` |
+|---|---|---|---|
+| 100% | same as lossless | grain slightly soft | visible artifacts |
+| 300–800% | `d=0.1`: the grain looks a little different, seen only by flipping between the files | artifacts, like `d=1.0` at 100% | — |
+
+The lit subject held up far better: it looked clean even at `d=1.0`. That is
+why `d=0.1` is the recommendation for masters; `d=0.05` closes the last small
+gap for about a third more space. More numbers (distance, error and SNR,
+16-bit against 8-bit):
+[the r/jpegxl post](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/).
+
+### Without editing (the photo as it is)
+
+No edit here: the photos are looked at as they are. Zoomed in to 200%,
+`d=1.0` smooths the grain a little; `d=0.7` keeps it. Measured on three grainy
+photos (ISO 25600 among them), as sRGB copies against a lossless decode: the
+luminance grain is 94–98% intact at `d=1.0` and 98% or more from `d=0.6`
+down. The **colour** grain is what the encoder simplifies first: it stays
+close to the original only at `d=0.1` and below. So `d=0.7` is a light file
+that keeps the grain's texture, not its exact colour noise. The wizard offers
+it as "visually lossless (keeps the grain texture)".
+
 ## Film scans
 
 Scans are archived lossless by default (`SCAN_DISTANCE = 0`): a scan can only
