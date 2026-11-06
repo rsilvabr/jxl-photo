@@ -39,7 +39,7 @@ Spectacular compression with no compromise on bit depth.
 Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000). ZIP is the TIFF compression tiff-workflow writes. Detail and noise move the size more than the camera does — [every distance, with the spread across the photos](docs/file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff):
 
 | Format | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
-|--------|---------------:|-----------:|-------------:|
+|--------|:--------------:|:----------:|:------------:|
 | TIFF 16-bit / with ZIP | 273 / 227 | 146 / 120 | 72 / 60 |
 | TIFF 8-bit / with ZIP | 136 / 61 | 73 / 30 | 36 / 16 |
 | JXL lossless, from 16-bit | 173 | 89 | 43 |
