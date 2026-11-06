@@ -28,6 +28,7 @@ import pytest
 import tifffile
 
 import jxl_recompressor as rec
+from _encode_record import encode_record
 import jxl_tiff_encoder as enc
 
 REPO = Path(__file__).resolve().parent.parent
@@ -74,7 +75,8 @@ def _exif(*args):
 def _meta(path):
     d = json.loads(_exif("-j", "-XMP-dc:Relation", "-XMP-dc:Description", path))[0]
     rel = d.get("Relation") or []
-    return ([rel] if isinstance(rel, str) else rel), str(d.get("Description") or "")
+    # the encode record wherever it lives (History since v2.24.0)
+    return ([rel] if isinstance(rel, str) else rel), encode_record(path)
 
 
 @needs_tools

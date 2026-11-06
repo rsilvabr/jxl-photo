@@ -45,9 +45,16 @@ def _history(path):
 
 
 def _ours(entry, action, params):
+    """`params` is the entry's own part; since v2.24.0 an encoder or
+    recompressor entry ends with the encode record (" | gen=N | cjxl d=…"),
+    a decoder or transcoder entry never does."""
     assert entry["Action"] == action
     assert entry["SoftwareAgent"] == f"jxl-photo {VERSION} (https://github.com/rsilvabr/jxl-photo)"
-    assert entry["Parameters"] == params
+    got = entry["Parameters"]
+    if params.startswith(("jxl_tiff_encoder", "jxl_recompressor")):
+        assert got.startswith(params + " | ") and "cjxl d=" in got, got
+    else:
+        assert got == params
     assert entry["When"][:4].isdigit()
 
 
@@ -170,11 +177,15 @@ def test_h2_encoder_keeps_the_existing_history(tmp_path):
 
 
 @real
-def test_h3_strip_writes_no_history(tmp_path):
+def test_h3_strip_writes_only_the_record_entry(tmp_path):
+    """--strip keeps no metadata but the encode record, and since v2.24.0 the
+    record lives in a History entry: exactly one."""
     tif = tmp_path / "s.tif"
     _rgb_tiff(tif, np.uint16)
     _run("jxl_tiff_encoder.py", tif, "--mode", "0", "--strip", "--delete-confirm-off")
-    assert _history(tmp_path / "s.jxl") == []
+    h = _history(tmp_path / "s.jxl")
+    assert len(h) == 1, h
+    _ours(h[0], "converted", "jxl_tiff_encoder: from image/tiff to image/jxl")
 
 
 @real

@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0_beta1"
+TOOLKIT_VERSION = "2.24.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1176,21 +1176,26 @@ OVERWRITE = "smart"
 #            Useful after re-editing and re-exporting from Capture One.
 # Never overwrites TIFFs or any other non-JXL format.
 
-ENCODE_TAG_MODE = "xmp"
-# Records encoding parameters in the JXL metadata as an append-only lineage
+ENCODE_TAG_MODE = "history"
+# Every output records its encoding parameters as an append-only lineage
 # chain: "gen=N | cjxl d=X e=Y | cjxl d=... e=..." (gen = number of LOSSY
 # generations, reconciled from the chain on every write, never incremented).
-# "software" -> appends to the EXIF Software field (e.g. "Capture One | gen=1 | cjxl d=0.5 e=7")
-#              Visible in IrfanView, exiftool, and most viewers.
-# "xmp"      -> writes as XMP-dc:Description custom field
-#              Cleaner — does not touch the original Software field
-#              Visible in Windows Properties, but not in IrfanView
-#              (any user caption stays FIRST; the gen=/chain block follows it)
-# "off"      -> records nothing AND strips any gen=/cjxl chain the source TIFF
-#              carries — the only way to deliberately discard the lineage
-# NOTE: When EMBED_ICC_IN_JXL is True and ENCODE_TAG_MODE is "xmp",
-# the encoding tag is concatenated to dc:Description, and the ICC goes to
-# dc:Relation as a jxlphoto-iccprofile token.
+# Since v2.24.0 the chain lives in the output's xmpMM:History entry (exiftool
+# -XMP-xmpMM:HistoryParameters); this setting only decides where a VISIBLE
+# copy goes:
+# "history"  -> nowhere else (default): the Title stays the photo's own.
+# "comment"  -> also XMP exif:UserComment, shown by Windows Explorer as
+#              "Comments" (the Title stays the photo's own).
+# "title"    -> also XMP-dc:Description, shown by Explorer as the Title
+#              (the behaviour before v2.24.0; a caption stays FIRST).
+# "software" -> also the EXIF Software field ("Capture One | gen=1 | cjxl d=0.5 e=7"),
+#              visible in IrfanView.
+# "xmp"      -> the old default's name: same as "history".
+# "off"      -> records nothing (the History entry says "no encode record")
+#              AND strips any chain the source TIFF carries — the only way to
+#              deliberately discard the lineage.
+# Files written before v2.24.0 keep the chain in dc:Description or Software;
+# both scripts still read it there.
 
 EMBED_ICC_IN_JXL = True
 # Embeds the original ICC profile as metadata in the JXL file.
@@ -1730,8 +1735,8 @@ DELETE_CONFIRM = True
 
 STRIP_METADATA = False
 # If True, strip all metadata from output (no EXIF/XMP preservation).
-# Only the encode record (gen=N | cjxl d=X e=Y) is added to dc:Description —
-# and with ENCODE_TAG_MODE = "off", not even that.
+# Only the encode record (gen=N | cjxl d=X e=Y) is kept — its History entry
+# and the visible copy of ENCODE_TAG_MODE; with "off", not even that.
 # Useful for creating clean JXL files without embedded metadata.
 # Can also be set via --strip CLI flag.
 
@@ -1938,7 +1943,7 @@ _OVERLAY_SETTINGS = {
     "WORKER_MEMORY_FRACTION": ("float", 0.0, 2.0),   # 0 = no cap; above 1 trusts the estimate
     "WORKER_MEMORY_LIMIT": ("choice", "both", "commit", "physical"),
     "USE_RAM_FOR_PNG": ("bool",),
-    "ENCODE_TAG_MODE": ("choice", "xmp", "software", "off"),
+    "ENCODE_TAG_MODE": ("choice", "history", "comment", "title", "xmp", "software", "off"),
     "ICC_PNG_STRATEGY": ("choice", "heuristic", "always", "skip", "cautious"),
     "ICC_PROBLEMATIC_SIZE_THRESHOLD": ("int", 0, None),
     "D50_PATCH_MODE": ("choice", "on", "off", "auto"),
@@ -2523,7 +2528,7 @@ def _history_mime(path):
     return _HISTORY_MIME.get(p.suffix.lower())
 
 
-def _history_args(action: str, src_path, dst_path) -> list:
+def _history_args(action: str, src_path, dst_path, record: str = "") -> list:
     """The one exiftool line appending this run's entry to xmpMM:History:
     which toolkit version wrote the file, when, and from what. Write-only:
     nothing in the toolkit reads it back. Callers never use it for a jbrd
@@ -2534,6 +2539,11 @@ def _history_args(action: str, src_path, dst_path) -> list:
     src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
     if src_mime and dst_mime:
         params += f": from {src_mime} to {dst_mime}"
+    # Since v2.24.0 the encode record ("gen=1 | cjxl d=0.05 e=9", or
+    # _NO_RECORD_SEGMENT for --encode-tag off) ends the entry's parameters:
+    # the History is where the toolkit keeps it (_history_record reads it).
+    if record:
+        params += f" | {record}"
     fields = [f"Action={_struct_escape(action)}", f"When={when}",
               f"SoftwareAgent={_struct_escape(agent)}",
               f"Parameters={_struct_escape(params)}"]
@@ -3643,6 +3653,35 @@ _MACHINE_BLOCK_RE = re.compile(
 _gen_divergence_logged = False
 
 
+# The History entry a deliberate "--encode-tag off" writes: a reader that meets
+# it before any record stops there (the lineage was discarded on purpose, an
+# older entry's record must not come back).
+_NO_RECORD_SEGMENT = "no encode record"
+
+
+def _history_record(values) -> str:
+    """The encode record carried by xmpMM:History, or "" — pure.
+
+    `values` is exiftool's HistoryParameters: a str (one entry), a list, or
+    None. Since v2.24.0 every write appends one History entry whose
+    parameters END with the whole record ("jxl_tiff_encoder: from image/tiff
+    to image/jxl | gen=1 | cjxl d=0.05 e=9"). The newest entry that carries
+    one wins; an entry with a "no encode record" segment (--encode-tag off)
+    stops the walk first; entries with neither (a decode, another program's
+    entry, a version before v2.24.0) are skipped.
+    """
+    if values is None:
+        return ""
+    items = values if isinstance(values, list) else [values]
+    for text in reversed([str(v) for v in items]):
+        if any(seg.strip() == _NO_RECORD_SEGMENT for seg in text.split("|")):
+            return ""
+        blocks = _MACHINE_BLOCK_RE.findall(text)
+        if blocks:
+            return " | ".join(b.strip().lstrip("|").strip() for b in blocks)
+    return ""
+
+
 def _strip_encode_params(text: str):
     """(cleaned_text, orphans) with the machine block removed.
 
@@ -3734,8 +3773,13 @@ def _append_encode_entry(text: str, new_d, new_e):
     return (f"{user} | {block}" if user else block), stored, counted, orphans
 
 
-def _merge_lineage_blocks(desc: str, software: str):
-    """Merge the two fields' machine blocks: (entries, stored_gen).
+def _merge_lineage_blocks(desc: str, software: str, history: str = ""):
+    """Merge the fields' machine blocks: (entries, stored_gen).
+
+    `history` (v2.24.0) is the record xmpMM:History carries
+    (_history_record): the newest home of the record. The three are folded
+    in age order, desc -> software -> history, with the rule below applied
+    pairwise; with history="" the result is the two-field merge's.
 
     The record can be SPLIT across dc:Description and Software (the user
     switched --encode-tag, a file came through a tool that keeps only one
@@ -3759,21 +3803,22 @@ def _merge_lineage_blocks(desc: str, software: str):
     text never match: the block regex only matches whole " | "-delimited
     segments.
     """
-    chains = []
-    for text in (desc, software):
+    def _chain(text):
         chain = []
         for block in _MACHINE_BLOCK_RE.findall(str(text)):
             chain.extend(_ENCODE_TAG_RE.findall(block))
-        chains.append(chain)
-    a, b = chains
-    if not a or b[:len(a)] == a:
-        entries = list(b) if len(b) >= len(a) else list(a)
-    elif not b or a[:len(b)] == b:
-        entries = list(a)
-    else:
-        entries = a + b
+        return chain
+
+    def _union(a, b):
+        if not a or b[:len(a)] == a:
+            return list(b) if len(b) >= len(a) else list(a)
+        if not b or a[:len(b)] == b:
+            return list(a)
+        return a + b
+
+    entries = _union(_union(_chain(desc), _chain(software)), _chain(history))
     stored = 0
-    for text in (desc, software):
+    for text in (desc, software, history):
         # findall + max per field: a field can carry SEVERAL gen= tokens (a
         # badly merged/written field) and search() reads only the FIRST —
         # "gen=1 | cjxl d=0.1 e=7 | gen=5 | cjxl d=1.0 e=7" would store 1 and
@@ -3797,6 +3842,70 @@ def _log_gen_notes_once(stored: int, counted: int) -> None:
         logger.info("At least one file's stored gen= disagrees with its cjxl "
                     "chain length — kept the larger (safer) value; the field "
                     "was corrected on the restamp.")
+
+
+def _encode_tag_mode() -> str:
+    """ENCODE_TAG_MODE with its old name resolved: "xmp" (the default before
+    v2.24.0) means "history" — the record IS in the XMP; the Title copy is
+    "title". Read at use time, so a value set without main() (the wrapper,
+    a test) means the same."""
+    mode = str(ENCODE_TAG_MODE or "history").strip().lower()
+    return "history" if mode == "xmp" else mode
+
+
+def _visible_record_args(mode, record, desc, software, comment, label="a file") -> list:
+    """exiftool lines for the encode record's VISIBLE copies (v2.24.0).
+
+    The record itself lives in the History entry; this only writes it where
+    `mode` shows it — "title" in dc:Description, "software" in Software,
+    "comment" in XMP exif:UserComment (Explorer's Comments) — after any user
+    text, and removes the machine block from every OTHER field that holds one
+    (user text kept). A field is written only when its value changes.
+    "history" and "off" show it nowhere. Pure apart from the orphan-token
+    warnings."""
+    mode = "history" if mode == "xmp" else mode
+    lines = []
+    for tag, name, value, shown_in in (
+            ("-XMP-dc:Description=", "dc:Description", desc, "title"),
+            ("-Software=", "Software", software, "software"),
+            ("-XMP-exif:UserComment=", "exif:UserComment", comment, "comment")):
+        value = str(value or "")
+        user, orphans = _strip_encode_params(value)
+        if orphans:
+            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from {name} "
+                           f"of {label} — the field was written badly earlier")
+        if mode == shown_in and record:
+            new = f"{user} | {record}" if user else record
+        else:
+            new = user
+        if new != value:
+            lines.append(tag + _argfile_safe(new))
+    return lines
+
+
+def _read_record_fields(tiff_path, tmp_dir):
+    """(Software, XMP exif:UserComment, xmpMM:History record) of a source TIFF,
+    in one exiftool call. Raises when exiftool fails: an unread field cannot
+    tell a stale record from none, and -tagsfromfile would carry the stale one
+    into the JXL — fail CLOSED on the file, as the Software read always did.
+    Empty output with rc=0 is the normal state of a TIFF with none of them."""
+    arg = tmp_dir / "rec_read.args"
+    arg.write_text(f"{_ARGFILE_CHARSET}-j\n-Software\n-XMP-exif:UserComment\n"
+                   f"-XMP-xmpMM:HistoryParameters\n{tiff_path}\n", encoding="utf-8")
+    r = _run_captured([_get_exiftool_cmd(), "-@", str(arg)], EXIFTOOL_TIMEOUT, text=True)
+    if r.returncode != 0:
+        _err = (r.stderr or r.stdout or "no output")[:200]
+        raise RuntimeError(f"exiftool could not read Software from {tiff_path.name} "
+                           f"(rc={r.returncode}): {_err.strip()}")
+    try:
+        data = json.loads(r.stdout) if (r.stdout or "").strip() else []
+    except ValueError:
+        raise RuntimeError(f"exiftool could not read Software from {tiff_path.name}: "
+                           f"output is not JSON ({(r.stdout or '')[:80]!r})")
+    entry = data[0] if data else {}
+    return (str(entry.get("Software") or "").strip(),
+            str(entry.get("UserComment") or "").strip(),
+            _history_record(entry.get("HistoryParameters")))
 
 
 def read_existing_description(xmp_path):
@@ -3932,14 +4041,16 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
         args_lines.append("-exif:all=")
         # Strip all XMP (must come BEFORE setting new Description)
         args_lines.append("-xmp:all=")
-        # Then set encoding params in dc:Description — unless ENCODE_TAG_MODE
-        # is "off": --strip promises no metadata, and the record IS metadata.
-        # Fresh file, fresh chain: gen= reconciles to the lossy-entry count
-        # (1 lossy, 0 lossless).
-        if ENCODE_TAG_MODE != "off":
-            encoding_desc, _s, _c, _o = _append_encode_entry(
-                "", _rec_d, CJXL_EFFORT)
-            args_lines.append(f"-xmp-dc:Description={encoding_desc}")
+        # Then the encode record — the only metadata --strip keeps: its History
+        # entry, plus the visible copy of the mode ("off": a History entry that
+        # says there is none). Fresh file, fresh chain: gen= reconciles to the
+        # lossy-entry count (1 lossy, 0 lossless).
+        record, _s, _c, _o = _append_encode_entry("", _rec_d, CJXL_EFFORT)
+        args_lines += _visible_record_args(_encode_tag_mode(), record, "", "", "",
+                                           tiff_path.name)
+        args_lines += _history_args(
+            "converted", tiff_path, write_path,
+            record=_NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else record)
         # Target file
         args_lines.append(str(write_path))
         # Write args file (UTF-8 charset first so non-ASCII paths work)
@@ -3975,153 +4086,32 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     for rel_value in user_relation:
         args_lines.append(f"-XMP-dc:Relation+={_argfile_safe(rel_value)}")
     
-    # 3. Handle encoding parameters and ICC embedding in XMP
+    # 3. The encode record (gen=N | cjxl d=X e=Y | ...), APPEND-ONLY: every
+    # encode appends one "cjxl d= e=" entry and reconciles gen= (a re-encode
+    # at identical d/e appends too: decode-then-re-encode is exactly where a
+    # generation of loss happens, and deduplicating it would undercount what
+    # the recompressor's --on-regeneration guards). Since v2.24.0 its home is
+    # this write's xmpMM:History entry (_history_args(record=...) below);
+    # ENCODE_TAG_MODE only decides where a VISIBLE copy goes. The source can
+    # carry the record in the History (a decode of a v2.24.0+ master), in
+    # dc:Description or Software (older masters, --encode-tag title/software):
+    # the union is the chain, and every visible field that held a record is
+    # cleaned (user text, e.g. a caption, kept) so no stale copy survives.
+    existing_desc = read_existing_description(xmp_original) if xmp_original else ""
+    original_sw, original_comment, existing_history = _read_record_fields(
+        tiff_path, tmp_dir)
+    merged_entries, merged_stored = _merge_lineage_blocks(
+        existing_desc, original_sw, existing_history)
+    merged_chain = " | ".join(
+        ([f"gen={merged_stored}"] if merged_stored else [])
+        + [f"cjxl d={d} e={e}" for d, e in merged_entries])
+    record, stored, counted, _orphans = _append_encode_entry(
+        merged_chain, _rec_d, CJXL_EFFORT)
+    _log_gen_notes_once(stored, counted)
+    history_record = _NO_RECORD_SEGMENT if _encode_tag_mode() == "off" else record
+    args_lines += _visible_record_args(_encode_tag_mode(), record, existing_desc,
+                                       original_sw, original_comment, tiff_path.name)
 
-    # Read existing description from original XMP if available
-    existing_desc = ""
-    if xmp_original:
-        existing_desc = read_existing_description(xmp_original)
-
-    # The encode record is APPEND-ONLY: every encode appends one
-    # "cjxl d= e=" entry to the chain and reconciles the gen= token at the
-    # head of the machine block (user text, e.g. a caption, stays first).
-    # A re-encode at identical d/e appends too — decode-then-re-encode is
-    # exactly where a generation of loss happens, so deduplicating it would
-    # undercount the generations the recompressor's --on-regeneration guards.
-    if ENCODE_TAG_MODE == "xmp":
-        # The EXIF Software field can carry a STALE chain too (a TIFF recovered
-        # by the decoder copies -exif:all, chain included, from a JXL that was
-        # encoded with --encode-tag software). Left alone, -tagsfromfile
-        # -exif:all carries it into the JXL alongside the new Description
-        # record, and the recompressor would merge the two contradictory
-        # records and trust the stale one (wrong d/e, inflated gen). Mirror
-        # the "software" branch in reverse: merge both fields' chains into the
-        # Description record, then strip the machine block from Software
-        # (keeping any unrelated text, e.g. a real editor name).
-        sw_arg = tmp_dir / "sw_read.args"
-        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
-        if r_sw.returncode != 0:
-            # Fail CLOSED on the file: a failed Software read cannot tell a
-            # stale chain from no chain, and -tagsfromfile -exif:all would
-            # carry the stale one into the JXL (the recompressor then merges
-            # the two contradictory records and inflates gen). Empty stdout
-            # with rc=0 is the normal no-Software-tag state, NOT a failure —
-            # failing it would refuse every fresh TIFF.
-            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
-            raise RuntimeError(
-                f"exiftool could not read Software from {tiff_path.name} "
-                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
-        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
-        merged_entries, merged_stored = _merge_lineage_blocks(
-            existing_desc, original_sw)
-        merged_chain = " | ".join(
-            ([f"gen={merged_stored}"] if merged_stored else [])
-            + [f"cjxl d={d} e={e}" for d, e in merged_entries])
-        user_text, _d_orphans = _strip_encode_params(existing_desc)
-        if user_text and merged_chain:
-            seed = f"{user_text} | {merged_chain}"
-        else:
-            seed = user_text or merged_chain
-        final_description, stored, counted, orphans = _append_encode_entry(
-            seed, _rec_d, CJXL_EFFORT)
-        _log_gen_notes_once(stored, counted)
-        if orphans or _d_orphans:
-            logger.warning(f"Stripped {orphans + _d_orphans} orphaned gen= token(s) from "
-                           f"dc:Description of {tiff_path.name} — the field "
-                           f"was written badly earlier")
-        # Set dc:Description with concatenated content
-        args_lines.append(f"-xmp-dc:Description={_argfile_safe(final_description)}")
-        clean_sw, s_orphans = _strip_encode_params(original_sw)
-        if clean_sw != original_sw:
-            if s_orphans:
-                logger.warning(f"Stripped {s_orphans} orphaned gen= token(s) "
-                               f"from Software of {tiff_path.name}")
-            args_lines.append(f"-Software={_argfile_safe(clean_sw)}")
-
-    elif ENCODE_TAG_MODE == "software":
-        # For software mode, we don't keep the record in dc:Description.
-        # Instead, we update the EXIF Software field.
-        sw_arg = tmp_dir / "sw_read.args"
-        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
-        if r_sw.returncode != 0:
-            # Fail CLOSED on the file: same stale-chain contamination as the
-            # "xmp" branch above — an unread Software field would leave the
-            # old chain in place for -tagsfromfile -exif:all to copy into the
-            # JXL. Empty stdout with rc=0 stays the normal no-tag state.
-            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
-            raise RuntimeError(
-                f"exiftool could not read Software from {tiff_path.name} "
-                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
-        # A TIFF without a Software tag used to seed the chain with a bare
-        # "cjxl" segment ("cjxl | gen=1 | cjxl d=…") — the fallback is empty
-        # so the field carries ONLY the machine block.
-        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
-        # The dc:Description may carry a stale chain (e.g. a TIFF recovered by
-        # the decoder, or a re-tagged file): migrate it into the Software
-        # record instead of leaving a shadow copy that a later reader
-        # (the recompressor reads dc:Description FIRST) would trust.
-        clean_sw, sw_orphans = _strip_encode_params(original_sw)
-        merged_entries, merged_stored = _merge_lineage_blocks(
-            existing_desc, original_sw)
-        merged_chain = " | ".join(
-            ([f"gen={merged_stored}"] if merged_stored else [])
-            + [f"cjxl d={d} e={e}" for d, e in merged_entries])
-        if clean_sw and merged_chain:
-            seed_sw = f"{clean_sw} | {merged_chain}"
-        else:
-            seed_sw = clean_sw or merged_chain
-        new_sw, stored, counted, orphans = _append_encode_entry(
-            seed_sw, _rec_d, CJXL_EFFORT)
-        _log_gen_notes_once(stored, counted)
-        if orphans:
-            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from "
-                           f"Software of {tiff_path.name} — the field was "
-                           f"written badly earlier")
-        args_lines.append(f"-Software={_argfile_safe(new_sw)}")
-        # ...and strip the migrated chain from dc:Description, keeping any
-        # real caption.
-        clean_desc, d_orphans = _strip_encode_params(existing_desc)
-        if clean_desc != existing_desc:
-            if d_orphans:
-                logger.warning(f"Stripped {d_orphans} orphaned gen= token(s) "
-                               f"from dc:Description of {tiff_path.name}")
-            args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
-
-    else:  # ENCODE_TAG_MODE == "off"
-        # Record nothing — AND strip any record the source TIFF carries (a
-        # TIFF produced by the decoder brings the JXL's gen=/cjxl chain along,
-        # and leaving it would let the recompressor trust parameters that
-        # describe a DIFFERENT file). Unrelated text is kept. This is the only
-        # way to deliberately discard the lineage; mirrors the recompressor's
-        # "off". Unrelated text survives; the machine block does not.
-        clean_desc, d_orphans = _strip_encode_params(existing_desc)
-        if clean_desc != existing_desc:
-            if d_orphans:
-                logger.warning(f"Stripped {d_orphans} orphaned gen= token(s) "
-                               f"from dc:Description of {tiff_path.name}")
-            args_lines.append(f"-xmp-dc:Description={_argfile_safe(clean_desc)}")
-        sw_arg = tmp_dir / "sw_read.args"
-        sw_arg.write_text(f"{_ARGFILE_CHARSET}-s\n-s\n-s\n-Software\n{tiff_path}\n", encoding="utf-8")
-        r_sw = _run_captured([_get_exiftool_cmd(), "-@", str(sw_arg)], EXIFTOOL_TIMEOUT, text=True)
-        if r_sw.returncode != 0:
-            # Fail CLOSED on the file: "off" must be a DELIBERATE discard of
-            # the lineage, not an accident of a failed read (the stale chain
-            # would survive in Software and migrate into the JXL exactly like
-            # the other modes). Empty stdout with rc=0 stays the no-tag state.
-            _sw_err = (r_sw.stderr or r_sw.stdout or "no output")[:200]
-            raise RuntimeError(
-                f"exiftool could not read Software from {tiff_path.name} "
-                f"(rc={r_sw.returncode}): {_sw_err.strip()}")
-        original_sw = r_sw.stdout.strip() if r_sw.stdout else ""
-        clean_sw, s_orphans = _strip_encode_params(original_sw)
-        if clean_sw != original_sw:
-            if s_orphans:
-                logger.warning(f"Stripped {s_orphans} orphaned gen= token(s) "
-                               f"from Software of {tiff_path.name}")
-            args_lines.append(f"-Software={_argfile_safe(clean_sw)}")
-    
     # Always store original bit depth in dc:Relation so the decoder can restore
     # the original BitsPerSample per page according to --depth-policy.
     args_lines.append(f"-XMP-dc:Relation+={DEPTH_XMP_PREFIX}{original_depth}")
@@ -4135,8 +4125,8 @@ def build_metadata_injection_args(tiff_path, write_path, tmp_dir, exif_bin, icc_
     if _origin:
         args_lines.append(f"-XMP-dc:Relation+={ORIGIN_PREFIX}{_argfile_safe(_origin)}")
 
-    # Which toolkit version wrote this master (write-only; see _history_args).
-    args_lines += _history_args("converted", tiff_path, write_path)
+    # Which toolkit version wrote this master, and its encode record.
+    args_lines += _history_args("converted", tiff_path, write_path, record=history_record)
 
     # WHICH source made this output. Written for every output, not just for
     # multi-page splits: it is what lets a later run tell "the same photo,
@@ -5553,7 +5543,7 @@ def _read_origin_inputs(path):
     try:
         r = _run_exiftool_argfile(
             ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
-             str(path)], timeout=EXIFTOOL_TIMEOUT)
+             "-XMP-xmpMM:HistoryParameters", str(path)], timeout=EXIFTOOL_TIMEOUT)
         if r.returncode != 0 or not r.stdout:
             return None, False
         data = json.loads(r.stdout)
@@ -5563,7 +5553,9 @@ def _read_origin_inputs(path):
     rel = entry.get("Relation")
     values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
     tokens = [str(v).strip() for v in values if str(v).strip()]
-    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}"
+    hist = entry.get("HistoryParameters")
+    hist = "\n".join(str(v) for v in (hist if isinstance(hist, list) else [hist or ""]))
+    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}\n{hist}"
     return tokens, bool(_ORIGIN_RECORD_RE.search(text))
 
 
@@ -7742,10 +7734,13 @@ def build_parser():
                         help="[Modes 6/7] Output folder created under the export marker "
                              "(default: script setting EXPORT_JXL_FOLDER, '16B_JXL'). "
                              "Overrides EXPORT_JXL_FOLDER.")
-    parser.add_argument("--encode-tag",     type=str, default=None, choices=["xmp", "software", "off"],
-                        help="Where to record encoding params: xmp (default), software, or off. "
-                             "'off' records nothing AND strips any existing gen=/cjxl d=/e= "
-                             "record from the output — the lineage is deliberately discarded")
+    parser.add_argument("--encode-tag",     type=str, default=None,
+                        choices=["history", "comment", "title", "xmp", "software", "off"],
+                        help="The encode record always goes to xmpMM:History; a visible copy: "
+                             "history (default: none), comment (Explorer's Comments), title "
+                             "(dc:Description, the Title), software (EXIF Software); xmp = "
+                             "history. 'off' records nothing AND strips any existing "
+                             "gen=/cjxl d=/e= record — the lineage is deliberately discarded")
     parser.add_argument("--d50-patch",      type=str, default=None, choices=["on", "off", "auto"],
                         help="D50 illuminant patch: on (always), off (never), auto (only a near-D50 "
                              "illuminant, e.g. Kodak's ProPhoto.icm)")
@@ -7951,6 +7946,7 @@ def main():
             parser.error(f"--export-jxl-folder: {_why}")
     if args.encode_tag is not None:
         ENCODE_TAG_MODE = args.encode_tag
+    ENCODE_TAG_MODE = _encode_tag_mode()   # "xmp" = "history" (the log says which)
     if args.d50_patch is not None:
         D50_PATCH_MODE = args.d50_patch
     if args.modular is not None:

@@ -200,3 +200,68 @@ def test_already_asked_today_starts_no_thread(cfg, asked, monkeypatch):
     cfg.config.update_latest_seen = "v99.0.0"
     assert wp._update_check_start(cfg)(0)[0].startswith("A new release is out")
     assert asked == []
+
+
+# ---------------------------------------------------------------------------
+# jxl-thumb: installed, and up to date? (owner's request, 2026-11-06)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file versions")
+def test_dll_file_version_reads_a_real_dll():
+    v = wp._dll_file_version(Path(os.environ["SystemRoot"]) / "System32" / "kernel32.dll")
+    assert v and wp._version_key(v), v
+    assert wp._dll_file_version(Path(__file__)) is None        # no VERSIONINFO
+
+
+def test_the_suite_never_sees_an_installed_jxl_thumb():
+    assert os.environ.get("JXLPHOTO_JXL_THUMB") == "0"
+    assert wp._jxl_thumb_dll_version() is None
+
+
+@pytest.mark.parametrize("installed,latest,news", [
+    ("0.2.1", "v0.2.2", True), ("0.2.1", "v0.3.0", True),
+    ("0.2.1", "v0.2.1", False), ("0.2.2", "v0.2.1", False),
+    (None, "v0.2.2", False),                      # not installed: nothing to update
+    ("0.2.1", None, False)])                      # never asked
+def test_thumb_update_notice(cfg, monkeypatch, installed, latest, news):
+    monkeypatch.setattr(wp, "_jxl_thumb_dll_version", lambda: installed)
+    cfg.config.thumb_latest_seen = latest
+    notice = wp._thumb_update_notice(cfg)
+    assert bool(notice) is news, notice
+    if news:
+        assert f"jxl-thumb {installed} is installed; {latest.lstrip('v')} is out" in notice
+        assert "[T]" in notice
+
+
+def test_thumb_update_notice_is_off_with_the_release_check(cfg, monkeypatch):
+    monkeypatch.setattr(wp, "_jxl_thumb_dll_version", lambda: "0.2.1")
+    cfg.config.thumb_latest_seen = "v0.2.2"
+    cfg.config.check_for_updates = False
+    assert wp._thumb_update_notice(cfg) is None
+    cfg.config.check_for_updates = True
+    monkeypatch.setenv("JXLPHOTO_NO_UPDATE_CHECK", "1")
+    assert wp._thumb_update_notice(cfg) is None
+
+
+def test_the_daily_ask_includes_jxl_thumb_only_when_installed(cfg, asked, monkeypatch):
+    monkeypatch.setattr(wp, "_jxl_thumb_dll_version", lambda: None)
+    wp._update_notice(cfg, today="2026-11-06")
+    assert "jxl-thumb" not in asked
+    monkeypatch.setattr(wp, "_jxl_thumb_dll_version", lambda: "0.2.1")
+    asked.clear()
+    wp._update_notice(cfg, today="2026-11-07")
+    assert asked == [wp._update_repo(), "jxl-thumb"]
+    assert cfg.config.thumb_latest_seen == "v99.0.0"
+    saved = json.loads(Path(cfg.config_path).read_text(encoding="utf-8"))
+    assert saved["thumb_latest_seen"] == "v99.0.0"
+    asked.clear()
+    wp._update_notice(cfg, today="2026-11-07")                 # once a day
+    assert asked == []
+
+
+def test_the_background_ask_keeps_the_jxl_thumb_answer(cfg, asked, monkeypatch):
+    monkeypatch.setattr(wp, "_jxl_thumb_dll_version", lambda: "0.2.1")
+    poll = wp._update_check_start(cfg)
+    poll(5.0)
+    assert "jxl-thumb" in asked
+    assert wp.ConfigManager().config.thumb_latest_seen == "v99.0.0"

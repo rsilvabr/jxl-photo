@@ -131,7 +131,7 @@ def test_encode_tag_xmp_merges_software_chain(tmp_path, monkeypatch):
 
     enc.setup_logger()
     monkeypatch.setattr(enc, "OVERWRITE", True)
-    monkeypatch.setattr(enc, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(enc, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(enc, "CJXL_DISTANCE", 0)
     monkeypatch.setattr(enc, "CJXL_EFFORT", 7)
 
@@ -337,7 +337,7 @@ def test_recompressor_promotes_beside_final_temp_over_existing(tmp_path, monkeyp
     final.write_bytes(b"older-output")
     write = final.parent / f"{'ab' * 16}_photo.jxl"
 
-    def fake_convert(src, w, f, *a):
+    def fake_convert(src, w, f, *a, **_kw):
         Path(w).write_bytes(b"recompressed")
         return (str(src), "ok", str(f))
 

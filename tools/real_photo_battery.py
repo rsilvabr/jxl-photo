@@ -199,6 +199,33 @@ def exif(args):
     return r.stdout.strip()
 
 
+_RECORD_BLOCK = re.compile(r"(?:^|\|)\s*(?:gen=\d+\s*\|\s*)?cjxl\s+d=[0-9.]+\s+e=\d+"
+                           r"(?:\s*\|\s*cjxl\s+d=[0-9.]+\s+e=\d+)*")
+
+
+def record_of(path):
+    """The encode record a reader trusts: since v2.24.0 the newest
+    xmpMM:History entry that carries one ("no encode record" = none); a file
+    written before keeps it in dc:Description / Software."""
+    try:
+        e = json.loads(exif(["-j", "-XMP-xmpMM:HistoryParameters", "-XMP-dc:Description",
+                             "-Software", path]) or "[{}]")[0]
+    except ValueError:
+        return ""
+    hist = e.get("HistoryParameters")
+    for text in reversed([str(v) for v in (hist if isinstance(hist, list) else
+                                           ([hist] if hist else []))]):
+        if any(seg.strip() == "no encode record" for seg in text.split("|")):
+            return ""
+        blocks = _RECORD_BLOCK.findall(text)
+        if blocks:
+            return " | ".join(b.strip().lstrip("|").strip() for b in blocks)
+    blocks = []
+    for text in (str(e.get("Description") or ""), str(e.get("Software") or "")):
+        blocks += [b.strip().lstrip("|").strip() for b in _RECORD_BLOCK.findall(text)]
+    return " | ".join(blocks)
+
+
 def relation(path):
     """XMP-dc:Relation values as a list. exiftool -j keeps list items separate,
     while -s3 would join them with ', ' on one line."""
@@ -218,13 +245,23 @@ def history(path):
     return [] if h is None else (h if isinstance(h, list) else [h])
 
 
+def _our_parameters(got, parameters):
+    """An entry's Parameters are `parameters`; since v2.24.0 an encoder or
+    recompressor entry ENDS with the encode record (" | gen=N | cjxl d=…")."""
+    got = str(got or "")
+    if parameters.startswith(("jxl_tiff_encoder", "jxl_recompressor")):
+        return got.startswith(parameters + " | ") and "cjxl d=" in got
+    return got == parameters
+
+
 def _last_history_entry(path, action, parameters, label):
     """check() that the LAST xmpMM:History entry of `path` is this toolkit's."""
     h = history(path)
     ok = (bool(h) and h[-1].get("Action") == action
           and str(h[-1].get("SoftwareAgent", "")).startswith("jxl-photo ")
-          and h[-1].get("Parameters") == parameters)
-    check(label, ok, f"{len(h)} entries" if h else "no History")
+          and _our_parameters(h[-1].get("Parameters"), parameters))
+    check(label, ok, (f"{len(h)} entries, last: {h[-1].get('Parameters')!r}" if h
+                      else "no History"))
 
 
 def _count_history(path):
@@ -344,7 +381,8 @@ def encoder_checks(A1, A2, A3, pool_jxl):
     check("encoder: an earlier History entry (Capture One) is kept, ours appended",
           rc == 0 and len(h) == 2 and h[0].get("SoftwareAgent") == "Capture One 16"
           and h[0].get("Action") == "saved"
-          and h[1].get("Parameters") == "jxl_tiff_encoder: from image/tiff to image/jxl",
+          and _our_parameters(h[1].get("Parameters"),
+                              "jxl_tiff_encoder: from image/tiff to image/jxl"),
           f"rc={rc} {len(h)} entries")
 
     e = B / "e_caption"
@@ -352,9 +390,11 @@ def encoder_checks(A1, A2, A3, pool_jxl):
     exif(["-q", "-overwrite_original",
           "-XMP-dc:Description=[minor] Captured: autumn 1958", e / "cap.tif"])
     rc, _ = run("enc_caption", [ENC, e, "--mode", "1"] + FAST)
-    desc = exif(["-s3", "-XMP-dc:Description", e / "converted_jxl" / "cap.jxl"])
-    check("caption carried verbatim, lineage appended",
-          rc == 0 and desc.startswith("[minor] Captured: autumn 1958 | gen=1"), desc)
+    desc = exif(["-s3", "-XMP-dc:Description", e / "converted_jxl" / "cap.jxl"]).strip()
+    rec1 = record_of(e / "converted_jxl" / "cap.jxl")
+    check("caption carried verbatim, the Title free of the record (in xmpMM:History)",
+          rc == 0 and desc == "[minor] Captured: autumn 1958" and rec1.startswith("gen=1 | cjxl d="),
+          f"{desc!r} / {rec1!r}")
 
     e = B / "e_own"
     cp(A1, e / "own.tif")
@@ -553,7 +593,7 @@ def multipage_and_recompressor_checks(A1, pool_jxl, scan):
           f"rc={rc} changed={changed}")
     check("in place: jxlphoto-mpg markers kept on the replaced pages",
           all("jxlphoto-mpg" in exif(["-s3", "-XMP-dc:Relation", r / p.name]) for p in pages))
-    lin = exif(["-s3", "-XMP-dc:Description", r / "single.jxl"])
+    lin = record_of(r / "single.jxl")
     check("in place: lineage records the second generation", "gen=2" in lin, lin[:120])
     # The single file goes straight through cjxl (its XMP carried, #531), the
     # scan pages through the 'skip' route (decoded, no carried XMP): both must
@@ -1188,7 +1228,7 @@ def interaction_checks(A1, A2):
         cp(t2, e2 / "p.tif")
     rc, _ = run("ix_gen2", [ENC, e2, "--mode", "1"] + FAST8[2:])
     j2 = e2 / "converted_jxl" / "p.jxl"
-    desc = exif(["-s3", "-XMP-dc:Description", j2]) if j2.exists() else ""
+    desc = record_of(j2) if j2.exists() else ""
     src2 = [x for x in relation(j2) if x.startswith("jxlphoto-src:")] if j2.exists() else []
     src1 = [x for x in relation(j1) if x.startswith("jxlphoto-src:")] if j1.exists() else []
     check("re-encoded decode: gen=2 lineage with both encode entries",
@@ -1444,7 +1484,7 @@ def scan_checks(scans):
     wrong = []
     for s in scanner:
         j = e / "converted_jxl" / (s.stem + ".jxl")
-        desc = exif(["-s3", "-XMP-dc:Description", j]) if j.exists() else ""
+        desc = record_of(j) if j.exists() else ""
         rel = exif(["-s3", "-XMP-dc:Relation", j]) if j.exists() else ""
         if not desc.strip().endswith("cjxl d=0.0 e=2") or "jxlphoto-scan:" not in rel:
             wrong.append(s.name)
@@ -1490,7 +1530,7 @@ def silverfast_checks(folder):
                            "--no-preflight"])
     jxls = sorted((e / "converted_jxl").glob("*.jxl"))
     main_jxl = e / "converted_jxl" / (src.stem + ".jxl")
-    desc = exif(["-s3", "-XMP-dc:Description", main_jxl]) if main_jxl.exists() else ""
+    desc = record_of(main_jxl) if main_jxl.exists() else ""
     check("SilverFast scan: archived lossless at --distance 1, every page",
           rc == 0 and desc.strip().endswith("cjxl d=0.0 e=2") and len(jxls) == 3,
           f"rc={rc} {[p.name for p in jxls]} {desc.strip()[-20:]!r}")
@@ -1547,7 +1587,7 @@ def tagless_checks(folder):
         if not j.exists():
             wrong.append(f"{s.name}: no JXL")
             continue
-        desc = exif(["-s3", "-XMP-dc:Description", j]).strip()
+        desc = record_of(j).strip()
         rel = relation(j)
         with tifffile.TiffFile(s) as t:
             tagless = 305 not in t.pages[0].tags and 34665 not in t.pages[0].tags
@@ -1577,7 +1617,7 @@ def tagless_checks(folder):
     wrong8 = []
     for s, b in depth.items():
         j = e8 / s.parent.name / (s.stem + ".jxl")
-        desc = exif(["-s3", "-XMP-dc:Description", j]).strip() if j.exists() else ""
+        desc = record_of(j).strip() if j.exists() else ""
         want = "cjxl d=0.0 e=2" if b <= 8 else "cjxl d=0.1 e=2"
         if not desc.endswith(want):
             wrong8.append(f"{s.name} ({b}-bit): {desc[-16:]!r}")

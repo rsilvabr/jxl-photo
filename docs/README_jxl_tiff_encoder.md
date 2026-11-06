@@ -152,18 +152,21 @@ EMBED_ICC_IN_JXL = True
 # True  → embed ICC profile in JXL metadata (recommended, default)
 # False → do not embed ICC (smaller file, but lossy JXLs will use generic ICC on decode)
 
-ENCODE_TAG_MODE = "xmp"
-# Records encoding parameters in the JXL metadata as an append-only lineage
+ENCODE_TAG_MODE = "history"
+# Every output records its encoding parameters as an append-only lineage
 # chain: "gen=N | cjxl d=X e=Y | cjxl d=... e=..." (gen = number of LOSSY
-# generations, reconciled from the chain on every write, never incremented)
-# "software" → appends to the EXIF Software field
-# "xmp"      → writes as XMP metadata (default); any user caption stays FIRST
+# generations, reconciled from the chain on every write, never incremented),
+# since v2.24.0 in its xmpMM:History entry. This chooses a VISIBLE copy:
+# "history"  → none (default); "xmp" is its old name
+# "comment"  → XMP exif:UserComment (Windows Explorer's "Comments")
+# "title"    → XMP dc:Description, Explorer's Title (the behaviour up to
+#              v2.23.x; any user caption stays FIRST)
+# "software" → the EXIF Software field
 # "off"      → records nothing AND strips any gen=/cjxl record the source
 #              TIFF carries — the only way to deliberately discard the lineage
-# Can also be set via --encode-tag CLI argument (xmp/software/off)
-# NOTE: When EMBED_ICC_IN_JXL is True, the ICC goes to XMP dc:Relation
-# (jxlphoto-iccprofile token) and encoding params are concatenated to
-# dc:Description.
+# Can also be set via --encode-tag (history/comment/title/xmp/software/off).
+# Files written before v2.24.0 keep the chain in dc:Description or Software;
+# it is still read there. See docs/metadata_written.md.
 
 EXPLORER_THUMBNAIL = "auto"
 # A 768 px sRGB JPEG of the image stored inside the output (its own box, not
@@ -597,9 +600,12 @@ Options:
                   Each finished file is moved to a temp in the destination folder
                   and then renamed over the final name (os.replace): an existing
                   output is never half-overwritten by an interrupted move
-  --encode-tag      Where to record encoding params: xmp (default), software, off
-                    ('off' also strips any gen=/cjxl record the source TIFF
-                    carries — the only way to deliberately discard the lineage)
+  --encode-tag      The encode record always goes to xmpMM:History; a visible
+                    copy: history (default: none), comment (Explorer's
+                    Comments), title (dc:Description, the Title), software
+                    (EXIF Software); xmp = history. off records nothing (and
+                    strips any gen=/cjxl record the source TIFF carries — the
+                    only way to deliberately discard the lineage)
   --d50-patch       D50 illuminant patch: on (always), off (never), auto (only a near-D50 illuminant, e.g. Kodak's ProPhoto.icm)
   --modular         on/off — force the Modular encoder for LOSSY output (default off:
                     cjxl's VarDCT). Screenshots/graphics only — measured on real

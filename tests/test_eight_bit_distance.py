@@ -24,6 +24,7 @@ import pytest
 import tifffile
 
 import jxl_tiff_encoder as enc
+from _encode_record import encode_record
 
 REPO = Path(__file__).resolve().parent.parent
 HOSTILE = "菜の花 [8bit] 50%"
@@ -117,14 +118,8 @@ def _tiff(path, dtype, seed):
 
 
 def _desc(path):
-    af = Path(os.environ.get("TEMP", ".")) / f"eightbit_{os.getpid()}.args"
-    af.write_text(f"-charset\nfilename=utf8\n-j\n-XMP-dc:Description\n{path}\n",
-                  encoding="utf-8")
-    try:
-        out = subprocess.run(["exiftool", "-@", str(af)], capture_output=True).stdout
-    finally:
-        af.unlink()
-    return str(json.loads(out)[0].get("Description") or "")
+    """The encode record (in xmpMM:History since v2.24.0)."""
+    return encode_record(path)
 
 
 @needs_tools

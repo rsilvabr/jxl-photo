@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tifffile
+from _encode_record import encode_record
 
 REPO = Path(__file__).resolve().parent.parent
 HOSTILE = "吾妻山 [tmp] 100%"
@@ -86,7 +87,7 @@ def test_a_percent_name_keeps_its_metadata_through_every_script(tmp_path):
          "--effort", "3", "--no-preflight", "--delete-confirm-off",
          "--on-regeneration", "convert")
     assert _tags(jxl) == want, _tags(jxl)
-    assert b"cjxl d=2.0" in _exif("-s3", "-XMP-dc:Description", jxl)
+    assert "cjxl d=2.0" in encode_record(jxl)      # History since v2.24.0
 
 
 @needs_tools
@@ -135,5 +136,5 @@ def test_a_percent_jxl_keeps_its_metadata_in_the_decoder_and_the_recompressor(tm
          "--effort", "3", "--no-preflight", "--delete-confirm-off",
          "--on-regeneration", "convert")
     jxl = d / "rec" / f"{NAME2}.jxl"
-    assert b"cjxl d=2.0" in _exif("-s3", "-XMP-dc:Description", jxl)
+    assert "cjxl d=2.0" in encode_record(jxl)      # History since v2.24.0
     assert _tags(jxl) == want, _tags(jxl)

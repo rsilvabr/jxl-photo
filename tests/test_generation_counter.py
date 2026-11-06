@@ -20,6 +20,7 @@ Every test here fails against the pre-change code (the helpers did not exist
 """
 
 import logging
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -35,7 +36,7 @@ import jxl_tiff_encoder as enc
 def _clean_state(monkeypatch):
     monkeypatch.setattr(rec, "CJXL_DISTANCE", 1.0)
     monkeypatch.setattr(rec, "CJXL_EFFORT", 7)
-    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(rec, "ON_DOWNGRADE", "ask")
     monkeypatch.setattr(rec, "ON_REGENERATION", "ask")
     monkeypatch.setattr(rec, "ON_UNKNOWN", "convert")
@@ -43,7 +44,7 @@ def _clean_state(monkeypatch):
     monkeypatch.setattr(rec, "_gen_divergence_logged", False)
     monkeypatch.setattr(enc, "CJXL_DISTANCE", 0.1)
     monkeypatch.setattr(enc, "CJXL_EFFORT", 7)
-    monkeypatch.setattr(enc, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(enc, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(enc, "_gen_divergence_logged", False)
     yield
 
@@ -272,13 +273,13 @@ class TestEncodeTagModes:
         argfile = _encoder_argfile(
             monkeypatch, tmp_path, mode="off",
             existing_desc="My caption | gen=2 | cjxl d=0.1 e=7 | cjxl d=1.0 e=7")
-        assert "-xmp-dc:Description=My caption" in argfile
+        assert "-XMP-dc:Description=My caption" in argfile
         assert "gen=" not in argfile and "cjxl d=" not in argfile
 
     def test_encoder_off_leaves_clean_fields_alone(self, monkeypatch, tmp_path):
         argfile = _encoder_argfile(monkeypatch, tmp_path, mode="off",
                                    existing_desc="Just a caption")
-        assert "-xmp-dc:Description" not in argfile
+        assert "-xmp-dc:description" not in argfile.lower()
         assert "-Software" not in argfile
 
     def test_software_mode_gets_the_gen_token(self, monkeypatch):
@@ -324,7 +325,7 @@ class TestRoundTrip:
 # ---------------------------------------------------------------------------
 
 def _encoder_argfile(monkeypatch, tmp_path, existing_desc="", sw_stdout="",
-                     mode="xmp", distance=0.1, strip=False) -> str:
+                     mode="title", distance=0.1, strip=False) -> str:
     """Run build_metadata_injection_args with all exiftool reads mocked and
     return the written argfile's text."""
     monkeypatch.setattr(enc, "ENCODE_TAG_MODE", mode)
@@ -335,9 +336,11 @@ def _encoder_argfile(monkeypatch, tmp_path, existing_desc="", sw_stdout="",
     monkeypatch.setattr(enc, "read_existing_description", lambda p: existing_desc)
     monkeypatch.setattr(enc, "read_existing_relation", lambda p: [])
     monkeypatch.setattr(enc, "read_existing_creator_tool", lambda p: "")
+    _json = json.dumps([{"SourceFile": "src.tif", "Software": sw_stdout.strip()}]
+                       if sw_stdout.strip() else [{"SourceFile": "src.tif"}])
     monkeypatch.setattr(enc.subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(
-                            cmd, 0, stdout=sw_stdout, stderr=""))
+                            cmd, 0, stdout=_json, stderr=""))
     xmp = tmp_path / "src.xmp"
     xmp.write_text("<xmp/>", encoding="utf-8")
     tiff = tmp_path / "src.tif"
@@ -355,8 +358,10 @@ def _encoder_argfile(monkeypatch, tmp_path, existing_desc="", sw_stdout="",
 
 class TestStripMetadataRespectsOff:
     def test_strip_writes_the_record_by_default(self, monkeypatch, tmp_path):
-        argfile = _encoder_argfile(monkeypatch, tmp_path, strip=True)
-        assert "gen=1 | cjxl d=0.1 e=7" in argfile
+        argfile = _encoder_argfile(monkeypatch, tmp_path, mode="history", strip=True)
+        # since v2.24.0 in the History entry (| is escaped as || in a struct)
+        assert "-XMP-xmpMM:History+=" in argfile
+        assert "gen=1 || cjxl d=0.1 e=7" in argfile
 
     def test_strip_with_off_writes_nothing(self, monkeypatch, tmp_path):
         argfile = _encoder_argfile(monkeypatch, tmp_path, mode="off", strip=True)

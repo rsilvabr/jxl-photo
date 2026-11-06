@@ -101,7 +101,7 @@ def test_merge_mirror_is_one_history_split_is_two(mod):
 
 
 def test_restamp_of_a_two_generation_legacy_chain_counts_three(monkeypatch):
-    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(rec, "CJXL_DISTANCE", 1.0)
     monkeypatch.setattr(rec, "CJXL_EFFORT", 7)
     lines = rec._restamp_args("cjxl d=0.1 e=7 | cjxl d=0.1 e=7", "")

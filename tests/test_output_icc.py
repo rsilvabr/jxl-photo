@@ -343,7 +343,8 @@ def test_real_derive_to_srgb_pixels_and_markers(tmp_path):
     assert "jxlphoto-derived:sRGB" + _label_suffix(1.0) in tokens
     assert not any(t.startswith("jxlphoto-src:") for t in tokens), tokens
 
-    desc = _exif_value(out, "-XMP-dc:Description")
+    from _encode_record import encode_record
+    desc = encode_record(out)          # the History record since v2.24.0
     assert desc.endswith("cjxl d=1.0 e=7"), desc
     assert "gen=2" in desc, desc
 

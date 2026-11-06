@@ -229,6 +229,13 @@ SHARED_HELPERS = [
     # stored gen= identically or one of them undercounts generations when the
     # field changes.
     "_merge_lineage_blocks",
+    # The record's home since v2.24.0 (xmpMM:History parameters): both scripts
+    # must find the same record, and stop at the same "no encode record".
+    "_history_record",
+    # Where the record's VISIBLE copy goes (history/comment/title/software/off)
+    # and the "xmp" = "history" alias: both writers must agree.
+    "_encode_tag_mode",
+    "_visible_record_args",
     # Lossy ICC-blob detection (djxl --icc_out vs --orig_icc_out): the decoder,
     # the recompressor, the transcoder and the encoder's cautious probe must
     # all recognise the "djxl returned linear sRGB" case the same way — one

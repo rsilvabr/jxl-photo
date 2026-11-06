@@ -198,8 +198,16 @@
   output**: one entry per write (`converted`, or `derived` for a
   derivative), appended by `_history_args` (parity-pinned in the four
   backends) inside a metadata call that already exists — never a new
-  exiftool spawn, never in a jbrd container or a verbatim copy, never
-  read back by any gate. The version is `TOOLKIT_VERSION`, identical in
+  exiftool spawn, never in a jbrd container or a verbatim copy. Since
+  v2.24.0 the encoder's and the recompressor's entries END with the encode
+  record (`… | gen=N | cjxl d= e=`, `_history_args(record=)`; `off` writes
+  `| no encode record`): that is the record's home, read by
+  `_history_record` (parity-pinned) FIRST, then dc:Description / Software
+  (files written before; never drop that fallback — it is what the guards
+  see on every older archive). `ENCODE_TAG_MODE` only chooses a VISIBLE copy
+  (`_visible_record_args`: history = none, the default; comment =
+  XMP exif:UserComment; title = dc:Description; software; `xmp` = history).
+  Nothing else in the History is read back. The version is `TOOLKIT_VERSION`, identical in
   all five scripts. The recompressor's cjxl runs with `-x strip=xmp`: its
   carried XMP plus the restamp's `-tagsfromfile -xmp:all` makes exiftool
   ADD the copied list to the carried one for every `+=` in that call,

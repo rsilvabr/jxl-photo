@@ -42,9 +42,10 @@ py jxl_recompressor.py D:\Photos\Archive --mode 1 --distance 1.0 --dry-run
 ## How it decides what to do with each file
 
 Every JXL written by this toolkit records its encoding parameters as an
-append-only lineage chain (`gen=N | cjxl d=X e=Y | cjxl d=... e=...` in
-XMP-dc:Description, or in EXIF Software when the encoder ran with
-`--encode-tag software`). `gen=N` is the number of **lossy** generations the
+append-only lineage chain (`gen=N | cjxl d=X e=Y | cjxl d=... e=...`; since
+v2.24.0 at the end of its xmpMM:History entry, before that in
+XMP-dc:Description, or in EXIF Software with `--encode-tag software`). The
+recompressor reads the History first, then the two older fields. `gen=N` is the number of **lossy** generations the
 file has been through (a `d=0` entry is recorded but does not count). The
 recompressor reads that record and compares it against the request:
 
@@ -252,11 +253,14 @@ stays first. Verbatim-copy paths (policy copies, jbrd copies, the
 keep-smaller fallback) carry the field over byte-for-byte — no re-encode
 happened, so nothing is recomputed.
 
-`--encode-tag` controls where the new record goes: `xmp` (default),
-`software` (EXIF Software field) or `off` (record nothing — and any previous
-record, `gen=` and chain together, is **stripped**, so a later run never
-trusts stale parameters; it is the only way to deliberately discard the
-lineage).
+The new record always goes to the output's xmpMM:History entry.
+`--encode-tag` adds a visible copy: `history` (default: none; `xmp` is its old
+name), `comment` (Explorer's Comments), `title` (dc:Description, the Title —
+the only place up to v2.23.x) or `software` (EXIF Software field); `off`
+records nothing — any previous record, `gen=` and chain together, is
+**stripped**, and the History entry says `no encode record`, so a later run
+never trusts stale parameters; it is the only way to deliberately discard
+the lineage.
 
 When a file carries the record in the OTHER field (it was written with a
 different `--encode-tag`), the chain is **migrated**, never dropped, and the
@@ -872,7 +876,7 @@ input / output        Input JXL file or folder / optional output (modes 0 and 2;
                       case-sensitive, first occurrence, extension untouched;
                       same semantics as the transcoder's flag)
 --rename-to TEXT      Replacement for --rename-from (may be empty)
---encode-tag MODE     xmp/software/off — where to record the new d=/e= (default: xmp)
+--encode-tag MODE     history/comment/title/xmp/software/off — a visible copy of the new d=/e= (always in xmpMM:History; default: history)
 --delete-source       Delete each source JXL after its output is verified
 --delete-skipped      Also delete sources whose output already existed
 --verify-roundtrip    Decode and compare pixels before deleting
@@ -972,7 +976,7 @@ REDERIVE_ON_LOWER_EFFORT = False
                              # effort goes DOWN at the same distance (also
                              # --rederive-on-lower-effort /
                              # --no-rederive-on-lower-effort)
-ENCODE_TAG_MODE = "xmp"      # xmp/software/off
+ENCODE_TAG_MODE = "history"  # history/comment/title/xmp/software/off
 EXPLORER_THUMBNAIL = "auto"  # auto (every output with jxl-thumb installed,
                              # else lossless outputs) / on / off; also
                              # --explorer-thumbnail and

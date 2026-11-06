@@ -843,7 +843,7 @@ exception: they are set in Settings (menu 9 → 1).
 | `TIFF_SUFFIX_TO_REPLACE` | `"TIFF"` | Mode 4 suffix match |
 | `JXL_SUFFIX_REPLACE` | `"JXL"` | Mode 4 suffix replacement |
 | `EMBED_ICC_IN_JXL` | `True` | Embed ICC in JXL metadata |
-| `ENCODE_TAG_MODE` | `"xmp"` | Where to record d=/e= (now also via `--encode-tag`) |
+| `ENCODE_TAG_MODE` | `"history"` | The d=/e= record is always in xmpMM:History; a visible copy: `comment`, `title`, `software` (also `--encode-tag`; `xmp` = `history`) |
 | `CJXL_MODULAR` | `False` | Force Modular encoder for lossy (`--modular=1`) |
 | `CJXL_BUFFERING` | `None` | [libjxl ≥ 0.12] `--buffering` for pixel encodes (also `--buffering` CLI); `None` = use cjxl default (fast); `0` = best compression, ~6× slower on large lossless TIFFs ([benchmark](https://github.com/rsilvabr/jxl-photo/releases/tag/v1.8.0)) |
 | `USE_RAM_FOR_PNG` | `True` | Keep PNG intermediate in RAM |
@@ -900,7 +900,7 @@ exception: they are set in Settings (menu 9 → 1).
 | `KEEP_SMALLER` | `True` | Verbatim copy when the re-encode is not smaller |
 | `REDERIVE_ON_ENCODE_CHANGE` | `True` | Derivatives: re-derive when the recorded distance/effort differ (also `--rederive-on-encode-change` / `--no-rederive-on-encode-change`) |
 | `REDERIVE_ON_LOWER_EFFORT` | `False` | Derivatives: at the same distance only a higher effort re-derives; `True` also re-derives on a lower one (also `--rederive-on-lower-effort` / `--no-rederive-on-lower-effort`; the wizard asks right after the question above) |
-| `ENCODE_TAG_MODE` | `"xmp"` | Where to record the new d=/e= |
+| `ENCODE_TAG_MODE` | `"history"` | The new d=/e= is always in xmpMM:History; a visible copy: `comment`, `title`, `software` (`xmp` = `history`) |
 | `WORKER_MEMORY_FRACTION` | `1.0` | Caps how many cjxl run at once (and `--workers`) so the run fits in this share of the memory budget; extra workers prepare the next files with what is left; `0` = no cap |
 | `WORKER_MEMORY_LIMIT` | `"both"` | The cap's budget: the smaller of commit (RAM + pagefile) and free physical RAM; `"commit"` or `"physical"` = only that one |
 | `DELETE_CONFIRM` | `True` | Require HHMM confirmation before deleting |
@@ -1036,6 +1036,12 @@ follows the jxl-photo-exe releases instead. `--run-preset` and
 (`api.github.com/repos/rsilvabr/jxl-photo/releases/latest`). Turn it off with
 `"check_for_updates": false` in `.jxl_tools_config.json`, or the environment
 variable `JXLPHOTO_NO_UPDATE_CHECK=1`.
+
+When [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is installed, the same
+daily ask also looks up its latest release and compares it with the installed
+DLL's version (read from the file, without loading it): an older one adds a
+line (`jxl-thumb 0.2.1 is installed; 0.2.2 is out`) and `T` opens its releases
+page. The same settings turn it off.
 
 ## Logs
 

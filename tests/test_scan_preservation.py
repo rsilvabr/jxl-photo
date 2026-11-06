@@ -155,7 +155,8 @@ def test_recompressed_master_still_carries_them(tmp_path):
          "--delete-confirm-off", "--on-scan", "convert")
     master = d / "jxl" / "neg [1] 100%.jxl"
     rel, hist = _relation(master)
-    assert any("cjxl d=0.5" in t for t in [_exif("-s3", "-XMP-dc:Description", master).decode()])
+    from _encode_record import encode_record
+    assert "cjxl d=0.5" in encode_record(master)      # History since v2.24.0
     assert b"isWithIR" in _exif("-b", "-XMP", master)
     assert any(t.startswith("jxlphoto-tifftag:35243:") for t in rel)
     assert hist == ["converted", "converted"], hist

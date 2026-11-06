@@ -24,10 +24,11 @@ cannot give away.
 | Field | What the toolkit puts there | Written by |
 |---|---|---|
 | `XMP-xmp:CreatorTool` | nothing since v2.19.0 — it keeps naming the program that made the photo. Files written up to v2.18.x carry the ICC copy there, as `ICC:<base64>` after the program name (`Capture One Windows \| ICC:…`); [see below](#the-icc-copy-jxlphoto-iccprofile) | encoder and recompressor up to v2.18.x |
-| `XMP-dc:Description` | the encode record `gen=N \| cjxl d=… e=… \| …` (after your own caption, which stays first) | encoder, recompressor (`ENCODE_TAG_MODE = "xmp"`, the default) |
-| `EXIF:Software` | the same encode record, instead of the Description | encoder, recompressor (`ENCODE_TAG_MODE = "software"`) |
+| `XMP-dc:Description` | your caption, untouched. Up to v2.23.x (and with `ENCODE_TAG_MODE = "title"`) also a copy of the encode record after it — Windows shows this field as the **Title** | encoder, recompressor (`"title"` only) |
+| `XMP-exif:UserComment` | a copy of the encode record — Windows shows it as **Comments** | encoder, recompressor (`ENCODE_TAG_MODE = "comment"`) |
+| `EXIF:Software` | a copy of the encode record after the program name | encoder, recompressor (`ENCODE_TAG_MODE = "software"`) |
 | `XMP-dc:Relation` | `jxlphoto-*` tokens — see [the next table](#markers-in-xmp-dcrelation). Your own Relation values are kept | all four scripts |
-| `XMP-xmpMM:History` | one entry per output: `Action` (`converted`, or `derived` for a derivative), `When`, `SoftwareAgent` = `jxl-photo <version> (<github link>)`, `Parameters` = `<script>: from <type> to <type>`. Earlier entries (Capture One, previous runs) are kept | all four scripts |
+| `XMP-xmpMM:History` | one entry per output: `Action` (`converted`, or `derived` for a derivative), `When`, `SoftwareAgent` = `jxl-photo <version> (<github link>)`, `Parameters` = `<script>: from <type> to <type>`, and since v2.24.0 the **encode record** at its end (encoder, recompressor). Earlier entries (Capture One, previous runs) are kept | all four scripts |
 | `ExifImageWidth/Height`, `XMP-exif:PixelX/YDimension` | corrected to the new size | derivatives that were resized |
 | A thumbnail box (ISO BMFF `uuid` box, not a metadata field) | `jxlphoto-thumbnail:v1:<image data bytes>:<hash>` and a 768 px sRGB JPEG of the image, for [jxl-thumb](https://github.com/rsilvabr/jxl-thumb); the hash names the image data it was made from, so it is shown only while current ([details](README_jxl_tiff_encoder.md#explorer-thumbnails-explorer_thumbnail---explorer-thumbnail)). Reveals nothing the image does not | encoder and recompressor (`EXPLORER_THUMBNAIL = "auto"`: every output when jxl-thumb is installed, lossless outputs otherwise); the recompressor's `--refresh-explorer-thumbnails` on existing files. Never in a `jbrd` container; never copied to another file |
 
@@ -75,8 +76,27 @@ One `cjxl d= e=` entry per encode, appended, never rewritten; `gen` is the
 number of lossy generations. The recompressor reads it to refuse
 counterproductive re-encodes and to guard repeated lossy generations
 (`--on-regeneration`). The JPEG transcoder does not write one.
-`ENCODE_TAG_MODE = "off"` writes nothing and strips any record the source
-carries.
+
+**Where it lives (v2.24.0):** at the end of the `Parameters` of the
+`xmpMM:History` entry the write appends — the whole chain up to that write:
+
+```
+Parameters : jxl_recompressor: from image/jxl to image/jxl | gen=2 | cjxl d=0.05 e=9 | cjxl d=3.0 e=9
+```
+
+The newest entry that carries one is the file's record. `ENCODE_TAG_MODE` /
+`--encode-tag` only adds a **visible copy**: none (`history`, the default;
+`xmp` is its old name), Explorer's Comments (`comment`, XMP
+`exif:UserComment`), the Title (`title`, after your caption in
+`dc:Description` — where every version up to v2.23.x wrote it) or EXIF
+Software (`software`). Files written before v2.24.0 keep the record in
+`dc:Description` or Software: every script still reads it there, and the
+next output made from such a file carries it in its History (and, with the
+default, no longer in the Title).
+
+`ENCODE_TAG_MODE = "off"` writes no record — its History entry ends with
+`| no encode record`, so an older entry's record is not trusted again — and
+strips any record the source carries.
 
 ## Markers in `XMP-dc:Relation`
 
@@ -125,8 +145,10 @@ Parameters    : jxl_recompressor: from image/jxl to image/jxl
 
 `Action` is `derived` for a derivative (`--output-icc`, `--resize-*`,
 `--sharpen`); the script that actually ran writes the entry, so files written by
-different releases each name their real version. It is **write-only**: no gate,
-policy or `gen=` calculation in the toolkit ever reads it back. Read it with:
+different releases each name their real version. Since v2.24.0 the entries the
+encoder and the recompressor write end with the encode record
+([above](#the-encode-record)), which the recompressor's policies and the `gen=`
+calculation read; nothing else in the History is read back. Read it with:
 
 ```
 exiftool -struct -XMP-xmpMM:History file.jxl
@@ -153,8 +175,9 @@ A derivative is a recompressor or transcoder output made with `--output-icc`,
 - **JXL → JPEG bit-exact reconstruction**: the JPEG comes back byte for byte.
 - **Verbatim copies** in the recompressor (a `jbrd` file kept as it is, or a
   re-encode that was not smaller): the bytes are the source's.
-- **`--strip`** (encoder): no metadata, except the encode record unless
-  `ENCODE_TAG_MODE = "off"`.
+- **`--strip`** (encoder): no metadata, except the encode record (its
+  History entry, plus the visible copy of `ENCODE_TAG_MODE`); with `"off"`,
+  only a History entry that says there is none.
 
 All of the cases above gain no `xmpMM:History` entry either, for the same
 reason: the jbrd container and the bit-exact JPEG come back byte for byte, a
@@ -217,7 +240,8 @@ JXL_mobile/DSC_2290_sRGB_v1.jxl
 ## Checking a file yourself
 
 ```
-exiftool -XMP-dc:Relation -XMP-dc:Description -EXIF:Software file.jxl
+exiftool -XMP-dc:Relation -XMP-dc:Description -XMP-exif:UserComment -EXIF:Software file.jxl
+exiftool -XMP-xmpMM:HistoryParameters file.jxl
 exiftool -s3 -XMP-xmp:CreatorTool file.jxl
 exiftool -struct -XMP-xmpMM:History file.jxl
 ```

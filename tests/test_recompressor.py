@@ -28,7 +28,7 @@ def _clean_state(monkeypatch, tmp_path):
     monkeypatch.setattr(rec, "ON_UNKNOWN", "convert")
     monkeypatch.setattr(rec, "JBRD_POLICY", "copy")
     monkeypatch.setattr(rec, "KEEP_SMALLER", True)
-    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(rec, "DELETE_SOURCE", False)
     monkeypatch.setattr(rec, "DELETE_SKIPPED", False)
     monkeypatch.setattr(rec, "VERIFY_ROUNDTRIP", False)

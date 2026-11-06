@@ -346,7 +346,7 @@ def test_merge_lineage_blocks_unions_and_dedupes():
 
 def test_restamp_merges_when_the_record_moves_fields(monkeypatch):
     # The record lived in Software; this restamp writes dc:Description.
-    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "xmp")
+    monkeypatch.setattr(rec, "ENCODE_TAG_MODE", "title")
     monkeypatch.setattr(rec, "CJXL_DISTANCE", 2.0)
     monkeypatch.setattr(rec, "CJXL_EFFORT", 7)
     monkeypatch.setattr(rec, "_gen_divergence_logged", False)

@@ -293,7 +293,7 @@ def _in_place_group(tmp_path, monkeypatch, second_ok):
     monkeypatch.setattr(rec, "_read_mpg_markers",
                         lambda paths: ({str(p): "group-1" for p in paths}, True))
 
-    def fake_convert(src, w, f, action, in_place, desc, software, src_d):
+    def fake_convert(src, w, f, action, in_place, desc, software, src_d, **_kw):
         if Path(src).name == "p1.jxl" and not second_ok:
             return (str(src), "error", str(f))
         Path(w).write_bytes(b"RECOMPRESSED")
@@ -334,7 +334,7 @@ def _in_place_singles(tmp_path, monkeypatch, names, mpg_of=None, on_convert=None
     monkeypatch.setattr(rec, "_read_mpg_markers",
                         lambda paths: (dict(mpg_of or {}), True))
 
-    def fake_convert(src, w, f, action, in_place, desc, software, src_d):
+    def fake_convert(src, w, f, action, in_place, desc, software, src_d, **_kw):
         Path(w).write_bytes(b"RECOMPRESSED")
         if on_convert:
             on_convert(Path(src))

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.24.0_beta1"
+TOOLKIT_VERSION = "2.24.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -938,6 +938,7 @@ class ToolConfig:
     check_for_updates: bool = True
     update_checked_on: Optional[str] = None      # YYYY-MM-DD of the last ask
     update_latest_seen: Optional[str] = None     # the tag it answered
+    thumb_latest_seen: Optional[str] = None      # jxl-thumb's latest release tag, same ask
 
     last_input_dir: Optional[str] = None
     last_output_mode: Optional[str] = None
@@ -2462,7 +2463,7 @@ _CHILD_OPTION_DEFAULTS = {
         'thumbnail_mode': ('THUMBNAIL_MODE', 'auto'),
         'thumbnail_suffix': ('THUMBNAIL_SUFFIX', '_thumbnail'),
         'd50_patch': ('D50_PATCH_MODE', 'auto'),
-        'encode_tag': ('ENCODE_TAG_MODE', 'xmp'),
+        'encode_tag': ('ENCODE_TAG_MODE', 'history'),
         'use_ram': ('USE_RAM_FOR_PNG', True),
         'provenance': ('PROVENANCE_CHECK', 'path'),
         'overwrite_guard': ('OVERWRITE_GUARD', True),
@@ -3061,8 +3062,11 @@ REGISTRY: Tuple[Opt, ...] = (
         "graphics only: on photos, equal quality, bigger files, 20-100x slower.",
         choices=('on', 'off'), legacy_key="advanced.modular"),
     Opt("encode_tag", "--encode-tag", _TIFF2JXL, "value", "metadata", "advanced",
-        "Encode record", "Where the cjxl d=/e= record is written.",
-        choices=('xmp', 'software', 'off'), legacy_key="advanced.encode_tag"),
+        "Encode record", "The cjxl d=/e= record is always in xmpMM:History; a visible copy: "
+        "history = none, comment = Explorer's Comments, title = the Title, software = EXIF "
+        "Software; xmp = history; off = no record.",
+        choices=('history', 'comment', 'title', 'xmp', 'software', 'off'),
+        legacy_key="advanced.encode_tag"),
     Opt("multipage_mode", "--multipage-mode", _TIFF2JXL, "value", "multipage", "advanced",
         "Multi-page TIFFs", "What happens to the pages after the first: split = one "
         "JXL per page, thumbnails per the next option (the shipped setting); split_all = "
@@ -3250,8 +3254,9 @@ REGISTRY: Tuple[Opt, ...] = (
         "auto = lossless outputs (every output when jxl-thumb is installed); on; off.",
         choices=("auto", "on", "off"), legacy_key="extra.explorer_thumbnail"),
     Opt("recompress_encode_tag", "--encode-tag", _JXL2JXL, "value", "metadata",
-        "advanced", "Encode record", "Where the recompressor writes the cjxl d=/e= "
-        "record.", choices=('xmp', 'software', 'off'),
+        "advanced", "Encode record", "The recompressor's cjxl d=/e= record is always in "
+        "xmpMM:History; a visible copy: history = none, comment, title, software; xmp = "
+        "history; off = no record.", choices=('history', 'comment', 'title', 'xmp', 'software', 'off'),
         legacy_key="extra.recompress_encode_tag"),
     Opt("allow_incomplete_groups", "--allow-incomplete-groups", _JXL2TIFF, "flag",
         "deletion", "expert", "Delete incomplete multi-page groups",
@@ -4472,7 +4477,9 @@ class InteractiveMenu:
             if _late:
                 self.ui.markup(f"[yellow]{_rich_safe(_late[0])}[/yellow]", _late[0])
                 self._update_available = (self.config.config.update_latest_seen, _late[1])
-        if getattr(self, '_thumb_tip', False):
+        if getattr(self, '_thumb_update', False):
+            options.append(("T", "Update jxl-thumb (opens its releases page)", True))
+        elif getattr(self, '_thumb_tip', False):
             options.append(("T", "Get jxl-thumb: fast thumbnails in Explorer "
                                  "(opens its page)", True))
         if getattr(self, '_update_available', None):
@@ -10442,6 +10449,74 @@ _THUMBNAIL_HANDLER_KEYS = (
 _JXL_THUMB_CLSID = "{EF830030-FBD6-4B62-BFD4-0DBD590D6135}"
 
 
+def _dll_file_version(path) -> Optional[str]:
+    """"major.minor.patch" of a Windows DLL's fixed file version (its
+    VERSIONINFO resource), or None: not Windows, no resource, any error.
+    Reads the file's header only; never loads or runs it."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ver = ctypes.WinDLL("version")
+        size = ver.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return None
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(str(path), 0, size, buf):
+            return None
+        ptr, n = ctypes.c_void_p(), wintypes.UINT()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(ptr), ctypes.byref(n)) \
+                or n.value < 52:
+            return None
+        fixed = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint32 * 13)).contents
+        if fixed[0] != 0xFEEF04BD:           # VS_FIXEDFILEINFO's signature
+            return None
+        ms, ls = fixed[2], fixed[3]          # dwFileVersionMS / LS
+        return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}"
+    except Exception:
+        return None
+
+
+def _jxl_thumb_dll_version() -> Optional[str]:
+    """The installed jxl-thumb's version ("0.2.1"), from the DLL its CLSID is
+    registered to, or None (not installed, not Windows, unreadable).
+    JXLPHOTO_JXL_THUMB=0 (the test suite, the battery) reads as not
+    installed."""
+    if os.name != "nt" or os.environ.get("JXLPHOTO_JXL_THUMB") == "0":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            rf"CLSID\{_JXL_THUMB_CLSID}\InprocServer32") as key:
+            dll = str(winreg.QueryValue(key, None) or "").strip()
+    except Exception:
+        return None
+    return _dll_file_version(dll) if dll and os.path.isfile(dll) else None
+
+
+def _thumb_update_notice(config_manager) -> Optional[str]:
+    """The menu line when the installed jxl-thumb is older than its latest
+    release (kept by the daily check, thumb_latest_seen), else None. No
+    network here; off like the release check."""
+    cfg = config_manager.config
+    if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
+        return None
+    mine = _jxl_thumb_dll_version()
+    km, kt = _version_key(mine), _version_key(cfg.thumb_latest_seen)
+    if not km or not kt or kt[:3] <= km[:3]:
+        return None
+    return (f"jxl-thumb {mine} is installed; {cfg.thumb_latest_seen.lstrip('v')} is out "
+            f"— [T] in the menu opens its page.")
+
+
+def _thumb_latest_if_installed(timeout: float = None) -> Optional[str]:
+    """jxl-thumb's latest release tag, asked only when jxl-thumb is installed."""
+    if not _jxl_thumb_dll_version():
+        return None
+    return _latest_release_tag("jxl-thumb", **({} if timeout is None else {"timeout": timeout}))
+
+
 _UPDATE_OWNER = "rsilvabr"
 _UPDATE_TIMEOUT = 3          # seconds: a slow or absent network stays silent
 
@@ -10494,9 +10569,12 @@ def _update_notice(config_manager, today: Optional[str] = None) -> Optional[Tupl
     repo = _update_repo()
     if cfg.update_checked_on != today:
         tag = _latest_release_tag(repo)
+        thumb = _thumb_latest_if_installed()
         cfg.update_checked_on = today
         if tag:
             cfg.update_latest_seen = tag
+        if thumb:
+            cfg.thumb_latest_seen = thumb
         try:
             config_manager.save_config()
         except Exception:
@@ -10526,9 +10604,11 @@ def _update_check_start(config_manager):
         return lambda wait=0.0: notice
     import threading
     answer: Dict[str, Optional[str]] = {}
-    worker = threading.Thread(
-        target=lambda: answer.__setitem__("tag", _latest_release_tag(_update_repo())),
-        name="update-check", daemon=True)
+    def _ask():
+        answer["tag"] = _latest_release_tag(_update_repo())
+        answer["thumb"] = _thumb_latest_if_installed()
+
+    worker = threading.Thread(target=_ask, name="update-check", daemon=True)
     worker.start()
     state: Dict[str, Any] = {"done": False, "notice": None}
 
@@ -10541,6 +10621,8 @@ def _update_check_start(config_manager):
             cfg.update_checked_on = today
             if answer.get("tag"):
                 cfg.update_latest_seen = answer["tag"]
+            if answer.get("thumb"):
+                cfg.thumb_latest_seen = answer["thumb"]
             try:
                 config_manager.save_config()
             except Exception:
@@ -10697,6 +10779,13 @@ def _main():
         print(_tip)
         print("     (Hide this tip: 9 - Settings, then 1.)")
         menu._thumb_tip = True
+    # jxl-thumb installed but older than its latest release (the same daily
+    # ask; no extra network call when it was already asked today).
+    _thumb_upd = _thumb_update_notice(config)
+    if _thumb_upd:
+        print(_thumb_upd)
+        menu._thumb_tip = True
+        menu._thumb_update = True
 
     # Main loop
     while True:
@@ -10741,12 +10830,14 @@ def _main():
             menu.script_settings_flow()
 
         elif choice == "T" and getattr(menu, '_thumb_tip', False):
+            _thumb_url = (f"{JXL_THUMB_URL}/releases/latest"
+                          if getattr(menu, '_thumb_update', False) else JXL_THUMB_URL)
             try:
                 import webbrowser
-                webbrowser.open(JXL_THUMB_URL)
+                webbrowser.open(_thumb_url)
             except Exception:
                 pass
-            print(f"jxl-thumb: {JXL_THUMB_URL}")
+            print(f"jxl-thumb: {_thumb_url}")
         elif choice == "U" and getattr(menu, '_update_available', None):
             _url = menu._update_available[1]
             print(f"Release page: {_url}")
