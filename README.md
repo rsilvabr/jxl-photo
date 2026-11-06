@@ -259,7 +259,7 @@ jxl_tiff_encoder.py      TIFF → JXL      the master: 16-bit, lossless or near-
     └─ jxl_tiff_decoder.py    JXL → TIFF      the TIFF back, in its original profile, to edit again
 ```
 
-The copies are made from the master, never from the TIFF, so the TIFF can go once its master is verified.
+**The encoder only writes masters — by design.** It has no colour conversion, resize or sharpening: a master must be the TIFF, same pixels (up to the distance), same profile, same metadata, so that it can bring the TIFF back and prove it is safe to delete. A setting left on by mistake should never turn an archive into resized, sharpened files that look like masters. Resize, sharpening and colour conversion live where copies are made, from the master: the recompressor (lighter JXLs) and the transcoder (JPEG/PNG). Copies never delete anything and never pass for a master. [Why](docs/README_jxl_tiff_encoder.md#why-the-encoder-never-converts-colour-or-resizes-design-decision).
 
 ### TIFF → JXL
 
