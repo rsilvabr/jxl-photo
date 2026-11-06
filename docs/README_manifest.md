@@ -277,6 +277,71 @@ wizard charges the HHMM token before the run, and a preset carrying it is
 refused unattended. To schedule a recompression, use a non-replacing mode
 (1–7) instead.
 
+### 7. A whole library, end to end: masters, a 16-bit sRGB copy, phone JPEGs
+
+The author's own setup: three manifests over the same year folders, each saved
+as a preset and run in this order. Capture One exports 16-bit ProPhoto TIFFs
+into each event's `_EXPORT` folder; everything else is made from them.
+
+**Masters** (`tiff2jxl`; preset at `d=0.05`, effort 7) — every TIFF under an
+`_EXPORT` becomes `_EXPORT\16B_JXL\<name>.jxl`; two folder names that hold old
+TIFFs are left out:
+
+```csv
+Source,Destination,Mode,Direction,ExcludeFolders
+G:\2024,G:\2024,6,tiff2jxl,OLD_TIFFs;OLD_PADDED
+G:\2025,G:\2025,6,tiff2jxl,OLD_TIFFs;OLD_PADDED
+G:\2026,G:\2026,6,tiff2jxl,OLD_TIFFs;OLD_PADDED
+```
+
+**A light 16-bit sRGB copy** (`jxl2jxl`; preset at `d=0.7`, effort 7) — read
+from `_EXPORT\16B_JXL`, written to `_EXPORT\sRGB`, with the profile swapped in
+the file name (`DSC_0001_ProPhoto-g22_v1.jxl` → `DSC_0001_sRGB_v1.jxl`):
+
+```csv
+Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,RenameTo,ExportSubfolder,ExportJxlFolder
+G:\2024,G:\2024,7,jxl2jxl,sRGB,,,ProPhoto-g22,sRGB,16B_JXL,sRGB
+G:\2025,G:\2025,7,jxl2jxl,sRGB,,,ProPhoto-g22,sRGB,16B_JXL,sRGB
+G:\2026,G:\2026,7,jxl2jxl,sRGB,,,ProPhoto-g22,sRGB,16B_JXL,sRGB
+```
+
+**JPEGs for the phone** (`jxl2jpeg`, the lossy conversion; preset at quality
+70) — also from the masters: sRGB, 2048 px on the long side, screen
+sharpening, into `_EXPORT\JPG_mobile`:
+
+```csv
+Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,RenameTo,ExportSubfolder,ExportJxlFolder
+G:\2024,G:\2024,7,jxl2jpeg,sRGB,long:2048,screen,ProPhoto-g22,sRGB,16B_JXL,JPG_mobile
+G:\2025,G:\2025,7,jxl2jpeg,sRGB,long:2048,screen,ProPhoto-g22,sRGB,16B_JXL,JPG_mobile
+G:\2026,G:\2026,7,jxl2jpeg,sRGB,long:2048,screen,ProPhoto-g22,sRGB,16B_JXL,JPG_mobile
+```
+
+One event folder then looks like this:
+
+```
+250118_Event [FINAL]\_EXPORT\
+├── TIFF16\DSC_0001_ProPhoto-g22_v1.tif        ← from Capture One
+├── 16B_JXL\DSC_0001_ProPhoto-g22_v1.jxl       ← master
+├── sRGB\DSC_0001_sRGB_v1.jxl                  ← 16-bit sRGB copy
+└── JPG_mobile\DSC_0001_sRGB_v1.jpg            ← 2048 px JPEG
+```
+
+On a 45 MP event (64 photos, medians): TIFF 249 MB, master 37 MB, sRGB copy
+6.2 MB, phone JPEG 0.4 MB.
+
+- **Order matters:** the copies are made from the masters, so the masters run
+  first ([one scheduled `.cmd` for all three](README_jxl_tools.md#several-presets-in-one-scheduled-run-a-cmd-file)).
+- **The re-runs are cheap.** Each preset syncs: only a TIFF newer than its
+  master is encoded again, and only a master newer than its copy is converted
+  again. A copy whose recipe (colour, size, sharpening, distance) changed is
+  remade by itself.
+- **Mode 7 with `ExportSubfolder` = `16B_JXL`** is what keeps the copies from
+  reading each other: the sRGB and JPEG runs read only the masters' folder.
+- The presets carry the run-wide settings (distance, effort, JPEG quality,
+  workers, sync, overwrite guard off because the author renames event folders —
+  see [Renamed folders](behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard));
+  the manifests carry what differs per row.
+
 * * *
 
 ## What is checked before anything runs

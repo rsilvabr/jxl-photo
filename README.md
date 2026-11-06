@@ -232,7 +232,14 @@ F:\2026\京都・嵐山 [FINAL]\_EXPORT\TIFF,F:\2026\京都・嵐山 [FINAL]\_EX
 # F:\2026\Outtakes (later)\_EXPORT\TIFF,F:\2026\Outtakes (later)\_EXPORT\TIFF,6,tiff2jxl
 ```
 
-The whole manifest is checked before anything runs: two rows writing the same file, or an invalid cell, refuse it up front. Every column, what can be left out, and recipes: [docs/README_manifest.md](docs/README_manifest.md).
+A row can also carry its own colour space, resize, sharpening and output folder — the JPEGs for the phone, made from the masters:
+
+```csv
+Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,RenameTo,ExportSubfolder,ExportJxlFolder
+G:\2026,G:\2026,7,jxl2jpeg,sRGB,long:2048,screen,ProPhoto-g22,sRGB,16B_JXL,JPG_mobile
+```
+
+The whole manifest is checked before anything runs: two rows writing the same file, or an invalid cell, refuse it up front. Every column, what can be left out, and recipes — among them a whole library from masters to phone JPEGs: [docs/README_manifest.md](docs/README_manifest.md#7-a-whole-library-end-to-end-masters-a-16-bit-srgb-copy-phone-jpegs).
 
 ---
 
