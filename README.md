@@ -46,7 +46,6 @@ Typical sizes of ProPhoto exports from Capture One (median of 10–20 photos per
 | JXL lossless, from 8-bit | ~43 MB (33–54) | ~21 MB (18–29) | ~10 MB (7.7–12) |
 | JXL `d=0.05` | ~42 MB (36–51) | ~21 MB (19–26) | ~9.9 MB (7.9–12) |
 | JXL `d=0.1` | ~31 MB (24–38) | ~15 MB (13–20) | ~7.2 MB (5.4–9.2) |
-| JXL `d=0.3` | ~16 MB (11–22) | ~7.6 MB (5.8–12) | ~3.5 MB (2.5–5.7) |
 | JXL `d=0.5` | ~11 MB (7–16) | ~4.9 MB (3.5–9.3) | ~2.4 MB (1.4–4.3) |
 | JXL `d=1.0` (visually lossless) | ~5.5 MB (3–10) | ~2.7 MB (1.4–6.2) | ~1.2 MB (0.6–2.8) |
 | JXL `d=3.0` (web) | ~1.8 MB (1.0–4.4) | ~0.9 MB (0.4–1.8) | ~0.4 MB (0.2–1.1) |
