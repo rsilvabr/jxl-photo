@@ -1,14 +1,14 @@
 # jxl_recompressor.py
 
-Batch **JXL → JXL recompressor**: shrink an existing JPEG XL archive by
-re-encoding it at a new distance/effort, keeping everything this toolkit
-stamps into the files — the base64 ICC (`jxlphoto-iccprofile`), EXIF/XMP/IPTC
-metadata, provenance markers (`jxlphoto-*`) and multi-page group markers.
+Batch **JXL → JXL**: makes a new JXL from one this toolkit wrote, keeping its
+ICC copy (`jxlphoto-iccprofile`), EXIF/XMP/IPTC metadata, provenance markers
+(`jxlphoto-*`) and multi-page group markers. Two uses:
 
-The typical workflow: photos were archived at near-lossless (`d=0.05–0.1`)
-when disk was cheap; years later storage runs short and the archive is
-recompressed to `d=1.0` ("visually lossless") or `d=2.0` — paying **one**
-generation of lossy re-encode, not several.
+- **Copies from the masters** — a lighter 16-bit file, a colour-converted one
+  (sRGB, Adobe RGB) or a resized and sharpened one, re-made by itself when the
+  master changes ([Derivatives](#derivatives-colour-conversion-resize-and-sharpening));
+- **Shrinking an archive** — taking `d=0.05–0.1` masters to `d=1.0` when
+  storage runs short, in **one** generation of loss, not several.
 
 ## Requirements
 

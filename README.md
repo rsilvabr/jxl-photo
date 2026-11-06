@@ -339,30 +339,27 @@ Every option of every script: the per-script READMEs under [Documentation](#docu
 
 ## Recommended Settings
 
-### Archival (Master Files)
+### Masters (`jxl_tiff_encoder.py`)
 
 ```python
-# jxl_tiff_encoder.py
-CJXL_DISTANCE = 0.05      # Near-lossless, ~42MB for 45MP
-#OR#
-CJXL_DISTANCE = 0.1       # Also Near-lossless, ~31MB for 45MP
-
-CJXL_EFFORT = 7           # Effort 9 gains nothing at these distances (docs/file_sizes.md)
-EMBED_ICC_IN_JXL = True   # Always preserve ICC!
+CJXL_DISTANCE = 0.1     # near-lossless, ~31 MB at 45 MP — the default
+# CJXL_DISTANCE = 0.05  # finest lossy, ~42 MB — what I use, out of caution
+CJXL_EFFORT = 7         # effort 9 gains nothing at these distances (docs/file_sizes.md)
 ```
 
-### Web / Delivery
+Film scans and 8-bit TIFFs get lossless on their own.
 
-```python
-# jxl_tiff_encoder.py
-CJXL_DISTANCE = 1.0       # Visually lossless, ~5.5MB for 45MP
-CJXL_EFFORT = 7
+### Copies, made from the masters
 
-# jxl_tiff_decoder.py
-DJXL_OUTPUT_DEPTH = 8     # Smaller files
-TIFF_COMPRESSION = "zip"
-ADD_JPEG_PREVIEW = True   # Fast Explorer thumbnails
+```powershell
+# A light 16-bit sRGB copy (d=0.7 keeps the grain texture)
+py jxl_recompressor.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jxl-folder sRGB --output-icc sRGB --distance 0.7 --sync --rename-from ProPhoto-g22 --rename-to sRGB
+
+# JPEGs for the phone: sRGB, 2048 px, screen sharpening, quality 70
+py jxl_jpeg_transcoder.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jpeg-folder JPG_mobile --force-convert --decode --format jpeg --icc-profile sRGB --resize-long 2048 --sharpen screen --quality 70 --sync --rename-from ProPhoto-g22 --rename-to sRGB
 ```
+
+The same three steps as manifests and presets: [a whole library, end to end](docs/README_manifest.md#7-a-whole-library-end-to-end-masters-a-16-bit-srgb-copy-phone-jpegs).
 
 ---
 
