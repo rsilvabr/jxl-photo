@@ -73,13 +73,13 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 
 **TIFF → JXL** — 16-bit lossless or near-lossless archives. The exact original ICC profile comes back on decode, even from a lossy file; EXIF/XMP stay visible in IrfanView, XnView MP and other viewers. Multi-page TIFFs and film scans (IR page included) are split and rebuilt page for page.
 
-**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
-
 **JXL → TIFF** — Roundtrip, Basic and Matrix decode modes, a JPEG preview for fast Explorer thumbnails, and a sync that reconverts only what changed.
 
 **JPEG ↔ JXL, JXL → JPEG/PNG** — lossless JPEG → JXL with the bit-exact JPEG back on demand, its EXIF visible in IrfanView too; JPEG/PNG delivery copies with colour conversion (sRGB, AdobeRGB or any profile), resize and output sharpening fitted to Capture One's presets.
 
 **JXL → JXL** — shrink an archive to a new distance in one step, with counterproductive re-encodes refused and metadata carried over; light 16-bit derivatives (sRGB, resized, sharpened) made from the master.
+
+**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
 
 **Viewer compatibility** — every JXL keeps its EXIF where IrfanView reads it: in a plain box, before the XMP and the image data. cjxl compresses it by default, which saves a median 2.3 KB per photo (0.19 %) and hides the EXIF from IrfanView; one setting turns that compression on if you prefer the smallest file ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
 
