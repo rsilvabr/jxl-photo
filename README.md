@@ -227,7 +227,9 @@ From there, **[P]** writes a **manifest**: a CSV with one Source → Destination
 Source,Destination,Mode,Direction
 F:\2025\Recife\_Export\TIFF,F:\2025\Recife\_Export\TIFF,6,tiff2jxl
 F:\2025\São Paulo\_EXPORT\16bit,F:\2025\São Paulo\_EXPORT\16B_JXL,7,tiff2jxl
-# F:\2025\横浜\RAW,F:\2025\横浜\JXL,0,tiff2jxl
+F:\2025\横浜\RAW,F:\2025\横浜\JXL,0,tiff2jxl
+F:\2026\京都・嵐山 [FINAL]\_EXPORT\TIFF,F:\2026\京都・嵐山 [FINAL]\_EXPORT\TIFF,6,tiff2jxl
+# F:\2026\Outtakes (later)\_EXPORT\TIFF,F:\2026\Outtakes (later)\_EXPORT\TIFF,6,tiff2jxl
 ```
 
 The whole manifest is checked before anything runs: two rows writing the same file, or an invalid cell, refuse it up front. Every column, what can be left out, and recipes: [docs/README_manifest.md](docs/README_manifest.md).
