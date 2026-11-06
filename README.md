@@ -36,19 +36,19 @@ Spectacular compression with no compromise on bit depth.
 - Lossy 16-bit files — small files that retain full 16-bit tonal information, something no other common format achieves (JPEG is 8-bit, TIFF lossless is large)
 - This is genuinely new: small lossy files, but with 16-bit color depth
 
-Typical sizes of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000). ZIP is the TIFF compression tiff-workflow writes. Detail and noise move the size more than the camera does — [every distance, with the spread across the photos](docs/file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff):
+Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000). ZIP is the TIFF compression tiff-workflow writes. Detail and noise move the size more than the camera does — [every distance, with the spread across the photos](docs/file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff):
 
-| Format | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
-|--------|----------------|------------|--------------|
-| TIFF 16-bit / with ZIP | 273 / 227 MB | 146 / 120 MB | 72 / 60 MB |
-| TIFF 8-bit / with ZIP | 136 / 61 MB | 73 / 30 MB | 36 / 16 MB |
-| JXL lossless, from 16-bit | 173 MB | 89 MB | 43 MB |
-| JXL lossless, from 8-bit | 43 MB | 21 MB | 10 MB |
-| JXL `d=0.05` (finest lossy) | 42 MB | 21 MB | 9.9 MB |
-| JXL `d=0.1` (near-lossless, recommended for masters) | 31 MB | 15 MB | 7.2 MB |
-| JXL `d=0.5` (high-quality, headroom for edits) | 11 MB | 4.9 MB | 2.4 MB |
-| JXL `d=1.0` (visually lossless) | 5.5 MB | 2.7 MB | 1.2 MB |
-| JXL `d=3.0` (web and social media) | 1.8 MB | 0.9 MB | 0.4 MB |
+| Format | Use | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
+|--------|-----|---------------:|-----------:|-------------:|
+| TIFF 16-bit / with ZIP | | 273 / 227 | 146 / 120 | 72 / 60 |
+| TIFF 8-bit / with ZIP | | 136 / 61 | 73 / 30 | 36 / 16 |
+| JXL lossless, from 16-bit | | 173 | 89 | 43 |
+| JXL lossless, from 8-bit | | 43 | 21 | 10 |
+| JXL `d=0.05` | finest lossy | 42 | 21 | 9.9 |
+| JXL `d=0.1` | near-lossless, recommended for masters | 31 | 15 | 7.2 |
+| JXL `d=0.5` | high quality, headroom for edits | 11 | 4.9 | 2.4 |
+| JXL `d=1.0` | visually lossless | 5.5 | 2.7 | 1.2 |
+| JXL `d=3.0` | web and social media | 1.8 | 0.9 | 0.4 |
 
 Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
 
