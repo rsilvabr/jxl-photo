@@ -45,12 +45,12 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 | JXL lossless, from 16-bit | 173 | 89 | 43 |
 | JXL lossless, from 8-bit | 43 | 21 | 10 |
 | JXL `d=0.05` (finest lossy) | 42 | 21 | 9.9 |
-| JXL `d=0.1` (near-lossless, recommended for masters) | 31 | 15 | 7.2 |
-| JXL `d=0.5` (high quality, headroom for edits) | 11 | 4.9 | 2.4 |
+| JXL `d=0.1` (near-lossless) | 31 | 15 | 7.2 |
+| JXL `d=0.5` (high quality) | 11 | 4.9 | 2.4 |
 | JXL `d=1.0` (visually lossless) | 5.5 | 2.7 | 1.2 |
-| JXL `d=3.0` (web and social media) | 1.8 | 0.9 | 0.4 |
+| JXL `d=3.0` (web) | 1.8 | 0.9 | 0.4 |
 
-Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
+`d=0.1` is the default and the recommendation for masters. `d=0.5` still leaves headroom for later edits; `d=1.0` is JPEG XL's own "visually lossless" — fine to look at, less room to edit. Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
 
 Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB). On 8-bit scans, `d=0.05`/`0.1` save little or nothing over lossless, so keep those lossless. Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0` for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
 
