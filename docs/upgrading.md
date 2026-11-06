@@ -11,7 +11,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.24.0: 8-bit TIFFs are archived lossless at d=0.1 and below
+## v2.24.0: 8-bit TIFFs are archived lossless at d=0.1 and below; the encode record leaves the Title
 
 - **An 8-bit TIFF that is not a film scan is encoded lossless** when the run's
   `--distance` is 0.1 or less (`EIGHT_BIT_DISTANCE = "auto"`). Its JXL is
@@ -23,6 +23,15 @@ Per-release notes: [version_history.md](version_history.md) and the
   earlier version** now judges them as lossless and keeps their TIFFs (a
   `KEEP` line that names `--eight-bit-distance same`). Add that flag to such
   a run, or re-archive those TIFFs with `--overwrite`.
+- **The encode record (`gen=1 | cjxl d=0.05 e=9`) is no longer written into
+  the Title** (`dc:description`, which Windows Explorer shows as the Title):
+  it moves to the file's `xmpMM:History`, where the scripts read it. A
+  caption stays the photo's own. `--encode-tag comment` shows the record in
+  Explorer's Comments instead; `--encode-tag title` (or
+  `ENCODE_TAG_MODE = "title"`) keeps the old behaviour. `xmp`, the old
+  default, now means `history`, so presets and manifests that store it follow
+  the new behaviour. Files written before are read as they are; nothing needs
+  to be re-archived.
 
 ---
 

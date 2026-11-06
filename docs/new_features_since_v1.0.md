@@ -1,5 +1,15 @@
 # New Features Since v1.0
 
+## v2.24.0 (2026-11-06)
+
+### The encode record lives in xmpMM:History (encoder, recompressor)
+
+The `gen=N | cjxl d= e=` record ends the parameters of each write's
+`xmpMM:History` entry instead of `dc:description` (Explorer's Title);
+`--encode-tag history|comment|title|software|off` only chooses a visible
+copy (`xmp` = `history`). Older files are still read. See
+[metadata_written.md](metadata_written.md#the-encode-record).
+
 ## v2.24.0_beta1 (2026-11-06, pre-release)
 
 ### 8-bit TIFFs are archived lossless at low distances (encoder)

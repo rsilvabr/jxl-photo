@@ -14,8 +14,9 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.24.0_beta1](#v2240_beta1)** | 2026-11-06 | Pre-release. 8-bit TIFFs archived lossless at `d=0.1` and below (`--eight-bit-distance`); the wizard shows the typical file size next to every distance; `d=0.7` and `d=5` in the lists |
-| **[v2.23.0](#v2230)** | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
+| **[v2.24.0](#v2240)** | 2026-11-06 | The encode record leaves the Title (`dc:description`) for `xmpMM:History`; 8-bit TIFFs archived lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard; everything in v2.24.0_beta1 |
+| [v2.24.0_beta1](#v2240_beta1) | 2026-11-06 | Pre-release. 8-bit TIFFs archived lossless at `d=0.1` and below (`--eight-bit-distance`); the wizard shows the typical file size next to every distance; `d=0.7` and `d=5` in the lists |
+| [v2.23.0](#v2230) | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
 | [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
 | [v2.22.4](#v2224) | 2026-11-04 | "Make smaller or resized JXL copies" offers named distances in cjxl's recommended range (0.5, 1, 2, 3) |
 | [v2.22.3](#v2223) | 2026-11-04 | The 8-bit/16-bit tip under the distance list; the film-scan line points to the review's Film scans row |
@@ -90,11 +91,50 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.24.0
+
+**Released 2026-11-06.** Supersedes v2.24.0_beta1 and v2.23.0. Two defaults
+change: where the encode record is shown, and 8-bit TIFFs at low distances
+([Upgrading](upgrading.md#v2240-8-bit-tiffs-are-archived-lossless-at-d01-and-below-the-encode-record-leaves-the-title)).
+Everything in [v2.24.0_beta1](#v2240_beta1), and:
+
+- **The encode record leaves the Title.** Windows Explorer shows XMP
+  `dc:description` as a photo's Title (checked through WIC and the Shell
+  property system), so every master showed `gen=1 | cjxl d=0.05 e=9` as its
+  title, and a caption written in Capture One got the chain glued to it.
+  The record now ends the `Parameters` of the `xmpMM:History` entry each
+  write already appends (`jxl_tiff_encoder: from image/tiff to image/jxl |
+  gen=1 | cjxl d=0.05 e=9`) — the whole chain up to that write, in the same
+  text as before, so the lineage rules are unchanged. `ENCODE_TAG_MODE` /
+  `--encode-tag` (encoder, recompressor) now only chooses a visible copy:
+  `history` (new default: none), `comment` (XMP `exif:UserComment`,
+  Explorer's Comments), `title` (the old `dc:description` copy), `software`
+  (EXIF Software); `xmp`, the old default, means `history`; `off` writes
+  `| no encode record` so an older entry's record is not trusted again.
+- **Files written before are read as they are.** The readers
+  (`_history_record`, then dc:description / Software) see the record of an
+  older master where it is, so the downgrade and regeneration guards keep
+  working on the whole archive; the next output made from such a file
+  carries its chain in the History (and, by default, a Title without it).
+  Nothing has to be re-archived. A TIFF decoded from a new master carries
+  the History, so re-encoding it still counts `gen`.
+- `--strip` keeps one History entry with the record (it wrote it in
+  `dc:description` before). The wizard's "Encode record" options list the
+  new values.
+- **The menu says when jxl-thumb has a newer release.** The daily release
+  check also looks up jxl-thumb's latest release when jxl-thumb is installed,
+  and compares it with the version of the DLL Windows uses (its file version,
+  read without loading it); an older one adds a line and `T` opens the
+  releases page. Off with the release check.
+- Tests: 26 new real-exiftool/real-codec ones in a hostile folder (legacy
+  master read and migrated, guards reading the History, decoder round trip,
+  `off`, origin), all failing on the beta; the battery reads the record
+  wherever it lives and checks a caption comes out alone in the Title.
+
 ## v2.24.0_beta1
 
-**Pre-release, 2026-11-06.** The last stable release is v2.23.0; the stable
-v2.24.0 will also move the encode record out of the Title. One default
-changes for 8-bit TIFFs ([Upgrading](upgrading.md#v2240-8-bit-tiffs-are-archived-lossless-at-d01-and-below)).
+**Pre-release, 2026-11-06.** Superseded by v2.24.0. One default
+changes for 8-bit TIFFs.
 
 - **8-bit TIFFs are archived lossless at low distances** (encoder,
   `EIGHT_BIT_DISTANCE = "auto"`, `EIGHT_BIT_LOSSLESS_UP_TO = 0.1`,
