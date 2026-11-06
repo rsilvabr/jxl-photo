@@ -128,7 +128,7 @@ Install them in the same Python you will run the scripts with.
 
 The scripts find exiftool under either name, `exiftool.exe` or the download's `exiftool(-k).exe`.
 
-Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. Memory per worker is about 35–40 MB per megapixel (1.55 GB for a 45 MP file); see [RAM per worker](docs/README_jxl_tiff_encoder.md#ram-per-worker) before raising `--workers`.
+Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](docs/README_jxl_tiff_encoder.md#ram-per-worker)).
 
 ### 3. Add to PATH (PowerShell)
 
