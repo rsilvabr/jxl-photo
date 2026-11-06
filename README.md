@@ -365,13 +365,19 @@ Plain cjxl/djxl:   TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIF
 With this toolkit: TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
 ```
 
-The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. The encode record (`gen=1 | cjxl d=0.1 e=7`), which the recompressor reads, goes into the file's `xmpMM:History` since v2.24.0, so the Title (`dc:Description`) stays yours; `--encode-tag comment` or `title` also shows it where Explorer can see it, and files written before still have it in the Title, which is still read ([details](docs/metadata_written.md#the-encode-record)). To check a round trip:
+The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. To check a round trip:
 
 ```powershell
 exiftool -ProfileDescription -ProfileCopyright original.tif roundtrip.tif   # should match
 ```
 
 XYB, ICC blobs and the table-curve profiles that need special handling: [docs/jxl_color_internals.md](docs/jxl_color_internals.md).
+
+### The encode record
+
+Every JXL the toolkit writes also records how it was encoded, for example `gen=2 | cjxl d=0.05 e=7 | cjxl d=0.7 e=7`. Each `cjxl d= e=` entry is one encode, with its distance and effort, oldest first; `gen=` counts the lossy ones — how many times the photo has lost quality. A file re-encoded from another keeps the old entries and adds its own, so a copy made from a master still shows where it came from. The recompressor reads the record to decide what is worth doing: it asks before an encode that would only lose quality (the same or a finer distance than the file already has) and before a third lossy generation.
+
+The record lives in the file's XMP processing history (`xmpMM:History`), out of the way: your caption stays alone in the photo's Title. To see it in Windows Explorer as well, `--encode-tag comment` copies it into Comments (or `title`, after the caption). Every field the toolkit writes: [docs/metadata_written.md](docs/metadata_written.md#the-encode-record).
 
 ---
 
