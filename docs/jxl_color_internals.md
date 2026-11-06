@@ -112,7 +112,7 @@ TIFF:   Original ICC (ProPhoto RGB)
 Encode: cjxl creates native primaries for image data
         + Original ICC base64-encoded in XMP
            ↓
-JXL:    "Custom primaries" + XMP(dc:Description="ICC:AAADrE...")
+JXL:    "Custom primaries" + XMP(dc:Relation="jxlphoto-iccprofile:AAADrE...")
            ↓
 Decode: djxl generates generic ICC from primaries
         + Script extracts original ICC from XMP and replaces
@@ -287,64 +287,26 @@ In practice:
 
 ### How It Works
 
-In `jxl_tiff_encoder.py`:
+- **`jxl_tiff_encoder.py`** reads the TIFF's ICC profile, byte for byte, and
+  writes it base64-encoded into the JXL's XMP as a `jxlphoto-iccprofile:<base64>`
+  item in `dc:Relation` (since v2.19.0). Up to v2.18.x it was appended to
+  `xmp:CreatorTool` as `ICC:<base64>`: that copy is still read, and a re-encode
+  moves it to the token.
+- **`jxl_tiff_decoder.py`** (Roundtrip mode) decodes the pixels, converts them
+  to the original profile when djxl returned them in another space (the float
+  path above), and writes the original ICC bytes into the TIFF. The token itself
+  is dropped from the TIFF's XMP (`CLEANUP_XMP_ICC_MARKER`).
 
-```python
-# 1. Extract ICC from source TIFF
-icc_data = extract_icc_from_tiff(tiff_path)  # ~500-3000 bytes
-
-# 2. Base64 encode for text embedding
-icc_base64 = base64.b64encode(icc_data)  # ~700-4000 chars
-
-# 3. Create XMP with embedded ICC
-xmp = f"""<?xpacket...?>
-  <dc:description>
-    <rdf:Alt>
-      <rdf:li>ICC:{icc_base64}</rdf:li>
-    </rdf:Alt>
-  </dc:description>
-"""
-
-# 4. Embed encoding params separately (visible in Windows)
-xmp += f"""<xmp:CreatorTool>cjxl d={distance} e={effort}</xmp:CreatorTool>"""
-
-# 5. Inject XMP into JXL
-exiftool -XMP<=xmp_file.jxl
-```
-
-In `jxl_tiff_decoder.py`:
-
-```python
-# 1. Extract XMP from JXL
-xmp_data = exiftool("-XMP", jxl_path)
-
-# 2. Find and decode ICC
-match = re.search(r'ICC:([A-Za-z0-9+/=]+)', xmp_data)
-icc_data = base64.b64decode(match.group(1))
-
-# 3. Apply to output TIFF
-exiftool(f"-ICC_Profile<={icc_data}", tiff_path)
-
-# 4. Clean up XMP (remove base64, keep encoding params)
-if "ICC:" in creator_tool:
-    # Remove ICC: prefix, keep suffix
-    new_ct = creator_tool.replace("ICC:AAADrE...", "").strip(" |")
-    exiftool(f"-XMP-xmp:CreatorTool={new_ct}", tiff_path)
-```
+Every field, and what it reveals:
+[metadata_written.md](metadata_written.md#the-icc-copy-jxlphoto-iccprofile).
 
 ### Storage Locations
 
 | Location | Content | Visibility |
 |----------|---------|------------|
-| JXL codestream | Native primaries | Internal |
-| XMP dc:Description | Base64 ICC | Windows shows first 255 chars |
-| XMP CreatorTool | Encoding params | Windows Properties panel |
-
-The base64 data appears in Windows Explorer as:
-```
-Title: ICC:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...
-```
-This is intentional — the encoding params are more useful to see at a glance.
+| JXL codestream | Native primaries (lossy), or the ICC itself (lossless) | Internal |
+| XMP dc:Relation | `jxlphoto-iccprofile:<base64>` | exiftool; not shown in Explorer |
+| XMP xmpMM:History | The encode record (`gen=1 \| cjxl d=0.1 e=7`), since v2.24.0 | exiftool; `--encode-tag comment` or `title` adds a copy Explorer shows |
 
 ---
 
@@ -400,11 +362,11 @@ Look for:
 # Direct ICC (lossless)
 exiftool -ICC_Profile photo.jxl
 
-# XMP-embedded ICC (this workflow)
-exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
+# XMP-embedded ICC (this workflow; files up to v2.18.x: "ICC:" in XMP-xmp:CreatorTool)
+exiftool -XMP-dc:Relation photo.jxl | findstr "jxlphoto-iccprofile:"
 
-# Encoding params
-exiftool -XMP-xmp:CreatorTool photo.jxl
+# Encode record (xmpMM:History since v2.24.0; dc:Description before)
+exiftool -XMP-xmpMM:HistoryParameters photo.jxl
 ```
 
 ### Check ICC in TIFF:
@@ -442,8 +404,8 @@ exiftool -ProfileDescription -ProfileCopyright roundtrip.tif
 
 **Check 1:** Was ICC embedded?
 ```powershell
-exiftool -XMP-dc:Description photo.jxl | findstr "ICC:"
-# Should show "ICC:AAAD..."
+exiftool -XMP-dc:Relation photo.jxl | findstr "jxlphoto-iccprofile:"
+# Should show "jxlphoto-iccprofile:AAAD..."
 ```
 
 **Check 2:** Is ICC the same size?

@@ -133,14 +133,14 @@ master encoded by the toolkit, then its recompression:
 
 ```
 Action        : converted
-When          : 2026:10:13 14:02:11-03:00
-SoftwareAgent : jxl-photo 2.14.0 (https://github.com/rsilvabr/jxl-photo)
-Parameters    : jxl_tiff_encoder: from image/tiff to image/jxl
+When          : 2026:11:06 10:17:11+09:00
+SoftwareAgent : jxl-photo 2.24.0 (https://github.com/rsilvabr/jxl-photo)
+Parameters    : jxl_tiff_encoder: from image/tiff to image/jxl | gen=1 | cjxl d=0.05 e=7
 
 Action        : converted
-When          : 2026:10:13 14:07:48-03:00
-SoftwareAgent : jxl-photo 2.14.0 (https://github.com/rsilvabr/jxl-photo)
-Parameters    : jxl_recompressor: from image/jxl to image/jxl
+When          : 2026:11:06 13:02:40+09:00
+SoftwareAgent : jxl-photo 2.24.0 (https://github.com/rsilvabr/jxl-photo)
+Parameters    : jxl_recompressor: from image/jxl to image/jxl | gen=2 | cjxl d=0.05 e=7 | cjxl d=0.5 e=7
 ```
 
 `Action` is `derived` for a derivative (`--output-icc`, `--resize-*`,
@@ -148,7 +148,10 @@ Parameters    : jxl_recompressor: from image/jxl to image/jxl
 different releases each name their real version. Since v2.24.0 the entries the
 encoder and the recompressor write end with the encode record
 ([above](#the-encode-record)), which the recompressor's policies and the `gen=`
-calculation read; nothing else in the History is read back. Read it with:
+calculation read; nothing else in the History is read back. Entries written
+before v2.24.0 end after the MIME types, as `from image/tiff to image/jxl`.
+`exiftool -struct` shows every `|` of the record doubled (`||`): that is how a
+structure escapes it, not what is stored. Read it with:
 
 ```
 exiftool -struct -XMP-xmpMM:History file.jxl
@@ -223,18 +226,20 @@ History entry there too.
   time of each conversion.** It never names a file, a folder, a user name or a
   computer name.
 
-A real master and its mobile derivative (camera fields left out):
+A master and its mobile derivative as v2.24.0 writes them with the default
+`--encode-tag` (camera fields left out; `comment` would add the same record as
+`UserComment`, and files from v2.23.x and older have it as `Description`):
 
 ```
 16B_JXL/DSC_2290_ProPhoto-g22_v1.jxl
-  Relation    : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-iccprofile:<base64, 1580 chars: LargeRGB-elle-V4-g22>, jxlphoto-src:b9cf20e1422140c1, jxlphoto-srcsum:e6317b596c1e840d
-  Description : gen=1 | cjxl d=0.05 e=9
-  CreatorTool : Capture One Windows
+  Relation          : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-src:b9cf20e1422140c1, jxlphoto-srcsum:e6317b596c1e840d, jxlphoto-iccprofile:<base64, 1580 chars: LargeRGB-elle-V4-g22>
+  HistoryParameters : jxl_tiff_encoder: from image/tiff to image/jxl | gen=1 | cjxl d=0.05 e=9
+  CreatorTool       : Capture One Windows
 
 JXL_mobile/DSC_2290_sRGB_v1.jxl
-  Relation    : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-derived:sRGB/d3e9, jxlphoto-iccprofile:<base64, 812 chars: sRGB>
-  Description : gen=2 | cjxl d=0.05 e=9 | cjxl d=3.0 e=9
-  CreatorTool : Capture One Windows
+  Relation          : jxlphoto-depth:16, jxlphoto-origin:tiff16, jxlphoto-derived:sRGB/d3e9, jxlphoto-iccprofile:<base64, 812 chars: sRGB>
+  HistoryParameters : jxl_tiff_encoder: from image/tiff to image/jxl | gen=1 | cjxl d=0.05 e=9, jxl_recompressor: from image/jxl to image/jxl | gen=2 | cjxl d=0.05 e=9 | cjxl d=3.0 e=9
+  CreatorTool       : Capture One Windows
 ```
 
 ## Checking a file yourself

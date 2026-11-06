@@ -615,8 +615,9 @@ Options:
   --icc-png-strategy cautious|heuristic|always|skip
                     How to embed ICC in the PNG intermediate for lossy encoding (default: cautious)
   --strip           Strip all metadata from output (no EXIF/XMP preservation;
-                    the encode record is still written to dc:Description unless
-                    --encode-tag off, which writes nothing; also disables the
+                    the encode record is still written to its xmpMM:History
+                    entry, plus the visible copy --encode-tag names; with
+                    --encode-tag off the entry says there is none; also disables the
                     multi-page reconstruction and grayscale markers, so split
                     pages decode as standalone files and faithful multipage/
                     grayscale reconstruction is not possible)
@@ -743,9 +744,11 @@ TIFF (ProPhoto ICC) → JXL (lossy + XMP with base64 ICC) → TIFF (original Pro
    appended to `xmp:CreatorTool` as `ICC:<base64>`; that copy is still read,
    and a re-encode moves it (CreatorTool keeps only the program name — see
    [metadata_written.md](metadata_written.md#the-icc-copy-jxlphoto-iccprofile))
-4. **Encoding params** go to `dc:description` as an append-only lineage
-   chain (`gen=1 | cjxl d=0.1 e=7`, visible in Windows Properties); any
-   existing user text (a caption) stays first. Every encode **appends** one
+4. **Encoding params** go to the output's `xmpMM:History` entry as an
+   append-only lineage chain (`gen=1 | cjxl d=0.1 e=7`), so a caption in the
+   Title stays untouched. Up to v2.23.x the chain went to `dc:description`
+   (the Title) instead; it is still read there. `--encode-tag comment`,
+   `title` or `software` adds a visible copy. Every encode **appends** one
    entry — re-encoding a TIFF produced by the decoder at identical d/e adds
    a second entry, because decode-then-re-encode is exactly where a
    generation of loss happens. `gen=N` counts the **lossy** (`d>0`) entries
@@ -769,11 +772,16 @@ The embedded ICC is stored as:
     <rdf:li>jxlphoto-iccprofile:AAADrEtDTVMCEAAAbW50clJHQiBYWVogB84A...</rdf:li>
   </rdf:Bag>
 </dc:relation>
-<dc:description>
-  <rdf:Alt>
-    <rdf:li xml:lang="x-default">gen=1 | cjxl d=0.1 e=7</rdf:li>
-  </rdf:Alt>
-</dc:description>
+<xmpMM:History>
+  <rdf:Seq>
+    <rdf:li rdf:parseType="Resource">
+      <stEvt:action>converted</stEvt:action>
+      <stEvt:parameters>jxl_tiff_encoder: from image/tiff to image/jxl | gen=1 | cjxl d=0.1 e=7</stEvt:parameters>
+      <stEvt:softwareAgent>jxl-photo 2.24.0 (https://github.com/rsilvabr/jxl-photo)</stEvt:softwareAgent>
+      <stEvt:when>2026-11-06T10:17:11+09:00</stEvt:when>
+    </rdf:li>
+  </rdf:Seq>
+</xmpMM:History>
 ```
 
 The base64 string is not human-readable but preserves the **exact binary ICC data**.
@@ -978,7 +986,8 @@ the TIFF (real 16 MP ProPhoto export, 2026-09-24).
 ## XMP Preservation
 
 Metadata is written with **targeted XMP updates**:
-- `-xmp-dc:Description=` for the encode record (`gen=N | cjxl d=/e=` chain appended after any existing dc:description)
+- `-XMP-xmpMM:History+=` for the encode record: one entry per write, with the `gen=N | cjxl d=/e=` chain at the end of its Parameters
+- `-xmp-dc:Description=` only with `--encode-tag title` (the chain after any caption), or to take an old chain out of a caption the TIFF carried in
 - `-XMP-dc:Relation+=jxlphoto-iccprofile:` for ICC data (base64-encoded ICC
   profile); `-xmp-xmp:CreatorTool=` only to take an old `ICC:` copy out of a
   CreatorTool the TIFF carried in
@@ -1134,8 +1143,9 @@ D50 patch: 0 applied | 0 skipped (already correct) | 0 needed patch, 42 already 
 # files written up to v2.18.x have it in XMP CreatorTool as "ICC:")
 exiftool -XMP-dc:Relation photo.jxl | findstr "jxlphoto-iccprofile:"
 
-# Check encoding params (they live in dc:Description)
-exiftool -XMP-dc:Description photo.jxl
+# Check the encode record (in xmpMM:History since v2.24.0; files written
+# before have it in dc:Description, the Title)
+exiftool -XMP-xmpMM:HistoryParameters photo.jxl
 
 # Check EXIF Software (informational; the D50 patch no longer reads it)
 exiftool -Software photo.jxl
