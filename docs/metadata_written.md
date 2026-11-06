@@ -5,6 +5,11 @@ Lightroom, the camera — is **copied** to the output. On top of that, the
 toolkit adds the few fields below, almost all of them in XMP. This page lists
 every one: what it is, which script writes it, and when it is removed again.
 
+The EXIF keeps the source TIFF's byte order (little- or big-endian) in the
+master, in every copy made from it and in the TIFF the decoder writes back
+(since v2.25.0; until v2.24.x a master was always little-endian and a copy
+always big-endian).
+
 Since v2.17.0 the encoder, the decoder and the recompressor copy the XMP as
 **one block**, so it keeps namespaces exiftool can read but not write
 (SilverFast keeps its IR and dust-removal settings in one; a scan decoded
@@ -117,7 +122,7 @@ strips any record the source carries.
 | `jxlphoto-thumb` | the page was the TIFF's embedded thumbnail | encoder | decoder |
 | `jxlphoto-icc:inherited` | the page had no ICC of its own and used page 0's | encoder | decoder, recompressor derivatives |
 | `jxlphoto-pixsum:<pages>:<md5>` | a hash of the pixels the decoder wrote, so a TIFF edited later is never overwritten | decoder (on the TIFF) | the next encode |
-| `jxlphoto-derived:<recipe>` | this file is a **derivative**, and how it was made: target profile (or `keep`), `@long<px>`/`@short<px>`/`@pct<n>` (`+up` when upscaling was allowed), `+<sharpen>`, and in the recompressor `/d<d>e<e>` (`s` when cjxl streamed). Example: `sRGB@long2048+screen/d3e9` | recompressor, transcoder (derivatives only) | decoder |
+| `jxlphoto-derived:<recipe>` | this file is a **derivative**, and how it was made: target profile (or `keep`), `@long<px>`/`@short<px>`/`@pct<n>` (`+up` when upscaling was allowed), `+<sharpen>`, and in the recompressor `/d<d>e<e>` (`s` when cjxl streamed), in the transcoder's JPEG `/q<quality>` (since v2.25.0). Examples: `sRGB@long2048+screen/d3e9`, `sRGB@long2048+screen/q70` | recompressor, transcoder (derivatives only) | decoder |
 
 The decoder removes the tokens that describe the JXL (page structure, depth,
 the derivative recipe, the private tags it writes back), so a TIFF it writes
@@ -160,7 +165,9 @@ exiftool -struct -XMP-xmpMM:History file.jxl
 ## Derivatives
 
 A derivative is a recompressor or transcoder output made with `--output-icc`,
-`--resize-*` or `--sharpen`. It keeps everything the master had, except:
+`--resize-*` or `--sharpen`. It keeps everything the master had — its EXIF
+in the master's byte order (since v2.25.0; before, a copy's EXIF was always
+big-endian) — except:
 
 - `jxlphoto-src` / `jxlphoto-srcsum` are **removed** — a 2048 px copy must
   never prove the master is archived;

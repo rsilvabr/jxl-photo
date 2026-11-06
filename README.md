@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.24.0** (2026-11-06) · [What's new](#whats-new-in-v2240) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.25.0** (2026-11-06) · [What's new](#whats-new-in-v2250) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 ---
 
@@ -19,7 +19,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.24.0](#whats-new-in-v2240)
+- [What's new in v2.25.0](#whats-new-in-v2250)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -370,9 +370,10 @@ With sync (the wizard's and the presets' default), a run redoes only what change
 | The TIFF (re-exported) | redone | redone (its master is newer) | redone (its master is newer) |
 | The distance, up or down | **kept** — run once with `--overwrite` | redone | — |
 | The effort | **kept** | redone if higher, kept if lower | — |
-| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone |
+| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone (a resized or sharpened copy) |
 | Sharpening sigma / gain / threshold | — | kept | kept |
-| JPEG quality, PNG bit depth | — | — | **kept** — run once with `--overwrite` |
+| JPEG quality | — | — | redone (a resized or sharpened JPEG) |
+| PNG bit depth | — | — | **kept** — run once with `--overwrite` |
 
 A master is never redone because a setting changed: it is the archive, and a wrong value in a preset should not re-encode it. [Why each one](docs/behavior_and_limitations.md#what-a-re-run-redoes).
 
@@ -442,9 +443,22 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.24.0
+## What's new in v2.25.0
 
 2026-11-06.
+
+- **The TIFF's byte order is kept**: a big-endian TIFF (SilverFast scans,
+  some Mac programs) gives a big-endian master and decodes back to a
+  big-endian TIFF, and every copy keeps its master's order. Only how the EXIF
+  numbers are stored changes, not their values; little-endian TIFFs (Capture
+  One, Lightroom) behave as before.
+- **A new JPEG quality redoes the JPEG copies** on the next sync, like a new
+  size or sharpening. JPEGs made before are kept; run once with
+  `--overwrite` to redo them ([Upgrading](docs/upgrading.md#v2250-the-tiffs-byte-order-is-kept-a-new-jpeg-quality-redoes-the-jpeg-copies)).
+
+[Version history](docs/version_history.md#v2250).
+
+### In v2.24.0
 
 - **The cjxl record no longer shows as the photo's Title** in Windows
   Explorer: it is kept in the file's XMP History, and your caption stays your
@@ -501,7 +515,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.24.0** | 2026-11-06 | The encode record leaves the Title for the XMP History; 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
+| **v2.25.0** | 2026-11-06 | The TIFF's byte order kept in masters, copies and decoded TIFFs; a new JPEG quality redoes the JPEG copies |
+| [v2.24.0](docs/version_history.md#v2240) | 2026-11-06 | The encode record leaves the Title for the XMP History; 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
 | [v2.23.0](docs/version_history.md#v2230) | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
 | [v2.22.5](docs/version_history.md#v2225) | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
 | [v2.22.1](docs/version_history.md#v2221) | 2026-11-04 | Every wizard question on one question layer; same questions and command lines |

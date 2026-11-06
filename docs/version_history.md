@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.24.0](#v2240)** | 2026-11-06 | The encode record leaves the Title (`dc:description`) for `xmpMM:History`; 8-bit TIFFs archived lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard; everything in v2.24.0_beta1 |
+| **[v2.25.0](#v2250)** | 2026-11-06 | The TIFF's byte order (II/MM) kept in the master, its copies and the decoded TIFF; a JPEG copy records its quality, so a new quality redoes it |
+| [v2.24.0](#v2240) | 2026-11-06 | The encode record leaves the Title (`dc:description`) for `xmpMM:History`; 8-bit TIFFs archived lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard; everything in v2.24.0_beta1 |
 | [v2.24.0_beta1](#v2240_beta1) | 2026-11-06 | Pre-release. 8-bit TIFFs archived lossless at `d=0.1` and below (`--eight-bit-distance`); the wizard shows the typical file size next to every distance; `d=0.7` and `d=5` in the lists |
 | [v2.23.0](#v2230) | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
 | [v2.22.5](#v2225) | 2026-11-04 | Distances up to 25 (cjxl's own limit), not 15 |
@@ -91,9 +92,52 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.25.0
+
+**Released 2026-11-06.** Supersedes v2.24.0. Two things change in what the
+scripts write ([Upgrading](upgrading.md#v2250-the-tiffs-byte-order-is-kept-a-new-jpeg-quality-redoes-the-jpeg-copies)):
+
+- **The TIFF's byte order is kept end to end.** Until v2.24.x the encoder
+  forced every master's EXIF to little-endian (`-ExifByteOrder=Little-endian`,
+  a line from the first version, with no reason recorded), and every copy
+  came out big-endian: the recompressor and the transcoder copy the tags with
+  `-tagsfromfile … -exif:all` into a file without EXIF, and exiftool writes a
+  new EXIF block big-endian. Measured on a Capture One master: TIFF II,
+  master II, sRGB copy MM, phone JPEG MM; on a SilverFast scan (MM): master
+  II. Now:
+  - the master keeps the TIFF's order (`-ExifByteOrder=` read from the TIFF's
+    first two bytes, `_tiff_byte_order`; set explicitly, since exiftool also
+    writes a new block when no raw one could be extracted);
+  - every copy keeps its source's (`-ExifByteOrder<ExifByteOrder` in the same
+    `-tagsfromfile`, recompressor and transcoder);
+  - the decoder writes the TIFF in the master's order (`byteorder=` of
+    tifffile's writer, from the JXL's Exif box header, `_jxl_exif_byteorder`;
+    the JPEG-preview rewrite keeps the TIFF's).
+
+  The EXIF's contents do not change, only how its numbers are stored; every
+  reader takes both (IrfanView, Explorer and exiftool checked on MM files).
+  The pixel record (`jxlphoto-pixsum`) was already order-independent.
+  Masters written before stay little-endian: their original order was not
+  recorded.
+- **A JPEG copy records its quality.** The transcoder's derivative recipe
+  ends with the JPEG quality (`jxlphoto-derived:sRGB@long2048+screen/q70`),
+  and `_recipe_changed` compares it: a new quality, higher or lower, redoes
+  the JPEG on the next sync, like a new size or sharpening. A recipe without
+  a quality (every JPEG written before) is kept — its quality is unknown, and
+  an update must not redo every phone JPEG. A PNG copy records none.
+- Two comments in the encoder brought up to date (the distance levels of
+  `CJXL_DISTANCE`; a deleting run, not only mode 8, keeps a TIFF whose pages
+  were dropped).
+- Tests: `tests/test_exif_byte_order.py`, real codecs and exiftool in a
+  hostile folder: an MM and an II TIFF through master, sRGB copy, resized
+  JPEG and decoded TIFF; q70 kept on a second run, q80 re-derived, an old
+  recipe without a quality kept. Four of them fail on v2.24.0. The battery
+  checks that its SilverFast scan (MM) keeps its order in the master and the
+  decoded TIFF.
+
 ## v2.24.0
 
-**Released 2026-11-06.** Supersedes v2.24.0_beta1 and v2.23.0. Two defaults
+**Released 2026-11-06.** Superseded by v2.25.0. Supersedes v2.24.0_beta1 and v2.23.0. Two defaults
 change: where the encode record is shown, and 8-bit TIFFs at low distances
 ([Upgrading](upgrading.md#v2240-8-bit-tiffs-are-archived-lossless-at-d01-and-below-the-encode-record-leaves-the-title)).
 Everything in [v2.24.0_beta1](#v2240_beta1), and:

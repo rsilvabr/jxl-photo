@@ -11,6 +11,23 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.25.0: the TIFF's byte order is kept; a new JPEG quality redoes the JPEG copies
+
+- **Masters, copies and decoded TIFFs keep the TIFF's byte order** (little-
+  or big-endian, `II`/`MM`). Capture One, Lightroom and most cameras write
+  little-endian TIFFs: nothing changes for them except that their copies (an
+  sRGB JXL, a phone JPEG) now come out little-endian too, as the master.
+  Big-endian TIFFs (SilverFast scans, some Mac programs) now give a
+  big-endian master and decode back to a big-endian TIFF. Only how the EXIF
+  numbers are stored changes, not their values. Masters written before stay
+  little-endian.
+- **A JPEG copy (resized or sharpened) records its quality**, so changing
+  `--quality` redoes it on the next sync. JPEGs written before carry no
+  quality and are kept: after changing the quality of an existing preset, run
+  it once with `--overwrite` to redo them.
+
+---
+
 ## v2.24.0: 8-bit TIFFs are archived lossless at d=0.1 and below; the encode record leaves the Title
 
 - **An 8-bit TIFF that is not a film scan is encoded lossless** when the run's

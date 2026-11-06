@@ -797,6 +797,12 @@ py jxl_jpeg_transcoder.py photo.jxl --icc-profile "C:\ICC\sRGB.icc"
 
 ## Resized and sharpened derivatives (`--resize-long/-short/-percent`, `--sharpen`)
 
+Every resized or sharpened JPEG/PNG records its recipe, `jxlphoto-derived:sRGB@long2048+screen/q70`
+(colour, size, sharpening and, for a JPEG, its quality): a sync run redoes
+it when the recipe asked for differs, so a new size, sharpening or quality
+needs no `--overwrite`. A JPEG written before v2.25.0 has no quality in its
+recipe and is kept when the quality changes.
+
 On the JXL → JPEG/PNG direction the transcoder can deliver a master at any
 size, with output sharpening tuned for the destination:
 

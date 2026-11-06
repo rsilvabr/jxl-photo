@@ -100,9 +100,10 @@ The TIFF encoder/decoder default to **smart sync** (reconvert when the source is
 | The TIFF (re-exported) | redone | redone (its master is newer) | redone (its master is newer) |
 | The distance, up or down | **kept** — run once with `--overwrite` | redone | — |
 | The effort | **kept** | redone if higher, kept if lower | — |
-| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone |
+| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone (a resized or sharpened copy) |
 | Sharpening sigma / gain / threshold | — | kept | kept |
-| JPEG quality, PNG bit depth | — | — | **kept** — run once with `--overwrite` |
+| JPEG quality | — | — | redone (a resized or sharpened JPEG) |
+| PNG bit depth | — | — | **kept** — run once with `--overwrite` |
 
 This is with sync, the wizard's and the presets' default (`--sync`; the
 encoder's and the decoder's own default). Why each column behaves as it does:
@@ -123,10 +124,14 @@ encoder's and the decoder's own default). Why each column behaves as it does:
   counts (`REDERIVE_ON_LOWER_EFFORT` to change that), because a lower one
   would spend a run on a larger file. Copies made before v2.7.0 carry no
   distance in their recipe and are kept.
+- **A JPEG or PNG copy has a recipe only when it is resized or sharpened**
+  (`jxlphoto-derived:sRGB@long2048+screen/q70`); a JPEG also records its
+  quality since v2.25.0. A copy that is only colour-converted carries no
+  recipe, so for it only a newer master counts. JPEGs written before v2.25.0
+  carry no quality and are kept when the quality changes.
 - **What the recipe does not record is not compared:** the sharpening's
-  sigma, gain and threshold (only `screen`/`print` is), and for a JPEG or
-  PNG copy its quality and bit depth. After changing one of those, run once
-  with `--overwrite`.
+  sigma, gain and threshold (only `screen`/`print` is), and a PNG copy's bit
+  depth. After changing one of those, run once with `--overwrite`.
 - After a rebuild of the masters, every master is newer than its copies, so
   the next sync of the copies redoes them all.
 

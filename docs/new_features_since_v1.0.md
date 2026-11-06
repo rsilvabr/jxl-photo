@@ -1,5 +1,18 @@
 # New Features Since v1.0
 
+## v2.25.0 (2026-11-06)
+
+### The TIFF's byte order is kept (encoder, recompressor, transcoder, decoder)
+
+A big-endian (MM) TIFF gives a big-endian master, its copies keep their
+master's order, and the decoder writes the TIFF back in it; until v2.24.x the
+master was always little-endian and the copies always big-endian.
+
+### A JPEG copy records its quality (transcoder)
+
+`jxlphoto-derived:<recipe>/q<N>`: a new `--quality` re-derives a resized or
+sharpened JPEG on the next sync. Recipes written before (no quality) are kept.
+
 ## v2.24.0 (2026-11-06)
 
 ### The encode record lives in xmpMM:History (encoder, recompressor)
