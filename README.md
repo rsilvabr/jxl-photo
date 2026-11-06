@@ -361,6 +361,21 @@ py jxl_jpeg_transcoder.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL -
 
 The same three steps as manifests and presets: [a whole library, end to end](docs/README_manifest.md#7-a-whole-library-end-to-end-masters-a-16-bit-srgb-copy-phone-jpegs).
 
+### What a re-run redoes
+
+With sync (the wizard's and the presets' default), a run redoes only what changed:
+
+| You change | Master | JXL copy | JPEG / PNG copy |
+|---|---|---|---|
+| The TIFF (re-exported) | redone | redone (its master is newer) | redone (its master is newer) |
+| The distance, up or down | **kept** — run once with `--overwrite` | redone | — |
+| The effort | **kept** | redone if higher, kept if lower | — |
+| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone |
+| Sharpening sigma / gain / threshold | — | kept | kept |
+| JPEG quality, PNG bit depth | — | — | **kept** — run once with `--overwrite` |
+
+A master is never redone because a setting changed: it is the archive, and a wrong value in a preset should not re-encode it. [Why each one](docs/behavior_and_limitations.md#what-a-re-run-redoes).
+
 ---
 
 ## How the ICC profile is preserved
@@ -394,7 +409,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **cjxl 0.12 treats every distance up to 0.05 as 0.05**, so smaller values buy nothing there. [More](docs/behavior_and_limitations.md#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011)
 - **Every page of a multi-page TIFF is converted by default**, embedded previews included, except Capture One's. [More](docs/behavior_and_limitations.md#multi-page-tiffs-every-page-is-converted-by-default)
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
-- **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
+- **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs; a changed distance redoes the copies but not the masters ([table](#what-a-re-run-redoes)). [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **8-bit TIFFs** are archived lossless when the distance is 0.1 or less, where lossy saves little (`d=0.1`) or comes out larger (`d=0.05`); `--eight-bit-distance same` turns it off. [More](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)

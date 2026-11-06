@@ -93,6 +93,43 @@ Each script's settings are the variables at the top of the file. `jxl_photo.py`'
 
 The TIFF encoder/decoder default to **smart sync** (reconvert when the source is newer than the existing output — there is no plain "skip existing" CLI mode), while the JPEG transcoder **skips existing outputs** by default. Use `--overwrite` (always) or `--sync` (source newer) to control it explicitly. See each script's README for details.
 
+## What a re-run redoes
+
+| You change | Master (encoder) | JXL copy (recompressor) | JPEG / PNG copy (transcoder) |
+|---|---|---|---|
+| The TIFF (re-exported) | redone | redone (its master is newer) | redone (its master is newer) |
+| The distance, up or down | **kept** — run once with `--overwrite` | redone | — |
+| The effort | **kept** | redone if higher, kept if lower | — |
+| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone |
+| Sharpening sigma / gain / threshold | — | kept | kept |
+| JPEG quality, PNG bit depth | — | — | **kept** — run once with `--overwrite` |
+
+This is with sync, the wizard's and the presets' default (`--sync`; the
+encoder's and the decoder's own default). Why each column behaves as it does:
+
+- **A master follows its TIFF, not the settings.** The encoder's sync compares
+  dates only: a master is encoded again when its TIFF is newer. A new distance
+  or effort applies to new TIFFs, and to the existing ones only with
+  `--overwrite` (a rebuild). That is deliberate: the master is the archive, a
+  rebuild of a large library takes hours, and a wrong value in a preset
+  (`d=3` tried once and saved) must not quietly re-encode every master — once
+  the TIFFs are gone, there is no way back. Reading every master's record on
+  each sync would also slow every run down.
+- **A copy follows its master and its recipe.** Each copy records the recipe
+  it was made with, e.g. `jxlphoto-derived:sRGB@long2048+screen/d0.7e7`. A
+  newer master, or a recipe that differs from the one asked for, makes it
+  again. In a JXL copy the recipe includes the distance and the effort
+  (`REDERIVE_ON_ENCODE_CHANGE`); at the same distance only a higher effort
+  counts (`REDERIVE_ON_LOWER_EFFORT` to change that), because a lower one
+  would spend a run on a larger file. Copies made before v2.7.0 carry no
+  distance in their recipe and are kept.
+- **What the recipe does not record is not compared:** the sharpening's
+  sigma, gain and threshold (only `screen`/`print` is), and for a JPEG or
+  PNG copy its quality and bit depth. After changing one of those, run once
+  with `--overwrite`.
+- After a rebuild of the masters, every master is newer than its copies, so
+  the next sync of the copies redoes them all.
+
 ## Film scanners: IR channel / Digital ICE
 
 Since v2.17.0 a **SilverFast** scan (image, thumbnail, IR page) archived with the defaults and decoded back opens in SilverFast with its IR channel and dust removal (iSRD) recognised and its browser icon — checked on a slide and a negative, also after recompressing the master. It takes the IR page's role (`SubfileType` 4), the thumbnail page (`--thumbnail-mode auto`), SilverFast's own XMP settings (now copied as one block) and its private TIFF tags (now kept); before v2.17.0 the XMP settings and the thumbnail were lost and SilverFast saw no IR channel. Masters archived before v2.17.0 do not carry them: re-archive those scans from their TIFFs with `--overwrite`. Other scanner programs (VueScan, Epson Scan, ...) were not tested; **test one file before converting a whole archive.** [Details](README_jxl_tiff_encoder.md#film-scans-and-their-scanner-software)
