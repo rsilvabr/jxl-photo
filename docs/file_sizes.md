@@ -171,7 +171,9 @@ No edit here: the photos are looked at as they are. Zoomed in to 200%,
 photos (ISO 25600 among them), as sRGB copies against a lossless decode: the
 luminance grain is 94–98% intact at `d=1.0` and 98% or more from `d=0.6`
 down. The **colour** grain is what the encoder simplifies first: it stays
-close to the original only at `d=0.1` and below. So `d=0.7` is a light file
+close to the original at `d=0.1` and below, and already differs more at
+`d=0.2`, the next distance measured (nothing between the two was tested, so
+the change may start anywhere in that range). So `d=0.7` is a light file
 that keeps the grain's texture, not its exact colour noise. The wizard offers
 it as "visually lossless (keeps the grain texture)".
 
