@@ -36,16 +36,22 @@ Spectacular compression with no compromise on bit depth.
 - Lossy 16-bit files — small files that retain full 16-bit tonal information, something no other common format achieves (JPEG is 8-bit, TIFF lossless is large)
 - This is genuinely new: small lossy files, but with 16-bit color depth
 
-Typical sizes of 16-bit ProPhoto exports from Capture One (median of 10 photos per camera, ISO 64–4000; in brackets the range without the smallest and largest 10% — detail and noise move the size more than the camera does):
+Typical sizes of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000; in brackets the range without the smallest and largest 10% — detail and noise move the size more than the camera does). ZIP is the TIFF compression tiff-workflow writes:
 
-| Format | Nikon Z7 / Z8 (45 MP) | Nikon Zf (24 MP) |
-|--------|-----------------------|------------------|
-| TIFF 16-bit | 273 MB (~255 MB zip) | 146 MB (~139 MB zip) |
-| JXL lossless | ~173 MB (152–187) | ~89 MB (82–101) |
-| JXL `d=0.05` | ~42 MB (36–51) | ~21 MB (19–26) |
-| JXL `d=0.1` | ~31 MB (24–38) | ~15 MB (13–20) |
-| JXL `d=0.5` | ~11 MB (7–16) | ~5 MB (3.5–9) |
-| JXL `d=1.0` (visually lossless) | ~5.5 MB (3–10) | ~2.7 MB (1.4–6) |
+| Format | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
+|--------|----------------|------------|--------------|
+| TIFF 16-bit / with ZIP | 273 / 227 MB | 146 / 120 MB | 72 / 60 MB |
+| TIFF 8-bit / with ZIP | 136 / 61 MB | 73 / 30 MB | 36 / 16 MB |
+| JXL lossless, from 16-bit | ~173 MB (152–187) | ~89 MB (82–101) | ~43 MB (40–46) |
+| JXL lossless, from 8-bit | ~43 MB (33–54) | ~21 MB (18–29) | ~10 MB (7.7–12) |
+| JXL `d=0.05` | ~42 MB (36–51) | ~21 MB (19–26) | ~9.9 MB (7.9–12) |
+| JXL `d=0.1` | ~31 MB (24–38) | ~15 MB (13–20) | ~7.2 MB (5.4–9.2) |
+| JXL `d=0.3` | ~16 MB (11–22) | ~7.6 MB (5.8–12) | ~3.5 MB (2.5–5.7) |
+| JXL `d=0.5` | ~11 MB (7–16) | ~4.9 MB (3.5–9.3) | ~2.4 MB (1.4–4.3) |
+| JXL `d=1.0` (visually lossless) | ~5.5 MB (3–10) | ~2.7 MB (1.4–6.2) | ~1.2 MB (0.6–2.8) |
+| JXL `d=3.0` (web) | ~1.8 MB (1.0–4.4) | ~0.9 MB (0.4–1.8) | ~0.4 MB (0.2–1.1) |
+
+Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
 
 Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB). On 8-bit scans, `d=0.05`/`0.1` save little or nothing over lossless, so keep those lossless. Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0` for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
 
@@ -62,6 +68,8 @@ The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https
 ## Features
 
 **TIFF → JXL** — 16-bit lossless or near-lossless archives. The exact original ICC profile comes back on decode, even from a lossy file; EXIF/XMP stay visible in IrfanView, XnView MP and other viewers. Multi-page TIFFs and film scans (IR page included) are split and rebuilt page for page.
+
+**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance-v2170)).
 
 **JXL → TIFF** — Roundtrip, Basic and Matrix decode modes, a JPEG preview for fast Explorer thumbnails, and a sync that reconverts only what changed.
 
@@ -371,6 +379,7 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
 - **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs. [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
+- **8-bit TIFFs** are archived lossless when the distance is 0.1 or less, where lossy would not be smaller; `--eight-bit-distance same` turns it off. [More](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
 - **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **New releases:** the menu checks GitHub at most once a day and adds a line when a newer release is out; nothing is downloaded, and `--run-preset` never checks. [More](docs/README_jxl_tools.md#new-release-notice)
