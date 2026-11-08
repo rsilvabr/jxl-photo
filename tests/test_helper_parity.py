@@ -120,6 +120,10 @@ SHARED_HELPERS = [
     # The "still the file that was copied?" check before an in-place edit
     # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
     "_changed_since",
+    # TEMP_DIR / staging checked before the run (2026-11-08): the transcoder
+    # had no check, and a dry run with a missing TEMP_DIR failed every marker
+    # read in all four. One copy drifting brings either back.
+    "_work_dir_problem",
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
     "_long_codec_paths",

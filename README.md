@@ -200,7 +200,7 @@ The easiest way to use this toolkit. Run `py jxl_photo.py` and follow the guided
 │  8  Reset the encoder's ICC test cache                                                                             │
 │     SETTINGS                                                                                                       │
 │  9  Settings: wrapper defaults, script settings, reset, move                                                       │
-│  D  Dependencies: check again                                                                                      │
+│  D  Dependencies and new releases: check again                                                                     │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```

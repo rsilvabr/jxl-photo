@@ -91,7 +91,25 @@ def test_no_network_says_nothing(cfg, asked, monkeypatch):
     monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
     asked.answer = None
     assert wp._update_notice(cfg, today="2026-11-04") is None
-    assert cfg.config.update_checked_on == "2026-11-04"     # not asked again today
+    # No answer does not count as asked (owner's request, 2026-11-08): the
+    # next run of the same day asks again.
+    assert cfg.config.update_checked_on is None
+    assert not cfg.config_path.exists()                     # nothing written
+    asked.answer = "v99.0.0"
+    assert wp._update_notice(cfg, today="2026-11-04")
+    assert asked == ["jxl-photo", "jxl-photo"]
+
+
+def test_no_answer_in_the_background_leaves_the_day_unasked(cfg, asked, monkeypatch):
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.24.0")
+    cfg.config.update_checked_on = "2026-11-06"
+    cfg.config.update_latest_seen = "v2.25.0"
+    asked.answer = None
+    poll = wp._update_check_start(cfg)
+    assert _wait_for(lambda: asked == ["jxl-photo"])
+    notice = poll(5.0)
+    assert "earlier run on 2026-11-06" in notice[0]          # the kept answer, dated
+    assert wp.ConfigManager().config.update_checked_on in (None, "2026-11-06")
 
 
 @pytest.mark.parametrize("how", ["config", "env"])
@@ -265,3 +283,121 @@ def test_the_background_ask_keeps_the_jxl_thumb_answer(cfg, asked, monkeypatch):
     poll(5.0)
     assert "jxl-thumb" in asked
     assert wp.ConfigManager().config.thumb_latest_seen == "v99.0.0"
+
+
+# ---------------------------------------------------------------------------
+# The answer survives a run that never draws the menu again (owner's request,
+# 2026-11-08: "não é um programa que a pessoa volte pro menu... abre de novo").
+# Pre-fix proof: git show HEAD:jxl_photo.py into a tmp folder, then
+#   $env:JXLPHOTO_SCRIPTS_UNDER_TEST = "<tmp>"
+#   python -m pytest tests/test_update_check.py -q -k "earlier_run or keeps_its or d_in_the or only_its"
+# ---------------------------------------------------------------------------
+
+def _wait_for(pred, seconds=10):
+    import time
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_the_thread_keeps_its_answer_without_a_poll(cfg, asked, monkeypatch):
+    """The run goes straight into a job (no poll after the first half
+    second) and is closed: the answer must already be on disk."""
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    cfg.config.presets = {"MOBILE": {"last_input_dir": "G:/x"}}
+    cfg.save_config()
+    wp._update_check_start(cfg)                      # never polled
+    assert _wait_for(lambda: wp.ConfigManager().config.update_latest_seen == "v99.0.0")
+    again = wp.ConfigManager().config
+    assert again.presets == {"MOBILE": {"last_input_dir": "G:/x"}}   # nothing else lost
+
+
+def test_the_answer_rewrites_only_its_keys(cfg):
+    """save_update_answer edits the file on disk, not a dump of the memory:
+    a key the menu thread wrote and this copy never saw survives."""
+    cfg.save_config()
+    data = json.loads(cfg.config_path.read_text(encoding="utf-8"))
+    data["last_input_dir"] = "G:/2025/250118_吾妻山公園 [FINAL]"
+    cfg.config_path.write_text(json.dumps(data), encoding="utf-8")
+    cfg.save_update_answer("2026-11-08", "v99.0.0", None)
+    saved = json.loads(cfg.config_path.read_text(encoding="utf-8"))
+    assert saved["last_input_dir"] == "G:/2025/250118_吾妻山公園 [FINAL]"
+    assert saved["update_latest_seen"] == "v99.0.0"
+    assert saved["update_checked_on"] == "2026-11-08"
+
+
+def test_a_corrupt_file_is_not_overwritten_by_the_answer(cfg):
+    cfg.config_path.write_text("{not json", encoding="utf-8")
+    cfg.save_update_answer("2026-11-08", "v99.0.0", None)
+    assert cfg.config_path.read_text(encoding="utf-8") == "{not json"
+    assert cfg.config.update_latest_seen == "v99.0.0"
+
+
+def test_the_next_run_shows_an_earlier_runs_answer_with_its_date(cfg, monkeypatch):
+    """A slow network on the next day: the kept answer shows at once."""
+    import threading
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.24.0")
+    cfg.config.update_checked_on = "2026-11-06"
+    cfg.config.update_latest_seen = "v2.25.0"
+    release = threading.Event()
+    monkeypatch.setattr(wp, "_latest_release_tag",
+                        lambda repo, timeout=3: (release.wait(10), "v2.25.0")[1])
+    try:
+        notice = wp._update_check_start(cfg)(0.2)
+        assert notice and "v2.25.0" in notice[0]
+        assert "earlier run on 2026-11-06" in notice[0] and "D in the menu" in notice[0]
+    finally:
+        release.set()
+
+
+def test_asked_earlier_today_says_so(cfg, asked, monkeypatch):
+    from datetime import date
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.24.0")
+    cfg.config.update_checked_on = date.today().isoformat()
+    cfg.config.update_latest_seen = "v2.25.0"
+    notice = wp._update_check_start(cfg)(0)
+    assert f"earlier run on {date.today().isoformat()}" in notice[0]
+    assert asked == []
+
+
+def test_a_fresh_answer_carries_no_date(cfg, asked, monkeypatch):
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    poll = wp._update_check_start(cfg)
+    assert _wait_for(lambda: poll(0.2) is not None)
+    assert "earlier run" not in poll()[0]
+
+
+@pytest.mark.parametrize("answer,expect,news", [
+    ("v99.0.0", "A new release is out: v99.0.0", True),
+    ("v2.22.0", "up to date", False),
+    (None, "GitHub did not answer", False)])
+def test_d_in_the_menu_asks_now(cfg, asked, monkeypatch, answer, expect, news):
+    from datetime import date
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    cfg.config.update_checked_on = date.today().isoformat()   # asked today already
+    cfg.config.update_latest_seen = "v2.22.0"
+    asked.answer = answer
+    line, notice = wp._update_check_now(cfg)
+    assert asked == ["jxl-photo"]
+    assert expect in line and bool(notice) is news
+    assert "earlier run" not in line
+    if answer:
+        assert wp.ConfigManager().config.update_latest_seen == answer
+
+
+def test_d_respects_the_off_switch(cfg, asked):
+    cfg.config.check_for_updates = False
+    line, notice = wp._update_check_now(cfg)
+    assert notice is None and "off" in line and asked == []
+
+
+def test_d_in_the_main_loop_offers_u(tmp_path, monkeypatch, asked, capsys):
+    monkeypatch.setattr(wp, "TOOLKIT_VERSION", "2.22.0")
+    monkeypatch.setattr(wp, "_update_check_start", lambda c: (lambda wait=0.0: None))
+    menus = _main(tmp_path, monkeypatch, [], picks=("D", "0"))
+    assert menus[0] is None                      # nothing known before D
+    assert menus[1] and menus[1][0] == "v99.0.0"
+    assert "A new release is out: v99.0.0" in capsys.readouterr().out

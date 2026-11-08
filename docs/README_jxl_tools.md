@@ -53,7 +53,7 @@ The tool shows a status bar with all detected dependencies, then presents the ma
 │  8  Reset the encoder's ICC test cache                                                                             │
 │     SETTINGS                                                                                                       │
 │  9  Settings: wrapper defaults, script settings, reset, move                                                       │
-│  D  Dependencies: check again                                                                                      │
+│  D  Dependencies and new releases: check again                                                                     │
 │  0  Exit                                                                                                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
@@ -1021,7 +1021,14 @@ install command) and an empty value turns the tip off.
 ### New release notice
 
 When the menu starts, it asks GitHub whether a newer release is out — at most
-once a day, with a 3-second limit; without a network it says nothing. A newer
+once a day (a day counts once GitHub answered), with a 3-second limit; without
+a network it says nothing and the next run asks again. The
+menu does not wait for the answer (half a second at most): the lookup runs in
+the background and keeps its answer in the settings file as soon as it is in,
+so a run that goes straight into a job still leaves it for the NEXT run, which
+shows it at once with its date (`Checked by an earlier run on 2026-11-06; D in
+the menu checks again.`). `D` in the menu checks the dependencies and asks
+GitHub again right away. A newer
 one adds a line at the top (`A new release is out: v2.23.0 (this copy is
 v2.22.0)`) and a `U` entry in the menu that opens the release page. Nothing is
 downloaded or installed. Pre-releases (betas) are ignored. The Windows program

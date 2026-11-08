@@ -5912,6 +5912,32 @@ Examples:
     return parser
 
 
+def _work_dir_problem(path, label, dry_run, dry_run_uses_it=False):
+    """Why a work folder (TEMP_DIR, staging) cannot be used, or None. A real
+    run creates it. A DRY RUN creates nothing (a simulation that leaves new
+    folders on disk is not a simulation): a path that exists but is not a
+    folder is refused, and a folder the dry run itself writes into
+    (dry_run_uses_it: TEMP_DIR holds the exiftool argfiles and the captured
+    output of every planning read) must already exist, or every marker read
+    fails and a good archive is refused as unreadable."""
+    if path is None:
+        return None
+    p = Path(path)
+    try:
+        if dry_run:
+            if p.exists() and not p.is_dir():
+                return f"{label} is not a directory: {path}"
+            if dry_run_uses_it and not p.is_dir():
+                return (f"{label} does not exist: {path}. A dry run creates no "
+                        f"folders: create it, or run without --dry-run (a real "
+                        f"run creates it).")
+            return None
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"{label} is not usable: {path} ({e})"
+    return None
+
+
 def main():
     # Every module global this function assigns (D-1). Declared as one block at
     # the top so no assignment can ever textually precede its declaration when
@@ -5949,22 +5975,15 @@ def main():
     # worker mid-batch (TemporaryDirectory(dir=TEMP_DIR)).
     #
     # A DRY RUN validates without CREATING: a simulation that leaves two new
-    # folders on disk is not a simulation. It never writes into either one, so
-    # checking an existing path is enough there.
-    def _check_dir(path, label):
-        if path is None:
-            return
-        p = Path(path)
-        try:
-            if args.dry_run:
-                if p.exists() and not p.is_dir():
-                    parser.error(f"{label} is not a directory: {path}")
-                return
-            p.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            parser.error(f"{label} is not usable: {path} ({e})")
+    # folders on disk is not a simulation. It never writes into the staging
+    # folder, so an existing path is enough there; TEMP_DIR it does use (the
+    # planning reads' argfiles), so that one must exist (_work_dir_problem).
+    def _check_dir(path, label, dry_run_uses_it=False):
+        _why = _work_dir_problem(path, label, args.dry_run, dry_run_uses_it)
+        if _why:
+            parser.error(_why)
 
-    _check_dir(TEMP_DIR, "TEMP_DIR")
+    _check_dir(TEMP_DIR, "TEMP_DIR", dry_run_uses_it=True)
     _check_dir(args.staging, "staging directory")
 
     # Value validations that must run BEFORE the flag assignments below: a

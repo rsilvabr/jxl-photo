@@ -1005,8 +1005,12 @@ class ConfigManager:
     """Manages persistent configuration for jxl_tools"""
 
     def __init__(self):
+        import threading
         self.config_path = self._get_config_path()
         self.config = ToolConfig()
+        # The background release lookup writes its answer from its own thread
+        # (save_update_answer); every write of the file holds this lock.
+        self._save_lock = threading.RLock()
         self._load_config()
 
     def _get_config_path(self) -> Path:
@@ -1064,6 +1068,40 @@ class ConfigManager:
         self.config.presets = clean
 
     def save_config(self) -> None:
+        with self._save_lock:
+            self._write_config(asdict(self.config))
+
+    def save_update_answer(self, checked_on: str, tag: Optional[str],
+                           thumb: Optional[str]) -> None:
+        """Keep a release lookup's answer, from any thread. Sets the fields in
+        memory, then rewrites ONLY those keys in the file on disk (read, change,
+        atomic write, under the save lock): the background thread must never
+        serialise the whole config while the menu thread changes it, and the
+        answer has to reach the file even when the menu is never drawn again —
+        a run usually ends by closing the window, so the NEXT run shows it.
+        A file that exists but does not parse is left alone."""
+        with self._save_lock:
+            cfg = self.config
+            cfg.update_checked_on = checked_on
+            if tag:
+                cfg.update_latest_seen = tag
+            if thumb:
+                cfg.thumb_latest_seen = thumb
+            data: Dict[str, Any] = {}
+            if self.config_path.exists():
+                try:
+                    with open(self.config_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    return
+                if not isinstance(data, dict):
+                    return
+            data["update_checked_on"] = cfg.update_checked_on
+            data["update_latest_seen"] = cfg.update_latest_seen
+            data["thumb_latest_seen"] = cfg.thumb_latest_seen
+            self._write_config(data)
+
+    def _write_config(self, data: Dict[str, Any]) -> None:
         try:
             # Atomic write (same recipe the children adopted in v2.1.1): dump
             # to a unique temp file FIRST, then swap it in with os.replace.
@@ -1079,7 +1117,7 @@ class ConfigManager:
                         / f".{self.config_path.name}.{uuid.uuid4().hex}.tmp")
             try:
                 with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(asdict(self.config), f, indent=2, ensure_ascii=False)
+                    json.dump(data, f, indent=2, ensure_ascii=False)
                 os.replace(str(tmp_path), str(self.config_path))
             finally:
                 try:
@@ -4469,7 +4507,7 @@ class InteractiveMenu:
             ("8", "Reset the encoder's ICC test cache", True),
             ("", "SETTINGS", None),
             ("9", "Settings: wrapper defaults, script settings, reset, move", True),
-            ("D", "Dependencies: check again", True),
+            ("D", "Dependencies and new releases: check again", True),
         ])
         _poll = getattr(self, '_update_poll', None)
         if _poll and not getattr(self, '_update_available', None):
@@ -10570,66 +10608,101 @@ def _update_notice(config_manager, today: Optional[str] = None) -> Optional[Tupl
     if cfg.update_checked_on != today:
         tag = _latest_release_tag(repo)
         thumb = _thumb_latest_if_installed()
-        cfg.update_checked_on = today
+        # No answer (no network, a timeout, a rate limit): the day is NOT
+        # marked, so the next run asks again (owner's request, 2026-11-08).
         if tag:
-            cfg.update_latest_seen = tag
-        if thumb:
-            cfg.thumb_latest_seen = thumb
-        try:
-            config_manager.save_config()
-        except Exception:
-            pass
+            try:
+                config_manager.save_update_answer(today, tag, thumb)
+            except Exception:
+                pass
+    return _kept_update_notice(config_manager)
+
+
+def _kept_update_notice(config_manager, checked_before: bool = False
+                        ) -> Optional[Tuple[str, str]]:
+    """The notice from the answer kept in the config (no network), or None.
+    checked_before: the answer came from an earlier run (it was asked in the
+    background while that run was busy), so the line says when, and that D
+    asks again."""
+    cfg = config_manager.config
+    if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
+        return None
     latest = cfg.update_latest_seen
     mine, theirs = _version_key(TOOLKIT_VERSION), _version_key(latest)
     if not mine or not theirs or theirs[:3] < mine[:3] or theirs <= mine:
         return None
-    url = f"https://github.com/{_UPDATE_OWNER}/{repo}/releases/latest"
-    return (f"A new release is out: {latest} (this copy is {TOOLKIT_VERSION}) — "
-            f"[U] in the menu opens its page.", url)
+    url = f"https://github.com/{_UPDATE_OWNER}/{_update_repo()}/releases/latest"
+    line = (f"A new release is out: {latest} (this copy is {TOOLKIT_VERSION}) — "
+            f"[U] in the menu opens its page.")
+    if checked_before and cfg.update_checked_on:
+        line += (f" (Checked by an earlier run on {cfg.update_checked_on}; "
+                 f"D in the menu checks again.)")
+    return (line, url)
 
 
 def _update_check_start(config_manager):
     """The daily release lookup without making the menu wait: GitHub is asked
-    in a background thread and the answer is applied (config written) by the
-    main thread when it polls. Returns poll(wait=0.0) -> the notice or None;
-    a poll before the answer is in returns None and the next one may show it.
-    Off, or already asked today: no thread, the kept answer is used."""
+    in a background thread, which KEEPS the answer itself (save_update_answer)
+    as soon as it is in — the menu need not be drawn again, so the next run
+    shows it even when this one went straight into a job and was closed.
+    Returns poll(wait=0.0) -> the notice or None: until the answer is in, the
+    one an earlier run kept (with its date); after it, the fresh one.
+    Off: no thread, no notice. Already asked today: no thread, the kept
+    answer (with its date)."""
     cfg = config_manager.config
     if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
         return lambda wait=0.0: None
     from datetime import date
     today = date.today().isoformat()
     if cfg.update_checked_on == today:
-        notice = _update_notice(config_manager, today)       # no network
+        notice = _kept_update_notice(config_manager, checked_before=True)
         return lambda wait=0.0: notice
     import threading
-    answer: Dict[str, Optional[str]] = {}
+    fresh: Dict[str, bool] = {"answered": False}
+
     def _ask():
-        answer["tag"] = _latest_release_tag(_update_repo())
-        answer["thumb"] = _thumb_latest_if_installed()
+        tag = _latest_release_tag(_update_repo())
+        thumb = _thumb_latest_if_installed()
+        if tag:                          # no answer: the next run asks again
+            try:
+                config_manager.save_update_answer(today, tag, thumb)
+            except Exception:
+                pass
+            fresh["answered"] = True
 
     worker = threading.Thread(target=_ask, name="update-check", daemon=True)
     worker.start()
-    state: Dict[str, Any] = {"done": False, "notice": None}
 
     def poll(wait: float = 0.0):
-        if not state["done"]:
+        if worker.is_alive():
             worker.join(wait)
-            if worker.is_alive():
-                return None
-            state["done"] = True
-            cfg.update_checked_on = today
-            if answer.get("tag"):
-                cfg.update_latest_seen = answer["tag"]
-            if answer.get("thumb"):
-                cfg.thumb_latest_seen = answer["thumb"]
-            try:
-                config_manager.save_config()
-            except Exception:
-                pass
-            state["notice"] = _update_notice(config_manager, today)   # kept now
-        return state["notice"]
+        answered = not worker.is_alive() and fresh["answered"]
+        return _kept_update_notice(config_manager, checked_before=not answered)
     return poll
+
+
+def _update_check_now(config_manager) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """D in the menu: ask GitHub now (whatever was asked today) and keep the
+    answer. Returns (the line to print, the notice or None)."""
+    cfg = config_manager.config
+    if not cfg.check_for_updates or os.environ.get("JXLPHOTO_NO_UPDATE_CHECK"):
+        return ("Release check: off (check_for_updates in the settings file, "
+                "or JXLPHOTO_NO_UPDATE_CHECK).", None)
+    from datetime import date
+    tag = _latest_release_tag(_update_repo())
+    thumb = _thumb_latest_if_installed()
+    if not tag:
+        return (f"Release check: GitHub did not answer (this copy is "
+                f"{TOOLKIT_VERSION}).", None)
+    try:
+        config_manager.save_update_answer(date.today().isoformat(), tag, thumb)
+    except Exception:
+        pass
+    notice = _kept_update_notice(config_manager)
+    if notice:
+        return (notice[0], notice)
+    return (f"Release check: up to date ({tag} is the latest release; this copy "
+            f"is {TOOLKIT_VERSION}).", None)
 
 
 def _jxl_thumbnail_tip() -> Optional[str]:
@@ -10766,8 +10839,10 @@ def _main():
     # Menu runs only: a scheduled --run-preset log is no place for it.
     # A new release? Menu runs only, like the tip: --run-preset and
     # --list-presets have returned above and never ask the network.
-    # Asked in the background: the menu waits half a second at most, and a
-    # late answer shows up the next time the menu is drawn.
+    # Asked in the background: the menu waits half a second at most; until
+    # the answer is in it shows the one an earlier run kept (with its date).
+    # The thread keeps a late answer itself, so the next menu or the next run
+    # shows it.
     menu._update_poll = _update_check_start(config)
     _upd = menu._update_poll(0.5)
     if _upd:
@@ -10865,6 +10940,19 @@ def _main():
         if choice == "D":
             status = checker.check_dependencies(force=True)
             menu.display_status(status)
+            # ...and the releases, now (the daily background ask may be a
+            # day old, or answered by an earlier run).
+            _line, _notice = _update_check_now(config)
+            menu.ui.markup(f"[yellow]{_rich_safe(_line)}[/yellow]" if _notice
+                           else _rich_safe(_line), _line)
+            menu._update_poll = None          # D's answer stands
+            menu._update_available = ((config.config.update_latest_seen, _notice[1])
+                                      if _notice else None)
+            _thumb_upd = _thumb_update_notice(config)
+            if _thumb_upd:
+                print(_thumb_upd)
+                menu._thumb_tip = True
+                menu._thumb_update = True
 
         elif choice == "_reset":
             confirm = menu.ui.ask_yes(

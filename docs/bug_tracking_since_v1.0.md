@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #613.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #615.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | next release | #613–#614 (2) |
 | [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#612 (5) |
 | [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0 | #600–#607 (8) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |
@@ -88,6 +89,17 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-73 — a TEMP_DIR that does not exist (2026-11-08)
+
+Found when the owner's execution copy moved `TEMP_DIR` to `E:\TEMP` (the
+shortcuts create the folder first; a direct run did not). Regression tests:
+`tests/test_work_dir_check.py` (real runs in a Japanese/`[ ]`/`%` folder).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 613 | **The JPEG transcoder never checked `TEMP_DIR`**: pointing at a folder that did not exist, every file failed mid-run at its first temp file (`[Errno 2] No such file or directory: '<TEMP_DIR>\tmp…'`); the other three backends create it before the run | transcoder | ✅ FIXED (created up front, like the others; a path that cannot be a folder is a usage error, exit 2; the script-set `TEMP2_DIR` is checked too) |
+| 614 | **A dry run with a missing `TEMP_DIR` failed every marker read** — it only checked that an existing `TEMP_DIR` is a folder, but the planning reads write their exiftool argfiles there; fail closed, but the encoder refused a good master as "belongs to a DIFFERENT file" | all four | ✅ FIXED (the dry run stops first and names the cause; it still creates no folder) |
 
 ## Round-72 — the wizard's screens read in a real console (2026-11-05)
 

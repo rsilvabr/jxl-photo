@@ -8124,6 +8124,32 @@ _RUN_DEFAULTS = {
 }
 
 
+def _work_dir_problem(path, label, dry_run, dry_run_uses_it=False):
+    """Why a work folder (TEMP_DIR, staging) cannot be used, or None. A real
+    run creates it. A DRY RUN creates nothing (a simulation that leaves new
+    folders on disk is not a simulation): a path that exists but is not a
+    folder is refused, and a folder the dry run itself writes into
+    (dry_run_uses_it: TEMP_DIR holds the exiftool argfiles and the captured
+    output of every planning read) must already exist, or every marker read
+    fails and a good archive is refused as unreadable."""
+    if path is None:
+        return None
+    p = Path(path)
+    try:
+        if dry_run:
+            if p.exists() and not p.is_dir():
+                return f"{label} is not a directory: {path}"
+            if dry_run_uses_it and not p.is_dir():
+                return (f"{label} does not exist: {path}. A dry run creates no "
+                        f"folders: create it, or run without --dry-run (a real "
+                        f"run creates it).")
+            return None
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"{label} is not usable: {path} ({e})"
+    return None
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -8208,6 +8234,17 @@ def main():
         except OSError as e:
             print(f"ERROR: staging directory is not usable: {args.staging} ({e})")
             sys.exit(1)
+
+    # TEMP_DIR and the script-set staging (TEMP2_DIR) are checked up front
+    # like in the other three backends: a TEMP_DIR that does not exist used to
+    # fail every file mid-run at its first tempfile (and a dry run's marker
+    # reads with it). --staging was validated just above.
+    for _wd_path, _wd_label, _wd_dry in (
+            (TEMP_DIR, "TEMP_DIR", True),
+            (TEMP2_DIR if args.staging is None else None, "TEMP2_DIR (staging)", False)):
+        _why = _work_dir_problem(_wd_path, _wd_label, args.dry_run, _wd_dry)
+        if _why:
+            parser.error(_why)
 
     # --decode only makes sense for JXL inputs; reject it for other single
     # files instead of silently misrouting (e.g. djxl on a PNG).
