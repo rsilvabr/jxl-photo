@@ -337,6 +337,8 @@ Every option of every script: the per-script READMEs under [Documentation](#docu
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space (FreeFileSync folder filters make this easy).
 2. Delete the TIFFs, keep only the JXLs — with this toolkit's `--delete-source`: each TIFF is deleted only after its JXL is written and verified (decoded and compared with the TIFF), and a TIFF re-exported during the run is kept. The older [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports) (archived) is a simple script that deletes the `_EXPORT\TIFF16` folders recursively and checks nothing: only for TIFFs whose JXLs you have already verified.
 
+Then back up what you kept. [photo-backup](https://github.com/rsilvabr/photo-backup) copies, for every folder that has an export folder, the JXL master (instead of the TIFF), the RAW or camera JPEG it came from and your Capture One / NX Studio edits — and leaves out the outtakes and the copies this toolkit can make again from the master (sRGB, phone). It was written around one folder layout: the originals beside an export folder (`_EXPORT`, `Lightroom_Export`, … — any name containing "export"), the exports inside it. Run its dry-run first and read what it would copy; a different layout may need its settings, or the script, adapted.
+
 ---
 
 ## Recommended Settings
