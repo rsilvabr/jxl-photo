@@ -4,8 +4,9 @@
 - `jxl_jpeg_transcoder_HDR.py` and `hdr/` — abandoned HDR side project, kept
   untracked at the repo root (gitignored). Do not read, edit, analyze, or
   commit these files.
-- `deprecated/` — superseded scripts, tracked only for history. Out of scope
-  for audits, refactors and edits.
+- `deprecated/` — superseded scripts, kept untracked at the repo root
+  (gitignored; still in the git history). Out of scope for audits, refactors
+  and edits.
 - `claude/` — stale copies of the active scripts from the v1.7.0 era, kept
   untracked at the repo root (gitignored). They still match on a repo-wide
   grep, so treat any hit there as noise: the duplicated-helper rule below means

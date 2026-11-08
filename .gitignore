@@ -45,6 +45,9 @@ manifests/
 # Snapshot antigo dos scripts (era v1.7.0), mantido local — ver AGENTS.md
 claude/
 
+# Scripts aposentados, mantidos local — ver AGENTS.md (versões antigas no histórico do git)
+deprecated/
+
 # Dumps de --help e checksums de teste, regeneraveis
 cjxl_help*.txt
 djxl_help*.txt

@@ -1761,7 +1761,7 @@ The Basic mode call was also updated to pass `DJXL_OUTPUT_DEPTH` explicitly.
 - `jxl_photo.py` — Bug fixes #2, #9, #10, #21
 - `jxl_photo_v2.py` — Bug fixes #15, #18, #20, #21
 
-**Deprecated (reference only) — what `deprecated/` actually holds:**
+**Deprecated (reference only) — what `deprecated/` held (removed from the repository on 2026-11-08; recover it from the git history):**
 - `deprecated/jxl_to_jpg_png.py` — retired JXL → JPG/PNG converter (superseded by `jxl_jpeg_transcoder.py`)
 - `deprecated/jxl_to_jpg_png_terminal.ps1` — its PowerShell variant
 - `deprecated/README_jxl_to_jpg_png.md` — how to use them
