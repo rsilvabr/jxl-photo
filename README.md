@@ -333,7 +333,7 @@ Every option of every script: the per-script READMEs under [Documentation](#docu
 ### After conversion
 
 1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space (FreeFileSync folder filters make this easy).
-2. Delete the TIFFs, keep only the JXLs — with [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports), or with this toolkit's `--delete-source`.
+2. Delete the TIFFs, keep only the JXLs — with this toolkit's `--delete-source`: each TIFF is deleted only after its JXL is written and verified (decoded and compared with the TIFF), and a TIFF re-exported during the run is kept. The older [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports) (archived) is a simple script that deletes the `_EXPORT\TIFF16` folders recursively and checks nothing: only for TIFFs whose JXLs you have already verified.
 
 ---
 
