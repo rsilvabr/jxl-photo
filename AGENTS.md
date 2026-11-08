@@ -625,6 +625,10 @@ must-fix / should-fix items and a commit verdict.
   not a change to announce: it stays out of the release notes, the README's
   "What's new" and the release tables — one plain line in
   `docs/version_history.md` at most.
+- **The release notes' first line points to the Windows program** (owner's
+  rule, 2026-11-08): `> **Windows program, no Python needed:**
+  [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest)
+  — …`; the README says it right under "Current version" too.
 - **Every release bumps `TOOLKIT_VERSION` in ALL FIVE scripts**, even
   when only one changed, to the version of the newest
   `docs/version_history.md` section — `tests/test_toolkit_version.py`

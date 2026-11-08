@@ -4,6 +4,8 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 
 **Current version: v2.25.0** (2026-11-06) · [What's new](#whats-new-in-v2250) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
+**Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
+
 ---
 
 ## Contents
