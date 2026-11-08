@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.25.0](#v2250)** | 2026-11-06 | The TIFF's byte order (II/MM) kept in the master, its copies and the decoded TIFF; a JPEG copy records its quality, so a new quality redoes it |
+| **[v2.25.1](#v2251)** | 2026-11-08 | The new-release notice is kept by the background check and shown on the next start; `D` checks for releases; `TEMP_DIR` checked before every run (round 73, 2 fixes) |
+| [v2.25.0](#v2250) | 2026-11-06 | The TIFF's byte order (II/MM) kept in the master, its copies and the decoded TIFF; a JPEG copy records its quality, so a new quality redoes it |
 | [v2.24.0](#v2240) | 2026-11-06 | The encode record leaves the Title (`dc:description`) for `xmpMM:History`; 8-bit TIFFs archived lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard; everything in v2.24.0_beta1 |
 | [v2.24.0_beta1](#v2240_beta1) | 2026-11-06 | Pre-release. 8-bit TIFFs archived lossless at `d=0.1` and below (`--eight-bit-distance`); the wizard shows the typical file size next to every distance; `d=0.7` and `d=5` in the lists |
 | [v2.23.0](#v2230) | 2026-11-05 | Derivatives ~35-40% faster; `--export-jpeg-folder` names the JPEG/PNG folder of modes 6/7; the wizard's screens in tables, a clearer review; the update check never makes the menu wait; jxl-thumb recommended over Microsoft's extension (round 72, 5 fixes) |
@@ -92,9 +93,18 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.25.1
+
+**Released 2026-11-08.** Supersedes v2.25.0. Fixes; no command line changes.
+
+- **The new-release notice survives a closed window** (`jxl_photo.py`). Since v2.23.0 the daily GitHub lookup ran in a background thread and the menu waited half a second for it; a later answer was applied (and saved) only when the menu was drawn again. The lookup asks twice in a row (jxl-photo, then jxl-thumb when it is installed), about 0.5 s each, so the answer usually came late — and the usual run goes straight into a job and ends with the window closed: the answer was never kept, and the next day started over. Now the thread keeps the answer itself (`ConfigManager.save_update_answer`: only the three update keys are rewritten in the file on disk, under a save lock shared with `save_config`, so a preset saved meanwhile is never lost), and the next start shows it at once with its date (`Checked by an earlier run on 2026-11-08; D in the menu checks again.`). No answer from GitHub (no network, a timeout) no longer counts as the day's check: the next run asks again. `D` in the menu checks the dependencies and asks GitHub now (`_update_check_now`), whatever was asked today; it respects `check_for_updates = false` and `JXLPHOTO_NO_UPDATE_CHECK`.
+- **#613 — the JPEG transcoder checks `TEMP_DIR` before the run.** The other three backends create it up front; the transcoder did not, and a `TEMP_DIR` pointing at a folder that did not exist failed every file mid-run at its first temp file. Now it is created like in the others, and the script-set staging folder (`TEMP2_DIR`) is checked too; a path that cannot be a folder is a usage error (exit 2).
+- **#614 — a dry run with a missing `TEMP_DIR` (all four scripts).** A dry run creates no folders, so it only checked that an existing `TEMP_DIR` is a folder — but its planning reads write their exiftool argfiles there. With the folder missing every marker read failed; the run failed closed, but the encoder reported a good master as belonging to a different file. The dry run now stops first and names the cause (exit 2), still creating nothing. The check is one helper, `_work_dir_problem`, parity-pinned in the four backends.
+- Tests: `tests/test_work_dir_check.py` (the four scripts run for real in a Japanese/`[ ]`/space/`%` folder; seven of its checks fail on v2.25.0) and `tests/test_update_check.py` (ten new checks, all failing on v2.25.0).
+
 ## v2.25.0
 
-**Released 2026-11-06.** Supersedes v2.24.0. Two things change in what the
+**Released 2026-11-06.** Superseded by v2.25.1. Supersedes v2.24.0. Two things change in what the
 scripts write ([Upgrading](upgrading.md#v2250-the-tiffs-byte-order-is-kept-a-new-jpeg-quality-redoes-the-jpeg-copies)):
 
 - **The TIFF's byte order is kept end to end.** Until v2.24.x the encoder

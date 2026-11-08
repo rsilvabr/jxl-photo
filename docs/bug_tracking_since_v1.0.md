@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | next release | #613–#614 (2) |
+| [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | v2.25.1 | #613–#614 (2) |
 | [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#612 (5) |
 | [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0 | #600–#607 (8) |
 | [Round-70 — what the 261103 audit left open](#round-70--what-the-261103-audit-left-open-2026-11-03) | 2026-11-03 | v2.21.0 | #568–#585 (18) |

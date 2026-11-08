@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.25.0** (2026-11-06) · [What's new](#whats-new-in-v2250) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.25.1** (2026-11-08) · [What's new](#whats-new-in-v2251) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.25.0](#whats-new-in-v2250)
+- [What's new in v2.25.1](#whats-new-in-v2251)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -447,9 +447,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.25.0
+## What's new in v2.25.1
 
-2026-11-06.
+2026-11-08. Small fixes; nothing to do when upgrading.
+
+- **The new-release notice reaches you even when you close the window after a job**: the check runs in the background and keeps its answer, so the next start shows it (with the day it was checked). `D` in the menu now checks for a new release too.
+- **A `TEMP_DIR` that does not exist yet** is created before the JPEG transcoder starts, like the other scripts already did; a dry run says the folder is missing instead of failing its reads.
+
+[Version history](docs/version_history.md#v2251).
+
+### In v2.25.0
 
 - **The TIFF's byte order is kept**: a big-endian TIFF (SilverFast scans,
   some Mac programs) gives a big-endian master and decodes back to a
@@ -519,7 +526,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.25.0** | 2026-11-06 | The TIFF's byte order kept in masters, copies and decoded TIFFs; a new JPEG quality redoes the JPEG copies |
+| **v2.25.1** | 2026-11-08 | The new-release notice shown on the next start; `D` checks for releases; a missing `TEMP_DIR` created by the JPEG transcoder too |
+| [v2.25.0](docs/version_history.md#v2250) | 2026-11-06 | The TIFF's byte order kept in masters, copies and decoded TIFFs; a new JPEG quality redoes the JPEG copies |
 | [v2.24.0](docs/version_history.md#v2240) | 2026-11-06 | The encode record leaves the Title for the XMP History; 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
 | [v2.23.0](docs/version_history.md#v2230) | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
 | [v2.22.5](docs/version_history.md#v2225) | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
