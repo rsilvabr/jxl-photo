@@ -154,6 +154,10 @@ TIFF with transformed ICC
 
 ---
 
+## Private TIFF tags and the IPTC block
+
+The encoder keeps a TIFF's private tags (SilverFast's `35243`/`35244`) and, since v2.27.0, its IPTC block (tag 33723) in `jxlphoto-tifftag` markers. The decoder writes them back on page 0, byte for byte: the IPTC comes back identical to the original (as an UNDEFINED tag, whatever the original's declared type). The decoder does not map XMP fields back to IPTC; a master made before v2.27.0 has no IPTC block to return.
+
 ## Key settings
 
 Edit at the top of the script:

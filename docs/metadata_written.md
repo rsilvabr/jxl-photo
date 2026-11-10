@@ -121,7 +121,7 @@ strips any record the source carries.
 | `jxlphoto-subfiletype:<n>` | the page's TIFF role (e.g. `4` = a scanner's IR/mask page) | encoder | decoder |
 | `jxlphoto-extrasamples:<n>` | what the extra channel is (`0` = e.g. IR, `1`/`2` = alpha) | encoder | decoder |
 | `jxlphoto-scan:raw` / `jxlphoto-scan:final` / `jxlphoto-scan:no` | the TIFF was a **film scan** (scanner software, an IR channel, or no Software tag and no camera EXIF), raw or final (see the encoder's `SCAN_SCOPE`); `no`: a TIFF with neither tag that the encoder took for a camera TIFF by its 160×120 thumbnail page. Read by the recompressor's `--on-scan` guard | encoder | decoder |
-| `jxlphoto-tifftag:<code>:<type>:<hex>` | a **private TIFF tag** of the page that exiftool cannot copy (code 32768 and up, byte-sized types, up to 4 KB each; none of a page's when one is larger), e.g. SilverFast's `35243`/`35244`. Its bytes as stored, in hex | encoder | decoder (written back as the tag itself) |
+| `jxlphoto-tifftag:<code>:<type>:<hex>` | a **private TIFF tag** of the page that exiftool cannot copy (code 32768 and up, byte-sized types, up to 4 KB each; none of a page's when one is larger), e.g. SilverFast's `35243`/`35244`; also the **IPTC block** (`33723`, see below): accepted whatever its declared type (exiftool writes it as a LONG array), stored with type `7` (UNDEFINED), with its own 4 KB limit that never empties the page's other tags, and kept when another tag of the page is too large. Its bytes as stored, in hex | encoder | decoder (written back as the tag itself) |
 | `jxlphoto-grayscale` | the page was single-channel grey | encoder | decoder |
 | `jxlphoto-thumb` | the page was the TIFF's embedded thumbnail | encoder | decoder |
 | `jxlphoto-icc:inherited` | the page had no ICC of its own and used page 0's | encoder | decoder, recompressor derivatives |
@@ -132,6 +132,39 @@ The decoder removes the tokens that describe the JXL (page structure, depth,
 the derivative recipe, the private tags it writes back), so a TIFF it writes
 reads like an ordinary TIFF, plus its own `src`/`srcsum`/`pixsum` and the
 carried `origin` and `orientation`.
+
+## IPTC copied into the XMP
+
+A JXL has no IPTC box. When the source TIFF has an IPTC block (tag 33723), the
+encoder (v2.27.0) does two things: it copies these IPTC fields into the XMP, and
+it keeps the whole block in a `jxlphoto-tifftag:33723` marker so the decoder can
+write the identical bytes back.
+
+The copy only fills what the XMP lacks: a field (or a list, such as the
+keywords) the XMP already holds is never replaced, and nothing goes into the
+EXIF (the IPTC has a date, not a time).
+
+| IPTC | XMP |
+|---|---|
+| Keywords | `dc:Subject` |
+| Caption-Abstract | `dc:Description` |
+| By-line | `dc:Creator` |
+| ObjectName | `dc:Title` |
+| CopyrightNotice | `dc:Rights` |
+| Headline, City, Province-State, Country-PrimaryLocationName, Credit, Source, SpecialInstructions | `photoshop:` Headline, City, State, Country, Credit, Source, Instructions |
+| Country-PrimaryLocationCode, Sub-location | `Iptc4xmpCore:` CountryCode, Location |
+| DateCreated | `photoshop:DateCreated` |
+
+Urgency, CodedCharacterSet, ApplicationRecordVersion, DigitalCreation* and
+TimeCreated are not copied. An IPTC block larger than 4 KB is not kept as a
+marker (the log says so); its fields still reach the XMP. The text is read with
+the block's own CodedCharacterSet, as exiftool does.
+
+Like the other private-tag markers, the IPTC marker travels with the XMP: a
+recompressed copy and a JPEG or PNG the transcoder decodes carry it, and only
+the decoder turns it back into the tag. It holds what the TIFF's IPTC block
+held, nothing more; an export from Capture One has a block of about 100 bytes
+(a marker of some 200 characters).
 
 ## Processing history (xmpMM:History)
 

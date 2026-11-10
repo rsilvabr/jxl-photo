@@ -1365,7 +1365,14 @@ recompressed. What that takes:
   one) keeps none of them, and the log says so. The same goes for Photoshop's
   layers (tag 37724): the JXL holds the flattened image only. In both cases
   `--delete-source` and `--delete-skipped` **keep** the TIFF (`KEEP source`,
-  also previewed by `--dry-run`); there is no flag to release it.
+  also previewed by `--dry-run`); there is no flag to release it;
+- **the IPTC block** (tag 33723, v2.27.0): a JXL has no place for it, so the
+  fields it holds are copied into the XMP — only the ones the XMP does not
+  already have, nothing into the EXIF — and the whole block rides in a
+  `jxlphoto-tifftag:33723` marker (stored as UNDEFINED, its own 4 KB limit that
+  does not affect the page's other private tags). A SilverFast scan whose
+  capture date lived only in the IPTC keeps it as `XMP-photoshop:DateCreated`.
+  The table of fields is in `docs/metadata_written.md`.
 
 Other scanner programs were not tested. If yours relies on something else,
 test one file before converting a whole archive.

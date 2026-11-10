@@ -1249,6 +1249,31 @@ def interaction_checks(A1, A2):
           not list((g2).rglob("recompressed_jxl/*.jxl")) and rc == 0, f"rc={rc}")
 
 
+def _iim_block(path):
+    """The raw bytes of page 0's IPTC block (TIFF tag 33723), or None."""
+    with tifffile.TiffFile(path) as t:
+        tg = t.pages[0].tags.get(33723)
+        if tg is None:
+            return None
+        t.filehandle.seek(tg.valueoffset)
+        return t.filehandle.read(int(tg.valuebytecount))
+
+
+def _iim_round_trip(pairs):
+    """(how many sources carry an IPTC block, the names whose decoded TIFF does
+    not hold the same bytes) for (source TIFF, decoded TIFF) pairs. A block
+    over the encoder's 4 KB limit is not carried and is not counted."""
+    have, bad = 0, []
+    for s, t in pairs:
+        a = _iim_block(s)
+        if a is None or len(a) > 4096 or not Path(t).exists():
+            continue
+        have += 1
+        if _iim_block(t) != a:
+            bad.append(Path(s).name)
+    return have, bad
+
+
 def varied_checks(varied):
     """Every TIFF in <fixtures>/TIFF16_varied (cameras, phones, a film
     scanner, ICC v2/v4, ISO 64-8000, portrait, odd sizes, smooth to noisy)
@@ -1313,6 +1338,12 @@ def varied_checks(varied):
           f"worst {worst[0]:.1f} dB ({worst[1]})")
     check("varied: Make/Model/date/ISO/lens carried to the JXL and back",
           not bad_exif and len(e_src) == len(srcs), f"differ={bad_exif[:4]}")
+    # v2.27.0 (#640): the IPTC block of every export that has one (Capture One
+    # writes it) comes back byte for byte.
+    n_iim, bad_iim = _iim_round_trip((s, vd / "converted_tiff" / s.name) for s in srcs)
+    if n_iim:
+        check("varied: every IPTC block (tag 33723) comes back byte for byte (#640)",
+              not bad_iim, f"{n_iim} with a block, bad={bad_iim[:4]}")
 
     # v2.19.0: the ICC copy is ONE jxlphoto-iccprofile token holding the
     # source's profile byte for byte; CreatorTool keeps only the program
@@ -1451,6 +1482,11 @@ def scan_checks(scans):
         if dist == "0":
             check("scans lossless: bit-exact round trip, same shape/depth/ICC",
                   rc == 0 and not bad, f"rc={rc} {bad[:5]}")
+            n_iim, bad_iim = _iim_round_trip(
+                (s, dd / "converted_tiff" / (s.stem + ".tif")) for s in srcs)
+            if n_iim:
+                check("scans: every IPTC block (tag 33723) comes back byte for byte (#640)",
+                      not bad_iim, f"{n_iim} with a block, bad={bad_iim[:4]}")
         else:
             check("scans lossy: same shape/depth/ICC after the round trip",
                   rc == 0 and not bad, f"rc={rc} {bad[:5]}")
@@ -1575,6 +1611,21 @@ def silverfast_checks(folder):
     check("SilverFast scan: SilverFast's own XMP (LSI/) comes back unchanged",
           bool(lsi_a) and lsi_a == lsi_b,
           f"{len(lsi_a)} fields, missing={sorted(lsi_a - lsi_b)[:3]}")
+    # v2.27.0 (#640): the IPTC block (tag 33723) comes back byte for byte, and
+    # a capture date that exists only in the IPTC reaches the master's XMP.
+    iim_a, iim_b = _iim_block(src), _iim_block(out)
+    if iim_a is None:
+        print("(no IPTC block in this SilverFast scan: the IPTC checks are skipped)")
+        return
+    check("SilverFast scan: the IPTC block (tag 33723) comes back byte for byte",
+          len(iim_a) <= 4096 and iim_a == iim_b or len(iim_a) > 4096,
+          f"{len(iim_a)} bytes -> {None if iim_b is None else len(iim_b)}")
+    iptc_date = exif(["-s3", "-d", "%Y-%m-%d", "-IPTC:DateCreated", src]).strip()
+    other_date = exif(["-s3", "-EXIF:DateTimeOriginal", "-XMP-photoshop:DateCreated", src]).strip()
+    if iptc_date and not other_date:
+        got = exif(["-s3", "-d", "%Y-%m-%d", "-XMP-photoshop:DateCreated", main_jxl]).strip()
+        check("SilverFast scan: a capture date only in the IPTC reaches the master's XMP",
+              got == iptc_date, f"IPTC {iptc_date!r} -> XMP {got!r}")
 
 
 def tagless_checks(folder):

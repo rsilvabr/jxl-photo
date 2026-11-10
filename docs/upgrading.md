@@ -11,6 +11,30 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.27.0: the encoder's sync compares the content; the IPTC block is kept
+
+- **`jxl_tiff_encoder.py --sync`, and its default smart sync, skip a TIFF
+  whose date is newer but whose content is the same** as when its JXL was
+  made (a backup restored without its dates, a folder copied). Before, the
+  date alone re-encoded it, at the run's `--distance`. If you used to touch a
+  TIFF to have it re-encoded (at another distance, say), use `--overwrite`.
+  The check needs a master that records its TIFF's content (`jxlphoto-srcsum`,
+  written since v2.0.0); other masters are judged by the date, as before.
+  Nothing is written when a TIFF is skipped this way, so each run reads such
+  TIFFs again until they are re-saved or re-encoded: after restoring a large
+  folder without its dates, expect the start of every sync to take longer
+  (the log shows the progress), or run once with `--overwrite`.
+- **New masters of TIFFs that have an IPTC block** (every Capture One export
+  has one) carry it in one more marker, `jxlphoto-tifftag:33723`, and get the
+  IPTC fields their XMP lacks. For Capture One and Lightroom exports the XMP
+  already holds them, so only the marker is new (about 200 characters); a
+  scan whose capture date was only in the IPTC gains `photoshop:DateCreated`.
+  Copies and JPEGs made from such a master carry the marker. Existing masters
+  are not touched; `--overwrite` from the TIFF adds it. A TIFF decoded from a
+  new master has its IPTC block back, and the XMP fields that were copied.
+- **A lossy JPEG → JXL of a JPEG with a broken thumbnail IFD**, which ended
+  in an error per file, now converts. Nothing to do.
+
 ## v2.26.0: the JPEG of a rotated JPEG's archive keeps its original orientation
 
 - **A JPEG decoded from a JXL made from a rotated JPEG** (EXIF Orientation

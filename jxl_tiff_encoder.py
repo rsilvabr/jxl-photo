@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.26.1"
+TOOLKIT_VERSION = "2.27.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1649,7 +1649,11 @@ PRIVATE_TAG_MAX_BYTES = 4096
 # Private tags exiftool or this pipeline already carries, or that hold offsets.
 _PRIVATE_TAG_SKIP = frozenset({
     33432,                          # Copyright (exiftool copies it)
-    33723,                          # IPTC
+    #   33723 (IPTC) is NOT here since v2.27.0: exiftool copies it TIFF -> TIFF
+    #   but a JXL has no IPTC box, so it is carried as a token of its own
+    #   (_private_tiff_tags: any of BYTE/ASCII/SBYTE/UNDEFINED/LONG, written
+    #   back as UNDEFINED, its own size limit) and its fields are also copied
+    #   into the XMP (IPTC_TO_XMP_FILL).
     34377,                          # Photoshop image resources
     34665, 34853, 40965,            # Exif / GPS / Interop IFD pointers
     34675,                          # ICC profile
@@ -1659,6 +1663,40 @@ _PRIVATE_TAG_SKIP = frozenset({
     50740,                          # DNGPrivateData (holds offsets)
 })
 _PRIVATE_TAG_TYPES = frozenset({1, 2, 6, 7})   # BYTE, ASCII, SBYTE, UNDEFINED
+
+_IPTC_TAG = 33723
+# The IPTC block (IIM) of a TIFF: exiftool itself writes it as a LONG array
+# whose bytes are the IIM stream as is, in either byte order (measured
+# 2026-11-11, little- and big-endian files). Unlike every other private tag it
+# is a byte stream whatever its declared type, so LONG is accepted for it and
+# its token is written as UNDEFINED (7) — the decoder accepts only 1/2/6/7 and
+# the payload is the same.
+_IPTC_TAG_TYPES = frozenset({1, 2, 4, 6, 7})
+
+# IPTC field -> XMP field, in exiftool's names. At encode, each is copied into
+# the master's XMP ONLY IF the XMP does not already hold it (-wm cg:
+# _fill_xmp_from_iptc), so the capture date and the descriptive fields of a
+# file that kept them in the IPTC alone (SilverFast scans) are not lost. Not a
+# user setting: a mapping. Urgency, CodedCharacterSet, ApplicationRecordVersion,
+# DigitalCreation* and TimeCreated are left out on purpose (editor/camera
+# noise; the exact block comes back from the token).
+IPTC_TO_XMP_FILL = (
+    ("Keywords", "XMP-dc:Subject"),
+    ("Caption-Abstract", "XMP-dc:Description"),
+    ("By-line", "XMP-dc:Creator"),
+    ("ObjectName", "XMP-dc:Title"),
+    ("CopyrightNotice", "XMP-dc:Rights"),
+    ("Headline", "XMP-photoshop:Headline"),
+    ("City", "XMP-photoshop:City"),
+    ("Province-State", "XMP-photoshop:State"),
+    ("Country-PrimaryLocationName", "XMP-photoshop:Country"),
+    ("Country-PrimaryLocationCode", "XMP-iptcCore:CountryCode"),
+    ("Sub-location", "XMP-iptcCore:Location"),
+    ("Credit", "XMP-photoshop:Credit"),
+    ("Source", "XMP-photoshop:Source"),
+    ("SpecialInstructions", "XMP-photoshop:Instructions"),
+    ("DateCreated", "XMP-photoshop:DateCreated"),
+)
 
 DEPTH_XMP_PREFIX = "jxlphoto-depth:"
 # Prefix for the original BitsPerSample value stored in dc:Relation. The decoder
@@ -3676,10 +3714,20 @@ def _private_tiff_tags(tif, page):
 
     The bytes are read from the file as stored, not from tifffile's decoded
     value (an ASCII value comes back without its NUL and decoded). All or
-    nothing: when one candidate exceeds PRIVATE_TAG_MAX_BYTES the list is
-    empty and `why` says which tag, so the caller can log it.
+    nothing: when one candidate exceeds PRIVATE_TAG_MAX_BYTES none of the
+    program's tags is carried and `why` says which tag, so the caller can log
+    it.
+
+    The IPTC block (_IPTC_TAG) is the one exception, on every count: it is
+    accepted as a LONG too (its token says UNDEFINED, see _IPTC_TAG_TYPES) and
+    it is judged apart from the program's own tags, in both directions. An
+    IIM over PRIVATE_TAG_MAX_BYTES is left out alone (see _iptc_left_out_note)
+    and neither empties the list nor counts as "too large to carry" for the
+    delete gate (#620): its fields are in the XMP. And when ANOTHER tag is too
+    large (Affinity Photo's document), the list still holds the IPTC block,
+    beside the `why` that keeps the TIFF from being deleted.
     """
-    found = []
+    found, iptc, why = [], [], None
     for tag in page.tags.values():
         code = int(tag.code)
         if code < 32768 or code in _PRIVATE_TAG_SKIP:
@@ -3688,14 +3736,104 @@ def _private_tiff_tags(tif, page):
             dtype = int(tag.dtype)
         except (TypeError, ValueError):
             continue
-        if dtype not in _PRIVATE_TAG_TYPES:
-            continue
         size = int(tag.valuebytecount)
+        if code == _IPTC_TAG:
+            if dtype in _IPTC_TAG_TYPES and size <= PRIVATE_TAG_MAX_BYTES:
+                tif.filehandle.seek(tag.valueoffset)
+                iptc.append((code, 7, tif.filehandle.read(size)))
+            continue
+        if dtype not in _PRIVATE_TAG_TYPES or why:
+            continue
         if size > PRIVATE_TAG_MAX_BYTES:
-            return [], f"tag {code} is {size:,} bytes (limit {PRIVATE_TAG_MAX_BYTES:,})"
+            why = f"tag {code} is {size:,} bytes (limit {PRIVATE_TAG_MAX_BYTES:,})"
+            continue
         tif.filehandle.seek(tag.valueoffset)
         found.append((code, dtype, tif.filehandle.read(size)))
-    return sorted(found), None
+    if why:
+        return iptc, why
+    return sorted(found + iptc), None
+
+
+def _iptc_left_out_note(page):
+    """Why the page's IPTC block is NOT carried as a token, or None.
+
+    The block is bigger than PRIVATE_TAG_MAX_BYTES, or stored as a TIFF type
+    that is not a byte stream here (_IPTC_TAG_TYPES): it stays out (the fields
+    still reach the XMP through _fill_xmp_from_iptc) while the page's other
+    private tags are carried as usual. Never silent: the caller logs it.
+    """
+    tag = page.tags.get(_IPTC_TAG)
+    if tag is None:
+        return None
+    try:
+        size = int(tag.valuebytecount)
+        dtype = int(tag.dtype)
+    except (TypeError, ValueError):
+        return None
+    if dtype not in _IPTC_TAG_TYPES:
+        return f"IPTC block is stored as TIFF type {dtype}: kept as XMP fields only"
+    if size > PRIVATE_TAG_MAX_BYTES:
+        return (f"IPTC block is {size:,} bytes (limit {PRIVATE_TAG_MAX_BYTES:,}): "
+                f"kept as XMP fields only")
+    return None
+
+
+def _has_iptc(tif) -> bool:
+    """True when the TIFF's first page has the IPTC tag: the only fact that
+    decides whether _fill_xmp_from_iptc runs (no exiftool call to find out)."""
+    try:
+        return _IPTC_TAG in tif.pages[0].tags
+    except Exception:
+        return False
+
+
+def _iptc_only_source(tiff_path, tmp_dir) -> str:
+    """A 1x1 TIFF in tmp_dir whose only content is page 0's IPTC block, byte
+    for byte (any size: the token's limit does not apply here). Raises when
+    the tag cannot be read: an output must not go out without the fields."""
+    with tifffile.TiffFile(str(tiff_path)) as tif:
+        tag = tif.pages[0].tags.get(_IPTC_TAG)
+        if tag is None:
+            raise RuntimeError("the IPTC block disappeared from the TIFF while encoding")
+        tif.filehandle.seek(tag.valueoffset)
+        raw = tif.filehandle.read(int(tag.valuebytecount))
+    out = os.path.join(str(tmp_dir), "iptc_source.tif")
+    tifffile.imwrite(out, np.zeros((1, 1), dtype=np.uint8),
+                     extratags=[(_IPTC_TAG, 7, len(raw), raw, True)])
+    return out
+
+
+def _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir) -> None:
+    """Copy the TIFF's IPTC fields into the master's XMP — only the ones the
+    XMP does not hold yet (IPTC_TO_XMP_FILL).
+
+    ONE exiftool call, a call of its own: `-wm cg` (create tags and groups,
+    never overwrite one that exists; measured 2026-11-11 on single fields and
+    on lists such as dc:Subject) is global to the call and would break the
+    `=` assignments of the others. The XMP the master already carries always
+    wins; nothing goes into the EXIF (the IPTC has a date, not a time, and an
+    invented hour would be a guess). The charset is the IIM's own
+    (CodedCharacterSet); an IIM without one is read as exiftool reads it,
+    never "fixed" here. A failed call raises: the file is an error and
+    --delete-source keeps the TIFF (#571).
+
+    A source whose name has a '%' cannot be the -tagsFromFile operand as it is
+    (exiftool format-expands it, #550), and _exiftool_source's MIE dump is no
+    way out here: the MIE keeps the IPTC in Latin and every Japanese caption
+    or keyword arrives as '?' (measured 2026-11-11). Such a source is handed
+    over as a small TIFF in tmp_dir that holds only its IPTC block
+    (_iptc_only_source): the bytes are the ones exiftool reads from the file.
+    """
+    source = str(tiff_path)
+    if "%" in source:
+        source = _iptc_only_source(tiff_path, tmp_dir)
+    args = ["-overwrite_original", "-wm", "cg", "-tagsfromfile", source]
+    args += [f"-{xmp}<IPTC:{iptc}" for iptc, xmp in IPTC_TO_XMP_FILL]
+    args.append(str(write_path))
+    r = _run_exiftool_argfile(args, timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"exiftool IPTC copy failed: {(r.stderr or r.stdout or 'no output')[:200].strip()}")
 
 
 def _collapse_list_reset(lines, tag="-XMP-dc:Relation"):
@@ -6329,6 +6467,13 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                     logger.warning(
                         f"  >{tiff_path.name} (page {page_idx}): its private TIFF "
                         f"tags are not kept — {_private_why}")
+                _iptc_note = _iptc_left_out_note(page)
+                if _iptc_note and not STRIP_METADATA:
+                    logger.warning(f"  >{tiff_path.name} (page {page_idx}): {_iptc_note}")
+                # IPTC -> XMP fill (_fill_xmp_from_iptc): decided from the tag
+                # of page 0, no exiftool call to find out; every page of a
+                # split gets it (same source, same XMP).
+                _iptc_fill = not STRIP_METADATA and _has_iptc(tif)
                 img = page.asarray()
                 # Reject float/double and other unsupported integer dtypes before casting.
                 if img.dtype.kind == 'f':
@@ -6483,6 +6628,11 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if r2.returncode != 0:
                 err_msg = (r2.stderr or r2.stdout or "no output")[:300].strip()
                 raise RuntimeError(f"exiftool failed: {err_msg}")
+
+            # IPTC fields the XMP lacks (the capture date of a SilverFast scan
+            # lives only there): own call, before reorder_jxl_boxes.
+            if _iptc_fill:
+                _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir)
 
             # Multi-page group marker: tag split pages so the decoder reconstructs
             # only genuinely-split files. Stored as an ADDITIONAL value in the

@@ -291,6 +291,31 @@
 - **Re-run defaults differ per script**: the TIFF encoder/decoder default to
   smart sync (source newer than output), the JPEG transcoder skips existing
   outputs. Not a bug — documented in each README.
+- **The encoder's smart sync is a date AND a content question (#638).** A
+  TIFF newer than its JXL whose sha256 is the master's `jxlphoto-srcsum` (a
+  backup restored with a new date) is a SKIP: `_mark_sync_same_bytes` proves
+  the pairs once per run, before anything reads `_would_skip`
+  (`_prove_same_bytes` for the thumbnail guard, which runs earlier, during
+  page analysis). No readable srcsum = the date alone, as before. Never
+  "remember" the proof by moving the master's mtime: the recompressor's sync
+  compares a master's date with its derivatives' and would re-derive every
+  copy. `_would_skip` is encoder-only since then (the recompressor's copy is
+  not parity-pinned any more).
+- **The IPTC block of a TIFF (#640, v2.27.0).** A JXL has no IPTC box, so the
+  encoder (a) copies the IPTC fields the XMP lacks into the XMP
+  (`IPTC_TO_XMP_FILL`, `_fill_xmp_from_iptc`: a call of its own because
+  `-wm cg` is global to a call; only when page 0 has tag 33723 — never an
+  extra exiftool spawn for a TIFF without IPTC; nothing into the EXIF) and
+  (b) carries the block as `jxlphoto-tifftag:33723:7:<hex>` (LONG accepted,
+  written back as UNDEFINED; its own `PRIVATE_TAG_MAX_BYTES` limit, which
+  never empties the page's other private tags and is never a #620 veto, and
+  a program's own oversized tag — Affinity Photo's document — never costs
+  the IPTC block; `_iptc_left_out_note` logs a block left out). The decoder writes it back;
+  recompressed copies and the transcoder's JPEG/PNG carry the token like
+  `35243`. `_exiftool_source`'s MIE dump keeps EXIF and XMP text but turns
+  non-Latin IPTC text into `?` (measured 2026-11-11): never copy IPTC from
+  its result — a `%` path goes through `_iptc_only_source`. The two routes
+  differ, so a test of the IPTC copy runs in a `%` folder AND in one without.
 - Helper functions are deliberately duplicated across the scripts
   (`_marker_matches`, `_validate_export_folder_name`, `_replace_suffix_token`,
   `_is_relative_to`,
@@ -303,7 +328,7 @@
   exists ONLY in the transcoder — a JXL/JPEG/PNG/TIFF superset, not a
   shared copy),
   `has_jbrd_box`,
-  `md5_of_file`, `_warn_distance_clamp`, `_would_skip`, `_decode_jxl_for_verify`,
+  `md5_of_file`, `_warn_distance_clamp`, `_decode_jxl_for_verify`,
   `_canon_for_compare`, `_compare_stats`, `_provenance_marker_args`
   (encoder/decoder/transcoder), `_read_derived_markers_batch`,
   `_capture_output_identity`, `_delete_partial_if_written` (transcoder/
@@ -401,6 +426,13 @@
   its end and names the flag (`_note_minor_metadata`).
   `_run_exiftool_argfile` (four identical copies) adds the `-m` when the
   script's globals have the setting on — only the decoder defines it.
+  The other direction (#639): a lossy JPEG → JXL whose cjxl-copied EXIF is
+  malformed (a broken IFD1) gets ONE retry — cjxl again with
+  `_CJXL_STRIP_EXIF`, the EXIF fresh from the JPEG, `_verify_exif_kept`
+  after. Only when the first encode is PROVEN upright (`_jxl_orientation`
+  == 1): `-x strip=exif` drops the codestream orientation too, and an
+  unreadable one is "cannot tell". Unparseable maker notes stay an error that
+  names `--force-transcode`.
 - **ImageMagick and a standard sRGB profile (#635).** Reading a PNG,
   ImageMagick drops an `iCCP` it recognises as one of the standard sRGB
   profiles (Windows', most cameras' and phones'); writing one, it writes an
