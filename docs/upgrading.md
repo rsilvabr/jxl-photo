@@ -11,6 +11,22 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.25.2: a lossy JXL → JPEG/PNG `--sync` leaves a JPEG/PNG it did not write alone
+
+- **`--force-convert --decode … --sync` (or auto mode with `--sync`) no
+  longer replaces a same-named JPEG or PNG that carries no `jxlphoto-src`
+  marker** — typically the camera's own JPEG next to the master. Every
+  JPEG/PNG this decode writes carries the marker, so its own earlier outputs
+  are still refreshed as before. Such a file is now listed as refused and the
+  run ends with exit code 1, the file untouched. To replace it anyway, run
+  once with `--overwrite`; or decode into another folder.
+- **Two runs writing the same output folder at the same time:** a file the
+  other run wrote meanwhile is no longer replaced; this run reports it as an
+  error (exit code 1) and keeps its source. Nothing to do unless you start
+  such runs on purpose.
+
+---
+
 ## v2.25.0: the TIFF's byte order is kept; a new JPEG quality redoes the JPEG copies
 
 - **Masters, copies and decoded TIFFs keep the TIFF's byte order** (little-

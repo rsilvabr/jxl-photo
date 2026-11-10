@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.25.1** (2026-11-08) · [What's new](#whats-new-in-v2251) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.25.2** (2026-11-10) · [What's new](#whats-new-in-v2252) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.25.1](#whats-new-in-v2251)
+- [What's new in v2.25.2](#whats-new-in-v2252)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -447,7 +447,18 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.25.1
+## What's new in v2.25.2
+
+2026-11-10. Hardening that closes edge cases.
+
+- **Two runs started at the same time never write over each other's output** (TIFF encoder, JPEG transcoder, recompressor): an output that another run wrote after this one planned it is left alone, and this run keeps its source and ends with an error.
+- **A lossy JXL → JPEG/PNG run with `--sync` leaves a same-named JPEG/PNG it did not write alone** — typically the camera's own JPEG beside the master. Use `--overwrite` if you do want it replaced ([upgrading](docs/upgrading.md)).
+- **Every script flushes each output to the disk before it deletes the source**, so a power cut right after a delete cannot cost the photo.
+- Clearer messages when a source vanished during a run or an existing output is damaged; the wizard says at once that a lossy JXL → JPEG cannot delete the JXLs.
+
+[Version history](docs/version_history.md#v2252).
+
+### In v2.25.1
 
 2026-11-08. Small fixes; nothing to do when upgrading.
 
@@ -526,7 +537,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.25.1** | 2026-11-08 | The new-release notice shown on the next start; `D` checks for releases; a missing `TEMP_DIR` created by the JPEG transcoder too |
+| **v2.25.2** | 2026-11-10 | Two runs at once never write over each other's output; a lossy decode with `--sync` leaves the camera's JPEG alone; flush to disk before every delete |
+| [v2.25.1](docs/version_history.md#v2251) | 2026-11-08 | The new-release notice shown on the next start; `D` checks for releases; a missing `TEMP_DIR` created by the JPEG transcoder too |
 | [v2.25.0](docs/version_history.md#v2250) | 2026-11-06 | The TIFF's byte order kept in masters, copies and decoded TIFFs; a new JPEG quality redoes the JPEG copies |
 | [v2.24.0](docs/version_history.md#v2240) | 2026-11-06 | The encode record leaves the Title for the XMP History; 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
 | [v2.23.0](docs/version_history.md#v2230) | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
