@@ -5422,6 +5422,40 @@ def _source_path_id(src_path) -> str:
 # and the second store is a no-op.
 _content_id_cache = {}
 
+# Pairs (normcased TIFF path, normcased JXL path) this run PROVED to be the same
+# bytes: the TIFF is newer than its JXL but its sha256 is the `jxlphoto-srcsum`
+# the JXL carries (a backup restored with a new date). Filled by
+# _mark_sync_same_bytes before anything reads _would_skip; run-scoped.
+_SYNC_SAME_BYTES: set = set()
+
+
+def _sync_same_bytes(tiff_path, final_path) -> bool:
+    """Did this run prove that `final_path` was made from the bytes `tiff_path`
+    holds now? Only ever True after _mark_sync_same_bytes read both sides."""
+    return (os.path.normcase(str(tiff_path)),
+            os.path.normcase(str(final_path))) in _SYNC_SAME_BYTES
+
+
+def _prove_same_bytes(tiff_path, final_path) -> bool:
+    """_sync_same_bytes, and when it is not known yet, ONE proof now: the
+    srcsum of `final_path` against the sha256 of `tiff_path` (marks the pair
+    on success). Only for a caller that runs before _mark_sync_same_bytes
+    (the thumbnail guard, during page analysis). Never True on a doubt."""
+    if _sync_same_bytes(tiff_path, final_path):
+        return True
+    if OVERWRITE != "smart":
+        return False
+    try:
+        info = _read_source_markers_batch([Path(final_path)])[str(final_path)]
+        want = info.get("srcsum")
+        if info.get("unread") or not want or _file_content_id(tiff_path) != want:
+            return False
+    except OSError:
+        return False
+    _SYNC_SAME_BYTES.add((os.path.normcase(str(tiff_path)),
+                          os.path.normcase(str(final_path))))
+    return True
+
 
 def _file_digest_cached(path) -> bytes:
     """sha256 of one file's bytes, remembered for this run."""
@@ -5866,6 +5900,87 @@ def _foreign_overwrite_reason(info: dict, src_paths, out_path) -> Optional[str]:
     return None
 
 
+def _mark_sync_same_bytes(items: list, dry_run: bool) -> int:
+    """Smart sync: a TIFF newer than its JXL but with the SAME BYTES the JXL
+    was made from is up to date, not a new file (2.3 of the 2026-11-10 review).
+
+    A TIFF restored from a backup has a new date and the old bytes; the date
+    rule alone re-encoded it, and under a larger distance than the master's
+    that swapped a good master for a worse one. The master already carries the
+    proof -- `jxlphoto-srcsum`, the sha256 of the TIFF it was made from -- so the
+    pair is marked here and _would_skip / convert_one / _thumbnail_sync_guard
+    answer SKIP for it.
+
+    Fail closed, always the old behaviour on a doubt: a master without a
+    readable srcsum (older, markerless, jbrd, an unread batch) or a TIFF that
+    cannot be read is NOT marked and is re-encoded as before. The path marker
+    (`jxlphoto-src`) is not consulted: a moved folder with the same bytes is
+    still up to date, and a SKIP writes nothing for the overwrite guard to
+    judge. Writes nothing, not even the master's date (see the end of the
+    function). `dry_run` is kept for the caller's signature. Returns how many
+    pairs were marked.
+    """
+    if OVERWRITE != "smart":
+        return 0
+    cands = []
+    seen = set()
+    for it in items:
+        t, j = it[0], it[1]
+        key = (os.path.normcase(str(t)), os.path.normcase(str(j)))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not j.exists() or t.stat().st_mtime <= j.stat().st_mtime:
+                continue
+        except OSError:
+            continue
+        cands.append((t, j))
+    if not cands:
+        return 0
+    logger.info(f"Sync: comparing {len(cands)} newer TIFF(s) with the bytes their "
+                f"JXL was made from...")
+    # Pairs the thumbnail guard already proved while the pages were analysed
+    # need no second read.
+    todo = [(t, j) for t, j in cands if not _sync_same_bytes(t, j)]
+    marks = _read_source_markers_batch(sorted({str(j) for _t, j in todo})) if todo else {}
+    prog = _batch_read_state("Sync byte check", len(cands))
+    proven = []
+    for n, (t, j) in enumerate(cands):
+        _batch_read_tick(prog, n)
+        if _sync_same_bytes(t, j):
+            try:
+                proven.append((t, j, t.stat().st_mtime_ns))
+            except OSError:
+                pass
+            continue
+        info = marks.get(str(j)) or {}
+        want = info.get("srcsum")
+        if info.get("unread") or not want:
+            continue
+        try:
+            if _file_content_id(t) != want:
+                continue
+            tiff_mtime_ns = t.stat().st_mtime_ns
+        except OSError:
+            continue
+        _SYNC_SAME_BYTES.add((os.path.normcase(str(t)), os.path.normcase(str(j))))
+        proven.append((t, j, tiff_mtime_ns))
+    if proven:
+        logger.info(f"Sync: {len(proven)} of {len(cands)} newer TIFF(s) are the same "
+                    f"bytes — kept as up to date")
+    else:
+        logger.info(f"Sync: the {len(cands)} newer TIFF(s) are not the bytes their "
+                    f"JXL was made from (or it records no proof): re-encoded")
+    # Nothing is written, in a real run or a dry one. The master's date is left
+    # alone ON PURPOSE (review of #638): the recompressor's own sync compares a
+    # master's mtime with its derivatives', so moving it forward would
+    # re-derive every copy made from it. The price is that a run after a
+    # date-changing restore compares the newer TIFFs again; that is a read, not
+    # an encode.
+    return len(proven)
+
+
 def _skipped_archive_proof(pairs: list) -> dict:
     """E-1 proof for --delete-skipped: does each pre-existing output carry the
     provenance markers of the VERY source behind it?
@@ -6003,6 +6118,10 @@ def _would_skip(tiff_path: Path, final_path: Path) -> bool:
     by the dry-run preview of --delete-skipped (a destructive option that
     could not be previewed would be the wrong kind of opt-in), by the
     overwrite guard and by the space preflight (_preflight_groups).
+
+    Smart sync also skips a TIFF that is newer but PROVED to be the same bytes
+    its JXL was made from (_mark_sync_same_bytes, filled once per run before
+    the plan is judged) -- a pure lookup here, never a hash.
     """
     if not final_path.exists():
         return False
@@ -6010,9 +6129,11 @@ def _would_skip(tiff_path: Path, final_path: Path) -> bool:
         return True
     if OVERWRITE == "smart":
         try:
-            return tiff_path.stat().st_mtime <= final_path.stat().st_mtime
+            if tiff_path.stat().st_mtime <= final_path.stat().st_mtime:
+                return True
         except OSError:
             return False
+        return _sync_same_bytes(tiff_path, final_path)
     return False        # OVERWRITE True: always reconvert, never a skip
 
 
@@ -6084,6 +6205,10 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
             if tiff_mtime <= jxl_mtime:
                 n, total = next_count()
                 logger.info(f"[{n}/{total}] SKIP (sync: JXL up to date) | {tiff_path.name}")
+                return ((str(tiff_path), page_idx), "skipped", str(final_path), None)
+            if _sync_same_bytes(tiff_path, final_path):
+                n, total = next_count()
+                logger.info(f"[{n}/{total}] SKIP (sync: same TIFF bytes, JXL kept) | {tiff_path.name}")
                 return ((str(tiff_path), page_idx), "skipped", str(final_path), None)
             logger.info(f"  >SYNC: TIFF newer than JXL, reconverting | {tiff_path.name}")
 
@@ -6584,7 +6709,13 @@ def _thumbnail_sync_guard(tiff_path: Path, output_dir: Path, real_pages: list,
             return None
         if OVERWRITE == "smart":
             src_mtime = tiff_path.stat().st_mtime
-            if any(src_mtime > m.stat().st_mtime for m in existing):
+            # A main output proved to be the same bytes is skipped by the
+            # sync, so it does not make this run rewrite the group. This runs
+            # while the pages are analysed -- before _mark_sync_same_bytes
+            # has seen the plan -- so the proof is made here, for the TIFFs
+            # that are newer than an existing main output (rare).
+            if any(src_mtime > m.stat().st_mtime
+                   and not _prove_same_bytes(tiff_path, m) for m in existing):
                 return None
     except OSError:
         return None
@@ -8140,6 +8271,9 @@ def main():
         OVERWRITE = "smart"
     elif args.overwrite:
         OVERWRITE = True
+    # Run-scoped (tests call main() repeatedly in one process): the pairs
+    # proved to be the same bytes, see _mark_sync_same_bytes.
+    _SYNC_SAME_BYTES.clear()
 
     if args.delete_source:
         DELETE_SOURCE = True
@@ -8673,6 +8807,12 @@ def main():
     if args.restamp_then_sync:
         _rc_restamp, _restamped, _restamp_failures = _restamp_moved(all_items, args.dry_run)
         failed_files.extend(_restamp_failures)
+
+    # Smart sync: a newer TIFF with the bytes its JXL was made from is up to
+    # date. Filled BEFORE the guard below and the preflight read _would_skip
+    # (the set itself is cleared at the start of the run, where it is also
+    # filled by the thumbnail guard).
+    _mark_sync_same_bytes(all_items, args.dry_run)
 
     # Cross-RUN output collision. The guard above only sees collisions inside
     # THIS run; an output written by an earlier run can belong to a different

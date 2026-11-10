@@ -232,7 +232,9 @@ SHARED_HELPERS = [
     "_min_effective_distance",
     # Skip decision and pixel-verification helpers, born in the encoder. The
     # recompressor verifies source-vs-output decodes with the same statistics.
-    "_would_skip",
+    # (_would_skip is NOT here since v2.27: the encoder's also answers "same
+    # TIFF bytes" -- a TIFF newer than its JXL but with the bytes the JXL was
+    # made from is up to date. The recompressor keeps its own rules and guards.)
     "_decode_jxl_for_verify",
     "_canon_for_compare",
     "_compare_stats",

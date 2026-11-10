@@ -2208,6 +2208,9 @@ def orientation_and_gate_checks(A1):
         final = lk / "converted_jxl" / "a.jxl"
         if final.exists():
             before = md5(final)
+            # EDITED, not only touched: a newer TIFF with the same bytes is a
+            # sync skip since #638, and this check needs a real re-encode.
+            tifffile.imwrite(str(lk / "a.tif"), pix ^ np.uint16(255), photometric="rgb")
             touch(lk / "a.tif", 60)
             with open(final, "rb"):
                 rc, out = run("locked_second", ARGS + ["--sync"])

@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | unreleased | #639 (1) |
+| [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | unreleased | #638–#639 (2) |
 | [Round-77 — the should-fix list of the v2.26.0 review](#round-77--the-should-fix-list-of-the-v2260-review-2026-11-10) | 2026-11-10 | v2.26.1 | #636–#637 (2) |
 | [Round-76 — what stayed open after v2.25.3](#round-76--what-stayed-open-after-v2253-2026-11-10) | 2026-11-10 | v2.26.0 | #630–#635 (6) |
 | [Round-75 — the 261110 bug sweep](#round-75--the-261110-bug-sweep-2026-11-10) | 2026-11-10 | v2.25.3 | #620–#629 (10) |
@@ -98,14 +98,16 @@ were never tagged and never shipped.
 ## Round-78 — the 261111 plan (2026-11-11)
 
 Plan: `AI_tools/261111_Claude_plan_sync-same-bytes-and-lossy-jpeg-metadata.md`
-(local), part B (item S5 of the 261110 review). Regression tests:
+(local). Part B (item S5 of the 261110 review): regression tests
 `tests/test_lossy_jpeg_malformed_metadata.py` (real cjxl and exiftool, a folder
 named with Japanese, brackets, a space, `%` and parentheses; the owner's two
 files when present). Nothing was ever deleted: the file was an error and the
-source stayed.
+source stayed. Part A (item 2.3 of the 261110 review): `tests/test_sync_same_bytes.py`
+(real cjxl and exiftool, the same kind of hostile folder).
 
 | # | Bug | Script | Status |
 |---|-----|--------|--------|
+| 638 | **`--sync` (and the encoder's default smart sync) re-encoded a TIFF that was newer than its JXL but had the SAME BYTES**: a TIFF restored from a backup has a new date and the old content, and the date rule alone reconverted it; with a larger distance than the master's, that replaced a good master by a worse one (measured: a lossless 247 181 B master became 9 301 B). The master already carries the proof, `jxlphoto-srcsum` (sha256 of the TIFF it came from) | encoder | ✅ FIXED (in smart sync only, `_mark_sync_same_bytes` compares the srcsum of each master whose TIFF is newer with the TIFF as it is now, once per run before the plan is judged; equal = SKIP — `_would_skip`, `convert_one` and `_thumbnail_sync_guard` answer from that set, so a split group is not divided. Nothing is written, the master's date included: review of this fix dropped the plan's "set the master's mtime to the TIFF's", because the recompressor's own sync compares a master's mtime with its derivatives' and would have re-derived every copy; the cost is that each run reads the newer TIFFs again. No srcsum, an unread marker batch or an unreadable TIFF: re-encoded as before. `--overwrite` still remakes a master on purpose. No new flag or setting; `_would_skip` left the shared-helper parity list, the recompressor keeps its own rules) |
 | 639 | **A lossy JPEG → JXL (`--force-convert --from-jpeg`, distance above 0) of a JPEG with a malformed EXIF was an error**: cjxl copies the EXIF into the container as a block, and exiftool then refuses every write to it — the metadata copy failed on a broken IFD1 (`Bad IFD1 offset for BitsPerSample`) and the provenance write on maker notes it cannot parse (`Maker notes could not be parsed`). The same family as #631, in the JPEG → JXL direction | transcoder | ✅ FIXED for a broken IFD1: one retry, cjxl again with `-x strip=exif` and the EXIF written fresh from the JPEG, an output that lost all its EXIF is an error (`METADATA PARTIAL`). Review fix, before release: the retry's `-x strip=exif` also drops the EXIF Orientation cjxl keeps in the codestream, so a ROTATED JPEG with a broken IFD1 came out sideways in a JXL viewer (and `--delete-source` deleted the JPEG) — a rotated JPEG (codestream orientation 2–8 on the first encode) is now not retried: error plus `--force-transcode`. **Unparseable maker notes stay an error by design** (the copy recreates the block and the next write fails again; measured): the message names the cause and `--force-transcode`, which works; nothing is added to the JXL and never `-m` (#571). Documented in `behavior_and_limitations.md` |
 
 ## Round-77 — the should-fix list of the v2.26.0 review (2026-11-10)

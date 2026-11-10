@@ -113,8 +113,10 @@ def test_s1_unchanged_renamed_guard_on(tmp_path):
 
 
 @real
-def test_s2_touched_same_content_is_reconverted_not_refused(tmp_path):
-    """The ORDER test: the restamp must run before the guard reads the record."""
+def test_s2_touched_same_content_is_restamped_and_kept_not_refused(tmp_path):
+    """The ORDER test: the restamp must run before the guard reads the record.
+    Since #638 a newer TIFF with the SAME bytes is not re-encoded: the restamp
+    still rewrites the record and the sync keeps the master."""
     tif, jxl = _layout(tmp_path)
     t = time.time() + 60
     os.utime(tif, (t, t))
@@ -122,7 +124,8 @@ def test_s2_touched_same_content_is_reconverted_not_refused(tmp_path):
     r = _run(ENCODER, "lib", "--mode", "8", *FAST, "--restamp-then-sync", cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "RESTAMP |" in r.stdout, r.stdout
-    assert "SYNC done: 1 reconverted" in r.stdout, r.stdout
+    assert "SYNC done: 0 reconverted" in r.stdout, r.stdout
+    assert "are the same bytes" in r.stdout, r.stdout
     assert "REFUSING" not in r.stdout, r.stdout
     assert _src_marker(jxl) == ["jxlphoto-src:" + enc._source_path_id(tif)]
 

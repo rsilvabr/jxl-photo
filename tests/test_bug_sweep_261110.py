@@ -191,6 +191,9 @@ def test_624_encoder_move_failure_is_an_error(tmp_path):
     assert rc == 0, out
     final = _only(d, "*.jxl")
     before = _md5(final)
+    # EDITED, not just touched: since #638 a newer TIFF with the same bytes is
+    # a skip, and this test needs a real re-encode to fail the move.
+    _tif16(src, seed=2)
     _newer(src)
     rc, out = _hold_open_and_run(final, lambda: _enc(
         tmp_path, d, "--mode", "1", "--distance", "0", "--sync", "--staging", staging))

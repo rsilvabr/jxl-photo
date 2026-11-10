@@ -437,7 +437,22 @@ Options:
                   RAM is the real ceiling — see "RAM per worker" in Performance
   --overwrite     Always overwrite existing JXLs
   --sync          Reconvert only TIFFs newer than their JXL
-                  (wins over --overwrite if both are given)
+                  (wins over --overwrite if both are given). "Newer" is a
+                  date AND a content question: a TIFF with a new date but the
+                  SAME BYTES its JXL was made from (a backup restored, a
+                  folder copied) is up to date and is skipped, whatever
+                  --distance says -- the master carries the sha256 of its
+                  TIFF (jxlphoto-srcsum) and the run compares it before
+                  deciding ("Sync: K of N newer TIFF(s) are the same bytes --
+                  kept as up to date"). Nothing is written, the master's
+                  file date included (the recompressor compares it with its
+                  copies'), so every run reads the newer TIFFs again until
+                  they are re-saved or re-encoded. A master without a
+                  readable srcsum (made before the markers, jbrd, a marker
+                  read that failed) is judged by the date alone, as before.
+                  To remake a master on purpose, at another distance for
+                  instance, use --overwrite. The default (no flag) is the
+                  same smart sync
   --distance N    JXL distance (0=lossless, 0.1=near-lossless, default: from script)
   --effort 1-10  Compression effort (default: from script setting)
   --buffering 0-3 [libjxl >= 0.12] cjxl buffering level (default: off = use cjxl default;

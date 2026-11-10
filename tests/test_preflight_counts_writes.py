@@ -107,6 +107,15 @@ def test_p1_encoder_sync_counts_only_what_it_reencodes(tmp_path):
     assert "0 reconverted" in r.stdout, r.stdout
     assert _count(r) == 0, "an up-to-date master was counted"
 
+    # Only the date changed (a restored backup): the master carries the proof of
+    # the bytes it came from, so it is still up to date (#638) and not counted.
+    _touch_future(lib / "a.tif")
+    r = _run(probe, lib, *ENC_FAST, "--sync")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _count(r) == 0, "a same-bytes TIFF was counted as a write"
+
+    # EDITED since: that is a real re-encode.
+    _tiff(lib / "a.tif", 1500)
     _touch_future(lib / "a.tif")
     r = _run(probe, lib, *ENC_FAST, "--sync")
     assert r.returncode == 0, r.stdout + r.stderr
