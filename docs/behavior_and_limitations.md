@@ -77,9 +77,15 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 
 **Still protected with the guard off:** a lossless JPEG archive (`jbrd`) of a different JPEG, an original TIFF master (the decoder never overwrites a TIFF it did not write) or an edited decode, and a file a derivative run did not write.
 
+**A lossy JXL → JPEG/PNG run with `--sync`** refuses to replace a JPEG or PNG that carries no `jxlphoto-src` marker: every JPEG/PNG this decode writes carries one, so a marker-less file is not a file the tool converted (typically the camera's own JPEG beside the master). `--overwrite` replaces it; `--no-overwrite-guard` does not lift the refusal.
+
+**Two runs writing one folder at once:** each output is replaced only if it is still what the run found when it planned; a file another run wrote there meanwhile is left alone, this run's source is kept and the run ends with exit code 1 (encoder, JPEG transcoder, recompressor).
+
+**Before deleting a source, every script flushes the output to the disk.** An output it cannot flush keeps its source with a `KEEP` line — including a read-only file, e.g. an archive you protected, under `--delete-skipped`.
+
 ## A JPEG or 8-bit PNG made from a JXL never deletes it
 
-A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has fewer bits and, for a JPEG, a lossy encode. Like the decoder's 8-bit TIFF and the recompressor's derivatives, it never deletes the JXL: the transcoder refuses `--force-convert --decode` to JPEG/8-bit PNG with `--delete-source` (exit 2), auto mode keeps each such JXL with a `KEEP` line, and the wizard refuses the combination before asking for the HHMM time. The bit-exact recovery of a lossless JPEG archive and a 16-bit PNG still delete, behind their checks.
+A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has fewer bits and, for a JPEG, a lossy encode. Like the decoder's 8-bit TIFF and the recompressor's derivatives, it never deletes the JXL: the transcoder refuses `--force-convert --decode` to JPEG/8-bit PNG with `--delete-source` (exit 2), auto mode keeps each such JXL with a `KEEP` line, and the wizard refuses the combination before asking for the HHMM time (for a lossy JPEG, already when you pick `[D]`). The bit-exact recovery of a lossless JPEG archive and a 16-bit PNG still delete, behind their checks.
 
 ## Modes 6/7: which `_EXPORT` counts, and what is left out
 

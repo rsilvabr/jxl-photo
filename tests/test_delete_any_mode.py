@@ -780,14 +780,16 @@ def test_wrapper_emits_provenance_for_every_direction(menu, launched, monkeypatc
 
 @pytest.mark.parametrize("origin,dest,conv", [
     ("jpeg", "jxl", "transcode_lossless"),
-    ("jxl", "jpeg", "jxl_to_jpeg_force"),
+    # jxl_to_jpeg_auto, not the lossy jxl_to_jpeg_force: that one never
+    # deletes (#600) and its [D] is refused at once since v2.25.2.
+    ("jxl", "jpeg", "jxl_to_jpeg_auto"),
 ])
 def test_D_asks_provenance_for_transcoder_directions_too(menu, monkeypatch, origin,
                                                          dest, conv):
     """It was asked only when both ends were TIFF/JXL, so every JPEG run was
     stuck on the default with no way to say the folders had moved."""
     answers = ["y", "5", "y", "n"]          # gate1, layout, gate2, delete-skipped
-    if conv in ("jxl_to_jpeg_force",):
+    if conv in ("jxl_to_jpeg_auto",):
         pass                                # lossy gate only fires when skipped is on
     answers.append("content")               # provenance
     ok, wf = _gateway(menu, monkeypatch, answers, origin=origin, dest=dest, conv=conv)

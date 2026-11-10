@@ -7134,11 +7134,23 @@ class InteractiveMenu:
         """
         origin = workflow['origin_format']
         dest = workflow['dest_format']
+        ui = self.ui
+
+        # A lossy JXL -> JPEG never deletes its JXL (#600, T-B): say so at the
+        # choice, not after both confirmations (the review refused it only
+        # then). Only for the lossy conversion, which is settled by now; a PNG
+        # may still become 16-bit later, so its rule stays at the review.
+        if workflow.get('conversion_type') == 'jxl_to_jpeg_force':
+            _never = _lossy_decode_never_deletes(workflow)
+            if _never:
+                _msg = (f"[D] is not available for this task: {_never}. Pick a layout "
+                        f"— your JXLs are kept.")
+                ui.panel(f"[yellow]{_rich_safe(_msg)}[/yellow]", style="yellow", plain=_msg)
+                return self._wizard_select_mode(workflow)
 
         # --- Gate 1: undo a mis-key ---------------------------------------
         warn = (f"[D] deletes your original {origin.upper()} files after converting them. "
                 f"This cannot be undone.")
-        ui = self.ui
         ui.panel(f"[bold red]{_rich_safe(warn)}[/bold red]", style="red", plain=warn)
         go = ui.ask_yes("delete.continue", "[bold]Continue?[/bold]", "Continue? [y/N]: ", False)
         if not go:

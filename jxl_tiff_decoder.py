@@ -184,6 +184,28 @@ _CHANGED_WHILE_DECODING = ("the existing TIFF changed while it was being decoded
                            "fresh decode discarded; the source is kept")
 
 
+def _flush_to_disk(path) -> bool:
+    """Force `path`'s data to the disk (#617). False when it cannot be done:
+    the delete gates then keep the source — a file that only exists in the
+    OS cache does not justify an irreversible delete. The flush needs write
+    access: a read-only output (an archive the owner protected) keeps its
+    source too, and the reason is logged."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        logger.warning(f"  could not open {Path(path).name} to flush it to disk "
+                       f"(read-only or in use?): {e}")
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError as e:
+        logger.warning(f"  could not flush {Path(path).name} to disk: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -4612,6 +4634,14 @@ def process_group(group_tasks, workers, target_icc=None):
                 _delete_stats["kept"] += (len(task["entries"])
                                           + len(task.get("ignored_thumbs", [])))
                 logger.warning(f" KEEP (TIFF failed integrity check) | {task['main_jxl'].name}")
+                continue
+            # #617: the TIFF on the disk, not only in the OS cache, before the
+            # irreversible delete.
+            if not _flush_to_disk(final_tiff):
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(f" KEEP (TIFF could not be flushed to disk) | "
+                               f"{task['main_jxl'].name}")
                 continue
             # A SKIPPED source is judged on the FILE — and the MATCH, not the
             # presence, of the marker is what says whose decode this TIFF is.

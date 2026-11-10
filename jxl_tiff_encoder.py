@@ -259,6 +259,126 @@ def _changed_since(path, st) -> bool:
     return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
 
 
+# What each planned output looked like when this run PLANNED it, keyed by its
+# normcased absolute path: None = nothing there, (size, mtime_ns) = that file,
+# False = could not be read. The overwrite guards judge an output once, at
+# planning, and the swap comes later (hours, on a big batch): another run
+# writing the same folder in between had its fresh archive replaced AFTER it
+# verified it and deleted its source (#615, review 261110). Recorded right
+# BEFORE the judgment, checked right before every swap. A path this run never
+# recorded (a direct caller, a test) is not checked. Cleared per run.
+_planned_outputs = {}
+
+
+def _record_planned_outputs(pairs) -> None:
+    """Remember the state of every output of `pairs` ((source, output)).
+    The first record of a path wins."""
+    for _src, out in pairs:
+        key = os.path.normcase(os.path.abspath(str(out)))
+        if key in _planned_outputs:
+            continue
+        try:
+            st = os.stat(out)
+        except FileNotFoundError:
+            _planned_outputs[key] = None
+        except OSError:
+            _planned_outputs[key] = False
+        else:
+            _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _output_changed_since_planned(final_path):
+    """Why `final_path` must not be written now, or None. Not None when a
+    file is there that is not the one this run planned over: one that
+    appeared, one that changed, or one whose state could not be read at
+    planning or cannot be read now (fail closed)."""
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if key not in _planned_outputs:
+        return None
+    rec = _planned_outputs[key]
+    try:
+        st = os.stat(final_path)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"the output path could not be checked before the swap ({e})"
+    if rec is None:
+        return ("a file appeared at the output path after this run planned it "
+                "(another run writing the same folder?)")
+    if rec is False:
+        return "the output path could not be read when this run planned it"
+    if (st.st_size, st.st_mtime_ns) != rec:
+        return ("the existing output changed after this run judged it "
+                "(another run rewrote it?)")
+    return None
+
+
+def _swap_into_place(tmp_path, final_path) -> None:
+    """Rename a verified temp over its final name — unless the final path is
+    no longer what this run planned (#615). Raises RuntimeError on a refusal;
+    the caller's handler removes the temp and reports the file as an error.
+    An output planned as ABSENT is renamed without replacing on Windows
+    (os.rename refuses an existing target there), so a file that appears
+    between the check and the rename is not replaced either."""
+    why = _output_changed_since_planned(final_path)
+    if why:
+        raise RuntimeError(f"REFUSED to write {Path(final_path).name}: {why} — "
+                           f"nothing was overwritten and the source is kept")
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if os.name == "nt" and key in _planned_outputs and _planned_outputs[key] is None:
+        try:
+            os.rename(str(tmp_path), str(final_path))
+        except FileExistsError:
+            raise RuntimeError(
+                f"REFUSED to write {Path(final_path).name}: a file appeared at the "
+                f"output path after this run planned it (another run writing the "
+                f"same folder?) — nothing was overwritten and the source is kept"
+            ) from None
+        return
+    os.replace(str(tmp_path), str(final_path))
+
+
+# Final paths whose move out of staging was refused this run (#615): the run
+# exits 1 for them even though the conversion itself succeeded.
+_swap_refusals = []
+
+
+def _refresh_planned_output(path) -> None:
+    """This run itself rewrote a planned output in place (the restamp, the
+    adopt stamp): its record follows, or the later swap would refuse it."""
+    key = os.path.normcase(os.path.abspath(str(path)))
+    if key not in _planned_outputs:
+        return
+    try:
+        st = os.stat(path)
+    except OSError:
+        _planned_outputs[key] = False
+    else:
+        _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _flush_to_disk(path) -> bool:
+    """Force `path`'s data to the disk (#617). False when it cannot be done:
+    the delete gates then keep the source — a file that only exists in the
+    OS cache does not justify an irreversible delete. The flush needs write
+    access: a read-only output (an archive the owner protected) keeps its
+    source too, and the reason is logged."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        logger.warning(f"  could not open {Path(path).name} to flush it to disk "
+                       f"(read-only or in use?): {e}")
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError as e:
+        logger.warning(f"  could not flush {Path(path).name} to disk: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -5454,6 +5574,7 @@ def _rewrite_master_relation(jxl_path: Path, arg_lines: list, expect_src: str):
             return ("the master changed while its record was being rewritten (another "
                     "run?) — left untouched")
         os.replace(str(tmp), str(jxl_path))
+        _refresh_planned_output(jxl_path)
         return None
     except Exception as e:
         return str(e)
@@ -6305,7 +6426,7 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 # Atomic same-folder swap (see the _promote_local note above):
                 # a partial never carries the final name. A failure raises
                 # into the error handler, which deletes the temp.
-                os.replace(str(write_path), str(final_path))
+                _swap_into_place(write_path, final_path)
 
             n, total = next_count()
             status = "overwrite" if overwritten else "ok"
@@ -7108,6 +7229,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
     _warn_stale_split_outputs(tasks)
 
     moved_finals = set()
+    refused_moves = {}      # (str(tiff), page_idx) -> why (#615)
 
     def _move_dest_from_staging(dest_tasks: list, status_map: Dict):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -7131,6 +7253,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                 continue
             # A locked/readonly destination must not abort the whole batch:
             # the file stays in staging and is logged for manual recovery.
+            _why = _output_changed_since_planned(final_jxl)
+            if _why:
+                _swap_refusals.append(str(final_jxl))
+                refused_moves[(str(tiff), page_idx)] = _why
+                logger.error(f"  REFUSED, kept in staging | {write_jxl.name} -> "
+                             f"{final_jxl} | {_why}")
+                continue
             if _promote_from_staging(write_jxl, final_jxl):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_jxl)))
@@ -7188,6 +7317,15 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             pending_by_dest[dest] -= 1
             if use_staging and pending_by_dest[dest] == 0:
                 _move_dest_from_staging(tasks_by_dest[dest], status_map)
+
+    if refused_moves:
+        # An error like any other (#615): counted in the summary and the
+        # failures list, never "written" for the stale-page cleanup, and the
+        # delete gate below keeps the TIFF.
+        results = [(r[0], "error",
+                    f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
+                    f"its output is kept in staging and the source is kept", None)
+                   if r[0] in refused_moves else r for r in results]
 
     # Delete source TIFFs after confirmed encode, in ANY mode, only after staging.
     # A source TIFF is deleted only if ALL of its encoded pages succeeded and every
@@ -7383,6 +7521,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             if _source_changed_since_read(src_tiff):
                 _delete_stats["kept"] += 1
                 logger.warning(f"  KEEP source (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_tiff.name}")
+                continue
+            # #617: every page's JXL on the disk, not only in the OS cache,
+            # before the irreversible delete.
+            if not all(_flush_to_disk(f) for f in sorted({r[2] for r in tiff_results})):
+                _delete_stats["kept"] += 1
+                logger.warning(f"  KEEP source (output could not be flushed to disk) | "
+                               f"{src_tiff.name}")
                 continue
             try:
                 src_tiff.unlink()
@@ -8427,9 +8572,12 @@ def main():
     planned_msg += ")"
     logger.info(planned_msg)
 
+    _planned_outputs.clear()        # run-scoped (#615)
+    _swap_refusals.clear()
     _abort_on_duplicate_outputs([(item[0], item[1]) for item in all_items])
     if not args.dry_run:
         _sweep_orphan_temps(item[1] for item in all_items)
+        _record_planned_outputs((item[0], item[1]) for item in all_items)
 
     # --restamp-moved stops here: no preflight, no conversion, no delete.
     if args.restamp_moved:
@@ -8969,7 +9117,7 @@ def main():
         sys.exit(2)
 
     # Non-zero exit when any file failed so wrappers/automation can detect it.
-    if err > 0:
+    if err > 0 or _swap_refusals:
         sys.exit(1)
 
 if __name__ == "__main__":

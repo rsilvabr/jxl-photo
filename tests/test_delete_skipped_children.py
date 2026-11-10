@@ -454,8 +454,11 @@ def test_D_lossy_direction_asks_an_extra_confirmation(menu, monkeypatch, capsys)
     """The one combination with no provenance of any kind gets its own gate,
     and declining it turns the option off rather than the whole run."""
     # gate1, layout, gate2, delete-skipped yes, EXTRA confirmation NO
+    # jxl_to_jpeg_auto: the lossy JXL -> JPEG (jxl_to_jpeg_force) never
+    # deletes (#600) and its [D] is refused at once since v2.25.2; the auto
+    # conversion still deletes its bit-exact archives and gets this gate.
     _ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "y", "n"],
-                       "jxl", "jpeg", "jxl_to_jpeg_force")
+                       "jxl", "jpeg", "jxl_to_jpeg_auto")
     assert wf["delete_source"] is True
     assert wf["delete_skipped"] is False
     assert "nothing compares the pixels" in _out(capsys)
@@ -463,7 +466,7 @@ def test_D_lossy_direction_asks_an_extra_confirmation(menu, monkeypatch, capsys)
 
 def test_D_lossy_direction_can_still_be_confirmed(menu, monkeypatch):
     _ok, wf = _gateway(menu, monkeypatch, ["y", "3", "y", "y", "y"],
-                       "jxl", "jpeg", "jxl_to_jpeg_force")
+                       "jxl", "jpeg", "jxl_to_jpeg_auto")      # see the test above
     assert wf["delete_skipped"] is True
 
 

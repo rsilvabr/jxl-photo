@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #615.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #620.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete](#round-74--two-runs-writing-one-output-a-same-named-camera-file-a-power-cut-after-a-delete-2026-11-10) | 2026-11-10 | v2.25.2 | #615–#619 (5) |
 | [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | v2.25.1 | #613–#614 (2) |
 | [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#612 (5) |
 | [Round-71 — delivery B of the wrapper redesign](#round-71--delivery-b-of-the-wrapper-redesign-2026-11-04) | 2026-11-04 | v2.22.0 | #600–#607 (8) |
@@ -89,6 +90,20 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete (2026-11-10)
+
+Found in the 261110 review of the delete and overwrite paths. Regression
+tests: `tests/test_review_261110.py` (real codecs, in a folder named with
+Japanese, brackets, a space and `%`).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 615 | **Two runs at once could write one output file**: an output was judged when the run planned it and replaced later, with no second look. Two runs mapping different sources to one output file: the second run's archive replaced the first's after the first had verified it and deleted its source | transcoder, encoder, recompressor | ✅ FIXED (the final path is compared with what the run planned right before the swap; a file that changed or appeared meanwhile is refused, the source is kept, exit 1. Out of staging, one file's copy time remains between that check and the move, as for #560) |
+| 616 | **A lossy JXL decode with `--sync` replaced a same-named JPEG/PNG with no `jxlphoto-src` marker** (the camera's own file beside the master, say) | transcoder | ✅ FIXED (refused under `--sync`, as an original TIFF master is; `--overwrite` still replaces it) |
+| 617 | **A power cut right after a delete could leave the output's data unwritten**: nothing flushed the output to disk before its source was deleted | transcoder, encoder, decoder, recompressor | ✅ FIXED (the output is flushed to disk before the delete — `_flush_to_disk`, identical in the four; a flush that fails keeps the source — so does a read-only output, which cannot be flushed) |
+| 618 | **The recompressor deleted a source on the strength of another run's file**: its delete gate trusted "promoted by this run" + the integrity check, so an output another run replaced after the promotion (a valid JXL of another photo) certified the delete | recompressor | ✅ FIXED (the output's size and time are recorded right after the promotion; the gate keeps the source when they changed) |
+| 619 | **Two messages pointed at the wrong problem**: a JPEG gone before the delete gate (another run deleted it) was reported as "djxl --reconstruct_jpeg does not reproduce this JPEG; run --repair-jbrd", and a damaged (truncated) output was refused as another source's | transcoder | ✅ FIXED ("the source no longer exists" and "the existing output is DAMAGED"; nothing else changes) |
 
 ## Round-73 — a TEMP_DIR that does not exist (2026-11-08)
 

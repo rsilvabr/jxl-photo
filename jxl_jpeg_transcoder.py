@@ -401,6 +401,107 @@ def _changed_since(path, st) -> bool:
     return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
 
 
+# What each planned output looked like when this run PLANNED it, keyed by its
+# normcased absolute path: None = nothing there, (size, mtime_ns) = that file,
+# False = could not be read. The overwrite guards judge an output once, at
+# planning, and the swap comes later (hours, on a big batch): another run
+# writing the same folder in between had its fresh archive replaced AFTER it
+# verified it and deleted its source (#615, review 261110). Recorded right
+# BEFORE the judgment, checked right before every swap. A path this run never
+# recorded (a direct caller, a test) is not checked. Cleared per run.
+_planned_outputs = {}
+
+
+def _record_planned_outputs(pairs) -> None:
+    """Remember the state of every output of `pairs` ((source, output)).
+    The first record of a path wins."""
+    for _src, out in pairs:
+        key = os.path.normcase(os.path.abspath(str(out)))
+        if key in _planned_outputs:
+            continue
+        try:
+            st = os.stat(out)
+        except FileNotFoundError:
+            _planned_outputs[key] = None
+        except OSError:
+            _planned_outputs[key] = False
+        else:
+            _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _output_changed_since_planned(final_path):
+    """Why `final_path` must not be written now, or None. Not None when a
+    file is there that is not the one this run planned over: one that
+    appeared, one that changed, or one whose state could not be read at
+    planning or cannot be read now (fail closed)."""
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if key not in _planned_outputs:
+        return None
+    rec = _planned_outputs[key]
+    try:
+        st = os.stat(final_path)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"the output path could not be checked before the swap ({e})"
+    if rec is None:
+        return ("a file appeared at the output path after this run planned it "
+                "(another run writing the same folder?)")
+    if rec is False:
+        return "the output path could not be read when this run planned it"
+    if (st.st_size, st.st_mtime_ns) != rec:
+        return ("the existing output changed after this run judged it "
+                "(another run rewrote it?)")
+    return None
+
+
+def _swap_into_place(tmp_path, final_path) -> None:
+    """Rename a verified temp over its final name — unless the final path is
+    no longer what this run planned (#615). Raises RuntimeError on a refusal;
+    the caller's handler removes the temp and reports the file as an error.
+    An output planned as ABSENT is renamed without replacing on Windows
+    (os.rename refuses an existing target there), so a file that appears
+    between the check and the rename is not replaced either."""
+    why = _output_changed_since_planned(final_path)
+    if why:
+        raise RuntimeError(f"REFUSED to write {Path(final_path).name}: {why} — "
+                           f"nothing was overwritten and the source is kept")
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if os.name == "nt" and key in _planned_outputs and _planned_outputs[key] is None:
+        try:
+            os.rename(str(tmp_path), str(final_path))
+        except FileExistsError:
+            raise RuntimeError(
+                f"REFUSED to write {Path(final_path).name}: a file appeared at the "
+                f"output path after this run planned it (another run writing the "
+                f"same folder?) — nothing was overwritten and the source is kept"
+            ) from None
+        return
+    os.replace(str(tmp_path), str(final_path))
+
+
+def _flush_to_disk(path) -> bool:
+    """Force `path`'s data to the disk (#617). False when it cannot be done:
+    the delete gates then keep the source — a file that only exists in the
+    OS cache does not justify an irreversible delete. The flush needs write
+    access: a read-only output (an archive the owner protected) keeps its
+    source too, and the reason is logged."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        logger.warning(f"  could not open {Path(path).name} to flush it to disk "
+                       f"(read-only or in use?): {e}")
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError as e:
+        logger.warning(f"  could not flush {Path(path).name} to disk: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -3349,7 +3450,7 @@ def encode_one_transcode(src_path: Path, write_path: Path, final_path: Path,
             # Atomic same-folder swap: the final name only ever names a
             # verified, complete file. A failure raises into the except
             # handler, which deletes the temp.
-            os.replace(str(write_path), str(final_path))
+            _swap_into_place(write_path, final_path)
             # The lines only AFTER the swap (#556). Filed first, they named a
             # file the swap had not replaced yet: a run stopped in between
             # left the OLD archive under the NEW source's checksum. Stopped
@@ -3545,7 +3646,7 @@ def decode_one_transcode(jxl_path: Path, write_path: Path, final_path: Path,
         if _promote_local:
             # Atomic same-folder swap: the final name only ever names a
             # verified, complete file (MD5-verified when a hash was stored).
-            os.replace(str(write_path), str(final_path))
+            _swap_into_place(write_path, final_path)
 
         status = "reconvert" if overwritten else "ok"
         if repaired_copy is not None:
@@ -4285,6 +4386,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
         tasks.append((src, write_out, final_out))
 
     moved_finals = set()
+    refused_moves = {}      # str(src) -> why (#615)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -4308,6 +4410,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 continue
             # A locked/readonly destination must not abort the whole batch:
             # the file stays in staging and is logged for manual recovery.
+            _why = _output_changed_since_planned(final_out)
+            if _why:
+                refused_moves[str(src)] = _why
+                logger.error(f"  REFUSED, kept in staging | {write_out.name} -> "
+                             f"{final_out} | {_why}")
+                continue
             if _promote_from_staging(write_out, final_out):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_out)))
@@ -4422,6 +4530,12 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     except OSError:
                         pass
 
+    if refused_moves:
+        results = [(r[0], "error",
+                    f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
+                    f"its output is kept in staging and the source is kept", None)
+                   if r[0] in refused_moves else r for r in results]
+
     # Any mode, not just 8: the mode decides where the output lands, deleting
     # the source is a separate opt-in. Every gate below certifies THIS run's
     # output at its FINAL path, which is mode-independent.
@@ -4447,6 +4561,11 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 logger.warning(
                     f" KEEP (final output missing) | "
                     f"{src_path.name if src_path is not None else result[0]}")
+                continue
+            if not src_path.exists():
+                # #619: nothing left to delete. Said as such — it used to
+                # reach the reconstruction check and blame the jbrd box.
+                logger.warning(f" {_SOURCE_GONE} | {src_path.name}")
                 continue
             # A staged output whose move FAILED leaves a stale pre-existing
             # file at the final path: it passes exists()+integrity below, but
@@ -4590,6 +4709,10 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
                 continue
+            if not _flush_to_disk(final_file):
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
+                continue
             if _source_changed_since_read(src_path):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
@@ -4652,7 +4775,24 @@ def _lineless_archive_refusal(jxl_path: Path, jpeg_path: Path, decode: bool) -> 
             "if this is the same photo edited since, delete the old .jxl first")
 
 
-def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False):
+def _damaged_output_why(out) -> Optional[str]:
+    """#619 (review 261110 item 1.3): an existing output this run refuses to
+    write over may simply be BROKEN — what a crash or a power cut leaves.
+    The refusal then said "another source" / "not the file the checksum was
+    recorded for", and the user had to guess. Only the wording changes: the
+    file is refused either way."""
+    try:
+        if out.exists() and not _verify_file_integrity(out):
+            return ("the existing output is DAMAGED (it fails the integrity check — "
+                    "truncated by a crash or a power cut?): check it, delete it and "
+                    "re-run")
+    except OSError:
+        pass
+    return None
+
+
+def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False,
+                              explicit_overwrite=False):
     """The half of _provenance_filter that runs when this run does NOT delete
     in a collapsing mode: drop every pair this run is about to OVERWRITE onto
     an existing output that is provably ANOTHER source's.
@@ -4670,6 +4810,9 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
       * the same two without a recorded checksum, when djxl --reconstruct_jpeg
         gives other bytes (#557, _lineless_archive_refusal). A dry run runs no
         reconstruction: it only says how many a real run will check.
+      * a marker-less JPEG/PNG at the output of a lossy JXL decode, unless
+        --overwrite was given (#616): every JPEG/PNG this decode writes carries
+        jxlphoto-src, so a marker-less one is the camera's own file.
     No record either way on a LOSSY output (markerless) keeps the old
     behaviour. A hash that cannot be computed is a refusal (fail closed).
 
@@ -4691,6 +4834,7 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
     refused = []
     lineless = []       # (src, out, jxl, jpeg, decode): judged by reconstruction below
     _marker_refusal = False
+    _original_refusals = 0      # #616: a marker-less JPEG/PNG, not another source's
     for src, out in targets:
         why = None
         info = marks.get(str(out)) or {"src": None, "srcsum": None}
@@ -4739,8 +4883,19 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
             else:
                 logger.warning(f"  OVERWRITE (overwrite guard off) | {out.name}: "
                                f"its provenance markers could not be read")
+        elif (not explicit_overwrite and not _is_derivative()
+              and src.suffix.lower() in JXL_EXTS
+              and out.suffix.lower() in (".jpg", ".jpeg", ".png")):
+            # #616: every JPEG/PNG this decode writes carries jxlphoto-src, so
+            # a marker-less one is not ours — the camera's own JPEG beside the
+            # master, say. The decoder's rule for an original TIFF master.
+            why = ("it carries no jxlphoto-src marker, so it is not a file this "
+                   "tool converted — it looks like an original JPEG/PNG. Convert "
+                   "into another folder, or re-run with --overwrite to replace it "
+                   "anyway")
+            _original_refusals += 1
         if why:
-            refused.append((src, out, why))
+            refused.append((src, out, _damaged_output_why(out) or why))
     if lineless and dry_run:
         logger.info(f" DRY | {len(lineless)} existing lossless archive(s) without a "
                     f"checksum line: a real run checks each with djxl --reconstruct_jpeg "
@@ -4751,16 +4906,25 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
         for src, out, jxl, jpeg, decode in lineless:
             why = _lineless_archive_refusal(jxl, jpeg, decode)
             if why:
-                refused.append((src, out, why))
+                refused.append((src, out, _damaged_output_why(out) or why))
     if not refused:
         return pairs, []
     _bad = {(os.path.normcase(str(s)), os.path.normcase(str(o))) for s, o, _w in refused}
     kept = [(s, o) for s, o in pairs
             if (os.path.normcase(str(s)), os.path.normcase(str(o))) not in _bad]
-    logger.error(
-        f"REFUSING {len(refused)} file(s): their output already exists and belongs "
-        f"to a DIFFERENT source. Converting would overwrite it — and if an earlier "
-        f"run deleted that source, the output is the only copy of the photo.")
+    _only_originals = _original_refusals == len(refused)
+    if _only_originals:
+        # #616: not another source's output — a JPEG/PNG this tool never
+        # wrote (no jxlphoto-src). "--provenance content" cannot help here.
+        logger.error(
+            f"REFUSING {len(refused)} file(s): their output path holds a JPEG/PNG "
+            f"this tool did not write (no jxlphoto-src marker — the camera's own "
+            f"file, say). Converting would replace it.")
+    else:
+        logger.error(
+            f"REFUSING {len(refused)} file(s): their output already exists and belongs "
+            f"to a DIFFERENT source. Converting would overwrite it — and if an earlier "
+            f"run deleted that source, the output is the only copy of the photo.")
     for _s, _o, _w in refused[:10]:
         logger.error(f"    {_s}")
         logger.error(f"      -> {_o} ({_w})")
@@ -4769,8 +4933,8 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
     logger.error(
         "  These were NOT converted and NOTHING was deleted. Rename them or write "
         "into another folder." +
-        ("" if (decode_lossless or PROVENANCE_CHECK == "content") else
-         " If you MOVED the sources, re-run with --provenance content."))
+        ("" if (decode_lossless or PROVENANCE_CHECK == "content" or _only_originals)
+         else " If you MOVED the sources, re-run with --provenance content."))
     if _marker_refusal:
         for _l in _guard_refusal_hint(False):
             logger.error(_l)
@@ -4779,7 +4943,7 @@ def _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run=False
 
 def _provenance_filter(pairs, mode, decode_lossless=False,
                        output_arg=None, source_root=None, would_write=None,
-                       dry_run=False):
+                       dry_run=False, explicit_overwrite=False):
     """Drop pairs whose output already exists and came from a DIFFERENT source.
 
     The STRICT check (every existing output must prove it came from this
@@ -4796,7 +4960,8 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
     Returns (kept_pairs, refused) — refused is [(src, out, why)].
     """
     if not (DELETE_SOURCE and _run_collapses_structure(mode, output_arg, source_root)):
-        return _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run)
+        return _foreign_overwrite_filter(pairs, decode_lossless, would_write, dry_run,
+                                         explicit_overwrite)
     existing = sorted({out for _s, out in pairs if out.exists()})
     if not existing:
         return pairs, []
@@ -4878,10 +5043,11 @@ def _provenance_filter(pairs, mode, decode_lossless=False,
                            "batch failed or stalled) — re-run once exiftool reads "
                            "the folder again")
                 else:
-                    why = ("no provenance marker (written by an older version)"
+                    why = ("no provenance marker (written by an older version, or "
+                           "not by this tool — an original JPEG/PNG?)"
                            if not (info.get("src") or info.get("srcsum"))
                            else "it was made from a different source")
-        refused.append((src, out, why))
+        refused.append((src, out, _damaged_output_why(out) or why))
     if refused:
         logger.error(
             f"REFUSING {len(refused)} file(s): their output already exists and did "
@@ -4934,6 +5100,11 @@ def _lossy_skip_unproven(src_path, final_file, marks) -> bool:
     # output exists), and the stale output deleted the only copy of it.
     return not _provenance_proves_archive(info, src_path, PROVENANCE_CHECK)
 
+
+# #619: the delete gates' line for a source that is gone before its turn
+# (another run or program deleted or moved it) — nothing to delete.
+_SOURCE_GONE = ("SKIP (the source no longer exists — deleted or moved by another "
+                "run or program while this one ran; nothing to delete)")
 
 _LOSSY_SKIP_KEEP = ("KEEP (the existing output carries no provenance marker "
                     "MATCHING this source as it is now — absent, foreign, or the "
@@ -5020,6 +5191,7 @@ def cmd_transcode(args, auto_decode: bool = False):
     the delete confirmation."""
     global _counter, STORE_MD5, DELETE_SOURCE, TEMP2_DIR
     _counter = {"done": 0, "total": 0}
+    _planned_outputs.clear()        # run-scoped (#615)
 
     # Extract reconvert settings
     smart_mode = args.sync
@@ -5110,6 +5282,7 @@ def cmd_transcode(args, auto_decode: bool = False):
     _abort_on_duplicate_outputs(pairs)
     if not args.dry_run:
         _sweep_orphan_temps(dst for _, dst in pairs)
+        _record_planned_outputs(pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode, decode_lossless=decode,
         output_arg=args.output, source_root=_prov_src_root(args),
@@ -5481,7 +5654,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                 store_jxl_self_hash_db(checksum_path, jxl_md5)
 
         if _promote_local:
-            os.replace(str(write_path), str(final_path))
+            _swap_into_place(write_path, final_path)
             if jbrd_lines:
                 # After the swap, never before it (#556; see encode_one_transcode).
                 _file_checksum_lines(final_path, src_md5, jxl_md5)
@@ -6719,7 +6892,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             raise RuntimeError("decode returned 0 but the output failed the integrity check")
 
         if _promote_local:
-            os.replace(str(actual_out), str(final_path))
+            _swap_into_place(actual_out, final_path)
 
         n, total = next_count()
         if derivative:
@@ -6770,6 +6943,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
         tasks.append((src, write_out, final_out))
 
     moved_finals = set()
+    refused_moves = {}      # str(src) -> why (#615)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -6786,6 +6960,12 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                     continue
                 # A locked/readonly destination must not abort the whole batch:
                 # the file stays in staging and is logged for manual recovery.
+                _why = _output_changed_since_planned(final_out)
+                if _why:
+                    refused_moves[str(src)] = _why
+                    logger.error(f"  REFUSED, kept in staging | {write_out.name} -> "
+                                 f"{final_out} | {_why}")
+                    continue
                 if _promote_from_staging(write_out, final_out):
                     moved += 1
                     moved_finals.add(os.path.normcase(str(final_out)))
@@ -6882,6 +7062,11 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 except OSError:
                     pass
 
+    if refused_moves:
+        results = [(r[0], "error",
+                    f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
+                    f"its output is kept in staging and the source is kept", None)
+                   if r[0] in refused_moves else r for r in results]
     # moved_finals lets the mode-8 delete gate distinguish "this run's output
     # arrived at the final path" from a stale pre-existing file whose
     # overwrite FAILED (the gate's integrity check would otherwise certify
@@ -6892,6 +7077,7 @@ def cmd_convert(args, from_jxl: bool = True):
     """Returns (errors, cancelled)."""
     global _counter, TEMP2_DIR, DELETE_SOURCE
     _counter = {"done": 0, "total": 0}
+    _planned_outputs.clear()        # run-scoped (#615)
     _FORCE_REDERIVE.clear()
 
     # NOTE: the --icc-profile guards live AFTER direction auto-detection
@@ -7082,12 +7268,13 @@ def cmd_convert(args, from_jxl: bool = True):
     _abort_on_duplicate_outputs(pairs)
     if not args.dry_run:
         _sweep_orphan_temps(dst for _, dst in pairs)
+        _record_planned_outputs(pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         output_arg=args.output, source_root=_prov_src_root(args),
         would_write=lambda s, o: (os.path.normcase(str(o)) in _FORCE_REDERIVE
                                   or should_process(s, o, smart_mode, reconvert_explicit)),
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, explicit_overwrite=reconvert_explicit)
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -7206,6 +7393,9 @@ def cmd_convert(args, from_jxl: bool = True):
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None:
                 continue
+            if not src_path.exists():
+                logger.warning(f" {_SOURCE_GONE} | {src_path.name}")      # #619
+                continue
             # Fail closed on a failed staging move: the file at the final
             # path would be a stale pre-existing one, not this run's output.
             if (TEMP2_DIR is not None and not was_skipped
@@ -7247,6 +7437,10 @@ def cmd_convert(args, from_jxl: bool = True):
             if final_file is None or not _verify_file_integrity(final_file):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                continue
+            if not _flush_to_disk(final_file):
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
                 continue
             if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
                 _delete_stats["kept"] += 1
@@ -7321,6 +7515,7 @@ def cmd_auto(args):
     """
     global _counter, TEMP2_DIR, DELETE_SOURCE, STORE_MD5
     _counter = {"done": 0, "total": 0}
+    _planned_outputs.clear()        # run-scoped (#615)
     _FORCE_REDERIVE.clear()
 
     if args.icc_profile and not MAGICK_AVAILABLE:
@@ -7681,13 +7876,14 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
     _abort_on_duplicate_outputs(pairs)
     if not args.dry_run:
         _sweep_orphan_temps(dst for _, dst in pairs)
+        _record_planned_outputs(pairs)
     pairs, _refused = _provenance_filter(
         pairs, args.mode,
         decode_lossless=(use_transcode and all(
             s.suffix.lower() == '.jxl' for s, _o in pairs)),
         output_arg=args.output, source_root=_prov_src_root(args),
         would_write=lambda s, o: should_process(s, o, args.sync, args.overwrite),
-        dry_run=args.dry_run)
+        dry_run=args.dry_run, explicit_overwrite=args.overwrite)
     if _is_derivative():
         # A resize/sharpened output is a derivative: never overwrite a file
         # that is not one of ours, re-derive when the recipe changed.
@@ -7838,6 +8034,9 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 src_path, final_file = src_map.get(result[0], (None, None))
                 if src_path is None:
                     continue
+                if not src_path.exists():
+                    logger.warning(f" {_SOURCE_GONE} | {src_path.name}")  # #619
+                    continue
                 # Fail closed on a failed staging move: the file at the
                 # final path would be a stale pre-existing one.
                 if (TEMP2_DIR is not None and not was_skipped
@@ -7874,6 +8073,10 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                 if final_file is None or not _verify_file_integrity(final_file):
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+                    continue
+                if not _flush_to_disk(final_file):
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
                     continue
                 if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
                     _delete_stats["kept"] += 1
@@ -8563,6 +8766,8 @@ def main():
         # Fallback - should not reach here
         print(f"ERROR: Unknown command state: {cmd}")
         sys.exit(1)
+
+    _planned_outputs.clear()        # run-scoped (#615)
 
     # Emitted BEFORE the exits below: a run with failures is exactly the run the
     # wrapper most needs the summary from. A cancelled run recorded nothing, so

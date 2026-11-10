@@ -113,6 +113,8 @@ def _isolate_run_globals():
     transcoder = sys.modules.get("jxl_jpeg_transcoder")
     if transcoder is not None and hasattr(transcoder, "_tool_version"):
         transcoder._tool_version.cache_clear()
+    if transcoder is not None and hasattr(transcoder, "_planned_outputs"):
+        transcoder._planned_outputs.clear()
 
     saved = {name: _snapshot(sys.modules[name])
              for name in _CHILD_MODULES if name in sys.modules}

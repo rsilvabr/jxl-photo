@@ -282,6 +282,142 @@ def _discard_in_place_temp(it) -> None:
         pass
 
 
+# What each planned output looked like when this run PLANNED it, keyed by its
+# normcased absolute path: None = nothing there, (size, mtime_ns) = that file,
+# False = could not be read. The overwrite guards judge an output once, at
+# planning, and the swap comes later (hours, on a big batch): another run
+# writing the same folder in between had its fresh archive replaced AFTER it
+# verified it and deleted its source (#615, review 261110). Recorded right
+# BEFORE the judgment, checked right before every swap. A path this run never
+# recorded (a direct caller, a test) is not checked. Cleared per run.
+_planned_outputs = {}
+
+
+def _record_planned_outputs(pairs) -> None:
+    """Remember the state of every output of `pairs` ((source, output)).
+    The first record of a path wins."""
+    for _src, out in pairs:
+        key = os.path.normcase(os.path.abspath(str(out)))
+        if key in _planned_outputs:
+            continue
+        try:
+            st = os.stat(out)
+        except FileNotFoundError:
+            _planned_outputs[key] = None
+        except OSError:
+            _planned_outputs[key] = False
+        else:
+            _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
+
+
+def _output_changed_since_planned(final_path):
+    """Why `final_path` must not be written now, or None. Not None when a
+    file is there that is not the one this run planned over: one that
+    appeared, one that changed, or one whose state could not be read at
+    planning or cannot be read now (fail closed)."""
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if key not in _planned_outputs:
+        return None
+    rec = _planned_outputs[key]
+    try:
+        st = os.stat(final_path)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"the output path could not be checked before the swap ({e})"
+    if rec is None:
+        return ("a file appeared at the output path after this run planned it "
+                "(another run writing the same folder?)")
+    if rec is False:
+        return "the output path could not be read when this run planned it"
+    if (st.st_size, st.st_mtime_ns) != rec:
+        return ("the existing output changed after this run judged it "
+                "(another run rewrote it?)")
+    return None
+
+
+def _swap_into_place(tmp_path, final_path) -> None:
+    """Rename a verified temp over its final name — unless the final path is
+    no longer what this run planned (#615). Raises RuntimeError on a refusal;
+    the caller's handler removes the temp and reports the file as an error.
+    An output planned as ABSENT is renamed without replacing on Windows
+    (os.rename refuses an existing target there), so a file that appears
+    between the check and the rename is not replaced either."""
+    why = _output_changed_since_planned(final_path)
+    if why:
+        raise RuntimeError(f"REFUSED to write {Path(final_path).name}: {why} — "
+                           f"nothing was overwritten and the source is kept")
+    key = os.path.normcase(os.path.abspath(str(final_path)))
+    if os.name == "nt" and key in _planned_outputs and _planned_outputs[key] is None:
+        try:
+            os.rename(str(tmp_path), str(final_path))
+        except FileExistsError:
+            raise RuntimeError(
+                f"REFUSED to write {Path(final_path).name}: a file appeared at the "
+                f"output path after this run planned it (another run writing the "
+                f"same folder?) — nothing was overwritten and the source is kept"
+            ) from None
+        return
+    os.replace(str(tmp_path), str(final_path))
+
+
+def _flush_to_disk(path) -> bool:
+    """Force `path`'s data to the disk (#617). False when it cannot be done:
+    the delete gates then keep the source — a file that only exists in the
+    OS cache does not justify an irreversible delete. The flush needs write
+    access: a read-only output (an archive the owner protected) keeps its
+    source too, and the reason is logged."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError as e:
+        logger.warning(f"  could not open {Path(path).name} to flush it to disk "
+                       f"(read-only or in use?): {e}")
+        return False
+    try:
+        os.fsync(fd)
+        return True
+    except OSError as e:
+        logger.warning(f"  could not flush {Path(path).name} to disk: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
+# The (size, mtime_ns) of each output right after THIS run put it at its final
+# path, keyed by source (#618, review 261110 item 4.2). The delete gate trusted
+# "promoted this run" + integrity: an output another run replaced in between
+# (a valid JXL of another photo) certified the deletion. A source this run
+# never recorded (a direct caller, a test) is not checked. Cleared per run.
+_promoted_identity = {}
+
+
+def _note_promoted(src_str, final_path) -> None:
+    try:
+        st = os.stat(final_path)
+    except OSError:
+        _promoted_identity[src_str] = False
+    else:
+        _promoted_identity[src_str] = (st.st_size, st.st_mtime_ns)
+
+
+def _changed_since_promoted(src_str, final_path):
+    """Why the output at `final_path` is no longer the one this run wrote for
+    `src_str`, or None."""
+    rec = _promoted_identity.get(src_str)
+    if rec is None:
+        return None
+    if rec is False:
+        return "the output could not be read right after this run wrote it"
+    try:
+        st = os.stat(final_path)
+    except OSError as e:
+        return f"the output could not be checked ({e})"
+    if (st.st_size, st.st_mtime_ns) != rec:
+        return ("the output changed after this run wrote it (another run "
+                "replaced it?)")
+    return None
+
+
 def _reset_abort():
     """Clear the latch. Called when a run starts (and by the tests).
 
@@ -6137,6 +6273,7 @@ def process_group(items, workers: int):
                     if it["write"] == final_path:
                         # No staging and not in place: written directly at the final path.
                         promoted.add(src_str)
+                        _note_promoted(src_str, final_path)
                         continue
                     if not it["in_place"] and it["write"].parent == final_path.parent:
                         # Beside-the-final uuid temp (no staging): same volume, so
@@ -6144,8 +6281,17 @@ def process_group(items, workers: int):
                         # _promote_from_staging's shutil.move would NOT (os.rename
                         # refuses an existing destination on Windows).
                         try:
-                            os.replace(str(it["write"]), str(final_path))
+                            _swap_into_place(it["write"], final_path)
                             moved = True
+                        except RuntimeError as e:
+                            # #615: the final path is not what this run planned.
+                            logger.error(f"  REPLACE REFUSED | {final_path.name} | {e}")
+                            _error_details[src_str] = str(e)
+                            try:
+                                it["write"].unlink()
+                            except OSError:
+                                pass
+                            moved = False
                         except OSError as e:
                             logger.error(f"  REPLACE FAILED | {final_path.name} | {e}")
                             # Remove the temp: the source is untouched (a failed
@@ -6162,6 +6308,7 @@ def process_group(items, workers: int):
                             results[src_str] = ("error", final_str)
                             continue
                         promoted.add(src_str)
+                        _note_promoted(src_str, final_path)
                         continue
                     if it["in_place"]:
                         # Converted and verified by convert_one: replaced now,
@@ -6169,11 +6316,20 @@ def process_group(items, workers: int):
                         # group has settled.
                         _settle_in_place(it, converted=True)
                         continue
+                    _why = _output_changed_since_planned(final_path)
+                    if _why:
+                        results[src_str] = ("error", final_str)
+                        _error_details[src_str] = (f"REFUSED to write {final_path.name}: "
+                                                   f"{_why}")
+                        logger.error(f"  REFUSED, kept in staging | {it['write'].name} -> "
+                                     f"{final_path} | {_why}")
+                        continue
                     moved = _promote_from_staging(it["write"], final_path)
                     if not moved:
                         results[src_str] = ("error", final_str)
                         continue
                     promoted.add(src_str)
+                    _note_promoted(src_str, final_path)
                 except Exception as e:
                     # The promotion block above runs in THIS thread, outside
                     # convert_one's own try: an unexpected failure here used to
@@ -6588,12 +6744,18 @@ def _delete_gate(items, results, promoted):
                               "not converted in this run", False))
             continue
         ok, reason = True, ""
+        _replaced = (_changed_since_promoted(src_str, final_path)
+                     if processed_this_run else None)
         if _source_changed_since_read(src):
             ok, reason = False, "source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived"
         elif not final_path.exists():
             ok, reason = False, "output missing"
+        elif _replaced:
+            ok, reason = False, _replaced                   # #618
         elif not _verify_jxl_integrity(final_path):
             ok, reason = False, "output failed integrity check"
+        elif not _flush_to_disk(final_path):
+            ok, reason = False, "output could not be flushed to disk"   # #617
         elif it["action"] == "copy" or status == "copied":
             # A verbatim copy is provable byte-for-byte — the strongest gate
             # there is, so it is required, not optional. Status "copied" covers
@@ -7846,12 +8008,17 @@ def main():
     # convert/copy like the others, and two sources sharing a destination are
     # a collision whether or not this run happens to write it.
     _writing = ("convert", "copy", "skip_uptodate")
+    _planned_outputs.clear()        # run-scoped (#615)
+    _promoted_identity.clear()      # run-scoped (#618)
     _abort_on_duplicate_outputs(
         [(it["src"], it["final"]) for it in items
          if it["action"] in _writing])
     if not args.dry_run:
         _sweep_orphan_temps(it["final"] for it in items
                             if it["action"] in _writing)
+        _record_planned_outputs((it["src"], it["final"]) for it in items
+                                if it["action"] in _writing
+                                and not it.get("in_place"))
 
     # Timed from here, not from _t_plan: the batch prompt above waits on a
     # person, and that wait is not planning.
