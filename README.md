@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.25.3** (2026-11-10) · [What's new](#whats-new-in-v2253) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.26.0** (2026-11-10) · [What's new](#whats-new-in-v2260) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,11 +21,12 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.25.3](#whats-new-in-v2253)
+- [What's new in v2.26.0](#whats-new-in-v2260)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
 - [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
+- [Related project: selective backup (photo-backup)](#related-project-selective-backup-photo-backup)
 - [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
 
 ---
@@ -130,6 +131,8 @@ Install them in the same Python you will run the scripts with.
 
 The scripts find exiftool under either name, `exiftool.exe` or the download's `exiftool(-k).exe`.
 
+`jxlinfo.exe` comes in the same libjxl zip, next to `cjxl.exe` and `djxl.exe`: keep the three together. The scripts ask it whether a JXL came from a rotated JPEG or holds float or animated content; without it they warn once and skip those checks.
+
 Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](docs/README_jxl_tiff_encoder.md#ram-per-worker)).
 
 ### 3. Add to PATH (PowerShell)
@@ -139,7 +142,7 @@ Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.
 ```powershell
 # EDIT THESE PATHS to match where YOU extracted the tools:
 $myPaths = @(
-    "C:\tools\libjxl\bin",                           # where cjxl.exe and djxl.exe are
+    "C:\tools\libjxl\bin",                           # where cjxl.exe, djxl.exe and jxlinfo.exe are
     "C:\tools\exiftool",                              # where exiftool.exe is
     "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
 )
@@ -157,6 +160,7 @@ Restart PowerShell, then:
 
 ```powershell
 cjxl --version          # cjxl v0.XX.X
+jxlinfo -h              # prints its usage (it comes in the same zip)
 exiftool -ver           # 12.XX or 13.XX
 magick -version         # ImageMagick version
 python -c "import tifffile, numpy, PIL, rich, imagecodecs; print('All Python packages OK')"
@@ -447,7 +451,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.25.3
+## What's new in v2.26.0
+
+2026-11-10. One new behaviour and the fixes left open after v2.25.3.
+
+- **A JPEG made from the JXL of a rotated JPEG comes back as the camera wrote it**: the stored pixels and the original EXIF Orientation (it shows the same way up). `--jpeg-orientation upright` or `JPEG_ORIENTATION` keeps v2.25.3's upright JPEG; PNG and TIFF stay upright ([upgrading](docs/upgrading.md)).
+- **JXL → PNG of camera JPEGs, and resizing or colour-converting a source with the standard sRGB profile** (camera and phone JPEGs, sRGB TIFF masters), work instead of ending in an error. Nothing to do.
+- The decoder's new `--exiftool-ignore-minor`, off by default, for the rare JXL whose maker notes exiftool cannot read; the end of a run lists such files. `jxlinfo` is now part of the dependency check.
+
+[Version history](docs/version_history.md#v2260).
+
+### In v2.25.3
 
 2026-11-10. Fixes from a bug sweep; most close rare cases.
 
@@ -545,12 +559,12 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.25.3** | 2026-11-10 | A rotated JPEG's archive decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error |
+| **v2.26.0** | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
+| [v2.25.3](docs/version_history.md#v2253) | 2026-11-10 | A rotated JPEG's archive decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error |
 | [v2.25.2](docs/version_history.md#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy decode with `--sync` leaves the camera's JPEG alone; flush to disk before every delete |
 | [v2.25.1](docs/version_history.md#v2251) | 2026-11-08 | The new-release notice shown on the next start; `D` checks for releases; a missing `TEMP_DIR` created by the JPEG transcoder too |
 | [v2.25.0](docs/version_history.md#v2250) | 2026-11-06 | The TIFF's byte order kept in masters, copies and decoded TIFFs; a new JPEG quality redoes the JPEG copies |
 | [v2.24.0](docs/version_history.md#v2240) | 2026-11-06 | The encode record leaves the Title for the XMP History; 8-bit TIFFs lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard |
-| [v2.23.0](docs/version_history.md#v2230) | 2026-11-05 | Faster derivatives; `--export-jpeg-folder`; the wizard in tables; a silent update check |
 | [v2.22.5](docs/version_history.md#v2225) | 2026-11-04 | Each distance named in the wizard, masters and smaller copies; the film-scan distance on the review screen; distances up to 25 |
 | [v2.22.1](docs/version_history.md#v2221) | 2026-11-04 | Every wizard question on one question layer; same questions and command lines |
 | [v2.22.0](docs/version_history.md#v2220) | 2026-11-04 | The wizard by task: a New job and one review screen with every option; new menus; a JXL → JPEG never deletes the JXL; modes 6/7 anchor below the input |
@@ -611,6 +625,14 @@ A 45 MP photo (medians, MB):
 | **JXL `d=0.1` (this toolkit)** | 31 (~89% smaller) | 43 — kept lossless: lossy would save only ~10 MB |
 
 **Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
+
+---
+
+## Related project: selective backup (photo-backup)
+
+[photo-backup](https://github.com/rsilvabr/photo-backup) backs up what this toolkit leaves you with. For every folder that has an export folder it copies the exports (the JXL master instead of the TIFF), the originals of the exported photos (RAW, camera JPEG, sidecars) and your Capture One / NX Studio edits, mirroring the folder tree on the destination. It leaves out the outtakes and the copies jxl-photo can make again from the master (sRGB, phone). The source is only read, nothing on the destination is ever deleted, and a later run can verify that the backup still matches.
+
+It was written around one folder layout: the originals beside an export folder (`_EXPORT`, `Lightroom_Export`, … — any name containing "export"), the exports inside it. Run its dry-run first and read what it would copy; a different layout may need its settings, or the script, adapted.
 
 ---
 
