@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #620.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #630.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-75 — the 261110 bug sweep](#round-75--the-261110-bug-sweep-2026-11-10) | 2026-11-10 | v2.25.3 | #620–#629 (10) |
 | [Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete](#round-74--two-runs-writing-one-output-a-same-named-camera-file-a-power-cut-after-a-delete-2026-11-10) | 2026-11-10 | v2.25.2 | #615–#619 (5) |
 | [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | v2.25.1 | #613–#614 (2) |
 | [Round-72 — the wizard's screens read in a real console](#round-72--the-wizards-screens-read-in-a-real-console-2026-11-05) | 2026-11-05 | v2.23.0 | #608–#612 (5) |
@@ -90,6 +91,27 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-75 — the 261110 bug sweep (2026-11-10)
+
+Found in a read-only sweep of v2.25.2 (`AI_tools/261110_Fable_review_bug-sweep.md`).
+Regression tests: `tests/test_bug_sweep_261110.py` (real codecs, in a folder
+named with Japanese, brackets, a space and `%`). Most of these close rare
+edge cases: a TIFF with layers, a 12-bit TIFF, a float or animated JXL, a
+photo shot upright-by-tag, a file open in a viewer while a run replaces it.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 620 | **A TIFF with Photoshop layers (tag 37724), or with a private tag too large to carry, was archived flattened and then deleted by `--delete-source`**: the JXL has no place for layers, and the source TIFF was the only copy | encoder | ✅ FIXED (the JXL is written as before; the TIFF is kept — `KEEP source`, also under `--delete-skipped`, and previewed in a dry run. Tag 34377 alone does not block) |
+| 621 | **A 10/12-bit (or 2/4-bit) TIFF was archived unscaled**: its values arrived in a 16-bit (8-bit) array as they were, so the image came back 16× darker, and `--verify-roundtrip` passed because both sides held the same numbers | encoder | ✅ FIXED (refused per file, `Unsupported TIFF bit depth`, like the photometrics it already refuses; the TIFF is kept. A master an earlier version wrote from such a TIFF is never taken as its archive: `--delete-skipped` keeps the TIFF — found in the review of the fix) |
+| 622 | **A float, deeper-than-16-bit or animated JXL was deleted after a 16-bit integer / first-frame decode** | decoder, transcoder | ✅ FIXED (`jxlinfo` says what the JXL holds; the source is kept when a decode is not a full copy of it. The transcoder's PNG keeps the frames of an animation, so only float and deeper JXLs are kept there. Without `jxlinfo` the gates behave as before) |
+| 623 | **A JXL made from a rotated JPEG came out rotated twice**: the codestream carries the orientation (so `djxl` turns the pixels) and the EXIF Orientation was copied on top | transcoder, decoder, recompressor | ✅ FIXED (the copied EXIF Orientation is set to 1 when the codestream has one — `_orientation_reset_args`, needs `jxlinfo`; the bit-exact JPEG recovery and the TIFF → JXL chain are untouched. XMP `tiff:Orientation` is not reset) |
+| 624 | **A failed move out of staging counted as success** (output open in a viewer, say): the summary said `0 errors` and the exit code was 0, with the old file still under the final name | encoder, decoder, transcoder | ✅ FIXED (the file's result is an error, exit code 1, the source is kept; the recompressor already did this) |
+| 625 | **The wizard's JXL → JXL job sent `--on-downgrade copy --on-regeneration convert --on-scan copy` over the recompressor's own settings** (and over the overlay) | jxl_photo | ✅ FIXED (the wizard follows `ON_DOWNGRADE`/`ON_REGENERATION`/`ON_SCAN`; only `ask`, a silent skip on its pipe, becomes the wizard's default) |
+| 626 | **A preset without `last_effort`/`last_quality`/`last_distance` replayed with `7` / `95` / `0.1`**: completes #538, which fixed the builders but not this path | jxl_photo | ✅ FIXED (absent = the child's own setting; `last_workers` absent = the wrapper's default workers; the "Last job" panel shows what will be used) |
+| 627 | **"Script settings" said a change applies to every run**, but a wizard job sends its own workers, effort, JPEG quality, export marker and TIFF → JXL distance | jxl_photo, docs | ✅ FIXED (the text says which values the wizard sends) |
+| 628 | **The transcoder's `checksums.md5` message told to "re-run"**, but a new run starts with an empty staging checksums file | transcoder | ✅ FIXED (the message says to move the file and its line before the next run) |
+| 629 | **The docs said IPTC is carried into a JXL**: it is not (exiftool cannot write IPTC IIM there), so keywords or captions that exist only in IPTC are not in the master | docs | ✅ FIXED (documented; the lossless JPEG archive keeps everything. Converting IPTC to XMP is a separate change) |
 
 ## Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete (2026-11-10)
 

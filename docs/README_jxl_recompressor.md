@@ -176,6 +176,11 @@ Recompressing destroys both, so these files default to **copy** verbatim,
 whatever distance you asked for. `--jbrd-policy convert` overrides this —
 logged per file, because the JPEG recovery is gone for good.
 
+When the JXL was made from a rotated JPEG its codestream carries the
+orientation, and a re-encode applies it to the pixels: the output's EXIF
+Orientation is set to 1 so a viewer does not turn the picture a second time
+(needs `jxlinfo`, which ships with libjxl; a verbatim copy is untouched).
+
 ### Profiles with no native JPEG XL form (scanner profiles, table curves)
 
 JPEG XL describes most working spaces natively (sRGB, AdobeRGB, ProPhoto,

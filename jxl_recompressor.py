@@ -2771,12 +2771,12 @@ _LONG_PATH_THRESHOLD = 240
 
 
 def _long_codec_paths(cmd):
-    """`cmd` with every long absolute path argument of cjxl/djxl given the
+    """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
     Windows extended-length prefix (Windows only; otherwise unchanged)."""
     if os.name != "nt" or not cmd:
         return cmd
     exe = os.path.basename(str(cmd[0])).lower()
-    if not exe.startswith(("cjxl", "djxl")):
+    if not exe.startswith(("cjxl", "djxl", "jxlinfo")):
         return cmd
     out = [cmd[0]]
     for a in cmd[1:]:
@@ -4497,6 +4497,44 @@ def _png_chunk_types(png_path: Path) -> list:
     return types
 
 
+_JXLINFO_NOTES = set()
+
+
+def _jxlinfo_text(jxl_path):
+    """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
+    jxlinfo is not installed, fails or times out."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        if "missing" not in _JXLINFO_NOTES:
+            _JXLINFO_NOTES.add("missing")
+            logger.warning("jxlinfo not found (it ships with libjxl, next to djxl): "
+                           "a JXL made from a rotated JPEG may come out with its "
+                           "rotation applied twice, and float or animated JXLs are "
+                           "not recognised before a delete")
+        return None
+    try:
+        r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
+    except Exception:
+        return None
+    return (r.stdout or "") if r.returncode == 0 else None
+
+
+def _codestream_orientation(info_text):
+    """The orientation (1-8) the JXL codestream carries, or None."""
+    m = re.search(r"^Orientation:\s*([1-8])\b", info_text or "", re.M)
+    return int(m.group(1)) if m else None
+
+
+def _orientation_reset_args(jxl_path) -> list:
+    """exiftool arguments that set the copied EXIF Orientation to 1 when the
+    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
+    already turned the pixels, so the tag copied from the Exif box would turn
+    them a second time. A JXL made from a TIFF has codestream orientation 1
+    and keeps its tag."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+
+
 def _djxl_icc_args(tmp_dir: Path) -> tuple:
     """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
     also report which colour space it decoded to and what the file's own is."""
@@ -5943,6 +5981,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                  # ExifByteOrder: the output's EXIF keeps the source's II/MM
                  # (cjxl wrote none, and a new EXIF block is MM by default).
                  "-exif:all", "-ExifByteOrder<ExifByteOrder", "-iptc:all"]
+                # #623: the re-encode already turned the pixels by the
+                # codestream orientation; the copied tag would turn them again.
+                + _orientation_reset_args(jxl_path)
                 + _restamp_args(desc, software, label=jxl_path.name, history=history,
                                 comment=comment, record=_record)
                 + _extra

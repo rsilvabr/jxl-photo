@@ -1,7 +1,10 @@
 # What jxl-photo writes into your photos
 
-Everything your source file carries — the EXIF, XMP and IPTC from Capture One,
-Lightroom, the camera — is **copied** to the output. On top of that, the
+Everything your source file carries — the EXIF and XMP from Capture One,
+Lightroom, the camera — is **copied** to the output. (IPTC IIM, the older
+keyword and caption block some programs still write, has no place in a JXL:
+what exists only there is not in the master. The lossless JPEG archive keeps
+everything.) On top of that, the
 toolkit adds the few fields below, almost all of them in XMP. This page lists
 every one: what it is, which script writes it, and when it is removed again.
 

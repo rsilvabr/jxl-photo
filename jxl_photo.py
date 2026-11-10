@@ -422,7 +422,7 @@ def _session_number_error(session: Dict) -> Optional[str]:
     return None
 
 
-def _session_int(session: Dict, field: str, fallback: int) -> int:
+def _session_int(session: Dict, field: str, fallback: Optional[int]) -> Optional[int]:
     """A stored workflow number as a real int.
 
     _session_number_error accepts 7.0 and "7" on purpose — Excel and
@@ -2824,6 +2824,17 @@ def _child_default(module: str, option: str):
     return _child_setting(module, name, fallback)
 
 
+_WIZARD_POLICIES = ("copy", "skip", "convert")
+
+
+def _wizard_policy(setting: str, wizard_default: str) -> str:
+    """The recompressor's own policy (ON_DOWNGRADE, ...), which the wizard
+    always sends; `wizard_default` only when the script says 'ask' — on the
+    wrapper's pipe an 'ask' is a silent skip (#347) — or cannot be read."""
+    value = _child_setting('jxl_recompressor', setting, wizard_default)
+    return value if value in _WIZARD_POLICIES else wizard_default
+
+
 def _workflow_or_child(workflow: Dict, key: str, module: str):
     """The run's own answer for `key`, else the child script's setting —
     never a literal copy of the shipped default."""
@@ -4787,9 +4798,12 @@ class InteractiveMenu:
                     "run started from here. Unset it to use one.")
             return
         ui.line(f"File: {path}")
-        ui.line("A change applies to the next run right away; the wizard shows the new "
-                "defaults the next time it starts. Deletion, confirmations, guards "
-                "and verification stay per-run choices.")
+        ui.line("A change applies to the next run of that script. Jobs started from "
+                "this wizard send their own workers, effort, JPEG quality, export "
+                "marker and TIFF -> JXL distance (Settings -> wrapper defaults, or the "
+                "job's review): for those, the script's value counts when the script "
+                "is run directly. Deletion, confirmations, guards and verification "
+                "stay per-run choices.")
         while True:
             key = ui.choose("settings.script", "Which script's settings",
                             [(str(i + 1), label.replace("<->", "↔").replace("->", "→"))
@@ -5391,10 +5405,10 @@ class InteractiveMenu:
         # Step 6, all defaults taken.
         if conv == 'jxl_recompress':
             workflow.setdefault('distance', _child_default('jxl_recompressor', 'distance'))
-            adv['on_downgrade'] = 'copy'
-            adv['on_regeneration'] = 'convert'
+            adv['on_downgrade'] = _wizard_policy('ON_DOWNGRADE', 'copy')
+            adv['on_regeneration'] = _wizard_policy('ON_REGENERATION', 'convert')
             if workflow.get('distance') and float(workflow['distance']) > 0:
-                adv['on_scan'] = 'copy'
+                adv['on_scan'] = _wizard_policy('ON_SCAN', 'copy')
             # Enter on the old colour question was "keep" and on resize/
             # sharpen "none": both CLEARED the recipe, so an answer from an
             # earlier pass never rode along (and none is offered in place or
@@ -5563,7 +5577,7 @@ class InteractiveMenu:
                                                    else 'jxl_tiff_encoder')
                 if conv == 'jxl_recompress':
                     if workflow['distance'] > 0:
-                        adv.setdefault('on_scan', 'copy')
+                        adv.setdefault('on_scan', _wizard_policy('ON_SCAN', 'copy'))
                     else:
                         adv.pop('on_scan', None)
                 you('distance')
@@ -10133,10 +10147,13 @@ class InteractiveMenu:
         # a mode stored as the NUMBER 99 (rather than the string) still read as
         # a manifest repeat below.
         last_mode = _session_int(session, 'last_output_mode', 0)
-        last_workers = _session_int(session, 'last_workers', 4)
+        last_workers = _session_int(session, 'last_workers',
+                                    self.config.config.default_workers)
         last_staging = session.get('last_staging') or ""
-        last_effort = _session_int(session, 'last_effort', 7)
-        last_quality = _session_int(session, 'last_quality', 95)
+        # #626: absent = None, so the builder reads the child's own setting
+        # (_workflow_or_child) instead of a literal 7 / 95 / 0.1.
+        last_effort = _session_int(session, 'last_effort', None)
+        last_quality = _session_int(session, 'last_quality', None)
         # Routed through the project's own clamp, which every other caller
         # already uses — the preset path was the one that read it raw and put
         # it straight on the cjxl command line.
@@ -10181,6 +10198,17 @@ class InteractiveMenu:
         _distance_driven = (last_origin == 'tiff'
                             or last_conv_type in ('convert_lossy', 'jxl_recompress'))
         _quality_driven = (last_origin == 'jxl' and last_dest in ('jpeg', 'png'))
+        # What the run will really use, for the panel only (#626): the saved
+        # value, else the child's own setting.
+        _mod = _child_module(last_origin, last_dest)
+        _shown_effort = (last_effort if last_effort is not None
+                         else (_child_default(_mod, 'effort')
+                               if 'effort' in _CHILD_OPTION_DEFAULTS.get(_mod, {}) else None))
+        _shown_quality = (last_quality if last_quality is not None
+                          else _child_default('jxl_jpeg_transcoder', 'quality'))
+        _shown_distance = (last_distance if last_distance is not None
+                           else (_child_default(_mod, 'distance')
+                                 if 'distance' in _CHILD_OPTION_DEFAULTS.get(_mod, {}) else None))
 
         if RICH_AVAILABLE and console:
             settings = [
@@ -10190,13 +10218,14 @@ class InteractiveMenu:
                 ["Destination", last_dest.upper()],
                 ["Mode", str(last_mode)],
                 ["Workers", str(last_workers)],
-                ["Effort", str(last_effort)],
             ]
+            if _shown_effort is not None:
+                settings.append(["Effort", str(_shown_effort)])
             # Show the knob that actually steers this run (see above).
-            if _distance_driven and last_distance is not None:
-                settings.append(["Distance", f"{last_distance}"])
-            elif not _distance_driven and _quality_driven and last_quality is not None:
-                settings.append(["Quality", str(last_quality)])
+            if _distance_driven and _shown_distance is not None:
+                settings.append(["Distance", f"{_shown_distance}"])
+            elif not _distance_driven and _quality_driven and _shown_quality is not None:
+                settings.append(["Quality", str(_shown_quality)])
             settings.append(["Staging", last_staging or "system default"])
             # Surface silently-reapplied dangerous settings (they are NOT
             # re-asked on this path, so the user must see them here).
@@ -10224,14 +10253,15 @@ class InteractiveMenu:
             print(f"  Destination:  {last_dest.upper()}")
             print(f"  Mode:         {last_mode}")
             print(f"  Workers:      {last_workers}")
-            print(f"  Effort:       {last_effort}")
+            if _shown_effort is not None:
+                print(f"  Effort:       {_shown_effort}")
             # Same rule as the rich panel: the knob that actually steers this
             # run (see _distance_driven/_quality_driven above, mirror of
             # _describe_session).
-            if _distance_driven and last_distance is not None:
-                print(f"  Distance:     {last_distance}")
-            elif not _distance_driven and _quality_driven and last_quality is not None:
-                print(f"  Quality:      {last_quality}")
+            if _distance_driven and _shown_distance is not None:
+                print(f"  Distance:     {_shown_distance}")
+            elif not _distance_driven and _quality_driven and _shown_quality is not None:
+                print(f"  Quality:      {_shown_quality}")
             print(f"  Staging:      {last_staging or '(none)'}")
             _last_adv = session.get('last_advanced_options') or {}
             if _last_adv.get('delete_source'):
@@ -10320,7 +10350,7 @@ class InteractiveMenu:
                 'workers': last_workers,
                 'staging': last_staging,
                 'effort': last_effort,
-                'distance': last_distance if last_distance is not None else 0.1,
+                'distance': last_distance,
                 'overwrite_mode': ow_choice,
             }
         else:

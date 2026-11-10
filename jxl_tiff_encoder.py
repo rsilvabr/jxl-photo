@@ -2131,6 +2131,12 @@ _thumbnails_dropped = {"files": 0, "pages": 0, "archived": 0}
 # integrity check downstream can notice — the one JXL that was written is
 # perfectly valid. Keyed by os.path.normcase(str(tiff_path)).
 _discarded_real_page_sources = set()
+# Source TIFFs holding content no JXL can carry (#620): Photoshop layers
+# (tag 37724) or a private tag too large to carry. The JXL keeps the
+# flattened image, so --delete-source must keep the TIFF.
+# normcase(str(tiff_path)) -> what it holds.
+_unarchived_content_sources = {}
+_LAYERS_TAG = 37724
 # Same, for thumbnail pages only. These do NOT block deletion — a thumbnail is a
 # reduced-resolution copy of a page that IS in the output — but the delete line
 # says so, because the decoded TIFF will not have that preview page back.
@@ -2720,12 +2726,12 @@ _LONG_PATH_THRESHOLD = 240
 
 
 def _long_codec_paths(cmd):
-    """`cmd` with every long absolute path argument of cjxl/djxl given the
+    """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
     Windows extended-length prefix (Windows only; otherwise unchanged)."""
     if os.name != "nt" or not cmd:
         return cmd
     exe = os.path.basename(str(cmd[0])).lower()
-    if not exe.startswith(("cjxl", "djxl")):
+    if not exe.startswith(("cjxl", "djxl", "jxlinfo")):
         return cmd
     out = [cmd[0]]
     for a in cmd[1:]:
@@ -4901,6 +4907,41 @@ def _note_subifd_images(tif, tiff_path) -> None:
             f"NOT be deleted")
 
 
+def _note_unarchivable_content(tif, tiff_path) -> None:
+    """#620: record a TIFF whose layers (Photoshop, tag 37724) or oversized
+    private tag (Affinity Photo's document) do not reach the JXL, so no
+    delete gate removes it. Also a page whose samples are not 8 or 16 bits
+    (#621): convert_one refuses it now, but a master written from it by
+    v2.25.2 or earlier holds the values unscaled, and --delete-skipped must
+    not take that master as the TIFF's archive."""
+    what = None
+    try:
+        for page in tif.pages:
+            if page.tags.get(_LAYERS_TAG) is not None:
+                what = "Photoshop layers (TIFF tag 37724)"
+                break
+            _tags, _why = _private_tiff_tags(tif, page)
+            if _why:
+                what = f"a private TIFF tag too large to carry ({_why})"
+                break
+            _bps = page.bitspersample
+            _bps = tuple(_bps) if isinstance(_bps, (tuple, list)) else (_bps,)
+            if any(int(b) not in (8, 16) for b in _bps):
+                what = f"{'/'.join(str(int(b)) for b in _bps)}-bit samples"
+                break
+    except Exception:
+        return
+    if not what:
+        return
+    with _multipage_ignored_lock:      # _capped_discard_warning needs it held
+        _unarchived_content_sources[os.path.normcase(str(tiff_path))] = what
+        if DELETE_SOURCE:
+            _capped_discard_warning(
+                f"NOT DELETED | {Path(tiff_path).name} | this TIFF holds {what}, "
+                f"which its JXL does not keep as they are: the source will NOT "
+                f"be deleted")
+
+
 def _analyze_tiff_pages(tiff_path: Path):
     """Analyze a TIFF and return lists of real/thumbnail page indices plus metadata.
 
@@ -4914,6 +4955,7 @@ def _analyze_tiff_pages(tiff_path: Path):
         real_pages = []
         thumb_pages = []
         _note_subifd_images(tif, tiff_path)
+        _note_unarchivable_content(tif, tiff_path)
         for i, page in enumerate(tif.pages):
             page_info[i] = _page_facts(i, page)
             try:
@@ -6156,6 +6198,16 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 if img.dtype not in (np.uint8, np.uint16):
                     _log_rejected_file(str(tiff_path), f"dtype {img.dtype} not supported")
                     raise ValueError(f"Unsupported TIFF dtype: {img.dtype}. Expected uint8 or uint16.")
+                # #621: 10/12-bit (or 2/4-bit) samples arrive unscaled in a uint16/uint8
+                # array; archived as they are, the image comes back 16x darker.
+                _bps = page.bitspersample
+                _bps = tuple(_bps) if isinstance(_bps, (tuple, list)) else (_bps,)
+                _want = 8 if img.dtype == np.uint8 else 16
+                if any(int(b) != _want for b in _bps):
+                    _shown = "/".join(str(int(b)) for b in _bps)
+                    _log_rejected_file(str(tiff_path), f"{_shown}-bit samples not supported")
+                    raise ValueError(f"Unsupported TIFF bit depth: {_shown} bits per sample. "
+                                     f"Expected 8 or 16.")
                 # Capture original bit depth before converting to 16-bit for the JXL pipeline.
                 original_depth = 8 if img.dtype == np.uint8 else 16
                 # Convert 8-bit to 16-bit with proper scaling (multiply by 257).
@@ -6728,6 +6780,7 @@ def convert_multipage(tiff_path: Path, output_dir: Path, mode: int = 0) -> list:
                     # "Page index 0 out of range" — a per-file ERROR, exit 1.
                     raise UnreadableTiff("no readable pages (corrupt or truncated TIFF)")
                 _note_subifd_images(tif, tiff_path)
+                _note_unarchivable_content(tif, tiff_path)
                 samples = int(tif.pages[0].samplesperpixel) if tif.pages[0].samplesperpixel else 1
                 # Same reason as samples: ignore encodes page 0 as a real page,
                 # so page 0's own SubfileType must travel with it or the decoder
@@ -7230,6 +7283,7 @@ def process_group(group_items: list, workers: int, mode: int = 0):
 
     moved_finals = set()
     refused_moves = {}      # (str(tiff), page_idx) -> why (#615)
+    failed_moves = set()    # (str(tiff), page_idx) (#624)
 
     def _move_dest_from_staging(dest_tasks: list, status_map: Dict):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -7263,6 +7317,8 @@ def process_group(group_items: list, workers: int, mode: int = 0):
             if _promote_from_staging(write_jxl, final_jxl):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_jxl)))
+            else:
+                failed_moves.add((str(tiff), page_idx))
         if moved:
             logger.info(f"  -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
 
@@ -7326,6 +7382,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
                     f"its output is kept in staging and the source is kept", None)
                    if r[0] in refused_moves else r for r in results]
+    if failed_moves:
+        # #624: an output that did not reach its folder is an error, not "ok".
+        results = [(r[0], "error",
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
+                    f"MOVE FAILED above) — the file under that name is the OLD one, "
+                    f"and the source is kept", None)
+                   if r[0] in failed_moves else r for r in results]
 
     # Delete source TIFFs after confirmed encode, in ANY mode, only after staging.
     # A source TIFF is deleted only if ALL of its encoded pages succeeded and every
@@ -7414,6 +7477,13 @@ def process_group(group_items: list, workers: int, mode: int = 0):
                     f"  KEEP source (pages were discarded, deleting would lose them) | "
                     f"{Path(tiff_key).name} | re-run with --multipage-mode split to encode "
                     f"every page, then delete")
+                continue
+            _held = _unarchived_content_sources.get(os.path.normcase(tiff_key))
+            if _held:
+                _delete_stats["kept"] += 1
+                logger.warning(
+                    f"  KEEP source ({_held}, which its JXL does not keep as they "
+                    f"are — deleting would lose them) | {Path(tiff_key).name}")
                 continue
 
             # All final JXLs must exist and pass integrity check
@@ -8203,6 +8273,7 @@ def main():
         _thumbnails_dropped["pages"] = 0
         _thumbnails_dropped["archived"] = 0
         _discarded_real_page_sources.clear()
+        _unarchived_content_sources.clear()
         _discarded_thumb_sources.clear()
         _discard_warned["count"] = 0
         _discard_warned["suppressed"] = 0
@@ -8818,6 +8889,9 @@ def main():
             for _src, _finals in _fully_skipped.items():
                 if os.path.normcase(_src) in _discarded_real_page_sources:
                     _would_keep.append((_src, "pages were discarded"))
+                elif os.path.normcase(_src) in _unarchived_content_sources:
+                    _would_keep.append(
+                        (_src, _unarchived_content_sources[os.path.normcase(_src)]))
                 elif not all(_proof.get((os.path.normcase(_src),
                                          os.path.normcase(str(j))), False)
                              for j in _finals):

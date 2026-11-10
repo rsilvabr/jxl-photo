@@ -979,7 +979,9 @@ def test_staging_move_failure_does_not_abort(monkeypatch, tmp_path):
     results = dec.process_group(
         [{"type": "multi", "main_jxl": src, "entries": entries,
           "final_tiff": tmp_path / "out" / "a.tif"}], 1)
-    assert results[0][1] == "ok"  # returned normally, no propagation
+    # Returned normally, no propagation. Since #624 the failed move is an
+    # error for the file (it used to stay "ok" with the output only in staging).
+    assert results[0][1] == "error"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="read-only unlink protection is Windows semantics; root/Linux can delete read-only files")

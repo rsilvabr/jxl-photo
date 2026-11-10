@@ -87,6 +87,24 @@ A renamed or moved folder changes the path. Renaming alone breaks nothing: the n
 
 A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has fewer bits and, for a JPEG, a lossy encode. Like the decoder's 8-bit TIFF and the recompressor's derivatives, it never deletes the JXL: the transcoder refuses `--force-convert --decode` to JPEG/8-bit PNG with `--delete-source` (exit 2), auto mode keeps each such JXL with a `KEEP` line, and the wizard refuses the combination before asking for the HHMM time (for a lossy JPEG, already when you pick `[D]`). The bit-exact recovery of a lossless JPEG archive and a 16-bit PNG still delete, behind their checks.
 
+## What a JXL cannot hold: layers, odd bit depths, IPTC
+
+- **Layered TIFFs.** A TIFF with Photoshop layers (tag 37724) or a private tag too large to carry (Affinity Photo's document) is archived flattened. `--delete-source` and `--delete-skipped` **keep** such a TIFF (`KEEP source`); there is no flag to release it. A tag 34377 on its own (paths, resources) does not block the delete.
+- **10/12-bit (and 1/2/4-bit) TIFFs are refused.** The values would be archived unscaled, 16 times darker than the original. The file gets an ERROR and stays. A master an earlier version wrote from such a TIFF holds those unscaled values: `--delete-skipped` never takes it as the TIFF's archive (`KEEP source`). 8- and 16-bit TIFFs are unaffected.
+- **IPTC (IIM) is not carried into a JXL.** Keywords, captions and authors that exist only there (older Photoshop, Photo Mechanic, agencies) are not in the master; EXIF and XMP are. The lossless JPEG archive (`jbrd`) keeps everything.
+
+## A JXL made from a rotated JPEG comes out upright
+
+The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the pixels. A decode to JPEG, PNG or TIFF, and a recompression, therefore set the copied EXIF Orientation to 1; the picture is shown once, the right way up. This needs `jxlinfo` (it ships with libjxl, next to `djxl`); without it the run warns once and behaves as before. The bit-exact JPEG recovery returns the original JPEG, Orientation included, and a TIFF → JXL → TIFF chain keeps the TIFF's own Orientation.
+
+## A float, deeper-than-16-bit or animated JXL is not deleted by a decode
+
+A decode to TIFF (16-bit integers, first frame) or to a 16-bit PNG is not a full copy of a JXL that holds floating-point or deeper-than-16-bit samples, and the TIFF decode is not one of an animation either (the PNG keeps the frames). `--delete-source` keeps such a JXL (`KEPT`). The toolkit's own masters are never any of these; this concerns JXLs from other programs. It relies on `jxlinfo`.
+
+## A move out of staging that fails is an error
+
+If the finished output cannot be moved from the staging folder to its destination (the old file is open in a viewer, say), the file counts as an error: the summary says so and the exit code is 1. The source is kept, and the next `--sync` run does the file again.
+
 ## Modes 6/7: which `_EXPORT` counts, and what is left out
 
 The anchor is the first folder matching the marker at or below the input folder; only when there is none below it, the closest one above it. A library kept under a folder whose name also matches (`Lightroom_Export`, `C1_Export`) is not anchored there — unless the run is pointed at that very folder, which then counts as the marker: point it at the year or event folder inside. Below the marker, the decoder and the recompressor leave out the other scripts' output folders (by the names in their settings), and these two and the transcoder's decode leave out every derivative (by its `jxlphoto-derived` marker, wherever it sits), unless mode 7 asks for that folder by name.

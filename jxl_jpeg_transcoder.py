@@ -1504,12 +1504,12 @@ _LONG_PATH_THRESHOLD = 240
 
 
 def _long_codec_paths(cmd):
-    """`cmd` with every long absolute path argument of cjxl/djxl given the
+    """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
     Windows extended-length prefix (Windows only; otherwise unchanged)."""
     if os.name != "nt" or not cmd:
         return cmd
     exe = os.path.basename(str(cmd[0])).lower()
-    if not exe.startswith(("cjxl", "djxl")):
+    if not exe.startswith(("cjxl", "djxl", "jxlinfo")):
         return cmd
     out = [cmd[0]]
     for a in cmd[1:]:
@@ -2167,6 +2167,10 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
     """
     if shutil.which(_get_exiftool_cmd()) is None:
         return
+    # #623: out of a JXL whose codestream carries an orientation, the pixels
+    # are already turned; the copied EXIF Orientation is reset to 1.
+    _reset = (_orientation_reset_args(src_path)
+              if src_path.suffix.lower() in JXL_EXTS else [])
     try:
         # A '%' in the source's name is expanded by -tagsfromfile and the
         # output got no metadata (#550): copy from a container instead.
@@ -2175,8 +2179,8 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
                  # ExifByteOrder: the output's EXIF keeps the source's II/MM
                  # (a new EXIF block is big-endian by default).
-                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-xmp:all", "-iptc:all",
-                 str(dst_path)],
+                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-xmp:all", "-iptc:all"]
+                + _reset + [str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
         if r_copy.returncode != 0:
@@ -4387,6 +4391,7 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
 
     moved_finals = set()
     refused_moves = {}      # str(src) -> why (#615)
+    failed_moves = set()    # str(src) (#624)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -4421,6 +4426,8 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                 moved_finals.add(os.path.normcase(str(final_out)))
                 if not decode:
                     _file_checksums(final_out, result_by_src.get(str(src)))
+            else:
+                failed_moves.add(str(src))
         if moved:
             logger.info(f" -> Moved {moved} file(s) from staging to {dest_tasks[0][2].parent}")
 
@@ -4523,7 +4530,8 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     logger.warning(
                         f"  Keeping {staging_db}: {_stranded} output(s) are still in "
                         f"staging and their checksums live only there. Move the file "
-                        f"and its line to the destination folder, or re-run.")
+                        f"and its line to the destination folder before the next run: "
+                        f"a new run starts with an empty staging checksums.md5.")
                 else:
                     try:
                         staging_db.unlink()
@@ -4535,6 +4543,13 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
                     f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
                     f"its output is kept in staging and the source is kept", None)
                    if r[0] in refused_moves else r for r in results]
+    if failed_moves:
+        # #624: an output that did not reach its folder is an error, not "ok".
+        results = [(r[0], "error",
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
+                    f"MOVE FAILED above) — the file under that name is the OLD one, "
+                    f"and the source is kept", None)
+                   if r[0] in failed_moves else r for r in results]
 
     # Any mode, not just 8: the mode decides where the output lands, deleting
     # the source is a separate opt-in. Every gate below certifies THIS run's
@@ -5705,6 +5720,61 @@ def _png_chunk_types(png_path: Path) -> list:
     return types
 
 
+_JXLINFO_NOTES = set()
+
+
+def _jxlinfo_text(jxl_path):
+    """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
+    jxlinfo is not installed, fails or times out."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        if "missing" not in _JXLINFO_NOTES:
+            _JXLINFO_NOTES.add("missing")
+            logger.warning("jxlinfo not found (it ships with libjxl, next to djxl): "
+                           "a JXL made from a rotated JPEG may come out with its "
+                           "rotation applied twice, and float or animated JXLs are "
+                           "not recognised before a delete")
+        return None
+    try:
+        r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
+    except Exception:
+        return None
+    return (r.stdout or "") if r.returncode == 0 else None
+
+
+def _codestream_orientation(info_text):
+    """The orientation (1-8) the JXL codestream carries, or None."""
+    m = re.search(r"^Orientation:\s*([1-8])\b", info_text or "", re.M)
+    return int(m.group(1)) if m else None
+
+
+def _orientation_reset_args(jxl_path) -> list:
+    """exiftool arguments that set the copied EXIF Orientation to 1 when the
+    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
+    already turned the pixels, so the tag copied from the Exif box would turn
+    them a second time. A JXL made from a TIFF has codestream orientation 1
+    and keeps its tag."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+
+
+def _reduced_by_integer_decode(info_text, frames_kept: bool):
+    """Why a 16-bit integer decode of this JXL is not a full copy of it (#622),
+    or None. Positive evidence only: no jxlinfo answer means None."""
+    m = re.search(r"^JPEG XL (image|animation),[^\n]*", info_text or "", re.M)
+    if not m:
+        return None
+    line = m.group(0)
+    if m.group(1) == "animation" and not frames_kept:
+        return "an animation (only its first frame is decoded)"
+    if "float" in line:
+        return "floating-point samples (16-bit integers clip and round them)"
+    b = re.search(r"\b(\d+)-bit\b", line)
+    if b and int(b.group(1)) > 16:
+        return f"{b.group(1)}-bit samples"
+    return None
+
+
 def _djxl_icc_args(tmp_dir: Path) -> tuple:
     """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
     also report which colour space it decoded to and what the file's own is."""
@@ -6251,6 +6321,12 @@ def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
         if depth != 16:
             return (f"KEEP (a {depth if depth else '?'}-bit PNG may be a degraded copy "
                     f"of the JXL — only a 16-bit PNG replaces it)")
+        # #622: a 16-bit PNG still is not a copy of a float or deeper JXL
+        # (an animated one is: the PNG keeps the frames).
+        _red = _reduced_by_integer_decode(_jxlinfo_text(src_path), frames_kept=True)
+        if _red:
+            return (f"KEEP (the JXL holds {_red}: a 16-bit PNG is not a full copy "
+                    f"of it)")
     return None
 
 
@@ -6944,6 +7020,7 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
 
     moved_finals = set()
     refused_moves = {}      # str(src) -> why (#615)
+    failed_moves = set()    # str(src) (#624)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -6971,6 +7048,8 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                     moved_finals.add(os.path.normcase(str(final_out)))
                     if direction == "to_jxl":
                         _file_checksums(final_out, result_by_src.get(str(src)))
+                else:
+                    failed_moves.add(str(src))
             elif write_out.exists():
                 # Failed conversion: do not promote a partial/corrupt file to the
                 # final destination. Leave it in staging so the user can inspect.
@@ -7055,7 +7134,8 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                 logger.warning(
                     f"  Keeping {staging_db}: {_stranded} output(s) are still in "
                     f"staging and their checksums live only there. Move the file "
-                    f"and its line to the destination folder, or re-run.")
+                    f"and its line to the destination folder before the next run: "
+                    f"a new run starts with an empty staging checksums.md5.")
             else:
                 try:
                     staging_db.unlink()
@@ -7067,6 +7147,13 @@ def process_group_convert(group_pairs: list, workers: int, direction: str,
                     f"REFUSED to write {Path(r[2]).name}: {refused_moves[r[0]]} — "
                     f"its output is kept in staging and the source is kept", None)
                    if r[0] in refused_moves else r for r in results]
+    if failed_moves:
+        # #624: an output that did not reach its folder is an error, not "ok".
+        results = [(r[0], "error",
+                    f"MOVE FAILED: {Path(r[2]).name} did not reach its folder (see "
+                    f"MOVE FAILED above) — the file under that name is the OLD one, "
+                    f"and the source is kept", None)
+                   if r[0] in failed_moves else r for r in results]
     # moved_finals lets the mode-8 delete gate distinguish "this run's output
     # arrived at the final path" from a stale pre-existing file whose
     # overwrite FAILED (the gate's integrity check would otherwise certify

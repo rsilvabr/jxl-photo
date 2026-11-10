@@ -6,6 +6,9 @@ original ICC color profile as XMP metadata** for a perfect round trip.
 
 Works with 16-bit and 8-bit TIFFs — Capture One, Lightroom, NX Studio and
 Photoshop exports, film scans (IR channel included), multi-page TIFFs.
+A TIFF with another sample depth (10- or 12-bit, 1/2/4-bit) is refused with a
+reason and its source is kept: archived unscaled, the image would come back
+16 times darker.
 
 **Key feature: the ICC profile comes back.** With `jxl_tiff_decoder.py`, the
 exact original ICC profile (curves, copyright and all) is restored even from a
@@ -1344,7 +1347,10 @@ recompressed. What that takes:
   a `jxlphoto-tifftag` marker and are written back on the same page —
   SilverFast's 35243/35244, for instance. Only byte-sized types, up to 4 KB
   each; a page with a larger one (Affinity Photo stores a 230 MB document in
-  one) keeps none of them, and the log says so.
+  one) keeps none of them, and the log says so. The same goes for Photoshop's
+  layers (tag 37724): the JXL holds the flattened image only. In both cases
+  `--delete-source` and `--delete-skipped` **keep** the TIFF (`KEEP source`,
+  also previewed by `--dry-run`); there is no flag to release it.
 
 Other scanner programs were not tested. If yours relies on something else,
 test one file before converting a whole archive.

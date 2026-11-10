@@ -540,7 +540,13 @@ its source:
 
 What still deletes, behind its gates: the bit-exact JPEG recovery of a
 lossless JPEG → JXL archive (`djxl --reconstruct_jpeg` + the checksum), and a
-16-bit PNG.
+16-bit PNG — except for a JXL with floating-point or deeper-than-16-bit
+samples (`jxlinfo` says so), which no 16-bit PNG copies: that JXL is kept.
+
+A JPEG or PNG decoded from a JXL that was made from a rotated JPEG comes out
+upright with its EXIF Orientation set to 1 (the codestream's orientation is
+already applied by `djxl`; needs `jxlinfo`). The bit-exact recovery returns
+the original JPEG, Orientation included.
 
 ---
 

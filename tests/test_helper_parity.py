@@ -127,6 +127,13 @@ SHARED_HELPERS = [
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
     "_long_codec_paths",
+    # #622/#623: what `jxlinfo` says about a JXL. A copy drifting is one
+    # backend turning a rotated JPEG's pixels twice, or deleting a float or
+    # animated JXL after a 16-bit / first-frame decode, that the others keep.
+    "_jxlinfo_text",
+    "_codestream_orientation",
+    "_orientation_reset_args",
+    "_reduced_by_integer_decode",     # decoder + transcoder only
     # Explorer thumbnail box (encoder + recompressor). jxl-thumb trusts a
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write

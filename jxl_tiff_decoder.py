@@ -845,12 +845,12 @@ _LONG_PATH_THRESHOLD = 240
 
 
 def _long_codec_paths(cmd):
-    """`cmd` with every long absolute path argument of cjxl/djxl given the
+    """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
     Windows extended-length prefix (Windows only; otherwise unchanged)."""
     if os.name != "nt" or not cmd:
         return cmd
     exe = os.path.basename(str(cmd[0])).lower()
-    if not exe.startswith(("cjxl", "djxl")):
+    if not exe.startswith(("cjxl", "djxl", "jxlinfo")):
         return cmd
     out = [cmd[0]]
     for a in cmd[1:]:
@@ -2428,6 +2428,61 @@ def select_decode_strategy(has_original_icc=False):
 # DECODING
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_JXLINFO_NOTES = set()
+
+
+def _jxlinfo_text(jxl_path):
+    """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
+    jxlinfo is not installed, fails or times out."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        if "missing" not in _JXLINFO_NOTES:
+            _JXLINFO_NOTES.add("missing")
+            logger.warning("jxlinfo not found (it ships with libjxl, next to djxl): "
+                           "a JXL made from a rotated JPEG may come out with its "
+                           "rotation applied twice, and float or animated JXLs are "
+                           "not recognised before a delete")
+        return None
+    try:
+        r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
+    except Exception:
+        return None
+    return (r.stdout or "") if r.returncode == 0 else None
+
+
+def _codestream_orientation(info_text):
+    """The orientation (1-8) the JXL codestream carries, or None."""
+    m = re.search(r"^Orientation:\s*([1-8])\b", info_text or "", re.M)
+    return int(m.group(1)) if m else None
+
+
+def _orientation_reset_args(jxl_path) -> list:
+    """exiftool arguments that set the copied EXIF Orientation to 1 when the
+    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
+    already turned the pixels, so the tag copied from the Exif box would turn
+    them a second time. A JXL made from a TIFF has codestream orientation 1
+    and keeps its tag."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+
+
+def _reduced_by_integer_decode(info_text, frames_kept: bool):
+    """Why a 16-bit integer decode of this JXL is not a full copy of it (#622),
+    or None. Positive evidence only: no jxlinfo answer means None."""
+    m = re.search(r"^JPEG XL (image|animation),[^\n]*", info_text or "", re.M)
+    if not m:
+        return None
+    line = m.group(0)
+    if m.group(1) == "animation" and not frames_kept:
+        return "an animation (only its first frame is decoded)"
+    if "float" in line:
+        return "floating-point samples (16-bit integers clip and round them)"
+    b = re.search(r"\b(\d+)-bit\b", line)
+    if b and int(b.group(1)) > 16:
+        return f"{b.group(1)}-bit samples"
+    return None
+
+
 def _djxl_icc_args(tmp_dir: Path) -> tuple:
     """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
     also report which colour space it decoded to and what the file's own is."""
@@ -3026,9 +3081,12 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         # A '%' in the JXL's name would be expanded by -tagsfromfile and
         # the TIFF would get no metadata at all (#550).
         _src = _exiftool_source(jxl_path, tmp_dir)
+        # #623: a codestream orientation is already applied to the decoded
+        # pixels: the EXIF Orientation copied from the Exif box is reset to 1.
         r_exif = _run_exiftool_argfile(
-            ["-overwrite_original", "-tagsfromfile", _src,
-             "-exif:all", str(tiff_path)], timeout=EXIFTOOL_TIMEOUT
+            ["-overwrite_original", "-tagsfromfile", _src, "-exif:all"]
+            + _orientation_reset_args(jxl_path) + [str(tiff_path)],
+            timeout=EXIFTOOL_TIMEOUT
         )
         # The XMP as a BLOCK (-XMP), not field by field (-xmp:all): the field
         # copy carries only what exiftool can WRITE and dropped a namespace it
@@ -4314,7 +4372,8 @@ def convert_multipage_jxl_group(main_jxl, page_entries, write_path, final_path, 
                 r_exif = _run_exiftool_argfile(
                     ["-overwrite_original", "-tagsfromfile",
                      _exiftool_source(main_jxl, tmp_dir),         # '%' names: #550
-                     "-exif:all", str(write_path)], timeout=EXIFTOOL_TIMEOUT
+                     "-exif:all"] + _orientation_reset_args(main_jxl)     # #623
+                    + [str(write_path)], timeout=EXIFTOOL_TIMEOUT
                 )
                 if r_exif.returncode != 0:
                     # Same rule as copy_metadata: a failed metadata copy is a
@@ -4480,6 +4539,7 @@ def process_group(group_tasks, workers, target_icc=None):
 
     moved_finals = set()
     changed_at_move = set()      # main JXLs whose destination changed (#560)
+    failed_moves = set()         # main JXLs whose move out of staging failed (#624)
 
     def _move_dest_from_staging(dest_tasks, status_map):
         """Bulk-move one destination folder's outputs out of staging."""
@@ -4518,6 +4578,8 @@ def process_group(group_tasks, workers, target_icc=None):
             if _promote_from_staging(write_path, final_tiff):
                 moved += 1
                 moved_finals.add(os.path.normcase(str(final_tiff)))
+            else:
+                failed_moves.add(str(main_jxl))
         if moved:
             logger.info(f" >Moved {moved} file(s) from staging to "
                         f"{dest_tasks[0]['final_tiff'].parent}")
@@ -4571,6 +4633,13 @@ def process_group(group_tasks, workers, target_icc=None):
     if changed_at_move:
         results = [(r[0], "refused", r[2] if len(r) > 2 else "")
                    if r[0] in changed_at_move else r for r in results]
+    if failed_moves:
+        # #624: an output that did not reach its folder is an error, not "ok".
+        results = [(r[0], "error",
+                    f"MOVE FAILED: {Path(r[2]).name if len(r) > 2 else r[0]} did not "
+                    f"reach its folder (see MOVE FAILED above) — the file under that "
+                    f"name is the OLD one, and the source is kept")
+                   if r[0] in failed_moves else r for r in results]
 
     # Any mode, not just 8: the mode decides where the TIFF lands, deleting the
     # source JXL is a separate opt-in. Every gate below certifies THIS run's
@@ -4757,6 +4826,24 @@ def process_group(group_tasks, workers, target_icc=None):
                     f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
                     f"--matrix decodes through PPM and cannot prove alpha was not "
                     f"dropped; use roundtrip/basic mode to delete them")
+                continue
+            # #622: a float, deeper-than-16-bit or animated JXL is not fully in
+            # the TIFF (16-bit integers, first frame). Positive evidence only:
+            # no jxlinfo answer leaves the gate as it was.
+            _red = None
+            for _e in task["entries"]:
+                _why_red = _reduced_by_integer_decode(_jxlinfo_text(_e[0]),
+                                                      frames_kept=False)
+                if _why_red:
+                    _red = (_e[0], _why_red)
+                    break
+            if _red:
+                _delete_stats["kept"] += (len(task["entries"])
+                                          + len(task.get("ignored_thumbs", [])))
+                logger.warning(
+                    f" KEPT {len(task['entries'])} source(s) | {task['main_jxl'].name} | "
+                    f"{_red[0].name} holds {_red[1]}: the TIFF is not a full copy of "
+                    f"it, so the JXL stays the archive")
                 continue
             # D2 (2026-10-08 audit): a decode the user degraded on purpose
             # (--depth 8 from 16 bits, --basic dropping the XMP profile) is a

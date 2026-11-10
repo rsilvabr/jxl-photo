@@ -331,6 +331,10 @@ class TestConvertOne:
         # ICC-blob routes have their own real-codec tests in
         # tests/test_audit_261008_r1.py).
         monkeypatch.setattr(rec, "_jxlinfo_colour", lambda p: ("enum", True))
+        # #623: the orientation read runs `jxlinfo -v <jxl>`, which this file's
+        # fake subprocess.run would take for a cjxl call (3 args, last ".jxl")
+        # and overwrite the source with. No answer = no orientation reset.
+        monkeypatch.setattr(rec, "_jxlinfo_text", lambda p: None)
 
     def test_convert_writes_output_and_restamps(self, tmp_path, monkeypatch):
         src = _fake_jxl(tmp_path / "photo.jxl", size=5000)

@@ -954,8 +954,14 @@ thresholds), `OVERWRITE`, `STRIP_METADATA`, `AUTO_REPAIR_JBRD` and the
 encoder's copy of the original profile (`EMBED_ICC_IN_JXL`). Those stay
 per-run choices (the wizard, the flags) or a deliberate edit of the script.
 
-A change applies to every script run from then on; the wizard's own defaults
-(which are read from the scripts) show it the next time this program starts.
+A change applies to the next run of that script. Jobs started from this
+wizard send their own workers, effort, JPEG quality, export marker and
+TIFF → JXL distance (Settings → wrapper defaults, or the job's review): for
+those, the script's value counts when the script is run directly. The
+recompressor's `ON_DOWNGRADE`, `ON_REGENERATION` and `ON_SCAN` are followed
+by the wizard (only `ask`, a silent skip on its pipe, becomes the wizard's
+own default). The wizard's other defaults, read from the scripts, show a
+change the next time this program starts.
 The file is plain JSON, one object per script:
 
 ```json
