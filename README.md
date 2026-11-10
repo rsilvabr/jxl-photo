@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.26.0** (2026-11-10) · [What's new](#whats-new-in-v2260) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.26.1** (2026-11-10) · [What's new](#whats-new-in-v2261) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.26.0](#whats-new-in-v2260)
+- [What's new in v2.26.1](#whats-new-in-v2261)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -131,7 +131,7 @@ Install them in the same Python you will run the scripts with.
 
 The scripts find exiftool under either name, `exiftool.exe` or the download's `exiftool(-k).exe`.
 
-`jxlinfo.exe` comes in the same libjxl zip, next to `cjxl.exe` and `djxl.exe`: keep the three together. The scripts ask it whether a JXL came from a rotated JPEG or holds float or animated content; without it they warn once and skip those checks.
+`jxlinfo.exe` comes in the same libjxl zip, next to `cjxl.exe` and `djxl.exe`: keep the three together. The scripts ask it whether a JXL holds float or animated content (and came from a rotated JPEG); without it they warn once, skip the float/animation check and read the orientation from the JXL's header themselves.
 
 Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](docs/README_jxl_tiff_encoder.md#ram-per-worker)).
 
@@ -451,7 +451,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.26.0
+## What's new in v2.26.1
+
+2026-11-10. Hardening that closes edge cases; nothing to do when upgrading.
+
+- **A JXL made from a rotated JPEG is shown the right way up even without `jxlinfo`**: the scripts read the orientation from the file's header themselves.
+- **PNGs and turned-back JPEGs keep the camera's `InteropIndex`** (the DCF colour-space tag), and a JXL → JPEG run calls exiftool once less per file.
+
+[Version history](docs/version_history.md#v2261).
+
+### In v2.26.0
 
 2026-11-10. One new behaviour and the fixes left open after v2.25.3.
 
@@ -559,7 +568,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.26.0** | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
+| **v2.26.1** | 2026-11-10 | A rotated JPEG's archive is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex` |
+| [v2.26.0](docs/version_history.md#v2260) | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
 | [v2.25.3](docs/version_history.md#v2253) | 2026-11-10 | A rotated JPEG's archive decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error |
 | [v2.25.2](docs/version_history.md#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy decode with `--sync` leaves the camera's JPEG alone; flush to disk before every delete |
 | [v2.25.1](docs/version_history.md#v2251) | 2026-11-08 | The new-release notice shown on the next start; `D` checks for releases; a missing `TEMP_DIR` created by the JPEG transcoder too |
