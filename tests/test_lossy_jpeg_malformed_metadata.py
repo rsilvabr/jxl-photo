@@ -236,6 +236,28 @@ def test_639_the_unrotated_broken_ifd1_still_retries(tmp_path):
 
 
 @needs_tools
+def test_639_an_unreadable_orientation_is_not_taken_for_upright(tmp_path, monkeypatch):
+    """Second review: the retry drops the codestream orientation, so it runs
+    only when the first encode is PROVEN upright. "Cannot tell" (neither
+    jxlinfo nor the header parse answers) is an error with the way out, the
+    output removed, cjxl run once."""
+    m = _tr()
+    jpg = _jpeg_with_exif(_folder(tmp_path, "unread") / "DSC_0001 (2).jpg", _malformed_exif())
+    monkeypatch.setattr(m, "_jxl_orientation", lambda p: None)
+    cjxl_runs = []
+    real_run = m._run_captured
+    monkeypatch.setattr(m, "_run_captured",
+                        lambda cmd, *a, **k: (cjxl_runs.append(cmd) if "cjxl" in str(cmd[0])
+                                              else None, real_run(cmd, *a, **k))[1])
+    result, final = _encode(m, jpg)
+    assert result[1] == "error", result
+    assert "could not be read" in result[2] and "--force-transcode" in result[2], result
+    assert len(cjxl_runs) == 1, cjxl_runs
+    assert not final.exists() and not _leftovers(jpg.parent)
+    assert jpg.exists()
+
+
+@needs_tools
 def test_639_nothing_is_written_twice_in_the_retried_output(tmp_path):
     """The markers appear once each (no #531-style doubling in the retry)."""
     jpg = _jpeg_with_exif(_folder(tmp_path, "once") / "DSC_0001 (2).jpg", _malformed_exif())

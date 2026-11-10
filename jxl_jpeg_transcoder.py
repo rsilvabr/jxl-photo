@@ -5743,12 +5743,16 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                 # rotated JPEG would show the picture sideways in a JXL viewer
                 # (its Exif box would still say "Rotate 90 CW"). The first
                 # encode still has the codestream orientation: a rotated JPEG
-                # is not retried (review of #639).
+                # is not retried (review of #639). Only a PROVEN upright
+                # first encode is retried: an orientation that cannot be read
+                # is "cannot tell", not "upright" (second review).
                 _o_first = _jxl_orientation(write_path)
-                if _o_first in _UNROTATE_MAGICK:
+                if _o_first != 1:
+                    _how = (f"the JPEG is rotated (EXIF Orientation {_o_first})"
+                            if _o_first in _UNROTATE_MAGICK else
+                            "the orientation of the first encode could not be read")
                     raise RuntimeError(
-                        f"{_e_meta} | the JPEG is rotated (EXIF Orientation "
-                        f"{_o_first}) and its EXIF is malformed; a second encode "
+                        f"{_e_meta} | {_how} and its EXIF is malformed; a second encode "
                         f"without that EXIF would lose the rotation. "
                         f"--force-transcode (lossless, bit-exact) keeps both") from None
                 logger.info(f"  >metadata copied again without the EXIF the codec "
