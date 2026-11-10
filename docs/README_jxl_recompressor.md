@@ -183,7 +183,8 @@ not turn the picture a second time, and the JPEG's own value is recorded
 once as `jxlphoto-orientation:<n>` in `dc:Relation` — the transcoder reads it
 to give a JPEG its original orientation back
 ([details](README_jxl_jpeg_transcoder.md#a-jxl-made-from-a-rotated-jpeg)).
-Needs `jxlinfo`, which ships with libjxl; a verbatim copy is untouched.
+The orientation is read with `jxlinfo` (it ships with libjxl) or, without
+it, from the JXL's header; a verbatim copy is untouched.
 
 ### Profiles with no native JPEG XL form (scanner profiles, table curves)
 

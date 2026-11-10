@@ -8,7 +8,9 @@ sequence of answers on stdin (Rich rendering, 110 columns) and saves the
 screen to FOLDER/screens/<session>.txt. A session that ends with rc 130 only
 ran out of answers somewhere — read its file to see where.
 
-Everything happens under FOLDER (default: a new folder in %TEMP%): a home
+Everything happens under FOLDER (default: a new folder in %TEMP%): a copy
+of the five scripts (so the repo's own manifests/ folder and settings overlay,
+which hold the owner's local files, never change what a screen shows), a home
 folder with its own settings (a last job and one preset), an empty library
 whose folder name has Japanese characters, [ ], a space and % (AGENTS.md),
 and the logs. Only dry runs and audits run, on that empty library; nothing
@@ -16,12 +18,15 @@ outside FOLDER is read or written, and the update check is off.
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = ("jxl_photo.py", "jxl_tiff_encoder.py", "jxl_tiff_decoder.py",
+           "jxl_jpeg_transcoder.py", "jxl_recompressor.py")
 
 
 def _sessions(lib: Path):
@@ -51,7 +56,7 @@ def _sessions(lib: Path):
     }
 
 
-def _seed_config(home: Path, lib: Path, env: dict) -> None:
+def _seed_config(app: Path, home: Path, lib: Path, env: dict) -> None:
     """A last job and one preset, written by the wrapper's own ConfigManager."""
     code = (
         "import sys; sys.path.insert(0, sys.argv[1]); import jxl_photo as wp\n"
@@ -61,7 +66,7 @@ def _seed_config(home: Path, lib: Path, env: dict) -> None:
         "c.last_conversion_type = 'jxl_tiff_encoder'; c.last_output_mode = '6'\n"
         "c.last_distance, c.last_effort, c.last_workers = 0.05, 7, 8\n"
         "cfg.save_config(); cfg.save_preset('MASTERS 2025 [x]', cfg.session_snapshot())\n")
-    subprocess.run([sys.executable, "-c", code, str(REPO), str(lib)], env=env,
+    subprocess.run([sys.executable, "-c", code, str(app), str(lib)], env=env,
                    check=True, capture_output=True)
 
 
@@ -72,15 +77,17 @@ def main() -> int:
     args = ap.parse_args()
 
     root = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="jxlphoto_ui_tour_"))
-    home, screens = root / "home", root / "screens"
+    home, screens, app = root / "home", root / "screens", root / "app"
     lib = root / "lib" / "250118_吾妻山公園 [FINAL] 5%"
-    for p in (home, screens, lib / "01_Z7" / "_EXPORT" / "TIFF16"):
+    for p in (home, screens, app / "manifests", lib / "01_Z7" / "_EXPORT" / "TIFF16"):
         p.mkdir(parents=True, exist_ok=True)
+    for name in SCRIPTS:
+        shutil.copy2(REPO / name, app / name)
     env = dict(os.environ, USERPROFILE=str(home), HOME=str(home),
                JXLPHOTO_LOG_DIR=str(root / "logs"), JXLPHOTO_NO_UPDATE_CHECK="1",
                PYTHONIOENCODING="utf-8", COLUMNS="110", JXLPHOTO_JXL_THUMB="0")
     env.pop("JXLPHOTO_SETTINGS", None)
-    _seed_config(home, lib, env)
+    _seed_config(app, home, lib, env)
 
     sessions = _sessions(lib)
     unknown = [s for s in args.sessions if s not in sessions]
@@ -90,9 +97,9 @@ def main() -> int:
     for name, keys in sessions.items():
         if args.sessions and name not in args.sessions:
             continue
-        r = subprocess.run([sys.executable, str(REPO / "jxl_photo.py")], input=keys,
+        r = subprocess.run([sys.executable, str(app / "jxl_photo.py")], input=keys,
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", env=env, cwd=str(REPO), timeout=300)
+                           errors="replace", env=env, cwd=str(app), timeout=300)
         text = r.stdout + ("\n--- stderr ---\n" + r.stderr if r.stderr.strip() else "")
         (screens / f"{name}.txt").write_text(text, encoding="utf-8")
         print(f"{name:26} rc {r.returncode:>3}  {len(r.stdout.splitlines()):>4} lines")

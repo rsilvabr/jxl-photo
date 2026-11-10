@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.26.0"
+TOOLKIT_VERSION = "2.26.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -1417,8 +1417,8 @@ class DependencyChecker:
             parts[0] += f" ({'/'.join(_missing_codecs)} missing)"
         elif status.get('jxlinfo') is False:
             # `is False`: a status saved by an older version has no entry.
-            parts[0] = ("[⚠] cjxl/djxl (jxlinfo missing: rotated-JPEG and "
-                        "float/animated JXLs are not recognised)")
+            parts[0] = ("[⚠] cjxl/djxl (jxlinfo missing: float/animated JXLs "
+                        "are not recognised)")
         if not status.get('magick'):
             parts[2] += " (ICC off)"
         if not status.get('tifffile'):

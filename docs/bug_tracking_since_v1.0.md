@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #636.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #638.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-77 — the should-fix list of the v2.26.0 review](#round-77--the-should-fix-list-of-the-v2260-review-2026-11-10) | 2026-11-10 | v2.26.1 | #636–#637 (2) |
 | [Round-76 — what stayed open after v2.25.3](#round-76--what-stayed-open-after-v2253-2026-11-10) | 2026-11-10 | v2.26.0 | #630–#635 (6) |
 | [Round-75 — the 261110 bug sweep](#round-75--the-261110-bug-sweep-2026-11-10) | 2026-11-10 | v2.25.3 | #620–#629 (10) |
 | [Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete](#round-74--two-runs-writing-one-output-a-same-named-camera-file-a-power-cut-after-a-delete-2026-11-10) | 2026-11-10 | v2.25.2 | #615–#619 (5) |
@@ -92,6 +93,25 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-77 — the should-fix list of the v2.26.0 review (2026-11-10)
+
+Items S1–S4 of `AI_tools/261110_Opus_review_open-items-and-orientation.md`
+(local). Regression tests: `tests/test_should_fix_261110.py` (real codecs, in
+a folder named with Japanese, brackets, a space and `%`): 15 of its 18 checks
+fail on v2.26.0. Nothing deleted in either case; both are about what a
+delivered file shows or carries.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 636 | **Without `jxlinfo` on PATH, a JXL made from a rotated JPEG still came out turned twice** (JPEG, PNG and TIFF decodes; the recompressor wrote no `jxlphoto-orientation` record): the codestream orientation was read only through `jxlinfo`, and the run merely warned. v2.25.3 and v2.26.0 alike | decoder, transcoder, recompressor | ✅ FIXED (when `jxlinfo` cannot answer, the orientation is read from the codestream header in Python — `_header_orientation`, identical in the three scripts; checked against `jxlinfo` on every JXL the real-photo battery writes) |
+| 637 | **`InteropIndex` / `InteropVersion` were lost on every PNG and on JPEGs that went through ImageMagick** (the original-orientation JPEG, resized or sharpened copies): they are exiftool's "unsafe" tags, which `-exif:all` does not copy, and on a path with `%` the metadata container (#550) left them out as well. Before v2.26.0 a PNG got them through djxl's own EXIF chunk (#630 removes it) | transcoder (the `%` container: all four) | ✅ FIXED (copied by name; cleared on an `--icc-profile`/`--to-srgb` output, where they would name the source's colour space; the container is written with `-unsafe`) |
+
+Also, without a number: the transcoder no longer runs exiftool on every JXL
+→ JPEG to look for the `jxlphoto-orientation` token — it reads the plain XMP
+box first (about 0.2 s per file saved); `tools/ui_tour.py` runs a copy of the
+scripts, so the repository's own `manifests/` folder (gitignored, the
+owner's files) no longer changes what a screen shows.
 
 ## Round-76 — what stayed open after v2.25.3 (2026-11-10)
 

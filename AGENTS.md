@@ -308,6 +308,7 @@
   (encoder/decoder/transcoder), `_read_derived_markers_batch`,
   `_capture_output_identity`, `_delete_partial_if_written` (transcoder/
   recompressor), `_jxlinfo_text`, `_codestream_orientation`,
+  `_codestream_head`, `_header_orientation`, `_jxl_orientation`,
   `_orientation_reset_args` (decoder/transcoder/recompressor),
   `_reduced_by_integer_decode` (decoder/transcoder), plus the encode-record lineage
   family shared by the encoder and the recompressor: `_strip_encode_params`,
@@ -358,7 +359,10 @@
   (lossless and lossy alike); djxl, and cjxl reading a JXL, turn the pixels
   upright. So every output made from such a JXL resets the copied EXIF
   Orientation to 1 and removes XMP `tiff:Orientation`
-  (`_orientation_reset_args`, needs `jxlinfo`; in the decoder the XMP line
+  (`_orientation_reset_args`; the value comes from `_jxl_orientation`:
+  `jxlinfo` first, else `_header_orientation` reads the codestream header in
+  Python (#636) — never call `_codestream_orientation(_jxlinfo_text())`
+  alone for it again; in the decoder the XMP line
   must ride on the LAST exiftool call — the XMP block copy comes after the
   EXIF one). The transcoder's JPEG is the exception (`JPEG_ORIENTATION =
   "original"`): `_stored_orientation`, then ImageMagick turns the pixels back
@@ -371,7 +375,10 @@
   encoder (NOT in `_INTERNAL_RELATION_PREFIXES` — it rides along as a user
   value), dropped from every JPEG/PNG the transcoder writes. Never in a jbrd
   container or a verbatim copy. PNG and TIFF outputs stay upright. A TIFF →
-  JXL chain has codestream 1 and keeps the TIFF's own tag. `_jxlinfo_text`
+  JXL chain has codestream 1 and keeps the TIFF's own tag. The transcoder
+  looks for the token in the plain XMP box first (`_xmp_box_mentions`; a
+  `brob` XMP or an odd file = None = ask exiftool), so a JXL without it costs
+  no exiftool run. `_jxlinfo_text`
   answers from a small cache keyed by path, size and mtime;
   `_jxlinfo_colour` reads through it.
 - **The codec's own metadata in a decoded PNG/JPEG (#630/#631).** djxl writes
@@ -381,7 +388,11 @@
   djxl wrote directly has those chunks removed before `_copy_metadata`
   (`_drop_djxl_png_profiles`); a JPEG only when the copy fails, then ONE
   retry (`_drop_jpeg_codec_metadata`) — dropping always would cost the tags
-  `-exif:all` does not copy (InteropIFD). Never `-m` on the toolkit's own
+  `-exif:all` does not copy (InteropIFD). Those are exiftool's "unsafe"
+  tags: `_copy_metadata` names `InteropIndex`/`InteropVersion` explicitly
+  (#637; cleared again on an `--icc-profile`/`--to-srgb` output, they name
+  the source's DCF colour space), and `_exiftool_source`'s MIE dump passes
+  `-unsafe` (without it a `%` path loses them before any copy). Never `-m` on the toolkit's own
   initiative: a copy that still fails is the file's error (#571). The one way
   to `-m` is the decoder's opt-in `EXIFTOOL_IGNORE_MINOR` /
   `--exiftool-ignore-minor`, for maker notes exiftool cannot parse (they

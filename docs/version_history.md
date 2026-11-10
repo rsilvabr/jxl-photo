@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.26.0](#v2260)** | 2026-11-10 | A JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (`JPEG_ORIENTATION`, `--jpeg-orientation`); JXL → PNG of camera JPEGs, and resize/colour conversion of sources with the standard sRGB profile, work; the decoder's opt-in `--exiftool-ignore-minor` (round 76, 6 fixes) |
+| **[v2.26.1](#v2261)** | 2026-11-10 | A JXL made from a rotated JPEG is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex`; one exiftool run less per JXL → JPEG (round 77, 2 fixes) |
+| [v2.26.0](#v2260) | 2026-11-10 | A JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (`JPEG_ORIENTATION`, `--jpeg-orientation`); JXL → PNG of camera JPEGs, and resize/colour conversion of sources with the standard sRGB profile, work; the decoder's opt-in `--exiftool-ignore-minor` (round 76, 6 fixes) |
 | [v2.25.3](#v2253) | 2026-11-10 | A JXL made from a rotated JPEG decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error; the wizard follows the recompressor's policies (round 75, 10 fixes) |
 | [v2.25.2](#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy JXL → JPEG/PNG `--sync` leaves a same-named camera JPEG/PNG alone; every script flushes an output to disk before deleting its source (round 74, 5 fixes) |
 | [v2.25.1](#v2251) | 2026-11-08 | The new-release notice is kept by the background check and shown on the next start; `D` checks for releases; `TEMP_DIR` checked before every run (round 73, 2 fixes) |
@@ -96,9 +97,21 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.26.1
+
+**Released 2026-11-10.** Supersedes v2.26.0. The should-fix list of the
+v2.26.0 review (round 77, #636–#637); hardening that closes edge cases, no
+command line changes.
+
+- **#636 — a JXL made from a rotated JPEG is shown the right way up even without `jxlinfo` (decoder, transcoder, recompressor).** The codestream orientation was read only through `jxlinfo`; without it on PATH a JPEG, PNG or TIFF decode copied the EXIF Orientation over pixels djxl had already turned (the picture turned twice), the original-orientation JPEG came out upright, and a recompression recorded no `jxlphoto-orientation`. When `jxlinfo` cannot answer, the orientation is now read from the codestream header in Python (`_header_orientation`: the signature, the SizeHeader and the first ImageMetadata fields, from a bare codestream or the `jxlc`/`jxlp` boxes of a container — cjxl's JXLs of JPEGs put only 6 bytes in their first `jxlp`). Identical in the three scripts; checked against `jxlinfo` on 8 orientations, jbrd and pixel re-encodes, bare codestreams, a split header and toolkit masters, and in the real-photo battery on every JXL it writes. The `jxlinfo` warning now names only the float/animation check it still skips.
+- **#637 — PNGs and turned-back JPEGs keep the camera's `InteropIndex`/`InteropVersion` (transcoder).** These are exiftool's "unsafe" tags, which `-exif:all` does not copy; a PNG used to get them through djxl's own EXIF chunk (removed by #630), and a JPEG through ImageMagick (the original-orientation route, resized or sharpened copies) lost them. They are now copied by name, and cleared on an `--icc-profile`/`--to-srgb` output, where `R98`/`R03` would name the source's colour space. The metadata container used for a path with `%` (#550, all four scripts) is written with `-unsafe`, or it left them out before any copy.
+- One exiftool run less per JXL → JPEG: the transcoder looks for the `jxlphoto-orientation` token in the plain XMP box before asking exiftool (`_xmp_box_mentions`; a Brotli-compressed XMP box still goes to exiftool). Measured 0.18 s per file.
+- `tools/ui_tour.py` runs a copy of the five scripts in its own folder, so the repository's `manifests/` folder (gitignored, local files) no longer changes what a screen shows.
+- Tests: `tests/test_should_fix_261110.py` (real codecs, in a folder named with Japanese, `[ ]`, a space and `%`): 18 checks, 15 of them failing on v2.26.0. The real-photo battery compares the header reader with `jxlinfo` on every JXL it writes (152 checks).
+
 ## v2.26.0
 
-**Released 2026-11-10.** Supersedes v2.25.3. One new behaviour (the JPEG of
+**Released 2026-11-10.** Superseded by v2.26.1. Supersedes v2.25.3. One new behaviour (the JPEG of
 a rotated JPEG's archive keeps its original orientation) and the fixes left
 open after v2.25.3 (round 76, #630–#635); most close rare cases. What changes
 on an existing command line: [upgrading.md](upgrading.md).

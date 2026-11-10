@@ -2194,6 +2194,36 @@ def orientation_and_gate_checks(A1):
                   False, f"first run rc={rc}: no output")
 
 
+def header_orientation_check():
+    """#636: the transcoder's Python header reader (used when jxlinfo cannot
+    answer) agrees with jxlinfo on every JXL the battery wrote — cameras,
+    phones, film scans, JPEG archives, derivatives, rotated JPEGs."""
+    section("JXL header orientation: the Python reader against jxlinfo")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("battery_transcoder", TR)
+    tr = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(Path(TR).parent))
+    try:
+        spec.loader.exec_module(tr)
+    finally:
+        sys.path.remove(str(Path(TR).parent))
+    files = sorted(p for p in B.rglob("*.jxl") if p.is_file())
+    bad, rotated, unread = [], 0, 0
+    for p in files:
+        want = tr._codestream_orientation(tr._jxlinfo_text(p))
+        if want is None:
+            unread += 1          # a cut or fake .jxl the interrupted runs left
+            continue
+        got = tr._header_orientation(p)
+        if got != want:
+            bad.append(f"{p.name}: jxlinfo {want}, header {got}")
+        rotated += want != 1
+    check("the JXL header reader agrees with jxlinfo on every JXL written (#636)",
+          len(files) >= 50 and rotated > 0 and not bad,
+          f"{len(files)} files, {rotated} rotated, {unread} jxlinfo could not read, "
+          f"bad={bad[:3]}")
+
+
 def main():
     global B, LOGS
     # The scratch folder's name is Japanese; a redirected console is cp1252.
@@ -2283,6 +2313,8 @@ def main():
             else:
                 print(f"\n(no {folder}/: {what} checks skipped)")
         _run_plan(plan, args.jobs)
+        # Last: it reads every JXL the sections above wrote.
+        header_orientation_check()
     finally:
         logs_after = (sum(1 for p in (REPO / "Logs").rglob("*") if p.is_file())
                       if (REPO / "Logs").is_dir() else 0)

@@ -561,7 +561,8 @@ samples (`jxlinfo` says so), which no 16-bit PNG copies: that JXL is kept.
 
 Such a JXL keeps the pixels as the JPEG stored them, plus the orientation in
 its codestream, and `djxl` turns them upright on every decode (`jxlinfo`
-tells which files these are).
+tells which files these are; without it the scripts read the JXL's header
+themselves).
 
 - **To JPEG** (`JPEG_ORIENTATION = "original"`, the default): the JPEG comes
   back as the camera wrote it — the stored pixel order and the original EXIF

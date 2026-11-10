@@ -134,6 +134,12 @@ SHARED_HELPERS = [
     "_codestream_orientation",
     "_orientation_reset_args",
     "_reduced_by_integer_decode",     # decoder + transcoder only
+    # #636: the codestream orientation read in Python when jxlinfo cannot
+    # answer (decoder, transcoder, recompressor). A copy drifting is one
+    # backend turning a rotated JPEG's picture twice again without jxlinfo.
+    "_codestream_head",
+    "_header_orientation",
+    "_jxl_orientation",
     # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
     # recompressor). A copy drifting is one backend failing again on every
     # source whose profile is a standard sRGB one.

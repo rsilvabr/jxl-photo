@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.26.0"
+TOOLKIT_VERSION = "2.26.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1707,7 +1707,9 @@ def _exiftool_source(path, tmp_dir) -> str:
         os.unlink(mie)
     except OSError:
         pass
-    r = _run_exiftool_argfile(["-o", mie, "-all:all", p], timeout=EXIFTOOL_TIMEOUT)
+    # -unsafe: exiftool leaves its "unsafe" tags (InteropIndex, ...) out of
+    # -all:all, and a caller that names one (#637) would find it missing.
+    r = _run_exiftool_argfile(["-o", mie, "-all:all", "-unsafe", p], timeout=EXIFTOOL_TIMEOUT)
     if os.path.exists(mie):
         return mie
     if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
@@ -2200,7 +2202,13 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                 ["-overwrite_original", "-tagsfromfile", _exiftool_source(src_path, _mt),
                  # ExifByteOrder: the output's EXIF keeps the source's II/MM
                  # (a new EXIF block is big-endian by default).
-                 "-exif:all", "-ExifByteOrder<ExifByteOrder", "-xmp:all", "-iptc:all"]
+                 "-exif:all", "-ExifByteOrder<ExifByteOrder",
+                 # #637: exiftool's "unsafe" tags are copied only when named:
+                 # InteropIndex says which DCF colour space the camera used
+                 # (R98 sRGB, R03 Adobe RGB). decode_to_image clears them
+                 # again on a colour-converted output.
+                 "-InteropIFD:InteropIndex", "-InteropIFD:InteropVersion",
+                 "-xmp:all", "-iptc:all"]
                 + _reset + [str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
@@ -5768,9 +5776,8 @@ def _jxlinfo_text(jxl_path):
         if "missing" not in _JXLINFO_NOTES:
             _JXLINFO_NOTES.add("missing")
             logger.warning("jxlinfo not found (it ships with libjxl, next to djxl): "
-                           "a JXL made from a rotated JPEG may come out with its "
-                           "rotation applied twice, and float or animated JXLs are "
-                           "not recognised before a delete")
+                           "float or animated JXLs are not recognised before a "
+                           "delete")
         return None
     try:
         _st = os.stat(jxl_path)
@@ -5800,13 +5807,104 @@ def _codestream_orientation(info_text):
     return int(m.group(1)) if m else None
 
 
+def _codestream_head(jxl_path, n=64):
+    """The first `n` bytes of a JXL's codestream - a bare codestream, or the
+    jxlc / jxlp boxes of a container (a jxlp payload without its 4-byte
+    index) - or None when the file is not a JXL or cannot be read."""
+    try:
+        with open(jxl_path, "rb") as f:
+            first = f.read(12)
+            if first[:2] == b"\xff\x0a":
+                return (first + f.read(max(0, n - len(first))))[:n]
+            if first != b"\x00\x00\x00\x0cJXL \r\n\x87\n":
+                return None
+            out = b""
+            while len(out) < n:
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                size, kind = struct.unpack(">I", hdr[:4])[0], hdr[4:8]
+                head_len = 8
+                if size == 1:
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        break
+                    size, head_len = struct.unpack(">Q", ext)[0], 16
+                left = None if size == 0 else size - head_len
+                if left is not None and left < 0:
+                    return None
+                if kind in (b"jxlc", b"jxlp"):
+                    if kind == b"jxlp":
+                        if left is not None and left < 4:
+                            return None
+                        f.seek(4, 1)
+                        left = None if left is None else left - 4
+                    want = n - len(out) if left is None else min(left, n - len(out))
+                    data = f.read(want)
+                    out += data
+                    if kind == b"jxlc" or left is None:
+                        break
+                    f.seek(left - len(data), 1)
+                    continue
+                if left is None:
+                    break
+                f.seek(left, 1)
+            return out or None
+    except OSError:
+        return None
+
+
+def _header_orientation(jxl_path):
+    """The orientation (1-8) in a JXL codestream's ImageMetadata, read in
+    Python from its first bytes (ISO/IEC 18181-1: the signature, SizeHeader,
+    then all_default, extra_fields and the 3-bit orientation), or None when
+    the file cannot be parsed. Needs no jxlinfo (#636)."""
+    data = _codestream_head(jxl_path)
+    if not data or data[:2] != b"\xff\x0a":
+        return None
+    bits, total, pos = int.from_bytes(data, "little"), len(data) * 8, 16
+
+    def take(k):
+        nonlocal pos
+        if pos + k > total:
+            raise ValueError("JXL header cut short")
+        v = (bits >> pos) & ((1 << k) - 1)
+        pos += k
+        return v
+
+    try:
+        small = take(1)
+        if small:
+            take(5)                                  # height / 8 - 1
+        else:
+            take((9, 13, 18, 30)[take(2)])           # height - 1 (U32)
+        if take(3) == 0:                             # no fixed aspect ratio
+            if small:
+                take(5)
+            else:
+                take((9, 13, 18, 30)[take(2)])
+        if take(1) or not take(1):                   # all_default / no extra_fields
+            return 1
+        return take(3) + 1
+    except ValueError:
+        return None
+
+
+def _jxl_orientation(jxl_path):
+    """The orientation (1-8) a JXL's codestream carries: jxlinfo's answer,
+    else the header read in Python (#636: without jxlinfo the copied EXIF
+    tag turned the picture a second time). None when neither can tell."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    return o if o is not None else _header_orientation(jxl_path)
+
+
 def _orientation_reset_args(jxl_path) -> list:
     """exiftool arguments that set the copied EXIF Orientation to 1 when the
     JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
     already turned the pixels, so the tag copied from the Exif box would turn
     them a second time. A JXL made from a TIFF has codestream orientation 1
     and keeps its tag."""
-    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    o = _jxl_orientation(jxl_path)
     # The XMP mirror of the tag goes too (#634): a reader that prefers the
     # XMP would turn the upright pixels again.
     return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
@@ -5821,15 +5919,55 @@ _UNROTATE_MAGICK = {2: ["-flop"], 3: ["-rotate", "180"], 4: ["-flip"],
                     7: ["-transverse"], 8: ["-rotate", "90"]}
 
 
+def _xmp_box_mentions(jxl_path, needle: bytes):
+    """Whether the plain XMP box of a JXL holds `needle` (True/False), read
+    in Python; None when only exiftool can tell (a Brotli-compressed XMP box,
+    an XMP box over 16 MB, a file this cannot walk). A bare codestream has no
+    XMP: False. Box headers are read and skipped; only the XMP is read."""
+    try:
+        with open(jxl_path, "rb") as f:
+            first = f.read(12)
+            if first[:2] == b"\xff\x0a":
+                return False
+            if first != _JXL_SIGNATURE:
+                return None
+            end = f.seek(0, 2)
+            pos, found = 12, False
+            while pos + 8 <= end:
+                f.seek(pos)
+                head = f.read(8)
+                size, typ, hdr = int.from_bytes(head[:4], "big"), head[4:8], 8
+                if size == 1:
+                    size, hdr = int.from_bytes(f.read(8), "big"), 16
+                elif size == 0:
+                    size = end - pos
+                if size < hdr or pos + size > end:
+                    return None
+                if typ == b"brob" and f.read(4) == b"xml ":
+                    return None
+                if typ == b"xml ":
+                    if size - hdr > 16 * 1024 * 1024:
+                        return None
+                    found = found or needle in f.read(size - hdr)
+                pos += size
+            return found if pos == end else None
+    except OSError:
+        return None
+
+
 def _stored_orientation(jxl_path):
     """The EXIF Orientation (2-8) of the JPEG this JXL's photo came from, or
     None: the codestream's own (a JXL made straight from a JPEG), else the
     jxlphoto-orientation token a recompression left (ORIENTATION_PREFIX).
     None when it is 1, unknown or unreadable — the output then stays upright,
     which is always a correct picture."""
-    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    o = _jxl_orientation(jxl_path)
     if o in _UNROTATE_MAGICK:
         return o
+    # Only a recompressed copy carries the token, and most files say so
+    # without an exiftool run (one spawn per JPEG output, ~0.2 s).
+    if _xmp_box_mentions(jxl_path, ORIENTATION_PREFIX.encode("ascii")) is False:
+        return None
     try:
         _creator, tokens = _read_creator_and_relation(jxl_path)
     except Exception:
@@ -7200,6 +7338,10 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # (_copy_metadata left it at 1, or at the token-less copy's 1).
         _orient = ([f"-IFD0:Orientation#={_unrot}", "-XMP-tiff:Orientation="]
                    if _unrot else [])
+        if output_icc:
+            # #637: the copied InteropIndex names the SOURCE's DCF colour
+            # space; a converted output is in another one.
+            _orient += ["-InteropIFD:InteropIndex=", "-InteropIFD:InteropVersion="]
         if derivative:
             _dlabel = _current_derived_label(output_icc)
             # Separate CLEAR invocation (see _derivative_metadata_args): the
