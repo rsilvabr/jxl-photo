@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.25.3](#v2253)** | 2026-11-10 | A JXL made from a rotated JPEG decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error; the wizard follows the recompressor's policies (round 75, 10 fixes) |
+| **[v2.26.0](#v2260)** | 2026-11-10 | A JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (`JPEG_ORIENTATION`, `--jpeg-orientation`); JXL → PNG of camera JPEGs, and resize/colour conversion of sources with the standard sRGB profile, work; the decoder's opt-in `--exiftool-ignore-minor` (round 76, 6 fixes) |
+| [v2.25.3](#v2253) | 2026-11-10 | A JXL made from a rotated JPEG decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error; the wizard follows the recompressor's policies (round 75, 10 fixes) |
 | [v2.25.2](#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy JXL → JPEG/PNG `--sync` leaves a same-named camera JPEG/PNG alone; every script flushes an output to disk before deleting its source (round 74, 5 fixes) |
 | [v2.25.1](#v2251) | 2026-11-08 | The new-release notice is kept by the background check and shown on the next start; `D` checks for releases; `TEMP_DIR` checked before every run (round 73, 2 fixes) |
 | [v2.25.0](#v2250) | 2026-11-06 | The TIFF's byte order (II/MM) kept in the master, its copies and the decoded TIFF; a JPEG copy records its quality, so a new quality redoes it |
@@ -95,9 +96,29 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.26.0
+
+**Released 2026-11-10.** Supersedes v2.25.3. One new behaviour (the JPEG of
+a rotated JPEG's archive keeps its original orientation) and the fixes left
+open after v2.25.3 (round 76, #630–#635); most close rare cases. What changes
+on an existing command line: [upgrading.md](upgrading.md).
+
+- **New — a JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (transcoder).** cjxl keeps a JPEG's pixels in the order the camera stored them and puts the EXIF Orientation (2–8) in the JXL's codestream; djxl turns the pixels upright, so v2.25.3 wrote such a JPEG upright with Orientation 1 (#623). With `JPEG_ORIENTATION = "original"` (the default; `--jpeg-orientation`, the settings overlay, the wizard's `[a]` screen) the JPEG gets its stored pixel order and its original EXIF Orientation back: ImageMagick applies the exact inverse permutation (`_UNROTATE_MAGICK`, checked against `-auto-orient` for the 8 values) on a 16-bit intermediate, and forces 4:4:4 when that route was taken only for the turn (ImageMagick drops to 4:2:0 below quality 90; djxl stays at 4:4:4 — measured −2 ssimulacra2 points otherwise). Measured on 21 real JPEGs turned back, quality 95: on average within 0.1 ssimulacra2 point of the upright JPEG (−0.56 to +0.52), size within 2 %. `"upright"` is what v2.25.3 wrote. A PNG and the decoder's TIFF stay upright. Without ImageMagick the JPEG comes out upright with a warning. A resized derivative swaps its width and height for the quarter turns.
+- **New token `jxlphoto-orientation:<n>` (recompressor).** A re-encode turns the pixels upright and its codestream says 1, so the recompressor records the JPEG's orientation once in `dc:Relation` (re-encodes and derivatives; never in a jbrd container or a verbatim copy). The decoder and the encoder carry it like any other value; the transcoder reads it for `JPEG_ORIENTATION` and never leaves it in a JPEG or PNG. `docs/metadata_written.md` lists it.
+- **#630 — JXL → PNG of a JXL made from a JPEG with EXIF and no XMP failed (transcoder)** — the usual camera JPEG (7 of the 23 JPEG structures of the test set). djxl writes its own copy of the EXIF into the PNG as a `Raw profile type exif` text chunk, and exiftool stops on such a PNG (`IFD0 pointer references previous IFD0 directory`). Those chunks are now removed from a PNG djxl wrote directly, before the metadata is copied from the JXL: one `eXIf`, one XMP, no `-m`.
+- **#631 — JXL → JPEG/PNG of a JPEG with a malformed EXIF failed (transcoder)** (a broken IFD1, say): the codec carries that EXIF into the output as a block and exiftool cannot rewrite it. When the copy fails on a JPEG, the EXIF/XMP/IPTC segments the codec wrote are dropped and the copy runs once more from the JXL; a second failure is still the file's error (#571). Dropping them always would cost the 2–3 tags `-exif:all` does not copy (InteropIFD).
+- **#632 — `JXLPHOTO_SETTINGS` naming a file that does not exist** ran with the script's own settings and not one line in the log (all four backends). The log's `Script settings overlay:` warning now names the path.
+- **#633 — `jxlinfo` in the wrapper's dependency check** (`jxl_photo.py`): the status bar shows `[⚠] cjxl/djxl (jxlinfo missing: …)` when it is missing; the README's install steps name it.
+- **#634 — XMP `tiff:Orientation` is removed where the EXIF Orientation is reset to 1** (transcoder, decoder, recompressor): Lightroom writes that mirror, and a reader that prefers it would turn the upright pixels again. In the decoder the removal rides on the last exiftool call, after the XMP block copy.
+- **#635 — derivatives and colour conversions of a source with the standard sRGB profile failed (transcoder, recompressor)** — the profile Windows, most cameras and phones embed (10 of 136 files in the test set). Reading a PNG, ImageMagick 7.1.2 replaces a profile it recognises as a standard sRGB one by an sRGB chunk, and writing one it does the same, so `magick could not extract the source ICC profile` (a JXL made from a JPEG: resize, sharpen, `--to-srgb`/`--icc-profile`, the recompressor's derivatives) or `ImageMagick wrote the converted image without its ICC profile` (an sRGB TIFF master: the recompressor's resize, the transcoder's resized PNG). The decoded PNG's profile is now read from its chunk (`_png_iccp`, identical in the two scripts) and assigned explicitly, and ImageMagick is told to keep the `iCCP` (`png:preserve-iCCP`). Derivatives of masters with other profiles are unchanged: a ProPhoto and an AdobeRGB master gave byte-identical pixels and profiles before and after (resize to JPEG/PNG, `--to-srgb`, the recompressor's resize and `--output-icc sRGB`). Since v2.3.0.
+- **New, off by default — the decoder's `--exiftool-ignore-minor` (`EXIFTOOL_IGNORE_MINOR`).** exiftool copies an EXIF whose maker notes it cannot parse (an old phone's JPEG) into a TIFF and then refuses every later write to that TIFF; such a file stays an ERROR by default, and the end of the run now lists it and names the flag. With the flag exiftool runs with `-m` and carries that block over as it is, unchecked (`METADATA WRITTEN UNCHECKED (-m)` per file). Refused together with `--delete-source` (exit 2), never taken from the settings overlay, and `-m` reaches exiftool only from the decoder with the flag on.
+- One `jxlinfo` run per file (a small cache keyed by path, size and time; the recompressor asked up to three times).
+- The real-photo battery needs `jxlinfo` on PATH and checks rotated JPEGs through every tool, every JPEG structure to PNG and JPEG, layered and 12-bit TIFFs, float/animated JXLs and a locked output (151 checks).
+- Tests: `tests/test_open_items_261110.py` and `tests/test_orientation_261110.py` (real codecs, in a folder named with Japanese, `[ ]`, a space and `%`): 65 checks, 47 of them failing on v2.25.3 (the others are controls: the bit-exact recovery, a TIFF → JXL → JPEG chain, a verbatim jbrd copy, profiles ImageMagick does not recognise).
+
 ## v2.25.3
 
-**Released 2026-11-10.** Supersedes v2.25.2. Fixes from a bug sweep of
+**Released 2026-11-10.** Superseded by v2.26.0. Supersedes v2.25.2. Fixes from a bug sweep of
 v2.25.2 (round 75, #620–#629); most close rare cases. A few existing command
 lines now keep a source, or end with exit code 1, where they used to delete or
 report success ([upgrading.md](upgrading.md)).

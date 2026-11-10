@@ -40,7 +40,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.25.3"
+TOOLKIT_VERSION = "2.26.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1090,6 +1090,10 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                                          dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
             argfile = af.name
             af.write(_ARGFILE_CHARSET)
+            if globals().get("EXIFTOOL_IGNORE_MINOR"):
+                # Only the decoder has this setting: -m makes exiftool write
+                # past an error it calls minor (maker notes it cannot parse).
+                af.write("-m\n")
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
         return _run_captured([_get_exiftool_cmd(), "-@", argfile],
@@ -1640,6 +1644,18 @@ OVERWRITE_GUARD = True
 # run's own outputs. Details: docs/behavior_and_limitations.md, "Renamed
 # folders and the overwrite guard".
 
+EXIFTOOL_IGNORE_MINOR = False
+# What to do when exiftool refuses to write a TIFF over an error it calls
+# "minor" - in practice maker notes it cannot parse (an old phone's JPEG,
+# say): the EXIF copy lands, and every later write to that TIFF is refused.
+# False (default) - the file is an ERROR, its JXL stays, and the end of the
+#   run lists such files and names this setting.
+# True - exiftool runs with -m: it writes anyway and carries the block it
+#   could not read over AS IT IS, without checking it (that block may be
+#   unusable in the TIFF; the rest of the metadata is copied as usual).
+#   Never together with --delete-source: that run exits 2.
+# Per run: --exiftool-ignore-minor. Not taken from the settings overlay.
+
 ALLOW_INCOMPLETE_GROUPS = False
 # [DELETE_SOURCE only] Delete the JXLs of a multi-page split even when pages of
 # it are MISSING (see PAGES_PREFIX).
@@ -1885,6 +1901,14 @@ def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
     result = {"path": None, "applied": [], "warnings": []}
     try:
         result["path"] = _settings_overlay_path()
+        if ((os.environ.get(_SETTINGS_OVERLAY_ENV) or "").strip()
+                and not result["path"].is_file()):
+            # #632: a mistyped JXLPHOTO_SETTINGS ran with the script's own
+            # settings and not one line in the log.
+            result["warnings"].append(
+                f"{_SETTINGS_OVERLAY_ENV} names a file that does not exist "
+                f"({result['path']}); no setting changed")
+            return result
         section = _settings_overlay_section(result["path"], module)
     except Exception as e:
         result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
@@ -2429,11 +2453,17 @@ def select_decode_strategy(has_original_icc=False):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _JXLINFO_NOTES = set()
+# The last answers of _jxlinfo_text, keyed by (path, size, mtime): one file is
+# asked several times in a row (colour, orientation, delete gate).
+_JXLINFO_CACHE = {}
+_JXLINFO_CACHE_LOCK = threading.Lock()
+_JXLINFO_CACHE_MAX = 256
 
 
 def _jxlinfo_text(jxl_path):
     """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
-    jxlinfo is not installed, fails or times out."""
+    jxlinfo is not installed, fails or times out. An answer is remembered
+    while the file keeps its size and mtime."""
     exe = shutil.which("jxlinfo")
     if not exe:
         if "missing" not in _JXLINFO_NOTES:
@@ -2444,10 +2474,25 @@ def _jxlinfo_text(jxl_path):
                            "not recognised before a delete")
         return None
     try:
+        _st = os.stat(jxl_path)
+        key = (os.path.normcase(str(jxl_path)), _st.st_size, _st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if key in _JXLINFO_CACHE:
+                return _JXLINFO_CACHE[key]
+    try:
         r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
     except Exception:
         return None
-    return (r.stdout or "") if r.returncode == 0 else None
+    text = (r.stdout or "") if r.returncode == 0 else None
+    if key is not None and text is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if len(_JXLINFO_CACHE) >= _JXLINFO_CACHE_MAX:
+                _JXLINFO_CACHE.clear()
+            _JXLINFO_CACHE[key] = text
+    return text
 
 
 def _codestream_orientation(info_text):
@@ -2463,7 +2508,10 @@ def _orientation_reset_args(jxl_path) -> list:
     them a second time. A JXL made from a TIFF has codestream orientation 1
     and keeps its tag."""
     o = _codestream_orientation(_jxlinfo_text(jxl_path))
-    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+    # The XMP mirror of the tag goes too (#634): a reader that prefers the
+    # XMP would turn the upright pixels again.
+    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
+            if o not in (None, 1) else [])
 
 
 def _reduced_by_integer_decode(info_text, frames_kept: bool):
@@ -3052,6 +3100,30 @@ def _page_subfiletype_kwargs(value) -> dict:
     return {"extratags": [(_SUBFILETYPE_TAG, 4, 1, value, True)]}
 
 
+# Outputs whose exiftool write failed on an error exiftool itself calls minor
+# (this run), and the ones written past such an error with -m.
+_minor_metadata_failures = set()
+_minor_metadata_unchecked = set()
+
+
+def _note_minor_metadata(r, tiff_path) -> None:
+    """Look at one exiftool write on a decoded TIFF (EXIFTOOL_IGNORE_MINOR):
+    a failure exiftool calls "[minor]" is remembered for the end-of-run hint;
+    with -m on, a write that went past unparseable maker notes is logged once
+    per file, because that block reached the TIFF unchecked."""
+    text = f"{getattr(r, 'stderr', '') or ''}\n{getattr(r, 'stdout', '') or ''}"
+    name = re.sub(r"^(?:[0-9a-f]{32}_)+", "", Path(tiff_path).name)
+    name = re.sub(r"(?:\.tmp)+$", "", name)
+    if r.returncode != 0:
+        if "[minor]" in text:
+            _minor_metadata_failures.add(name)
+    elif (EXIFTOOL_IGNORE_MINOR and "maker notes" in text.lower()
+          and name not in _minor_metadata_unchecked):
+        _minor_metadata_unchecked.add(name)
+        logger.warning(f"  METADATA WRITTEN UNCHECKED (-m) | {name} | exiftool could not "
+                       f"parse the maker notes and carried them over as they are")
+
+
 def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
                   provenance_sources=None, pixel_sum=None):
     """Copy metadata from JXL to TIFF using exiftool.
@@ -3101,6 +3173,7 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
         )
         copied = True
         for r in (r_exif, r_xmp):
+            _note_minor_metadata(r, tiff_path)
             if r.returncode != 0:
                 copied = False
                 logger.error(f"  METADATA COPY FAILED (exiftool rc={r.returncode}) | "
@@ -3249,9 +3322,14 @@ def copy_metadata(jxl_path, tiff_path, tmp_dir, is_multipage=False,
             # _history_args). Rides on the call that already writes the
             # provenance markers — no extra exiftool spawn per output.
             add_lines += _history_args("converted", jxl_path, tiff_path)
+            # #634: the XMP block was copied after the EXIF call above, so the
+            # mirror of a reset Orientation (XMP tiff:Orientation) is removed
+            # here, in the call that runs last.
+            add_lines += _orientation_reset_args(jxl_path)
             if len(add_lines) > 1:
                 add_lines.append(str(tiff_path))
                 r_rel = _run_exiftool_argfile(add_lines, timeout=EXIFTOOL_TIMEOUT)
+                _note_minor_metadata(r_rel, tiff_path)
                 if r_rel.returncode != 0:
                     # The provenance marker is what a LATER run uses to tell
                     # this output from an original master (_provenance_ok, and
@@ -5844,6 +5922,7 @@ _RUN_ASSIGNABLE = (
     "CLEANUP_XMP_ICC_MARKER", "DJXL_OUTPUT_DEPTH", "TIFF_COMPRESSION",
     "TEMP2_DIR", "EXPORT_MARKER", "EXCLUDE_FOLDERS", "ADD_JPEG_PREVIEW",
     "THUMBNAIL_HANDLING", "THUMBNAIL_SUFFIX", "RECONSTRUCT_MULTIPAGE",
+    "EXIFTOOL_IGNORE_MINOR",
 )
 # {global name: value BEFORE the last run that changed it}. Consumed (and
 # cleared) by main() at entry; nothing else touches it.
@@ -5981,6 +6060,14 @@ Examples:
                              "overwrite is logged. For libraries whose sources are "
                              "never deleted; refused together with --delete-source. "
                              "Same as OVERWRITE_GUARD = False.")
+    parser.add_argument("--exiftool-ignore-minor", action="store_true",
+                        help="Decode a JXL whose maker notes exiftool cannot parse "
+                             "(an old phone's JPEG, say): by default such a file is an "
+                             "ERROR, because exiftool refuses to write the TIFF. With "
+                             "this, exiftool runs with -m and carries that block over "
+                             "AS IT IS, without checking it; the rest of the metadata "
+                             "is copied as usual. Refused together with "
+                             "--delete-source. Same as EXIFTOOL_IGNORE_MINOR = True.")
     parser.add_argument("--delete-skipped", action="store_true",
                         help="[with --delete-source] Also delete sources whose output "
                              "ALREADY EXISTS (reported as SKIP), so a decode interrupted "
@@ -6062,7 +6149,10 @@ def main():
     global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
     global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
     global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
+    global EXIFTOOL_IGNORE_MINOR
 
+    _minor_metadata_failures.clear()        # per run
+    _minor_metadata_unchecked.clear()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -6138,6 +6228,8 @@ def main():
         PROVENANCE_CHECK = args.provenance
     if args.no_overwrite_guard:
         OVERWRITE_GUARD = False
+    if args.exiftool_ignore_minor:
+        EXIFTOOL_IGNORE_MINOR = True
     if args.delete_confirm_off:
         DELETE_CONFIRM = False
     if args.export_subfolder is not None:
@@ -6226,6 +6318,19 @@ def main():
                      "rebuild it, so it is refused. Turn the guard back on for "
                      "delete runs.")
         sys.exit(2)
+
+    # -m lets exiftool write metadata it could not check: never behind a delete.
+    if EXIFTOOL_IGNORE_MINOR and DELETE_SOURCE:
+        logger.error("exiftool is told to ignore minor errors (--exiftool-ignore-minor "
+                     "or EXIFTOOL_IGNORE_MINOR = True) and this run deletes sources "
+                     "(--delete-source). A JXL would be deleted behind a TIFF whose "
+                     "maker notes nobody checked, so the combination is refused. Decode "
+                     "without the delete, look at those TIFFs, then delete.")
+        sys.exit(2)
+    if EXIFTOOL_IGNORE_MINOR:
+        logger.warning("exiftool runs with -m (--exiftool-ignore-minor): it writes past "
+                       "errors it calls minor, and maker notes it cannot parse reach the "
+                       "TIFF as they are, unchecked")
 
     # Required tools first: a missing djxl/exiftool must be one clear message,
     # not N cryptic per-file errors (and, for exiftool, not a silent downgrade
@@ -6861,6 +6966,21 @@ def main():
         logger.info(f"SYNC done: {ok} reconverted | {skipped} up to date | {err} errors")
     else:
         logger.info(f"Done: {ok} OK | {overwritten} overwrites | {skipped} skipped | {err} errors")
+
+    if _minor_metadata_failures and not EXIFTOOL_IGNORE_MINOR:
+        _minor = sorted(_minor_metadata_failures)
+        logger.warning(f"{len(_minor)} file(s) failed on a metadata error exiftool calls "
+                       f"minor (maker notes it cannot parse, usually). Their JXLs are "
+                       f"untouched:")
+        for _p in _minor[:10]:
+            logger.warning(f"  -> {_p}")
+        if len(_minor) > 10:
+            logger.warning(f"  -> ... and {len(_minor) - 10} more")
+        logger.warning("  --exiftool-ignore-minor decodes them: exiftool then writes "
+                       "anyway and carries the block it could not read over AS IT IS, "
+                       "without checking it. That block (the camera's private maker "
+                       "notes) may be unusable in the TIFF; the rest of the metadata is "
+                       "copied as usual. Not available with --delete-source.")
 
     if refused:
         logger.warning(f"Refused: {len(refused)} existing TIFF(s) are not decodes of "

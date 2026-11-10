@@ -42,7 +42,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.25.3"
+TOOLKIT_VERSION = "2.26.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1475,6 +1475,14 @@ def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
     result = {"path": None, "applied": [], "warnings": []}
     try:
         result["path"] = _settings_overlay_path()
+        if ((os.environ.get(_SETTINGS_OVERLAY_ENV) or "").strip()
+                and not result["path"].is_file()):
+            # #632: a mistyped JXLPHOTO_SETTINGS ran with the script's own
+            # settings and not one line in the log.
+            result["warnings"].append(
+                f"{_SETTINGS_OVERLAY_ENV} names a file that does not exist "
+                f"({result['path']}); no setting changed")
+            return result
         section = _settings_overlay_section(result["path"], module)
     except Exception as e:
         result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
@@ -1648,6 +1656,13 @@ _RUN_DEFAULTS = {
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
 ORIGIN_PREFIX = "jxlphoto-origin:"
+# dc:Relation token: the EXIF Orientation (2-8) of the JPEG a JXL was made
+# from. A JXL made from a rotated JPEG keeps the pixels as the JPEG stored
+# them plus an orientation in its CODESTREAM; a re-encode turns the pixels
+# upright and its codestream says 1, so the original value is recorded here,
+# once, and carried forward. The transcoder reads it to give a JPEG its
+# original orientation back. Never in a jbrd container or a verbatim copy.
+ORIENTATION_PREFIX = "jxlphoto-orientation:"
 # Film scan marker written by the encoder: jxlphoto-scan:raw / :final.
 SCAN_PREFIX = "jxlphoto-scan:"
 SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
@@ -2855,7 +2870,11 @@ def _argfile_via_stdin(cmd):
 # The PNG ImageMagick hands to the next step is a temp file, read once and
 # deleted: zlib on 45 MP of 16-bit pixels cost ~6.5 s per photo, single-
 # threaded (measured 2026-11-05: 9.0 s -> 2.4 s, same pixels in the JXL).
-_TEMP_PNG_ARGS = ["-define", "png:compression-level=0"]
+_TEMP_PNG_ARGS = ["-define", "png:compression-level=0",
+                  # #635: without it ImageMagick writes an sRGB chunk INSTEAD of
+                  # the iCCP when the profile is a standard sRGB one, and the
+                  # "kept its ICC profile" check below refused the derivative.
+                  "-define", "png:preserve-iCCP=true"]
 
 
 def _run_captured(cmd, timeout, text=False, input=None, stall=None):
@@ -3026,6 +3045,10 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                                          dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
             argfile = af.name
             af.write(_ARGFILE_CHARSET)
+            if globals().get("EXIFTOOL_IGNORE_MINOR"):
+                # Only the decoder has this setting: -m makes exiftool write
+                # past an error it calls minor (maker notes it cannot parse).
+                af.write("-m\n")
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
         return _run_captured([_get_exiftool_cmd(), "-@", argfile],
@@ -4498,11 +4521,17 @@ def _png_chunk_types(png_path: Path) -> list:
 
 
 _JXLINFO_NOTES = set()
+# The last answers of _jxlinfo_text, keyed by (path, size, mtime): one file is
+# asked several times in a row (colour, orientation, delete gate).
+_JXLINFO_CACHE = {}
+_JXLINFO_CACHE_LOCK = threading.Lock()
+_JXLINFO_CACHE_MAX = 256
 
 
 def _jxlinfo_text(jxl_path):
     """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
-    jxlinfo is not installed, fails or times out."""
+    jxlinfo is not installed, fails or times out. An answer is remembered
+    while the file keeps its size and mtime."""
     exe = shutil.which("jxlinfo")
     if not exe:
         if "missing" not in _JXLINFO_NOTES:
@@ -4513,10 +4542,25 @@ def _jxlinfo_text(jxl_path):
                            "not recognised before a delete")
         return None
     try:
+        _st = os.stat(jxl_path)
+        key = (os.path.normcase(str(jxl_path)), _st.st_size, _st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if key in _JXLINFO_CACHE:
+                return _JXLINFO_CACHE[key]
+    try:
         r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
     except Exception:
         return None
-    return (r.stdout or "") if r.returncode == 0 else None
+    text = (r.stdout or "") if r.returncode == 0 else None
+    if key is not None and text is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if len(_JXLINFO_CACHE) >= _JXLINFO_CACHE_MAX:
+                _JXLINFO_CACHE.clear()
+            _JXLINFO_CACHE[key] = text
+    return text
 
 
 def _codestream_orientation(info_text):
@@ -4532,7 +4576,10 @@ def _orientation_reset_args(jxl_path) -> list:
     them a second time. A JXL made from a TIFF has codestream orientation 1
     and keeps its tag."""
     o = _codestream_orientation(_jxlinfo_text(jxl_path))
-    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+    # The XMP mirror of the tag goes too (#634): a reader that prefers the
+    # XMP would turn the upright pixels again.
+    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
+            if o not in (None, 1) else [])
 
 
 def _djxl_icc_args(tmp_dir: Path) -> tuple:
@@ -4973,15 +5020,8 @@ def _jxlinfo_colour(jxl_path: Path):
     ICC blob, which needs the careful route (_recompress_encode). None when
     jxlinfo is missing or says something unexpected: the careful route then
     decides from a real decode."""
-    exe = shutil.which("jxlinfo")
-    if not exe:
-        return None, None
-    try:
-        r = _run_captured([exe, str(jxl_path)], CJXL_TIMEOUT, text=True)
-    except Exception:
-        return None, None
-    out = r.stdout or ""
-    if r.returncode != 0:
+    out = _jxlinfo_text(jxl_path)        # one jxlinfo run per file, shared
+    if out is None:
         return None, None
     kind = None
     if re.search(r"^\d+-byte ICC profile", out, re.M):
@@ -5650,14 +5690,17 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                         src_path.write_bytes(src_icc)
                         args += ["+profile", "*", "-profile", str(src_path)]
                     elif "iCCP" in chunks:
-                        src_path = tmp / "src_iccp.icc"
-                        _r = _run_captured(["magick", str(dec_png), str(src_path)],
-                                           CJXL_TIMEOUT)
-                        if _r.returncode != 0 or not src_path.exists():
+                        # djxl's own iCCP, read from the chunk and assigned
+                        # explicitly (#635): reading a PNG, ImageMagick drops
+                        # an iCCP it recognises as a standard sRGB profile.
+                        _icc = _png_iccp(dec_png)
+                        if not _icc:
                             raise RuntimeError(
-                                f"magick could not extract the source ICC: "
-                                f"{_stderr_tail(_r.stderr)}")
-                        # convert from djxl's own iCCP, no explicit assign
+                                "the decoded PNG's iCCP profile could not be read — "
+                                "refusing to guess the source colour space")
+                        src_path = tmp / "src_iccp.icc"
+                        src_path.write_bytes(_icc)
+                        args += ["+profile", "*", "-profile", str(src_path)]
                     elif "sRGB" in chunks:
                         src_path = _SRGB_ICC_PATH
                         args += ["+profile", "*", "-profile", str(src_path)]
@@ -5830,6 +5873,24 @@ def _origin_marker_lines(jxl_path: Path, has_record: bool) -> list:
     return ["-XMP-dc:Relation+=" + ORIGIN_PREFIX + _argfile_safe(value)]
 
 
+def _orientation_marker_lines(jxl_path: Path) -> list:
+    """The dc:Relation line recording the EXIF Orientation (2-8) the source's
+    CODESTREAM carries (ORIENTATION_PREFIX): the re-encode turns the pixels
+    upright and its own codestream says 1. Nothing when the codestream says 1,
+    when jxlinfo gave no answer, or when the source already carries the token
+    (written once; the XMP copy carries it)."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    if o in (None, 1):
+        return []
+    try:
+        _creator, tokens = _read_creator_and_relation(jxl_path)
+    except Exception:
+        tokens = []
+    if any(t.startswith(ORIENTATION_PREFIX) for t in tokens):
+        return []
+    return ["-XMP-dc:Relation+=" + ORIENTATION_PREFIX + str(o)]
+
+
 def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
                 action: str, in_place: bool, desc: str, software: str,
                 src_distance, history: str = "", comment: str = ""):
@@ -5946,6 +6007,9 @@ def convert_one(jxl_path: Path, write_path: Path, final_path: Path,
             _extra = _extra + _skip_icc_lines(jxl_path, skip_icc)
         # jxlphoto-origin for a source that has none (ORIGIN_PREFIX).
         _extra = _extra + _origin_marker_lines(jxl_path, src_distance is not None)
+        # jxlphoto-orientation: what the JPEG's orientation was, before this
+        # re-encode turned the pixels upright (ORIENTATION_PREFIX).
+        _extra = _extra + _orientation_marker_lines(jxl_path)
         # Which toolkit version wrote this output (write-only; see
         # _history_args). A derivative is "derived", a re-encode "converted".
         # final_path, not write_path: the in-place temp is '<uuid>_<stem>.tmp'

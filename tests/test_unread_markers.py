@@ -428,7 +428,8 @@ def test_r2_real_encoder_overwrite_keeps_another_photos_archive(tmp_path, monkey
     r = subprocess.run([sys.executable, str(Path(enc.__file__)), str(a.parent),
                         str(out), "--mode", "0", "--distance", "0", "--effort", "3",
                         "--no-preflight"],
-                       capture_output=True, text=True, timeout=600,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=600,
                        stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stdout + r.stderr
     archive = out / "DSC_0001 (2).jxl"

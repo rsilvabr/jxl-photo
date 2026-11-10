@@ -66,13 +66,13 @@ def test_check_dependencies_honors_force(monkeypatch):
     monkeypatch.setattr(checker, "_test_tool_execution", lambda p, a: True)
 
     s1 = checker.check_dependencies()
-    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick']
+    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick', 'jxlinfo']
 
     # Second call without force: cached, no re-detection
     s2 = checker.check_dependencies()
-    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick']
+    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick', 'jxlinfo']
     assert s1 == s2
 
     # force=True bypasses the cache and re-detects
     checker.check_dependencies(force=True)
-    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick'] * 2
+    assert calls == ['cjxl', 'djxl', 'exiftool', 'magick', 'jxlinfo'] * 2

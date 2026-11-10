@@ -19,6 +19,7 @@ import argparse
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -360,14 +361,30 @@ def test_r4_single_file_is_replaced_the_moment_it_settles(tmp_path, monkeypatch)
     replaced as soon as it settles — deferring every file to the end of the
     run kept a whole tree's re-encodes on disk at once."""
     seen = {}
+    a_replaced = threading.Event()
+
+    def verified(path):
+        # process_group checks the final file right AFTER its os.replace.
+        if Path(path) == tmp_path / "a.jxl":
+            a_replaced.set()
+        return True
 
     def on_convert(src):
         if src.name == "b.jxl":
-            # a.jxl settled before b.jxl was even converted (1 worker).
+            # a.jxl is replaced by the MAIN thread once its future is
+            # collected, while this worker may already be converting b.jxl.
+            # Wait for that replacement WITHOUT opening a.jxl: on Windows a
+            # reader holding the file makes the product's os.replace fail
+            # (WinError 5, "REPLACE FAILED, original kept") - reading it here
+            # too early is what made this test fail under load. Were every
+            # replacement deferred to the end of the run, the wait would time
+            # out and a.jxl would still hold its old bytes.
+            a_replaced.wait(30)
             seen["a_when_b_converts"] = _read_settled(tmp_path / "a.jxl")
 
     items, srcs = _in_place_singles(tmp_path, monkeypatch, ["a.jxl", "b.jxl"],
                                     on_convert=on_convert)
+    monkeypatch.setattr(rec, "_verify_jxl_integrity", verified)
     rec.process_group(items, 1)
     assert seen["a_when_b_converts"] == b"RECOMPRESSED", \
         "a.jxl waited for the rest of the run instead of being replaced"

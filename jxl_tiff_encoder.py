@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.25.3"
+TOOLKIT_VERSION = "2.26.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -2009,6 +2009,14 @@ def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
     result = {"path": None, "applied": [], "warnings": []}
     try:
         result["path"] = _settings_overlay_path()
+        if ((os.environ.get(_SETTINGS_OVERLAY_ENV) or "").strip()
+                and not result["path"].is_file()):
+            # #632: a mistyped JXLPHOTO_SETTINGS ran with the script's own
+            # settings and not one line in the log.
+            result["warnings"].append(
+                f"{_SETTINGS_OVERLAY_ENV} names a file that does not exist "
+                f"({result['path']}); no setting changed")
+            return result
         section = _settings_overlay_section(result["path"], module)
     except Exception as e:
         result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
@@ -2941,6 +2949,10 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                                          dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
             argfile = af.name
             af.write(_ARGFILE_CHARSET)
+            if globals().get("EXIFTOOL_IGNORE_MINOR"):
+                # Only the decoder has this setting: -m makes exiftool write
+                # past an error it calls minor (maker notes it cannot parse).
+                af.write("-m\n")
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
         return _run_captured([_get_exiftool_cmd(), "-@", argfile],

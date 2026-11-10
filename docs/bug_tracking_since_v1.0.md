@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #630.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #636.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-76 — what stayed open after v2.25.3](#round-76--what-stayed-open-after-v2253-2026-11-10) | 2026-11-10 | v2.26.0 | #630–#635 (6) |
 | [Round-75 — the 261110 bug sweep](#round-75--the-261110-bug-sweep-2026-11-10) | 2026-11-10 | v2.25.3 | #620–#629 (10) |
 | [Round-74 — two runs writing one output, a same-named camera file, a power cut after a delete](#round-74--two-runs-writing-one-output-a-same-named-camera-file-a-power-cut-after-a-delete-2026-11-10) | 2026-11-10 | v2.25.2 | #615–#619 (5) |
 | [Round-73 — a TEMP_DIR that does not exist](#round-73--a-temp_dir-that-does-not-exist-2026-11-08) | 2026-11-08 | v2.25.1 | #613–#614 (2) |
@@ -91,6 +92,37 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-76 — what stayed open after v2.25.3 (2026-11-10)
+
+The should-fix list of the v2.25.3 review, and the suspicion the sweep left
+open (D1), plus one failure the real-photo battery found while this round
+was planned (#635). Regression tests: `tests/test_open_items_261110.py` and
+`tests/test_orientation_261110.py` (real codecs, in a folder named with
+Japanese, brackets, a space and `%`). Every one of these ended in an error
+for the file, with nothing deleted. The same release makes a JPEG decoded from the JXL of a
+rotated JPEG come back in its original orientation (a feature, not a bug:
+see [version_history.md](version_history.md)).
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 630 | **JXL → PNG failed for a JXL made from a JPEG with EXIF and no XMP** (the usual camera JPEG): `djxl` writes its own copy of the EXIF into the PNG as a `Raw profile type exif` chunk, and exiftool then stops with `IFD0 pointer references previous IFD0 directory`. An error per file, nothing deleted; a PNG that did get written carried two EXIF blocks | transcoder | ✅ FIXED (the chunks `djxl` writes are removed before the metadata is copied from the JXL — one `eXIf`, one XMP; no `-m`) |
+| 631 | **JXL → JPEG/PNG failed for a JPEG whose EXIF is malformed** (a broken IFD1, say): the codec carries that EXIF into the output as a block and exiftool cannot rewrite it | transcoder | ✅ FIXED (when the copy fails on a JPEG, the EXIF/XMP the codec wrote is dropped and the copy runs once more from the JXL; a second failure is still the file's error) |
+| 632 | **`JXLPHOTO_SETTINGS` naming a file that does not exist ran with the script's own settings and not one line in the log** | encoder, decoder, transcoder, recompressor | ✅ FIXED (a `Script settings overlay:` warning names the path) |
+| 633 | **`jxlinfo` was not part of the wrapper's dependency check**, nor of the install steps: without it #622/#623 fall back to the old behaviour behind one log line | jxl_photo, docs | ✅ FIXED (the status bar turns `cjxl/djxl` into a warning when it is missing; README install steps name it) |
+| 634 | **XMP `tiff:Orientation` kept the camera's value where #623 reset the EXIF Orientation to 1**: a reader that prefers the XMP would turn the upright pixels again | transcoder, decoder, recompressor | ✅ FIXED (removed in the same step; in the decoder, in the call that runs after the XMP block copy) |
+| 635 | **Derivatives and colour conversions failed for a source whose profile is a standard sRGB one** (the profile Windows, most cameras and phones embed): ImageMagick replaces such a profile by an sRGB chunk when it reads or writes a PNG, so `magick could not extract the source ICC profile` (a JXL made from a JPEG: resize, sharpen, `--to-srgb`/`--icc-profile`, the recompressor's derivatives) or `ImageMagick wrote the converted image without its ICC profile` (an sRGB TIFF master: the recompressor's resize, the transcoder's resized PNG) | transcoder, recompressor | ✅ FIXED (the decoded PNG's profile is read from its chunk and assigned explicitly; ImageMagick is told to keep the `iCCP` in the PNGs it writes) |
+
+Also, without a number: one `jxlinfo` run per file (a small cache; the
+recompressor asked it up to three times); a flaky test
+(`test_r4_single_file_is_replaced_the_moment_it_settles` read a file the
+product was replacing at that moment, which on Windows makes the replace
+fail); the suite's child output read as UTF-8 in three test files; the
+real-photo battery checks rotated JPEGs, layered and 12-bit TIFFs,
+float/animated JXLs and a locked output. New, off by default: the decoder's
+`--exiftool-ignore-minor` for a JXL whose maker notes exiftool cannot parse
+(such a file stays an error; the end of the run now lists it and names the
+flag).
 
 ## Round-75 — the 261110 bug sweep (2026-11-10)
 

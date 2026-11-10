@@ -113,6 +113,7 @@ strips any record the source carries.
 | `jxlphoto-src:<16 hex>` | **which file made this output**: a hash of the source's full path ([what it reveals](#what-these-fields-reveal)) | encoder (on the JXL), decoder (on the TIFF), transcoder (on a JPEG/PNG → JXL re-encode and on a decoded JPEG/PNG); carried by a recompressor re-encode | derivatives drop it; rewritten by the encoder's `--restamp-moved` after a folder rename |
 | `jxlphoto-srcsum:<16 hex>` | the same source's **content**: a hash of its bytes | same as `src` | derivatives drop it |
 | `jxlphoto-origin:<v>` | what the **first** master was made from: `tiff8`, `tiff16`, `jpeg`, `png8`, `png16`, `png`, `jxl-lossy`, `jxl-lossless`, `jxl`. Absent = unknown (also every file written before v2.10.0) | encoder, transcoder, recompressor; carried by the decoder and by derivatives | never |
+| `jxlphoto-orientation:<n>` | the EXIF Orientation (2–8) of the **JPEG** the photo came from, recorded when a re-encode turns the pixels upright (a JXL made straight from a JPEG keeps it in its codestream instead). The transcoder reads it to give a JPEG its original orientation back | recompressor (re-encodes and derivatives of a JXL made from a rotated JPEG); carried by the decoder and the encoder | transcoder (never left in a JPEG/PNG) |
 | `jxlphoto-iccprofile:<base64>` | the **original ICC profile**, byte for byte ([details](#the-icc-copy-jxlphoto-iccprofile)) | encoder (`EMBED_ICC_IN_JXL`), recompressor (moved from an old `CreatorTool`; the target profile on an `--output-icc` derivative, or the profile of pixels it re-encoded tagged sRGB) | decoder, transcoder |
 | `jxlphoto-depth:<8\|16>` | bit depth of the TIFF that was encoded | encoder | decoder |
 | `jxlphoto-mpg:<id>` | the group a page of a split multi-page TIFF belongs to (a hash) | encoder | decoder |
@@ -130,7 +131,7 @@ strips any record the source carries.
 The decoder removes the tokens that describe the JXL (page structure, depth,
 the derivative recipe, the private tags it writes back), so a TIFF it writes
 reads like an ordinary TIFF, plus its own `src`/`srcsum`/`pixsum` and the
-carried `origin`.
+carried `origin` and `orientation`.
 
 ## Processing history (xmpMM:History)
 

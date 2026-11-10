@@ -307,7 +307,9 @@
   `_canon_for_compare`, `_compare_stats`, `_provenance_marker_args`
   (encoder/decoder/transcoder), `_read_derived_markers_batch`,
   `_capture_output_identity`, `_delete_partial_if_written` (transcoder/
-  recompressor), plus the encode-record lineage
+  recompressor), `_jxlinfo_text`, `_codestream_orientation`,
+  `_orientation_reset_args` (decoder/transcoder/recompressor),
+  `_reduced_by_integer_decode` (decoder/transcoder), plus the encode-record lineage
   family shared by the encoder and the recompressor: `_strip_encode_params`,
   `_reconcile_gen`, `_append_encode_entry`, `_log_gen_notes_once`) so each
   stays standalone. One pair diverges ON PURPOSE: `_derivative_metadata_args` —
@@ -351,6 +353,55 @@
   direct run before the HHMM token (`_lossy_decode_never_deletes`) and drops
   the delete from a manifest row. The bit-exact recovery and a 16-bit PNG
   still delete. Do not reintroduce a lossy-decode delete path.
+- **Orientation of a JXL made from a JPEG (#623, v2.26.0).** cjxl keeps the
+  JPEG's pixels as stored and puts the EXIF Orientation in the CODESTREAM
+  (lossless and lossy alike); djxl, and cjxl reading a JXL, turn the pixels
+  upright. So every output made from such a JXL resets the copied EXIF
+  Orientation to 1 and removes XMP `tiff:Orientation`
+  (`_orientation_reset_args`, needs `jxlinfo`; in the decoder the XMP line
+  must ride on the LAST exiftool call — the XMP block copy comes after the
+  EXIF one). The transcoder's JPEG is the exception (`JPEG_ORIENTATION =
+  "original"`): `_stored_orientation`, then ImageMagick turns the pixels back
+  (`_UNROTATE_MAGICK`, exact permutations, always through `_via_magick`;
+  4:4:4 forced when that route was taken only for the turn, since ImageMagick
+  drops to 4:2:0 below quality 90) and the tag is written back. A
+  recompressor re-encode loses the codestream value, so it writes
+  `jxlphoto-orientation:<n>` once (`_orientation_marker_lines`): carried by
+  the XMP copy, by the decoder (NOT in `_is_internal_marker`) and by the
+  encoder (NOT in `_INTERNAL_RELATION_PREFIXES` — it rides along as a user
+  value), dropped from every JPEG/PNG the transcoder writes. Never in a jbrd
+  container or a verbatim copy. PNG and TIFF outputs stay upright. A TIFF →
+  JXL chain has codestream 1 and keeps the TIFF's own tag. `_jxlinfo_text`
+  answers from a small cache keyed by path, size and mtime;
+  `_jxlinfo_colour` reads through it.
+- **The codec's own metadata in a decoded PNG/JPEG (#630/#631).** djxl writes
+  the JXL's EXIF/XMP into a PNG as `Raw profile type` text chunks and into a
+  JPEG as APP1 (ImageMagick carries it on): exiftool fails on such a PNG when
+  it has EXIF and no XMP, and on either when the EXIF is malformed. A PNG
+  djxl wrote directly has those chunks removed before `_copy_metadata`
+  (`_drop_djxl_png_profiles`); a JPEG only when the copy fails, then ONE
+  retry (`_drop_jpeg_codec_metadata`) — dropping always would cost the tags
+  `-exif:all` does not copy (InteropIFD). Never `-m` on the toolkit's own
+  initiative: a copy that still fails is the file's error (#571). The one way
+  to `-m` is the decoder's opt-in `EXIFTOOL_IGNORE_MINOR` /
+  `--exiftool-ignore-minor`, for maker notes exiftool cannot parse (they
+  block every write to a TIFF): off by default, refused with
+  `--delete-source`, not in the overlay; a default run lists such files at
+  its end and names the flag (`_note_minor_metadata`).
+  `_run_exiftool_argfile` (four identical copies) adds the `-m` when the
+  script's globals have the setting on — only the decoder defines it.
+- **ImageMagick and a standard sRGB profile (#635).** Reading a PNG,
+  ImageMagick drops an `iCCP` it recognises as one of the standard sRGB
+  profiles (Windows', most cameras' and phones'); writing one, it writes an
+  sRGB chunk instead of the profile. So: never ask `magick` for a PNG's
+  profile (`_png_iccp` reads the chunk — parity-pinned, transcoder +
+  recompressor); always ASSIGN the source profile explicitly
+  (`+profile "*" -profile <file>`) before a target one, or the target is
+  assigned instead of converted to; and a magick command that writes a PNG
+  whose profile matters passes `-define png:preserve-iCCP=true`
+  (`_MAGICK_KEEP_ICCP`, the recompressor's `_TEMP_PNG_ARGS`). A test for this
+  needs a RECOGNISED profile (`sRGB Color Space Profile.icm`): one built by
+  littleCMS/Pillow never triggers it — which is how the whole suite missed it.
 - **Wrapper options live in `REGISTRY`** (`jxl_photo.py`, `# === OPTION
   REGISTRY ===`). Both the direct run and every manifest entry build the
   child's argv through `build_child_cmd`; never add a flag to a builder by
@@ -648,3 +699,11 @@ must-fix / should-fix items and a commit verdict.
   v2.16.2-exe1; jxl-thumb's releases are built the same way). A change
   to jxl-thumb that the exe bundles (its `TOOLS["jxl-thumb"]` URL + SHA-256)
   goes in the same way.
+
+## Pending list
+The owner keeps one list of everything still pending, across all repos, in
+`../PENDENCIAS.md` (the folder above this repo, outside git, in Portuguese).
+Read it when asked what is left to do. When work here finishes an item, leaves
+something for later, or waits on a decision from the owner, update that file in
+the same session: remove what is done, add what is new. It is private: never
+copy its contents into tracked files, commits or release notes.

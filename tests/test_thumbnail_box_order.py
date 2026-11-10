@@ -207,7 +207,8 @@ def test_r1_restamp_rewrite_keeps_the_thumbnail_before_the_codestream(tmp_path):
     r = subprocess.run([sys.executable, str(Path(enc.__file__)), str(t), "--mode", "0",
                         "--distance", "0", "--effort", "3", "--no-preflight",
                         "--explorer-thumbnail", "off"],
-                       capture_output=True, text=True, timeout=600,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=600,
                        stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stdout + r.stderr
     j = d / "DSC_0001 (2).jxl"

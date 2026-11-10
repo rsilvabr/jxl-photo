@@ -482,7 +482,10 @@ def _rotated_jbrd(tmp_path, name="rot"):
 def test_623_transcoder_decode_of_a_rotated_jpeg_archive_is_upright(tmp_path, fmt):
     _jpg, jxl = _rotated_jbrd(tmp_path)
     d = jxl.parent
-    rc, out = _tra(tmp_path, d, "--force-convert", "--decode", "--format", fmt, "--mode", "1")
+    # --jpeg-orientation upright: what v2.25.3 wrote. The default since
+    # v2.26.0 (the original orientation) is in test_orientation_261110.py.
+    rc, out = _tra(tmp_path, d, "--force-convert", "--decode", "--format", fmt, "--mode", "1",
+                   "--jpeg-orientation", "upright")
     assert rc == 0, out
     res = _only(d, "*.png" if fmt == "png" else "*.jpg")
     assert _size(res) == (200, 300), (res, _size(res))

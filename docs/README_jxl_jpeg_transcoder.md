@@ -132,6 +132,13 @@ COMPRESS_METADATA_BOXES = False
 #   IrfanView. The rebuilt JPEG is byte-identical either way.
 # Also: --compress-metadata.
 
+JPEG_ORIENTATION = "original"
+# [JXL -> JPEG] A JXL whose photo was a rotated JPEG (EXIF Orientation 2-8):
+# "original" (default) → the JPEG comes back as the camera wrote it: the
+#   stored pixel order and the original EXIF Orientation. Needs ImageMagick.
+# "upright" → turned pixels and Orientation 1 (what v2.25.3 wrote).
+# PNG outputs are always upright. Also: --jpeg-orientation.
+
 CODEC_TIMEOUT = 900
 # Timeout (seconds) for each cjxl/djxl/magick invocation; a timeout is a
 # per-file error.
@@ -393,6 +400,13 @@ Options:
                      (a few KB smaller per photo) instead of plain; IrfanView
                      then shows no EXIF and --repair-jbrd leaves the layout
                      alone. Same as COMPRESS_METADATA_BOXES = True.
+  --jpeg-orientation {original,upright}
+                     [JXL -> JPEG] a JXL whose photo was a rotated JPEG comes
+                     back as the camera wrote it (original: the stored pixel
+                     order and the original EXIF Orientation; needs
+                     ImageMagick) or turned upright with Orientation 1
+                     (upright). Default: JPEG_ORIENTATION. PNG and TIFF
+                     outputs are always upright.
   --auto-repair-jbrd [JXL -> JPEG lossless decode, djxl >= 0.12] when the
                      reconstruction fails, repair a COPY of the JXL and decode
                      from it — the JXL itself is never modified (heal the
@@ -543,10 +557,40 @@ lossless JPEG → JXL archive (`djxl --reconstruct_jpeg` + the checksum), and a
 16-bit PNG — except for a JXL with floating-point or deeper-than-16-bit
 samples (`jxlinfo` says so), which no 16-bit PNG copies: that JXL is kept.
 
-A JPEG or PNG decoded from a JXL that was made from a rotated JPEG comes out
-upright with its EXIF Orientation set to 1 (the codestream's orientation is
-already applied by `djxl`; needs `jxlinfo`). The bit-exact recovery returns
-the original JPEG, Orientation included.
+### A JXL made from a rotated JPEG
+
+Such a JXL keeps the pixels as the JPEG stored them, plus the orientation in
+its codestream, and `djxl` turns them upright on every decode (`jxlinfo`
+tells which files these are).
+
+- **To JPEG** (`JPEG_ORIENTATION = "original"`, the default): the JPEG comes
+  back as the camera wrote it — the stored pixel order and the original EXIF
+  Orientation (6, 8, …), also for a resized or sharpened derivative. The
+  turn back is an exact reordering of the decoded pixels, done by ImageMagick
+  before the one JPEG encode, so it adds no loss (measured at quality 95: the
+  same pixels as djxl's own JPEG; 4:4:4 is kept at every quality, as djxl
+  does).
+  `--jpeg-orientation upright` (or the setting) gives the turned pixels with
+  Orientation 1 instead, which is also what a PC without ImageMagick writes
+  (one warning per run).
+- **To PNG**: always upright, with Orientation 1 — many viewers ignore a
+  PNG's orientation.
+- A copy the recompressor re-encoded has lost the codestream orientation; it
+  carries `jxlphoto-orientation:<n>` instead and decodes to JPEG the same
+  way. The token is not left in the JPEG or PNG.
+- XMP `tiff:Orientation`, the mirror some programs write, is removed
+  wherever the EXIF Orientation is rewritten.
+
+The bit-exact recovery returns the original JPEG, Orientation included. A
+master made from a TIFF is not affected: its pixels and its Orientation tag
+go through as they are.
+
+A decoded PNG carries one EXIF block (`eXIf`) and one XMP block, both written
+from the JXL: the non-standard `Raw profile type` chunks `djxl` writes are
+removed first (exiftool failed on them for a JPEG with EXIF and no XMP). A
+JPEG whose EXIF is malformed is decoded too: when the metadata copy fails,
+the EXIF/XMP the codec carried into the output is dropped and the copy runs
+once more from the JXL.
 
 ---
 

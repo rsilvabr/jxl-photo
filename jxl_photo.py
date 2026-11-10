@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.25.3"
+TOOLKIT_VERSION = "2.26.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
@@ -1324,6 +1324,10 @@ class DependencyChecker:
             'djxl': ['djxl', '--version'],
             'exiftool': ['exiftool', '-ver'],
             'magick': ['magick', '--version'],
+            # Ships beside cjxl/djxl; the backends ask it whether a JXL came
+            # from a rotated JPEG or holds float/animated content (#633).
+            # `-h` is its only option that exits 0 without a file.
+            'jxlinfo': ['jxlinfo', '-h'],
         }
 
         detected_paths = {}
@@ -1411,6 +1415,10 @@ class DependencyChecker:
         if _codec_icon == '✗':
             _missing_codecs = [n for n in ('cjxl', 'djxl') if not status.get(n)]
             parts[0] += f" ({'/'.join(_missing_codecs)} missing)"
+        elif status.get('jxlinfo') is False:
+            # `is False`: a status saved by an older version has no entry.
+            parts[0] = ("[⚠] cjxl/djxl (jxlinfo missing: rotated-JPEG and "
+                        "float/animated JXLs are not recognised)")
         if not status.get('magick'):
             parts[2] += " (ICC off)"
         if not status.get('tifffile'):
@@ -3317,6 +3325,17 @@ REGISTRY: Tuple[Opt, ...] = (
         "advanced", "Compress EXIF/XMP",
         "Keep cjxl's compressed metadata boxes: a smaller file, but IrfanView shows "
         "no EXIF.", legacy_key="extra.compress_metadata"),
+    Opt("exiftool_ignore_minor", "--exiftool-ignore-minor", _JXL2TIFF, "flag", "metadata",
+        "expert", "Write past minor metadata errors",
+        "Decode a JXL whose maker notes exiftool cannot parse: that block reaches the "
+        "TIFF as it is, unchecked. Never with Delete originals.",
+        legacy_key="extra.exiftool_ignore_minor",
+        conflicts=("delete_source", "delete_skipped"), danger=True),
+    Opt("jpeg_orientation", "--jpeg-orientation", _D({"jxl2jpeg"}), "value", "metadata",
+        "advanced", "JPEG orientation",
+        "A JXL whose photo was a rotated JPEG: original = as the camera wrote it "
+        "(stored pixels + EXIF Orientation); upright = turned, Orientation 1.",
+        choices=("original", "upright"), legacy_key="extra.jpeg_orientation"),
     Opt("output_name", "--output-name", _TRANSCODER_DIRECTIONS, "value", "files",
         "advanced", "Output folder name", "Modes 1/3 of a lossy conversion: the "
         "subfolder's name.", legacy_key="extra.output_name",

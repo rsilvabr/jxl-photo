@@ -178,8 +178,12 @@ logged per file, because the JPEG recovery is gone for good.
 
 When the JXL was made from a rotated JPEG its codestream carries the
 orientation, and a re-encode applies it to the pixels: the output's EXIF
-Orientation is set to 1 so a viewer does not turn the picture a second time
-(needs `jxlinfo`, which ships with libjxl; a verbatim copy is untouched).
+Orientation is set to 1 (and XMP `tiff:Orientation` removed) so a viewer does
+not turn the picture a second time, and the JPEG's own value is recorded
+once as `jxlphoto-orientation:<n>` in `dc:Relation` — the transcoder reads it
+to give a JPEG its original orientation back
+([details](README_jxl_jpeg_transcoder.md#a-jxl-made-from-a-rotated-jpeg)).
+Needs `jxlinfo`, which ships with libjxl; a verbatim copy is untouched.
 
 ### Profiles with no native JPEG XL form (scanner profiles, table curves)
 

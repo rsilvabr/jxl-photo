@@ -42,7 +42,8 @@ below it (Japanese, [ ], parentheses, a space and %, on another drive than
 %TEMP%), the kind of path the owner's library is full of; --ascii-paths runs
 them in a plain folder instead, to tell a path bug from any other. The report is written to
 AI_tools/<YYMMDD>_battery_report.md (gitignored) and printed. Exit code 0 when
-every check passed, 1 otherwise. Needs cjxl, djxl, exiftool and magick on PATH.
+every check passed, 1 otherwise. Needs cjxl, djxl, jxlinfo, exiftool and magick
+on PATH.
 """
 import argparse
 import base64
@@ -1731,6 +1732,52 @@ def jpeg_checks(jpegs):
     check("--repair-jbrd: every relaid archive still rebuilds its JPEG bit for bit",
           rc == 0 and not bad, f"rc={rc} bad={bad[:4]}")
 
+    # #630/#631: every archive also decodes to PNG and to JPEG. The metadata
+    # copy failed on JPEGs with EXIF and no XMP (PNG) and on a malformed EXIF.
+    for fmt, pattern in (("png", "*.png"), ("jpeg", "*.jp*g")):
+        dd = B / f"jpg_dec_{fmt}"
+        for p in jx_made:
+            cp(p, dd / p.name)
+        rc, out = run(f"jpg_decode_{fmt}", [TR, dd, "--force-convert", "--decode",
+                                            "--format", fmt, "--mode", "1"])
+        got = {p.stem for p in dd.rglob(pattern)}
+        lost = sorted(p.stem for p in jx_made if p.stem not in got)
+        check(f"JPEGs: every archive decodes to {fmt.upper()} with its metadata (#630/#631)",
+              rc == 0 and jx_made and not lost, f"rc={rc} missing={lost[:4]}")
+
+    # v2.26.0: a JPEG shot upright-by-tag comes back as the camera wrote it.
+    rot = B / "jpg_rot"
+    turned = {}
+    for s in valid:
+        c = cp(s, rot / s.name)
+        os.chmod(c, 0o666)
+        exif(["-overwrite_original", "-n", "-IFD0:Orientation=6", c])
+        if exif(["-s3", "-n", "-IFD0:Orientation", c]).strip() == "6":
+            turned[c.stem] = (md5(c), exif(["-s3", "-ImageSize", c]).strip())
+    rc, _ = run("jpg_rot_encode", [TR, rot, "--mode", "1"])
+    rj = B / "jpg_rot_jxl"
+    for p in (rot / "converted_jxl").glob("*.jxl"):
+        if p.stem in turned:
+            cp(p, rj / p.name)
+    rc, out = run("jpg_rot_decode", [TR, rj, "--force-convert", "--decode", "--format",
+                                     "jpeg", "--mode", "1"])
+    outs = {p.stem: p for p in rj.rglob("*.jp*g")}
+    bad = [n for n, (_m, size) in turned.items()
+           if n not in outs
+           or exif(["-s3", "-n", "-IFD0:Orientation", outs[n]]).strip() != "6"
+           or exif(["-s3", "-ImageSize", outs[n]]).strip() != size]
+    check("rotated JPEGs: JXL -> JPEG gives back the stored size and Orientation 6",
+          rc == 0 and len(turned) >= 10 and not bad,
+          f"rc={rc} {len(turned)} rotated, bad={bad[:4]}")
+    rr = B / "jpg_rot_rec"
+    for p in rj.glob("*.jxl"):
+        cp(p, rr / p.name)
+    rc, _ = run("jpg_rot_reconstruct", [TR, rr, "--mode", "1", "--decode", "--force-transcode"])
+    recs = {p.stem: p for p in rr.rglob("*.jp*g")}
+    bad = [n for n, (m5, _s) in turned.items() if n not in recs or md5(recs[n]) != m5]
+    check("rotated JPEGs: the bit-exact recovery is unchanged", rc == 0 and not bad,
+          f"rc={rc} bad={bad[:4]}")
+
     d = B / "jpg_del"
     for s in srcs:
         cp(s, d / s.name)
@@ -1988,6 +2035,165 @@ def hostile_name_checks(A1):
               f"rc={rc}/{rc2}")
 
 
+def _decode_copy(tag, jxl, fmt, *extra):
+    """A copy of `jxl` in its own folder through the transcoder's JXL -> JPEG/PNG;
+    (rc, the output or None)."""
+    d = B / tag
+    cp(jxl, d / jxl.name)
+    rc, _ = run(tag, [TR, d, "--force-convert", "--decode", "--format", fmt, "--mode", "1",
+                      *extra])
+    found = sorted(d.rglob("*.png" if fmt == "png" else "*.jp*g"))
+    return rc, (found[0] if found else None)
+
+
+def _orient_of(path):
+    """(EXIF Orientation, XMP tiff:Orientation, 'WxH') of a file; '' = absent."""
+    return (exif(["-s3", "-n", "-IFD0:Orientation", path]).strip(),
+            exif(["-s3", "-n", "-XMP-tiff:Orientation", path]).strip(),
+            exif(["-s3", "-ImageSize", path]).strip())
+
+
+def orientation_and_gate_checks(A1):
+    """What v2.25.3 and v2.26.0 added, on files made in the scratch folder: a
+    JPEG shot upright-by-tag through every tool, a TIFF with Photoshop layers,
+    a 12-bit TIFF, a float and an animated JXL, an output held open."""
+    section("Rotated JPEG, layered and 12-bit TIFFs, float/animated JXLs, a locked output")
+    from PIL import Image
+    FAST = ["--effort", "3", "--no-preflight"]
+    o = B / "orient"
+    o.mkdir(parents=True, exist_ok=True)
+    _via_ascii(lambda s, t: ["magick", f"{A1}[0]", "-resize", "1200x1200", "-depth", "8",
+                             "-quality", "92", str(t)], None, o / "r.jpg").check_returncode()
+    exif(["-overwrite_original", "-n", "-IFD0:Orientation=6", "-XMP-tiff:Orientation=6",
+          o / "r.jpg"])
+    stored = exif(["-s3", "-ImageSize", o / "r.jpg"]).strip()
+    upright = "x".join(reversed(stored.split("x")))
+    jpg_md5 = md5(o / "r.jpg")
+    rc, _ = run("or_transcode", [TR, o, "--mode", "1", "--force-transcode"])
+    jx = o / "converted_jxl" / "r.jxl"
+    check("rotated JPEG -> JXL (lossless transcode)", rc == 0 and jx.exists(), f"rc={rc}")
+    if jx.exists():
+        rc, out_jpg = _decode_copy("or_jpeg", jx, "jpeg")
+        got = _orient_of(out_jpg) if out_jpg else None
+        check("rotated JPEG archive -> JPEG: stored pixels and Orientation 6 again (v2.26.0)",
+              rc == 0 and got == ("6", "", stored), f"rc={rc} {got} want size {stored}")
+        rc, out_up = _decode_copy("or_jpeg_upright", jx, "jpeg", "--jpeg-orientation", "upright")
+        got = _orient_of(out_up) if out_up else None
+        check("--jpeg-orientation upright: turned pixels and Orientation 1 (#623)",
+              rc == 0 and got == ("1", "", upright), f"rc={rc} {got} want size {upright}")
+        rc, out_png = _decode_copy("or_png", jx, "png")
+        got = _orient_of(out_png) if out_png else None
+        check("rotated JPEG archive -> PNG: upright, no orientation left to apply (#623/#634)",
+              rc == 0 and got is not None and got[0] in ("1", "") and got[1:] == ("", upright),
+              f"rc={rc} {got}")
+        dt = B / "or_tiff"
+        cp(jx, dt / "r.jxl")
+        rc, _ = run("or_tiff", [DEC, dt, "--mode", "1"])
+        tifs = sorted(dt.rglob("*.tif"))
+        got = _orient_of(tifs[0]) if tifs else None
+        check("rotated JPEG archive -> TIFF: upright with Orientation 1 (#623/#634)",
+              rc == 0 and got == ("1", "", upright), f"rc={rc} {got}")
+        db = B / "or_rec"
+        cp(jx, db / "r.jxl")
+        rc, _ = run("or_reconstruct", [TR, db, "--mode", "1", "--decode", "--force-transcode"])
+        back = sorted(db.rglob("*.jp*g"))
+        check("rotated JPEG archive: the bit-exact recovery returns the original file",
+              rc == 0 and len(back) == 1 and md5(back[0]) == jpg_md5, f"rc={rc}")
+        dr = B / "or_recompress"
+        cp(jx, dr / "r.jxl")
+        rc, _ = run("or_recompress", [REC, dr, "--mode", "1", "--distance", "2",
+                                      "--no-keep-smaller", "--jbrd-policy", "convert",
+                                      "--on-unknown", "convert", "--on-regeneration", "convert",
+                                      "--on-downgrade", "convert"] + FAST)
+        rjx = dr / "recompressed_jxl" / "r.jxl"
+        toks = ([t for t in relation(rjx) if t.startswith("jxlphoto-orientation:")]
+                if rjx.exists() else None)
+        check("recompressed copy: upright, Orientation 1, and the JPEG's orientation recorded",
+              rc == 0 and toks == ["jxlphoto-orientation:6"]
+              and _orient_of(rjx)[:2] == ("1", ""), f"rc={rc} tokens={toks}")
+        if rjx.exists():
+            rc, out2 = _decode_copy("or_recompress_jpeg", rjx, "jpeg")
+            got = _orient_of(out2) if out2 else None
+            check("recompressed copy -> JPEG: stored pixels and Orientation 6 again",
+                  rc == 0 and got == ("6", "", stored)
+                  and not [t for t in relation(out2) if t.startswith("jxlphoto-orientation:")],
+                  f"rc={rc} {got}")
+
+    # #620: a TIFF with Photoshop layers is archived and KEPT.
+    rng = np.random.default_rng(7)
+    pix = (rng.random((96, 128, 3)) * 65535).astype(np.uint16)
+    lay = B / "layers"
+    lay.mkdir(parents=True, exist_ok=True)
+    blob = b"Adobe Photoshop Document Data Block\x00" + bytes(100_000)
+    tifffile.imwrite(str(lay / "layered.tif"), pix, photometric="rgb",
+                     extratags=[(37724, 7, len(blob), blob, True)])
+    tifffile.imwrite(str(lay / "flat.tif"), pix, photometric="rgb")
+    rc, out = run("layers_delete", [ENC, lay, "--mode", "1", "--distance", "0",
+                                    "--delete-source", "--delete-confirm-off"] + FAST)
+    check("a TIFF with Photoshop layers is archived and kept by --delete-source (#620)",
+          (lay / "converted_jxl" / "layered.jxl").exists() and (lay / "layered.tif").exists()
+          and not (lay / "flat.tif").exists() and "KEEP source" in out, f"rc={rc}")
+
+    # #621: 12-bit samples are refused, not archived 16 times darker.
+    tw = B / "twelve"
+    tw.mkdir(parents=True, exist_ok=True)
+    tifffile.imwrite(str(tw / "rgb12.tif"), (pix >> 4), photometric="rgb", bitspersample=12)
+    rc, out = run("twelve_bit", [ENC, tw, "--mode", "1", "--distance", "0"] + FAST)
+    check("a 12-bit TIFF is refused with an error (#621)",
+          rc != 0 and "Unsupported TIFF bit depth" in out and (tw / "rgb12.tif").exists()
+          and not list(tw.rglob("*.jxl")), f"rc={rc}")
+
+    # #622: a float or animated JXL is not deleted behind a TIFF.
+    fa = B / "float_anim"
+    fa.mkdir(parents=True, exist_ok=True)
+    ramp = np.tile(np.linspace(0.0, 4.0, 96, dtype="<f4"), (64, 1))
+    rgbf = np.stack([ramp, ramp * 0.5, ramp * 0.25], axis=-1).astype("<f4")
+
+    def _pfm(src, out):
+        out.write_bytes(b"PF\n96 64\n-1.0\n" + np.flipud(rgbf).tobytes())
+        return ["cjxl", str(out), str(out.with_suffix(".jxl")), "-d", "0"]
+
+    def _apng(src, out):
+        frames = [Image.fromarray(np.full((64, 96, 3), v, np.uint8)) for v in (20, 120, 220)]
+        frames[0].save(out, save_all=True, append_images=frames[1:], duration=100, loop=0)
+        return ["cjxl", str(out), str(out.with_suffix(".jxl")), "-d", "0"]
+
+    for label, maker, ext in (("hdr", _pfm, ".pfm"), ("anim", _apng, ".png")):
+        tmp = Path(tempfile.mkdtemp(prefix="battery_"))
+        try:
+            subprocess.run(maker(None, tmp / f"x{ext}"), capture_output=True)
+            if (tmp / "x.jxl").exists():
+                shutil.move(str(tmp / "x.jxl"), str(fa / f"{label}.jxl"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    rc, out = run("float_anim_delete", [DEC, fa, "--mode", "0", "--delete-source",
+                                        "--delete-confirm-off"])
+    check("a float and an animated JXL are kept by the decoder's --delete-source (#622)",
+          (fa / "hdr.jxl").exists() and (fa / "anim.jxl").exists()
+          and len(list(fa.glob("*.tif"))) == 2 and "KEPT" in out, f"rc={rc}")
+
+    # #624: an output held open by another program is an error, not "ok".
+    if os.name == "nt":
+        lk = B / "locked"
+        lk.mkdir(parents=True, exist_ok=True)
+        tifffile.imwrite(str(lk / "a.tif"), pix, photometric="rgb")
+        stage = B / "locked_staging"
+        ARGS = [ENC, lk, "--mode", "1", "--distance", "0", "--staging", stage] + FAST
+        rc, _ = run("locked_first", ARGS)
+        final = lk / "converted_jxl" / "a.jxl"
+        if final.exists():
+            before = md5(final)
+            touch(lk / "a.tif", 60)
+            with open(final, "rb"):
+                rc, out = run("locked_second", ARGS + ["--sync"])
+            check("an output open in another program: MOVE FAILED is an error, exit 1 (#624)",
+                  rc == 1 and "MOVE FAILED" in out and md5(final) == before
+                  and (lk / "a.tif").exists(), f"rc={rc}")
+        else:
+            check("an output open in another program: MOVE FAILED is an error, exit 1 (#624)",
+                  False, f"first run rc={rc}: no output")
+
+
 def main():
     global B, LOGS
     # The scratch folder's name is Japanese; a redirected console is cp1252.
@@ -2023,7 +2229,7 @@ def main():
         ap.error("pass --fixtures <folder> or set JXLPHOTO_FIXTURES "
                  "(see the module docstring for the layout)")
 
-    for tool in ("cjxl", "djxl", "exiftool", "magick"):
+    for tool in ("cjxl", "djxl", "jxlinfo", "exiftool", "magick"):
         if shutil.which(tool) is None:
             sys.exit(f"{tool} is not on PATH")
     (A1, A2, A3), scan = pick_fixtures(args.fixtures)
@@ -2061,6 +2267,7 @@ def main():
                  (derivative_rederive_checks, (A1, pool_jxl), "par"),
                  (transcoder_checks, (A1, A2), "par"),
                  (hostile_name_checks, (A1,), "par"),
+                 (orientation_and_gate_checks, (A1,), "par"),
                  (interaction_checks, (A1, A2), "par"),
                  (explorer_thumbnail_checks, (A1, pool_jxl), "alone"),
                  (wrapper_checks, (A1, A2), "par"),

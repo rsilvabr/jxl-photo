@@ -132,7 +132,7 @@ FLAG_OF = {
     "DJXL_OUTPUT_DEPTH": "--depth", "TIFF_COMPRESSION": "--compression",
     "ON_DOWNGRADE": "--on-downgrade", "ON_REGENERATION": "--on-regeneration",
     "ON_UNKNOWN": "--on-unknown", "ON_SCAN": "--on-scan", "JBRD_POLICY": "--jbrd-policy",
-    "PNG_DEFAULT_BIT_DEPTH": "--bit-depth",
+    "PNG_DEFAULT_BIT_DEPTH": "--bit-depth", "JPEG_ORIENTATION": "--jpeg-orientation",
 }
 
 

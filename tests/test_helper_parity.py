@@ -134,6 +134,10 @@ SHARED_HELPERS = [
     "_codestream_orientation",
     "_orientation_reset_args",
     "_reduced_by_integer_decode",     # decoder + transcoder only
+    # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
+    # recompressor). A copy drifting is one backend failing again on every
+    # source whose profile is a standard sRGB one.
+    "_png_iccp",
     # Explorer thumbnail box (encoder + recompressor). jxl-thumb trusts a
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write

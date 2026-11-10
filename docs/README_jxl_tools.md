@@ -34,7 +34,7 @@ in the main README. The menu's status bar then shows what it found.
 py jxl_photo.py
 ```
 
-The tool shows a status bar with all detected dependencies, then presents the main menu:
+The tool shows a status bar with all detected dependencies (`cjxl/djxl` turns into a warning when `jxlinfo`, which ships beside them, is missing), then presents the main menu:
 
 ```
 ╭───────────────────────────────────────────── JXL Tools Environment ────────────────────────────────────────────────╮
@@ -675,6 +675,7 @@ Multi-page TIFFs: split — one JXL per page (thumbnail pages excluded)
   `--icc-png-strategy`, `--scan-scope`, `--warn-thumbnail-discard`,
   `--restamp-then-sync`, `--explorer-thumbnail`, the recompressor's
   `--encode-tag`, `--allow-incomplete-groups`, `--compress-metadata`,
+  `--jpeg-orientation` (JXL → JPEG), `--exiftool-ignore-minor` (JXL → TIFF),
   `--output-name` (modes 1/3 of a JPEG/PNG conversion) and the sharpening
   overrides. A number changes one; a choice made of numbers is typed as the
   number (`1` = `--buffering 1`, `-` = the script's value). The delete rules
@@ -940,6 +941,10 @@ The values go to a JSON file the scripts read when they start:
 2. else `.jxl_script_settings.json` next to the scripts (portable install,
    like this program's own settings file);
 3. else `.jxl_script_settings.json` in your user profile (`%USERPROFILE%`).
+
+A `JXLPHOTO_SETTINGS` that names a file that does not exist is reported in the
+run's log (`Script settings overlay: JXLPHOTO_SETTINGS names a file that does
+not exist …`) and no setting changes.
 
 Each script checks every value again (type, range, the allowed choices,
 folder names without path separators) and takes only the settings this

@@ -77,7 +77,8 @@ def test_explicit_lossy_decode_with_delete_exits_2(tmp_path, extra):
     r = subprocess.run([sys.executable, str(SCRIPTS / "jxl_jpeg_transcoder.py"), str(d),
                         "--force-convert", "--decode", "--delete-source",
                         "--delete-confirm-off"] + extra,
-                       capture_output=True, text=True, timeout=120,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=120,
                        stdin=subprocess.DEVNULL)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "not a copy of the JXL" in " ".join(r.stderr.split()), r.stderr
@@ -92,7 +93,8 @@ def test_16bit_png_decode_with_delete_is_not_refused(tmp_path):
                         "--force-convert", "--decode", "--format", "png",
                         "--bit-depth", "16", "--delete-source", "--delete-confirm-off",
                         "--dry-run"],
-                       capture_output=True, text=True, timeout=120,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=120,
                        stdin=subprocess.DEVNULL)
     assert "not a copy of the JXL" not in r.stderr, r.stderr
 
@@ -112,7 +114,8 @@ def test_auto_mode_keeps_a_jxl_it_converted_lossy(tmp_path):
     png.unlink()
     r = subprocess.run([sys.executable, str(SCRIPTS / "jxl_jpeg_transcoder.py"), str(d),
                         "--from-jxl", "--delete-source", "--delete-confirm-off"],
-                       capture_output=True, text=True, timeout=600,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=600,
                        stdin=subprocess.DEVNULL)
     assert jxl.exists(), "the JXL was deleted behind a lossy JPEG\n" + r.stdout
     assert list(d.rglob("*.jpg")), r.stdout

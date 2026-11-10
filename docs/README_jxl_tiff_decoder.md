@@ -600,6 +600,15 @@ Options:
                      and an edited decode. Same as OVERWRITE_GUARD = False. Details:
                      behavior_and_limitations.md, "Renamed folders and the overwrite
                      guard" (#renamed-folders-and-the-overwrite-guard)
+  --exiftool-ignore-minor
+                     Decode a JXL whose maker notes exiftool cannot parse (an old
+                     phone's JPEG, say). By default such a file is an ERROR:
+                     exiftool refuses to write the TIFF, the JXL stays, and the
+                     end of the run lists those files. With this flag exiftool
+                     runs with -m and carries that block over AS IT IS, without
+                     checking it -- it may be unusable in the TIFF; the rest of
+                     the metadata is copied as usual. Refused together with
+                     --delete-source (exit 2). Same as EXIFTOOL_IGNORE_MINOR = True.
   --allow-incomplete-groups
                      [with --delete-source] Delete the JXLs of a multi-page split
                      even when pages of it are MISSING. By default those sources
@@ -860,7 +869,8 @@ jxlinfo photo.jxl
 - **eciRGB v2, scanner profiles and other table-curve ICC profiles**: a lossy JXL whose profile has no native form (table curve) stores the whole ICC, and djxl decodes it to linear sRGB. Files the encoder wrote with its default `cautious` strategy as "skip" (eciRGB v2 and Epson scanner profiles, verified) round-trip correctly. A lossy JXL that *does* carry such an ICC blob is detected in Roundtrip mode (djxl's `--icc_out` and `--orig_icc_out` differ only in this case) and decoded to float, then CONVERTED to the original profile — correct colours, wide gamut intact (measured 51.9 dB, the native-path figure). When djxl writes **neither** probe profile, the decoder refuses the decode instead of pasting the original ICC (that paste is the linear-sRGB trap on a lossy ICC-blob file) — libjxl ≥ 0.11.2 writes both. **That decode needs ImageMagick (`magick`) on PATH**; without it the file fails with an error instead of writing a wrong-colour TIFF, and the JXL is kept. An ICC blob with an alpha channel is refused in the derivative paths of the other tools (the float decode has no alpha); plain decode to TIFF handles it. Details: [Lossy JXL with an ICC blob](jxl_color_internals.md#lossy-jxl-with-an-icc-blob-what-djxl-returns-measured-2026-09-25).
 - **Metadata extraction**: Some exotic JXL metadata formats may not transfer perfectly to TIFF. Standard EXIF/XMP/ICC from cjxl/libjxl work correctly.
 - **Animation**: JXL animations decode to the first frame only (TIFF doesn't support animation). `--delete-source` **keeps** the JXL of an animation, and of a JXL with floating-point or deeper-than-16-bit samples: the TIFF is not a full copy of it (`KEPT`; needs `jxlinfo`, which ships with libjxl next to `djxl` — without it the decoder cannot tell and deletes as before).
-- **JXL made from a rotated JPEG**: its codestream carries the orientation, so `djxl` already turns the pixels; the TIFF's EXIF Orientation is set to 1 so a viewer does not turn them again (needs `jxlinfo`). A TIFF → JXL → TIFF chain keeps its Orientation.
+- **JXL made from a rotated JPEG**: its codestream carries the orientation, so `djxl` already turns the pixels; the TIFF's EXIF Orientation is set to 1 and XMP `tiff:Orientation` removed, so a viewer does not turn them again (needs `jxlinfo`). The TIFF is always upright; a `jxlphoto-orientation` token from a recompressed copy stays in it. A TIFF → JXL → TIFF chain keeps its Orientation.
+- **Maker notes exiftool cannot parse** (the JXL of an old phone's JPEG, say): exiftool copies the EXIF and then refuses every later write to that TIFF, so the file is an ERROR and its JXL stays; the end of the run lists such files. `--exiftool-ignore-minor` (`EXIFTOOL_IGNORE_MINOR`) decodes them with exiftool's `-m`: the maker notes reach the TIFF as they are, **unchecked** — they may be unusable there — while the rest of the metadata is copied as usual. Off by default, and refused together with `--delete-source`. JPEG and PNG outputs of the same JXL need no such option.
 - **Grayscale with alpha**: May produce RGB TIFF depending on djxl version. Use `--depth 8` for smaller files if alpha is not needed.
 
 ---

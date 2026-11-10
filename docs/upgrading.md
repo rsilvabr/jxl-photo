@@ -11,6 +11,38 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.26.0: the JPEG of a rotated JPEG's archive keeps its original orientation
+
+- **A JPEG decoded from a JXL made from a rotated JPEG** (EXIF Orientation
+  2–8, the usual portrait shot) now comes back as the camera wrote it: the
+  pixels in their stored order and the original EXIF Orientation. Viewers
+  show it the same way up as before. v2.25.3 wrote it with the pixels turned
+  upright and Orientation 1; to keep that, run with
+  `--jpeg-orientation upright` or set `JPEG_ORIENTATION = "upright"` (top of
+  `jxl_jpeg_transcoder.py`, or the wizard's Settings → script settings). PNG
+  and TIFF outputs stay upright. This route needs ImageMagick; without it the
+  JPEG comes out upright, with a warning. JPEG copies already made are not
+  redone (`--overwrite` redoes them).
+- **JXL → PNG of files made from camera JPEGs** (EXIF and no XMP), which
+  ended in an error per file, now works. Nothing to do.
+- **XMP `tiff:Orientation` is removed** wherever the EXIF Orientation is
+  reset to 1 (PNG, TIFF, recompressed copies of a rotated JPEG's JXL).
+- **`JXLPHOTO_SETTINGS` naming a file that does not exist** now puts a
+  warning in the log (the run still uses the scripts' own settings).
+- **Resize, sharpening and colour conversion of sources with the standard
+  sRGB profile** (a JXL made from a camera or phone JPEG; a TIFF master in
+  sRGB), which ended in an error per file, now work. Nothing to do.
+- **The decoder has a new flag, `--exiftool-ignore-minor`**
+  (`EXIFTOOL_IGNORE_MINOR`), off by default. A JXL whose maker notes exiftool
+  cannot parse (an old phone's JPEG) is still an error when decoded to TIFF;
+  the end of the run now lists such files and explains the flag. With it,
+  exiftool writes anyway and carries that block over unchecked; it is
+  refused together with `--delete-source`.
+- **The real-photo battery** (`tools/real_photo_battery.py`) needs `jxlinfo`
+  on PATH (it ships with cjxl/djxl).
+
+---
+
 ## v2.25.3: a failed move is an error; layered TIFFs and float/animated JXLs are kept; rotated JPEG archives decode upright
 
 - **A move out of staging that fails now ends the run with exit code 1**

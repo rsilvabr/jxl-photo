@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.25.3"
+TOOLKIT_VERSION = "2.26.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1081,6 +1081,18 @@ COMPRESS_METADATA_BOXES = False
 #   EXIF layout alone. The rebuilt JPEG is byte-identical either way.
 # Can also be set via --compress-metadata.
 
+JPEG_ORIENTATION = "original"
+# [JXL -> JPEG] How a JXL whose photo was a ROTATED JPEG (EXIF Orientation
+# 2-8) comes back as a JPEG.
+# "original" (default) — as the camera wrote it: the pixels in their stored
+#   order and the original EXIF Orientation (6, 8, ...). Needs ImageMagick;
+#   without it the JPEG comes out upright, with a warning.
+# "upright" — the pixels turned upright and EXIF Orientation 1 (what v2.25.3
+#   wrote).
+# A PNG always comes out upright (many viewers ignore a PNG's orientation),
+# and so does the decoder's TIFF. The bit-exact recovery of a JPEG archive is
+# not affected: it returns the original file. Also: --jpeg-orientation.
+
 AUTO_REPAIR_JBRD = False
 # [JXL -> JPEG lossless decode, djxl >= 0.12]
 # True — when djxl --reconstruct_jpeg fails on a jbrd JXL (the v2.0.0-v2.0.3
@@ -1719,6 +1731,10 @@ def _run_exiftool_argfile(args_lines, timeout=60):
                                          dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
             argfile = af.name
             af.write(_ARGFILE_CHARSET)
+            if globals().get("EXIFTOOL_IGNORE_MINOR"):
+                # Only the decoder has this setting: -m makes exiftool write
+                # past an error it calls minor (maker notes it cannot parse).
+                af.write("-m\n")
             af.write("\n".join(str(a) for a in args_lines))
             af.write("\n")
         return _run_captured([_get_exiftool_cmd(), "-@", argfile],
@@ -1750,6 +1766,11 @@ ORIGIN_PREFIX = "jxlphoto-origin:"
 # v2.10.0). Written once by the script that first touches a clean input, then
 # carried forward unchanged — absent means unknown, never guessed. The only
 # reader is the recompressor's --on-regeneration guard (_hidden_generations).
+ORIENTATION_PREFIX = "jxlphoto-orientation:"
+# dc:Relation token: the EXIF Orientation (2-8) of the JPEG this photo came
+# from, written by the recompressor when its re-encode turns the pixels
+# upright (the codestream then says 1). Read here to give a JPEG its original
+# orientation back (JPEG_ORIENTATION); never left in a delivered JPEG/PNG.
 _TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
@@ -2192,7 +2213,8 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         # fails raises: the token would stay in the delivered file.
         content, _toks = _read_creator_and_relation(dst_path)
         strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
-                 for t in dict.fromkeys(_toks) if t.startswith(ICC_PROFILE_PREFIX)]
+                 for t in dict.fromkeys(_toks)
+                 if t.startswith((ICC_PROFILE_PREFIX, ORIENTATION_PREFIX))]
         if "ICC:" in content:
             content = content.strip()
             # Blob is bounded: base64 chars only up to the next pipe or EOL,
@@ -2395,6 +2417,14 @@ def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
     result = {"path": None, "applied": [], "warnings": []}
     try:
         result["path"] = _settings_overlay_path()
+        if ((os.environ.get(_SETTINGS_OVERLAY_ENV) or "").strip()
+                and not result["path"].is_file()):
+            # #632: a mistyped JXLPHOTO_SETTINGS ran with the script's own
+            # settings and not one line in the log.
+            result["warnings"].append(
+                f"{_SETTINGS_OVERLAY_ENV} names a file that does not exist "
+                f"({result['path']}); no setting changed")
+            return result
         section = _settings_overlay_section(result["path"], module)
     except Exception as e:
         result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
@@ -2445,6 +2475,7 @@ _OVERLAY_SETTINGS = {
     "CJXL_EFFORT": ("int", 1, 10),
     "CJXL_BUFFERING": ("choice", None, 0, 1, 2, 3),
     "COMPRESS_METADATA_BOXES": ("bool",),
+    "JPEG_ORIENTATION": ("choice", "original", "upright"),
     "CODEC_TIMEOUT": ("int", 1, None),
     "EXIFTOOL_TIMEOUT": ("int", 1, None),
     "EXIFTOOL_BATCH_STALL": ("int", 1, None),
@@ -5721,11 +5752,17 @@ def _png_chunk_types(png_path: Path) -> list:
 
 
 _JXLINFO_NOTES = set()
+# The last answers of _jxlinfo_text, keyed by (path, size, mtime): one file is
+# asked several times in a row (colour, orientation, delete gate).
+_JXLINFO_CACHE = {}
+_JXLINFO_CACHE_LOCK = threading.Lock()
+_JXLINFO_CACHE_MAX = 256
 
 
 def _jxlinfo_text(jxl_path):
     """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
-    jxlinfo is not installed, fails or times out."""
+    jxlinfo is not installed, fails or times out. An answer is remembered
+    while the file keeps its size and mtime."""
     exe = shutil.which("jxlinfo")
     if not exe:
         if "missing" not in _JXLINFO_NOTES:
@@ -5736,10 +5773,25 @@ def _jxlinfo_text(jxl_path):
                            "not recognised before a delete")
         return None
     try:
+        _st = os.stat(jxl_path)
+        key = (os.path.normcase(str(jxl_path)), _st.st_size, _st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if key in _JXLINFO_CACHE:
+                return _JXLINFO_CACHE[key]
+    try:
         r = _run_captured([exe, "-v", str(jxl_path)], EXIFTOOL_TIMEOUT, text=True)
     except Exception:
         return None
-    return (r.stdout or "") if r.returncode == 0 else None
+    text = (r.stdout or "") if r.returncode == 0 else None
+    if key is not None and text is not None:
+        with _JXLINFO_CACHE_LOCK:
+            if len(_JXLINFO_CACHE) >= _JXLINFO_CACHE_MAX:
+                _JXLINFO_CACHE.clear()
+            _JXLINFO_CACHE[key] = text
+    return text
 
 
 def _codestream_orientation(info_text):
@@ -5755,7 +5807,38 @@ def _orientation_reset_args(jxl_path) -> list:
     them a second time. A JXL made from a TIFF has codestream orientation 1
     and keeps its tag."""
     o = _codestream_orientation(_jxlinfo_text(jxl_path))
-    return ["-IFD0:Orientation#=1"] if o not in (None, 1) else []
+    # The XMP mirror of the tag goes too (#634): a reader that prefers the
+    # XMP would turn the upright pixels again.
+    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
+            if o not in (None, 1) else [])
+
+
+# ImageMagick operations that put upright pixels back into the order a JPEG
+# with EXIF Orientation n stored them in — the inverse of each orientation,
+# every one an exact permutation (checked against -auto-orient, 2026-11-10).
+_UNROTATE_MAGICK = {2: ["-flop"], 3: ["-rotate", "180"], 4: ["-flip"],
+                    5: ["-transpose"], 6: ["-rotate", "270"],
+                    7: ["-transverse"], 8: ["-rotate", "90"]}
+
+
+def _stored_orientation(jxl_path):
+    """The EXIF Orientation (2-8) of the JPEG this JXL's photo came from, or
+    None: the codestream's own (a JXL made straight from a JPEG), else the
+    jxlphoto-orientation token a recompression left (ORIENTATION_PREFIX).
+    None when it is 1, unknown or unreadable — the output then stays upright,
+    which is always a correct picture."""
+    o = _codestream_orientation(_jxlinfo_text(jxl_path))
+    if o in _UNROTATE_MAGICK:
+        return o
+    try:
+        _creator, tokens = _read_creator_and_relation(jxl_path)
+    except Exception:
+        return None
+    for t in tokens:
+        if t.startswith(ORIENTATION_PREFIX):
+            v = t[len(ORIENTATION_PREFIX):]
+            return int(v) if v.isdigit() and int(v) in _UNROTATE_MAGICK else None
+    return None
 
 
 def _reduced_by_integer_decode(info_text, frames_kept: bool):
@@ -5984,6 +6067,36 @@ def _get_adobergb_icc_path() -> str:
     return _adobergb_icc_cache
 
 
+def _png_iccp(png_path: Path):
+    """The ICC profile in a PNG's iCCP chunk (decompressed), or None. Reads
+    chunk headers only up to the first IDAT."""
+    import zlib
+    try:
+        with open(png_path, "rb") as f:
+            if f.read(8) != b"\x89PNG\r\n\x1a\n":
+                return None
+            while True:
+                head = f.read(8)
+                if len(head) < 8:
+                    return None
+                n = struct.unpack(">I", head[:4])[0]
+                t = head[4:8]
+                if t == b"IDAT":
+                    return None
+                if t == b"iCCP":
+                    data = f.read(n)
+                    sep = data.index(b"\x00")
+                    return zlib.decompress(data[sep + 2:])
+                f.seek(n + 4, 1)
+    except Exception:
+        return None
+
+
+# ImageMagick writes an sRGB chunk INSTEAD of the iCCP when the profile is one
+# of the standard sRGB ones it recognises; with this it writes the profile.
+_MAGICK_KEEP_ICCP = ["-define", "png:preserve-iCCP=true"]
+
+
 def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple:
     """(magick args, source profile path) describing the decoded pixels.
 
@@ -6008,14 +6121,19 @@ def _source_profile_args(jxl_path: Path, png_path: Path, tmp_dir: Path) -> tuple
         return (["+profile", "*", "-profile", str(path)], path)
     chunks = _png_chunk_types(png_path)
     if "iCCP" in chunks:
-        # magick converts from the profile djxl wrote, no explicit assign.
+        # The profile djxl wrote, read from the chunk and assigned explicitly
+        # (#635): reading a PNG, ImageMagick drops an iCCP it recognises as a
+        # standard sRGB profile, so it could neither hand it back ("no color
+        # profile is available") nor convert from it — a target profile would
+        # have been ASSIGNED (the trap of the sRGB chunk below). For any other
+        # profile the assignment changes nothing.
+        icc = _png_iccp(png_path)
+        if not icc:
+            raise RuntimeError("the decoded PNG's iCCP profile could not be read — "
+                               "refusing to guess the source colour space")
         path = tmp_dir / "src_iccp.icc"
-        r = _run_captured(["magick", str(png_path), str(path)],
-                          CODEC_TIMEOUT)
-        if r.returncode != 0 or not path.exists():
-            raise RuntimeError(f"magick could not extract the source ICC profile: "
-                               f"{_stderr_tail(r.stderr)}")
-        return ([], path)
+        path.write_bytes(icc)
+        return (["+profile", "*", "-profile", str(path)], path)
     if "sRGB" in chunks:
         path = _get_srgb_icc_path()
         if not path:
@@ -6177,6 +6295,102 @@ def _jpeg_replace_icc(path: Path, icc: bytes) -> bool:
                               + payload)
             if not placed:
                 dst.write(b"".join(app2))
+            shutil.copyfileobj(src, dst)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+# What djxl writes into a PNG for the EXIF/XMP/IPTC of the JXL: text chunks
+# with these keywords, not the standard eXIf / XML:com.adobe.xmp.
+_DJXL_PNG_PROFILES = (b"Raw profile type exif\x00", b"Raw profile type xmp\x00",
+                      b"Raw profile type iptc\x00", b"Raw profile type APP1\x00",
+                      b"Raw profile type 8bim\x00")
+_PNG_TEXT_CHUNKS = (b"tEXt", b"zTXt", b"iTXt")
+_JPEG_APP1_METADATA = (b"Exif\x00\x00", b"http://ns.adobe.com/xap/1.0/\x00",
+                       b"http://ns.adobe.com/xmp/extension/\x00")
+
+
+def _drop_djxl_png_profiles(path: Path) -> bool:
+    """Remove the 'Raw profile type exif/xmp/...' text chunks djxl wrote into
+    the PNG at `path` (#630), pixels and every other chunk untouched: exiftool
+    fails on a PNG that holds such an EXIF chunk and no XMP one (`IFD0 pointer
+    references previous IFD0 directory`), and a PNG it could write kept two
+    EXIF blocks. The metadata copy from the JXL then writes one standard eXIf
+    and one XMP. Temp beside the file + os.replace. True when a chunk went."""
+    path = Path(path)
+    found = False
+    with open(path, "rb") as f:
+        if f.read(8) != _PNG_SIGNATURE:
+            raise RuntimeError(f"not a PNG: {path.name}")
+        while not found:
+            head = f.read(8)
+            if len(head) < 8:
+                break
+            n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+            key = f.read(min(n, 32)) if name in _PNG_TEXT_CHUNKS else b""
+            found = key.startswith(_DJXL_PNG_PROFILES)
+            f.seek(n + 4 - len(key), 1)
+    if not found:
+        return False
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            dst.write(src.read(8))
+            while True:
+                head = src.read(8)
+                if len(head) < 8:
+                    break
+                n, name = struct.unpack(">I", head[:4])[0], head[4:8]
+                key = src.read(min(n, 32)) if name in _PNG_TEXT_CHUNKS else b""
+                if key.startswith(_DJXL_PNG_PROFILES):
+                    src.seek(n + 4 - len(key), 1)
+                    continue
+                dst.write(head + key)
+                shutil.copyfileobj(_LimitedReader(src, n + 4 - len(key)), dst)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def _jpeg_codec_metadata(marker: int, payload: bytes) -> bool:
+    """An APP1 Exif/XMP or APP13 Photoshop (IPTC) segment."""
+    return ((marker == 0xE1 and payload.startswith(_JPEG_APP1_METADATA))
+            or (marker == 0xED and payload.startswith(b"Photoshop 3.0\x00")))
+
+
+def _drop_jpeg_codec_metadata(path: Path) -> bool:
+    """Remove the EXIF, XMP and IPTC segments a codec copied into the JPEG at
+    `path` (#631), image data and every other segment (JFIF, ICC, Adobe)
+    untouched: djxl and ImageMagick carry a malformed EXIF over as a block,
+    and exiftool then cannot rewrite it. Temp beside the file + os.replace.
+    True when a segment went."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        segs = _jpeg_header_segments(f)
+    if not any(_jpeg_codec_metadata(m, p) for m, p in segs):
+        return False
+    tmp = path.parent / f"{uuid.uuid4().hex}_{path.name}.tmp"
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as dst:
+            segs = _jpeg_header_segments(src)        # src now at the SOS
+            dst.write(b"\xff\xd8")
+            for marker, payload in segs:
+                if _jpeg_codec_metadata(marker, payload):
+                    continue
+                if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                    dst.write(bytes((0xFF, marker)))
+                else:
+                    dst.write(bytes((0xFF, marker)) + struct.pack(">H", len(payload) + 2)
+                              + payload)
             shutil.copyfileobj(src, dst)
         os.replace(str(tmp), str(path))
     finally:
@@ -6615,7 +6829,8 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     _creator, tokens = _read_creator_and_relation(jxl_path)
     # ICC_PROFILE_PREFIX too: a delivered JPEG/PNG has its profile in the
     # normal place (_copy_metadata strips the copied token the same way).
-    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX)
+    drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX,
+            ORIENTATION_PREFIX)
     keep = [t for t in tokens if t and not t.startswith(drop)]
     lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
@@ -6637,7 +6852,7 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
 
 def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
                         output_icc, bit_depth: int, quality: int,
-                        is_png: bool, float_src=None) -> tuple:
+                        is_png: bool, float_src=None, unrotate=None) -> tuple:
     """(magick args, size|None, grey, converted) for the derivative/ICC pass.
 
     Order validated in the plan: source profile -> target conversion ->
@@ -6701,9 +6916,22 @@ def _output_magick_args(jxl_path: Path, tmp_png: Path, tmp_dir: Path,
                 args += _magick_icc_args(output_icc, [])
             elif src_profile is not None:
                 args += ["-profile", str(src_profile)]
+    if unrotate:
+        # JPEG_ORIENTATION = "original": back into the order the JPEG stored
+        # the pixels in, after every colour and size step. A resized output's
+        # width and height swap with it for the quarter turns.
+        args += _UNROTATE_MAGICK[unrotate]
+        if size and unrotate >= 5:
+            size = (size[1], size[0])
     args += ["-depth", str(bit_depth)]
     if not is_png:
         args += ["-quality", str(quality)]
+        if unrotate and not derivative and not output_icc:
+            # This file took the ImageMagick route only to be turned back; djxl,
+            # which would have written it, keeps 4:4:4 at every quality, while
+            # ImageMagick drops to 4:2:0 below quality 90 (measured: 2
+            # ssimulacra2 points lower).
+            args += ["-sampling-factor", "4:4:4"]
     return args, size, grey, converted
 
 
@@ -6804,6 +7032,20 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                 "--resize-*/--sharpen need ImageMagick (magick) in PATH. "
                 "Install ImageMagick or drop the resize/sharpening flags.")
 
+        # JPEG_ORIENTATION = "original": a JXL whose photo was a rotated JPEG
+        # gives the JPEG its stored pixel order and its EXIF Orientation back.
+        _unrot = None
+        if not is_png and JPEG_ORIENTATION == "original":
+            _unrot = _stored_orientation(jxl_path)
+            if _unrot and not MAGICK_AVAILABLE:
+                if "no-magick-orientation" not in _JXLINFO_NOTES:
+                    _JXLINFO_NOTES.add("no-magick-orientation")
+                    logger.warning("ImageMagick (magick) is not in PATH: a JPEG made "
+                                   "from a JXL of a rotated JPEG comes out upright, "
+                                   "with Orientation 1, instead of in its original "
+                                   "orientation")
+                _unrot = None
+
         # From here on, a tool writes to actual_out; on failure the partial
         # output must be removed (see except below).
         output_dirty = True
@@ -6820,7 +7062,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             size = None
             with tempfile.TemporaryDirectory(dir=TEMP_DIR) as tmp:
                 tmp_png = Path(tmp) / "tmp.png"
-                _decode_bits = 16 if derivative else bit_depth
+                _decode_bits = 16 if (derivative or _unrot) else bit_depth
                 icc_args, out_icc, orig_icc = _djxl_icc_args(Path(tmp))
                 r = _run_captured(["djxl", str(jxl_path), str(tmp_png), f"--bits_per_sample={_decode_bits}"] + icc_args, CODEC_TIMEOUT)
                 if r.returncode != 0:
@@ -6875,18 +7117,22 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                                 f"from the XMP-labelled PNG | {jxl_path.name}")
                 magick_output, size, grey, _converted = _output_magick_args(
                     jxl_path, tmp_png, Path(tmp), output_icc, bit_depth,
-                    quality, is_png, float_src=float_src)
+                    quality, is_png, float_src=float_src, unrotate=_unrot)
                 logger.debug(f"Using ICC/derivative pipeline: {magick_output[:3]}")
-                r = _run_captured(["magick", str(magick_in)] + magick_output + [_magick_out], CODEC_TIMEOUT)
+                r = _run_captured(["magick", str(magick_in)] + magick_output
+                                  + (_MAGICK_KEEP_ICCP if is_png else [])    # #635
+                                  + [_magick_out], CODEC_TIMEOUT)
                 if r.returncode != 0:
                     raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
                 if not grey:
                     _verify_profile_in_output(actual_out, is_png=is_png)
             return size
 
-        if (output_icc and MAGICK_AVAILABLE) or derivative:
+        _djxl_wrote_it = False
+        if (output_icc and MAGICK_AVAILABLE) or derivative or _unrot:
             size = _via_magick()
         else:
+            _djxl_wrote_it = True
             # Direct djxl to PNG/JPG (explicit format: the temp may end in
             # .tmp). The same call reports which colour space djxl decoded to
             # and what the file's own is (#568).
@@ -6917,6 +7163,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
                             f"ImageMagick instead of djxl's direct output | "
                             f"{jxl_path.name}")
                 size = _via_magick()
+                _djxl_wrote_it = False
             elif _space is True:
                 # The pixels are in the file's own space; the profile that
                 # describes them is the one the master carries in XMP. A
@@ -6933,7 +7180,26 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # derivative gets the provenance markers REMOVED in the same breath
         # (trap A7: a 2048 px JPEG must never prove the master is archived, or
         # a later --delete-source --delete-skipped run would unlink the master).
-        _copy_metadata(jxl_path, actual_out)
+        if is_png and _djxl_wrote_it:
+            # #630: djxl's own copy of the EXIF/XMP, in non-standard chunks,
+            # makes exiftool fail on a PNG with EXIF and no XMP.
+            _drop_djxl_png_profiles(actual_out)
+        try:
+            _copy_metadata(jxl_path, actual_out)
+        except RuntimeError as _e_meta:
+            # #631: a malformed EXIF reaches a JPEG as a block (djxl and
+            # ImageMagick copy it), and exiftool cannot rewrite it. Without
+            # that copy the metadata is written fresh from the JXL; a second
+            # failure is the file's error.
+            if is_png or not _drop_jpeg_codec_metadata(actual_out):
+                raise
+            logger.info(f"  >metadata copied again without the EXIF/XMP the codec "
+                        f"wrote into the JPEG | {jxl_path.name} | first try: {_e_meta}")
+            _copy_metadata(jxl_path, actual_out)
+        # The pixels were put back in their stored order: so is the tag
+        # (_copy_metadata left it at 1, or at the token-less copy's 1).
+        _orient = ([f"-IFD0:Orientation#={_unrot}", "-XMP-tiff:Orientation="]
+                   if _unrot else [])
         if derivative:
             _dlabel = _current_derived_label(output_icc)
             # Separate CLEAR invocation (see _derivative_metadata_args): the
@@ -6946,6 +7212,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             r2 = _run_exiftool_argfile(
                 ["-overwrite_original"]
                 + _derivative_metadata_args(jxl_path, _dlabel, size)
+                + _orient
                 + _history_args("derived", jxl_path, actual_out)
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r2.returncode != 0:
@@ -6955,6 +7222,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
             r_prov = _run_exiftool_argfile(
                 ["-overwrite_original"] + _inherited_marker_removal_lines(actual_out)
                 + _provenance_marker_args(jxl_path)
+                + _orient
                 + _history_args("converted", jxl_path, actual_out)
                 + [str(actual_out)], timeout=EXIFTOOL_TIMEOUT)
             if r_prov.returncode != 0:
@@ -8390,6 +8658,14 @@ Examples:
                              "plain; IrfanView then shows no EXIF, and "
                              "--repair-jbrd leaves the EXIF layout alone. Same "
                              "as COMPRESS_METADATA_BOXES = True.")
+    parser.add_argument("--jpeg-orientation", type=str, default=None,
+                        choices=["original", "upright"],
+                        help="[JXL -> JPEG] A JXL whose photo was a rotated JPEG comes "
+                             "back as the camera wrote it (original: the stored pixel "
+                             "order and the original EXIF Orientation; needs "
+                             "ImageMagick) or turned upright with Orientation 1 "
+                             "(upright). Default: script setting JPEG_ORIENTATION. "
+                             "PNG and TIFF outputs are always upright.")
 
     return parser
 
@@ -8404,6 +8680,7 @@ _RUN_DEFAULTS = {
     "EXPORT_JPEG_FOLDER": EXPORT_JPEG_FOLDER,
     "AUTO_REPAIR_JBRD": AUTO_REPAIR_JBRD,
     "COMPRESS_METADATA_BOXES": COMPRESS_METADATA_BOXES,
+    "JPEG_ORIENTATION": JPEG_ORIENTATION,
     "DELETE_CONFIRM": DELETE_CONFIRM,
     "DELETE_SOURCE": DELETE_SOURCE,
     "DELETE_SKIPPED": DELETE_SKIPPED,
@@ -8567,7 +8844,7 @@ def main():
 
     # Apply configurable export marker before resolving outputs
     global EXPORT_MARKER, EXPORT_JPEG_SUBFOLDER, EXPORT_JPEG_FOLDER, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, PROVENANCE_CHECK, AUTO_REPAIR_JBRD, STORE_MD5, OVERWRITE_GUARD
-    global COMPRESS_METADATA_BOXES
+    global COMPRESS_METADATA_BOXES, JPEG_ORIENTATION
     # Each global was restored to its SCRIPT setting at the top of main()
     # (_RUN_DEFAULTS); the flags override it here, one way.
     if args.export_marker is not None:
@@ -8577,6 +8854,8 @@ def main():
         AUTO_REPAIR_JBRD = True
     if args.compress_metadata:
         COMPRESS_METADATA_BOXES = True
+    if args.jpeg_orientation is not None:
+        JPEG_ORIENTATION = args.jpeg_orientation
     if args.export_subfolder is not None:
         EXPORT_JPEG_SUBFOLDER = args.export_subfolder
     if args.export_jpeg_folder is not None:

@@ -93,9 +93,9 @@ A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has
 - **10/12-bit (and 1/2/4-bit) TIFFs are refused.** The values would be archived unscaled, 16 times darker than the original. The file gets an ERROR and stays. A master an earlier version wrote from such a TIFF holds those unscaled values: `--delete-skipped` never takes it as the TIFF's archive (`KEEP source`). 8- and 16-bit TIFFs are unaffected.
 - **IPTC (IIM) is not carried into a JXL.** Keywords, captions and authors that exist only there (older Photoshop, Photo Mechanic, agencies) are not in the master; EXIF and XMP are. The lossless JPEG archive (`jbrd`) keeps everything.
 
-## A JXL made from a rotated JPEG comes out upright
+## A JXL made from a rotated JPEG
 
-The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the pixels. A decode to JPEG, PNG or TIFF, and a recompression, therefore set the copied EXIF Orientation to 1; the picture is shown once, the right way up. This needs `jxlinfo` (it ships with libjxl, next to `djxl`); without it the run warns once and behaves as before. The bit-exact JPEG recovery returns the original JPEG, Orientation included, and a TIFF → JXL → TIFF chain keeps the TIFF's own Orientation.
+The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the pixels. A decode to PNG or TIFF, and a recompression, therefore set the copied EXIF Orientation to 1 (and remove XMP `tiff:Orientation`); the picture is shown once, the right way up. **A decode to JPEG gives the original back** (v2.26.0): the pixels in the order the camera stored them and the original EXIF Orientation — an exact reordering before the one JPEG encode, so nothing is lost by it. `--jpeg-orientation upright` (or `JPEG_ORIENTATION`) keeps the turned pixels with Orientation 1, which is also what a PC without ImageMagick writes. A recompressed copy records the JPEG's orientation as `jxlphoto-orientation:<n>`, since its own codestream no longer has it. This needs `jxlinfo` (it ships with libjxl, next to `djxl`); without it the run warns once and behaves as before. The bit-exact JPEG recovery returns the original JPEG, Orientation included, and a TIFF → JXL → TIFF chain keeps the TIFF's own Orientation.
 
 ## A float, deeper-than-16-bit or animated JXL is not deleted by a decode
 
@@ -111,7 +111,7 @@ The anchor is the first folder matching the marker at or below the input folder;
 
 ## The scripts' settings: in the file, or in the overlay
 
-Each script's settings are the variables at the top of the file. `jxl_photo.py`'s Settings → script settings (menu 9 → 2) changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed. The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA`, the encoder's copy of the original profile (`EMBED_ICC_IN_JXL`) — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-9-option-2)
+Each script's settings are the variables at the top of the file. `jxl_photo.py`'s Settings → script settings (menu 9 → 2) changes them in a JSON overlay instead (`JXLPHOTO_SETTINGS`, else `.jxl_script_settings.json` next to the scripts, else in the user profile), which each script reads and checks when it starts; every run's log names the file and what it changed (and says so when `JXLPHOTO_SETTINGS` names a file that does not exist: nothing changes then). The safety settings — deletion, confirmations, the overwrite guard and the provenance check, the verification thresholds, `OVERWRITE`, `STRIP_METADATA`, the encoder's copy of the original profile (`EMBED_ICC_IN_JXL`) — are never taken from it. [Details](README_jxl_tools.md#script-settings-menu-9-option-2)
 
 ## Default re-run behavior differs per script
 
