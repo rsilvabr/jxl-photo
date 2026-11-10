@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #638.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #640.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | unreleased | #639 (1) |
 | [Round-77 — the should-fix list of the v2.26.0 review](#round-77--the-should-fix-list-of-the-v2260-review-2026-11-10) | 2026-11-10 | v2.26.1 | #636–#637 (2) |
 | [Round-76 — what stayed open after v2.25.3](#round-76--what-stayed-open-after-v2253-2026-11-10) | 2026-11-10 | v2.26.0 | #630–#635 (6) |
 | [Round-75 — the 261110 bug sweep](#round-75--the-261110-bug-sweep-2026-11-10) | 2026-11-10 | v2.25.3 | #620–#629 (10) |
@@ -93,6 +94,19 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-78 — the 261111 plan (2026-11-11)
+
+Plan: `AI_tools/261111_Claude_plan_sync-same-bytes-and-lossy-jpeg-metadata.md`
+(local), part B (item S5 of the 261110 review). Regression tests:
+`tests/test_lossy_jpeg_malformed_metadata.py` (real cjxl and exiftool, a folder
+named with Japanese, brackets, a space, `%` and parentheses; the owner's two
+files when present). Nothing was ever deleted: the file was an error and the
+source stayed.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 639 | **A lossy JPEG → JXL (`--force-convert --from-jpeg`, distance above 0) of a JPEG with a malformed EXIF was an error**: cjxl copies the EXIF into the container as a block, and exiftool then refuses every write to it — the metadata copy failed on a broken IFD1 (`Bad IFD1 offset for BitsPerSample`) and the provenance write on maker notes it cannot parse (`Maker notes could not be parsed`). The same family as #631, in the JPEG → JXL direction | transcoder | ✅ FIXED for a broken IFD1: one retry, cjxl again with `-x strip=exif` and the EXIF written fresh from the JPEG, an output that lost all its EXIF is an error (`METADATA PARTIAL`). Review fix, before release: the retry's `-x strip=exif` also drops the EXIF Orientation cjxl keeps in the codestream, so a ROTATED JPEG with a broken IFD1 came out sideways in a JXL viewer (and `--delete-source` deleted the JPEG) — a rotated JPEG (codestream orientation 2–8 on the first encode) is now not retried: error plus `--force-transcode`. **Unparseable maker notes stay an error by design** (the copy recreates the block and the next write fails again; measured): the message names the cause and `--force-transcode`, which works; nothing is added to the JXL and never `-m` (#571). Documented in `behavior_and_limitations.md` |
 
 ## Round-77 — the should-fix list of the v2.26.0 review (2026-11-10)
 

@@ -97,6 +97,12 @@ A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has
 
 The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the pixels. A decode to PNG or TIFF, and a recompression, therefore set the copied EXIF Orientation to 1 (and remove XMP `tiff:Orientation`); the picture is shown once, the right way up. **A decode to JPEG gives the original back** (v2.26.0): the pixels in the order the camera stored them and the original EXIF Orientation — an exact reordering before the one JPEG encode, so nothing is lost by it. `--jpeg-orientation upright` (or `JPEG_ORIENTATION`) keeps the turned pixels with Orientation 1, which is also what a PC without ImageMagick writes. A recompressed copy records the JPEG's orientation as `jxlphoto-orientation:<n>`, since its own codestream no longer has it. The orientation is read with `jxlinfo` (it ships with libjxl, next to `djxl`), or, without it, from the JXL's header directly (v2.26.1). The bit-exact JPEG recovery returns the original JPEG, Orientation included, and a TIFF → JXL → TIFF chain keeps the TIFF's own Orientation.
 
+## A JPEG with a malformed EXIF, converted lossy to JXL
+
+`--force-convert --from-jpeg` (distance above 0) lets `cjxl` copy the JPEG's EXIF into the JXL, and the transcoder then adds its markers with exiftool. A JPEG whose EXIF is malformed — a broken thumbnail IFD, maker notes exiftool cannot parse — makes exiftool refuse every write to that JXL. The file gets **one retry**: `cjxl` again without the EXIF it would copy, and the EXIF written fresh from the JPEG by exiftool (log line `metadata copied again without the EXIF the codec wrote`). That is enough for a broken IFD1 (an HDR program's output, for one); the EXIF and the markers arrive, and an output whose EXIF did not arrive at all is an error (`METADATA PARTIAL`). **A rotated JPEG (EXIF Orientation 2–8) is not retried**: `cjxl` keeps the orientation in the codestream, and the second encode, without the EXIF, would lose it and show the picture sideways in a JXL viewer. It is an error with the same way out (`--force-transcode`). Never `-m`: the toolkit does not tell exiftool to ignore minor errors on its own.
+
+**Unparseable maker notes are still an error** (a Nokia N73 JPEG, for one: exiftool says `[minor] Maker notes could not be parsed`): copying them recreates the block, and the next write fails again. The message names the cause and the way out. The lossless transcode (`--force-transcode`, no `--distance`) writes no metadata and keeps the JPEG's EXIF as it is, bit-exact. Nothing is deleted in either case.
+
 ## A float, deeper-than-16-bit or animated JXL is not deleted by a decode
 
 A decode to TIFF (16-bit integers, first frame) or to a 16-bit PNG is not a full copy of a JXL that holds floating-point or deeper-than-16-bit samples, and the TIFF decode is not one of an animation either (the PNG keeps the frames). `--delete-source` keeps such a JXL (`KEPT`). The toolkit's own masters are never any of these; this concerns JXLs from other programs. It relies on `jxlinfo`.
@@ -170,6 +176,12 @@ Film scans are also archived **lossless** by default since v2.17.0, whatever `--
 ## Scanner ICC profiles and lossy encoding
 
 Scanner ICC profiles (e.g. SilverFast `SFprofT`) can cause `cjxl` to produce very dark images in lossy mode. The encoder works around this by not embedding the ICC in the intermediate PNG and restoring it into the reconstructed TIFF (see `--icc-png-strategy`). The JXL file may therefore display with shifted colors in some viewers, but the TIFF round-trip is accurate. For scanner workflows, treat **JXL as the backup container and the reconstructed TIFF as the final image**.
+
+## Known limits, by design
+
+- **The recompressor does not prove the origin of an output made from a JXL without a marker** (a third party's, or one older than the markers). With `--delete-source` and then `--sync` or `--overwrite` into the same destination, in a folder that gathers several origins (modes 2, 0 with a destination, 4–7), a file of the same name can replace the only copy. Masters of the encoder (with `jxlphoto-src`/`srcsum`) are refused. Workaround: do not combine `--delete-source` with `--on-unknown copy|convert` into a shared destination, and check with `--dry-run` first.
+- **The decoder's `--overwrite` replaces any TIFF in the destination**, an original master included; with `--sync` both are refused. With `OVERWRITE_GUARD` off (the SYNC PHOTOS preset) the master of a deleted photo can be replaced by another photo with the same name.
+- **After a kill, `<uuid>_*.jxl` leftovers stay in the staging folder**; only `--clean-staging` removes them.
 
 ## Viewer quirks (not data loss)
 

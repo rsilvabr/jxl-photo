@@ -1745,6 +1745,31 @@ def jpeg_checks(jpegs):
         check(f"JPEGs: every archive decodes to {fmt.upper()} with its metadata (#630/#631)",
               rc == 0 and jx_made and not lost, f"rc={rc} missing={lost[:4]}")
 
+    # #639: the LOSSY JPEG -> JXL of every valid JPEG. A malformed EXIF (a
+    # broken IFD1) is retried without the EXIF cjxl copies and converts with
+    # its EXIF; maker notes exiftool cannot parse stay an error that names
+    # the way out (--force-transcode). Nothing else may be lost, no stray
+    # temp file, no traceback.
+    ll = B / "jpg_lossy"
+    for s in valid:
+        cp(s, ll / s.name)
+    rc, out = run("jpg_lossy", [TR, ll, "--mode", "1", "--force-convert", "--from-jpeg",
+                                "--distance", "1"])
+    made_l = {p.stem: p for p in (ll / "converted_jxl").glob("*.jxl")}
+    lost = [s.name for s in valid if s.stem not in made_l]
+    unexplained = [n for n in lost if not re.search(
+        re.escape(n) + r" \| .*Maker notes could not be parsed.*--force-transcode", out)]
+    check("JPEGs: a lossy convert loses no valid JPEG but maker notes exiftool cannot "
+          "parse, which name --force-transcode (#639)",
+          not unexplained and "Traceback" not in out and not list(ll.rglob("*.tmp")),
+          f"rc={rc} unexplained={unexplained[:4]}")
+    broken = [s for s in valid if s.name.startswith("bad_ifd1")]
+    if broken:
+        bad = [s.name for s in broken if s.stem not in made_l
+               or not exif(["-s3", "-IFD0:Make", made_l[s.stem]]).strip()]
+        check("JPEGs: a broken IFD1 converts lossy with its EXIF (#639)", not bad,
+              f"bad={bad}")
+
     # v2.26.0: a JPEG shot upright-by-tag comes back as the camera wrote it.
     rot = B / "jpg_rot"
     turned = {}

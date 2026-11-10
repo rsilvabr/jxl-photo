@@ -1298,6 +1298,10 @@ def _metadata_boxes_flag():
     """cjxl's --compress_boxes as COMPRESS_METADATA_BOXES asks."""
     return ["--compress_boxes=1"] if COMPRESS_METADATA_BOXES else _PLAIN_BOXES_FLAG
 
+# #639: cjxl without the EXIF box it would copy from the JPEG (the retry of
+# encode_to_jxl when that copy is malformed and exiftool cannot rewrite it).
+_CJXL_STRIP_EXIF = ["-x", "strip=exif"]
+
 _MIN_EFFECTIVE_DISTANCE = 0.05
 # cjxl >= 0.12 clamps every lossy distance below this to the same value:
 # --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
@@ -2260,6 +2264,60 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         raise
     except Exception as e:
         raise RuntimeError(f"metadata copy failed: {e}") from e
+
+def _write_converted_metadata(src_path: Path, write_path: Path) -> None:
+    """The metadata of a lossy JPEG/PNG -> JXL: the copy from the source, then
+    the provenance, origin and History lines (never into a jbrd container: the
+    caller checks). RuntimeError when exiftool fails either call (#571)."""
+    _copy_metadata(src_path, write_path)
+    r_prov = _run_exiftool_argfile(
+        ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
+        + _provenance_marker_args(src_path)
+        + _origin_marker_lines(src_path)
+        + _history_args("converted", src_path, write_path)
+        + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
+    if r_prov.returncode != 0:
+        raise RuntimeError(
+            f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
+            f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
+
+
+def _exif_tag_count(path: Path):
+    """How many EXIF tags exiftool reads in `path`; None when it cannot read it."""
+    r = _run_exiftool_argfile(["-j", "-EXIF:all", str(path)], timeout=EXIFTOOL_TIMEOUT)
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None
+    entry = data[0] if data else {}
+    return len([k for k in entry if k != "SourceFile"])
+
+
+def _verify_exif_kept(src_path: Path, out_path: Path) -> None:
+    """Fail closed after the #639 retry: a source that has EXIF must leave a
+    JXL that has some. An output that lost it all is `METADATA PARTIAL`, an
+    error for the file, so --delete-source can never remove a JPEG whose EXIF
+    did not arrive. Cannot read either file = cannot tell = error."""
+    n_src = _exif_tag_count(src_path)
+    n_out = _exif_tag_count(out_path)
+    if n_src is None or n_out is None:
+        raise RuntimeError("METADATA PARTIAL: could not check that the EXIF reached the JXL")
+    if n_src and not n_out:
+        raise RuntimeError(f"METADATA PARTIAL: the JPEG's EXIF ({n_src} tags) did not reach the JXL")
+
+
+def _with_makernote_hint(message: str) -> str:
+    """`message`, plus how to get such a JPEG into a JXL when the failure is
+    the maker notes exiftool cannot parse: once they are in the output it
+    refuses every write (#639). The lossless transcode writes no metadata."""
+    if "Maker notes could not be parsed" in message:
+        return (message + " | its EXIF carries maker notes exiftool cannot parse; the "
+                "lossy conversion cannot add its markers to it. --force-transcode "
+                "(lossless, bit-exact) keeps the JPEG's EXIF as it is")
+    return message
+
 
 # --------------------------------------------─
 # USER SETTINGS - TRANSCODE MODE CONFIGURATION
@@ -5669,17 +5727,41 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # DEBUG, and --delete-source then deleted a source whose output had
         # lost its IPTC or its provenance markers.
         if not has_jbrd_box(write_path):
-            _copy_metadata(src_path, write_path)
-            r_prov = _run_exiftool_argfile(
-                ["-overwrite_original"] + _inherited_marker_removal_lines(write_path)
-                + _provenance_marker_args(src_path)
-                + _origin_marker_lines(src_path)
-                + _history_args("converted", src_path, write_path)
-                + [str(write_path)], timeout=EXIFTOOL_TIMEOUT)
-            if r_prov.returncode != 0:
-                raise RuntimeError(
-                    f"provenance/history write failed (exiftool rc={r_prov.returncode}): "
-                    f"{(r_prov.stderr or r_prov.stdout or '').strip()[:200]}")
+            try:
+                _write_converted_metadata(src_path, write_path)
+            except RuntimeError as _e_meta:
+                # #639: cjxl copied the JPEG's EXIF into the container as a
+                # block, and when that EXIF is malformed (a broken IFD1) exiftool
+                # refuses every later write to the file. One retry: the file is
+                # encoded again without that copy and the EXIF comes fresh from
+                # the JPEG through exiftool. A second failure is the file's
+                # error; never `-m` (#571), nothing is deleted.
+                if not is_jpeg_input:
+                    raise
+                # cjxl keeps a JPEG's EXIF Orientation in the CODESTREAM, and
+                # `-x strip=exif` drops it with the EXIF: the retried JXL of a
+                # rotated JPEG would show the picture sideways in a JXL viewer
+                # (its Exif box would still say "Rotate 90 CW"). The first
+                # encode still has the codestream orientation: a rotated JPEG
+                # is not retried (review of #639).
+                _o_first = _jxl_orientation(write_path)
+                if _o_first in _UNROTATE_MAGICK:
+                    raise RuntimeError(
+                        f"{_e_meta} | the JPEG is rotated (EXIF Orientation "
+                        f"{_o_first}) and its EXIF is malformed; a second encode "
+                        f"without that EXIF would lose the rotation. "
+                        f"--force-transcode (lossless, bit-exact) keeps both") from None
+                logger.info(f"  >metadata copied again without the EXIF the codec "
+                            f"wrote | {src_path.name} | first try: {_e_meta}")
+                _delete_partial_if_written(write_path, final_path, _pre_identity)
+                r = _run_captured(cmd + _CJXL_STRIP_EXIF, CODEC_TIMEOUT)
+                if r.returncode != 0:
+                    raise RuntimeError(f"cjxl: {_stderr_tail(r.stderr)}")
+                try:
+                    _write_converted_metadata(src_path, write_path)
+                    _verify_exif_kept(src_path, write_path)
+                except RuntimeError as _e_retry:
+                    raise RuntimeError(_with_makernote_hint(str(_e_retry))) from None
 
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
