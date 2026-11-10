@@ -11,6 +11,41 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.25.3: a failed move is an error; layered TIFFs and float/animated JXLs are kept; rotated JPEG archives decode upright
+
+- **A move out of staging that fails now ends the run with exit code 1**
+  (TIFF encoder, decoder, JPEG transcoder; the recompressor already did).
+  Before, a `MOVE FAILED` line (the old output open in a viewer, say) still
+  counted as success. The source is kept and the next `--sync` does the file
+  again. A scheduled task that reads the exit code now sees such a run as
+  failed.
+- **`--delete-source` and `--delete-skipped` keep a TIFF with Photoshop
+  layers** (tag 37724) or with a private tag too large to carry (Affinity
+  Photo's document); the JXL is still written. Such TIFFs stay beside their
+  masters, with a `KEEP source` line. There is no flag to delete them: a JXL
+  holds the flattened image only.
+- **A TIFF with 10- or 12-bit (or 1/2/4-bit) samples is refused** with an
+  error instead of being archived unscaled (16 times darker), and
+  `--delete-skipped` keeps it even beside a master an earlier version wrote
+  from it. 8- and 16-bit TIFFs are unaffected. Such an earlier master is
+  dark: re-export the photo at 16 bits and archive it again.
+- **The decoder, and the transcoder's 16-bit PNG decode, keep a float,
+  deeper-than-16-bit or (decoder) animated JXL** when deleting: the decode is
+  not a full copy of it. Only JXLs from other programs are like this.
+- **The wizard's JXL → JXL job follows the recompressor's `ON_DOWNGRADE`,
+  `ON_REGENERATION` and `ON_SCAN`.** With the shipped settings nothing
+  changes. If you set one of them to `skip` or `convert` (in the script or in
+  Settings → script settings), new wizard jobs use it; presets saved before
+  keep the value they recorded.
+- **A JXL made from a rotated JPEG decodes upright**: JPEG, PNG and TIFF
+  outputs, and recompressed copies, get EXIF Orientation 1 (the pixels are
+  already turned). Outputs made before by these routes show turned twice in
+  most viewers: set their Orientation to 1
+  (`exiftool -Orientation#=1 -overwrite_original <file>`), or decode them
+  again with `--overwrite`. This needs `jxlinfo`, which ships with cjxl/djxl.
+
+---
+
 ## v2.25.2: a lossy JXL → JPEG/PNG `--sync` leaves a JPEG/PNG it did not write alone
 
 - **`--force-convert --decode … --sync` (or auto mode with `--sync`) no

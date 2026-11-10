@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.25.2](#v2252)** | 2026-11-10 | Two runs at once never write over each other's output; a lossy JXL → JPEG/PNG `--sync` leaves a same-named camera JPEG/PNG alone; every script flushes an output to disk before deleting its source (round 74, 5 fixes) |
+| **[v2.25.3](#v2253)** | 2026-11-10 | A JXL made from a rotated JPEG decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error; the wizard follows the recompressor's policies (round 75, 10 fixes) |
+| [v2.25.2](#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy JXL → JPEG/PNG `--sync` leaves a same-named camera JPEG/PNG alone; every script flushes an output to disk before deleting its source (round 74, 5 fixes) |
 | [v2.25.1](#v2251) | 2026-11-08 | The new-release notice is kept by the background check and shown on the next start; `D` checks for releases; `TEMP_DIR` checked before every run (round 73, 2 fixes) |
 | [v2.25.0](#v2250) | 2026-11-06 | The TIFF's byte order (II/MM) kept in the master, its copies and the decoded TIFF; a JPEG copy records its quality, so a new quality redoes it |
 | [v2.24.0](#v2240) | 2026-11-06 | The encode record leaves the Title (`dc:description`) for `xmpMM:History`; 8-bit TIFFs archived lossless at `d=0.1` and below; typical file sizes next to every distance in the wizard; everything in v2.24.0_beta1 |
@@ -94,9 +95,29 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.25.3
+
+**Released 2026-11-10.** Supersedes v2.25.2. Fixes from a bug sweep of
+v2.25.2 (round 75, #620–#629); most close rare cases. A few existing command
+lines now keep a source, or end with exit code 1, where they used to delete or
+report success ([upgrading.md](upgrading.md)).
+
+- **#620 — a TIFF with Photoshop layers (tag 37724), or with a private tag too large to carry, is never deleted (TIFF encoder).** A JXL has no place for layers, and exiftool does not copy that tag: the master holds the flattened image only. Both tags were skipped before the "private tags are not kept" warning, and no delete gate looked at them, so `--delete-source` removed the only copy of the layers without a word. The JXL is still written; the TIFF is now kept (`KEEP source (Photoshop layers …)`, also under `--delete-skipped`, and listed by a `--dry-run` with `--delete-skipped`). The same goes for a private tag over `PRIVATE_TAG_MAX_BYTES` (Affinity Photo stores its whole document in one). Tag 34377 (Photoshop paths and resources) on its own does not block. There is no flag to release such a TIFF.
+- **#621 — a 10/12-bit (or 1/2/4-bit) TIFF is refused (TIFF encoder).** tifffile hands those samples over unscaled in a 16-bit (8-bit) array, so the master was 16 times darker than the photo, and `--verify-roundtrip` passed because both sides held the same numbers. Such a file is now an error (`Unsupported TIFF bit depth: 12 bits per sample`), like the photometrics the encoder already refuses; the TIFF stays. A master an earlier version wrote from such a TIFF is never taken as its archive: `--delete-skipped` keeps the TIFF (the review of the fix found that path still deleting).
+- **#622 — a float, deeper-than-16-bit or animated JXL is not deleted by a decode that cannot hold it (decoder, transcoder).** A decode to TIFF is 16-bit integers and one frame; a decode to a 16-bit PNG is 16-bit integers (the PNG keeps an animation's frames). The decoder's and the transcoder's delete gates now ask `jxlinfo` what the JXL holds and keep it (`KEPT … holds floating-point samples`). Without `jxlinfo` the gates behave as before. JXLs written by the toolkit are never any of these.
+- **#623 — a JXL made from a rotated JPEG comes out upright (transcoder, decoder, recompressor).** cjxl writes a JPEG's EXIF orientation into the codestream and keeps the tag; djxl applies the codestream's orientation, and the scripts then copied the tag onto the turned pixels, so a viewer turned the picture a second time (JPEG, PNG, TIFF, and the recompressor's re-encodes and derivatives). The copied `IFD0:Orientation` is now set to 1 when the codestream carries an orientation (`_orientation_reset_args`, read with `jxlinfo`, identical in the three scripts). The bit-exact JPEG recovery, the recompressor's verbatim copy and a TIFF → JXL → TIFF chain (whose codestream orientation is 1) are unchanged. XMP `tiff:Orientation` is left as it is. Measured on 20 copies of real JPEGs given Orientation 6: v2.25.2 turned all 20 twice (JPEG and TIFF), v2.25.3 none.
+- **#624 — a move out of staging that fails is an error (TIFF encoder, decoder, transcoder).** When the finished output could not be moved over the old one (a viewer or an antivirus holding it open), the log said `MOVE FAILED` but the file still counted as done: `0 errors`, exit code 0, the old file under the final name. It is now an error for the file, the run exits 1, and the source is kept, as the recompressor already did. The next `--sync` does the file again.
+- **#625 — the wizard's JXL → JXL job follows the recompressor's `ON_DOWNGRADE`, `ON_REGENERATION` and `ON_SCAN`** (`jxl_photo.py`). It sent `--on-downgrade copy --on-regeneration convert --on-scan copy` over the script's settings and the settings overlay. Only `ask`, which is a silent skip on the wizard's pipe (#347), becomes the wizard's own default.
+- **#626 — a preset without `last_effort`, `last_quality` or `last_distance` replays with the child script's own setting** (`jxl_photo.py`), not with `7`, `95` or `0.1`; a missing `last_workers` takes the wrapper's default workers. Completes #538. The "Last job" panel shows the values the run will use.
+- **#627 — the Script settings screen says which values a wizard job sends itself** (workers, effort, JPEG quality, export marker, TIFF → JXL distance): for those, a script's own setting counts when the script is run directly.
+- **#628 — the transcoder's staging `checksums.md5` message** no longer suggests re-running: a new run starts with an empty staging checksums file, so the line has to be moved first.
+- **#629 — IPTC (IIM) is not carried into a JXL** (docs only): exiftool cannot write it there, so keywords or captions that exist only in IPTC are not in the master; EXIF and XMP are. The lossless JPEG archive keeps everything. `docs/metadata_written.md` and `behavior_and_limitations.md` say so; converting IPTC to XMP is a separate change.
+- `jxlinfo` comes with cjxl/djxl in the libjxl zip (and in jxl-photo-exe). Without it on PATH a run warns once and #622/#623 behave as before.
+- Tests: `tests/test_bug_sweep_261110.py` (real codecs, in a folder named with Japanese, `[ ]`, a space and `%`): 31 checks, 24 of them failing on v2.25.2 (the other seven check that normal runs still write, delete and keep their orientation).
+
 ## v2.25.2
 
-**Released 2026-11-10.** Supersedes v2.25.1. Fixes that close edge cases; one
+**Released 2026-11-10.** Superseded by v2.25.3. Supersedes v2.25.1. Fixes that close edge cases; one
 existing command line stops instead of replacing a file (#616, see
 [upgrading.md](upgrading.md)).
 
