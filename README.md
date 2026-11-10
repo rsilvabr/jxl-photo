@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.26.1** (2026-11-10) · [What's new](#whats-new-in-v2261) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.27.0** (2026-11-11) · [What's new](#whats-new-in-v2270) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.26.1](#whats-new-in-v2261)
+- [What's new in v2.27.0](#whats-new-in-v2270)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -451,7 +451,17 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.26.1
+## What's new in v2.27.0
+
+2026-11-11. Two additions for TIFF archives and one fix; most people have nothing to do.
+
+- **A TIFF's IPTC data reaches the master**: the fields are copied into the XMP where the XMP lacks them, and the decoder writes the IPTC block back byte for byte. A SilverFast scan whose capture date lived only in the IPTC keeps it. Exports from Capture One or Lightroom already carry the same data in their XMP.
+- **The encoder's sync compares the content, not only the date**: a TIFF with a newer date but the same bytes (a backup restored, a folder copied) is skipped. `--overwrite` remakes a master on purpose ([upgrading](docs/upgrading.md)).
+- **A lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts** instead of ending in an error.
+
+[Version history](docs/version_history.md#v2270).
+
+### In v2.26.1
 
 2026-11-10. Hardening that closes edge cases; nothing to do when upgrading.
 
@@ -568,7 +578,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.26.1** | 2026-11-10 | A rotated JPEG's archive is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex` |
+| **v2.27.0** | 2026-11-11 | A TIFF's IPTC data reaches the master and comes back in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts |
+| [v2.26.1](docs/version_history.md#v2261) | 2026-11-10 | A rotated JPEG's archive is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex` |
 | [v2.26.0](docs/version_history.md#v2260) | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
 | [v2.25.3](docs/version_history.md#v2253) | 2026-11-10 | A rotated JPEG's archive decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error |
 | [v2.25.2](docs/version_history.md#v2252) | 2026-11-10 | Two runs at once never write over each other's output; a lossy decode with `--sync` leaves the camera's JPEG alone; flush to disk before every delete |
