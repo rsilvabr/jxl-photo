@@ -10,7 +10,13 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 
 ## Why JPEG XL?
 
-Small files that keep the full 16-bit tonal range: lossless at about 60% of the TIFF, near-lossless at about a tenth. Typical sizes in MB of ProPhoto exports from Capture One (medians):
+Spectacular compression with no compromise on bit depth.
+
+- Lossless 16-bit files much smaller than TIFF and TIFF with ZIP/Deflate
+- Lossy 16-bit files — small files that retain full 16-bit tonal information, something no other common format achieves (JPEG is 8-bit, TIFF lossless is large)
+- This is genuinely new: small lossy files, but with 16-bit color depth
+
+Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000). ZIP is the TIFF compression tiff-workflow writes. Detail and noise move the size more than the camera does — [every distance, with the spread across the photos](docs/file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff):
 
 | Format | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
 |--------|:--------------:|:----------:|:------------:|
