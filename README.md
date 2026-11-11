@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.27.1** (2026-11-11) · [What's new](#whats-new-in-v2271) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.28.0** (2026-11-11) · [What's new](#whats-new-in-v2280) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -201,14 +201,15 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.27.1
+## What's new in v2.28.0
 
-2026-11-11. Hardening that closes an edge case of the lossy JPEG → JXL conversion; the lossless transcode, the default for JPEGs, is unchanged.
+2026-11-11. Small fixes to what a master and its copies carry; most people have nothing to do ([upgrading](docs/upgrading.md)).
 
-- **A lossy JPEG → JXL keeps a JPEG that has an HDR gain map** (Ultra HDR photos from recent phones): the lossy JXL holds the standard picture only, so `--delete-source` no longer deletes such a JPEG, and the run names each one. The lossless transcode keeps the whole file ([upgrading](docs/upgrading.md)).
-- **A JPEG whose maker notes exiftool cannot rewrite** names the way out (`--force-transcode`) for more of exiftool's wordings.
+- **A TIFF's small Photoshop resource block comes back** in the decoded TIFF, like the IPTC block; a large one (a Lightroom preview) is still left out, and the run says so.
+- **JPEG and PNG copies are lighter**: they no longer carry the markers only a TIFF decode uses, and no copy is made of a camera TIFF's own 160 px thumbnail page.
+- **Resized copies work in a folder named like `100%off`**, where ImageMagick misread the name.
 
-[Technical notes](docs/version_history.md#v2271) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
+[Technical notes](docs/version_history.md#v2280) · [earlier releases, in short](docs/whats_new.md) · [every release](docs/version_history.md#release-history)
 
 ---
 
