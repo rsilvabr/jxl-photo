@@ -11,6 +11,20 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.27.1: a lossy JPEG → JXL keeps a JPEG that has an HDR gain map
+
+- **`jxl_jpeg_transcoder.py --force-convert --from-jpeg` (distance above 0)
+  with `--delete-source` or `--delete-skipped` keeps a JPEG that carries an
+  HDR gain map** (Ultra HDR photos from recent Android phones, ISO 21496-1,
+  Apple's): the lossy JXL holds the standard picture only, so the JPEG is the
+  only copy of the gain map. The JXL is still written; the JPEG stays beside
+  it with a `KEEP` line, and the run names each such file. To archive these
+  photos whole and delete the JPEGs, use the lossless transcode (the default
+  for JPEGs, or `--force-transcode`). If an earlier version converted HDR
+  phone JPEGs lossy and deleted them, those JXLs are complete standard
+  pictures; the HDR rendering is not in them. Camera JPEGs (MPO files with
+  preview images included) are not affected.
+
 ## v2.27.0: the encoder's sync compares the content; the IPTC block is kept
 
 - **`jxl_tiff_encoder.py --sync`, and its default smart sync, skip a TIFF

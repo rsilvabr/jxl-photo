@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.27.0](#v2270)** | 2026-11-11 | A TIFF's IPTC data reaches the master (copied into the XMP where it is missing) and comes back byte for byte in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts (round 78, 3 fixes) |
+| **[v2.27.1](#v2271)** | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
+| [v2.27.0](#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master (copied into the XMP where it is missing) and comes back byte for byte in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts (round 78, 3 fixes) |
 | [v2.26.1](#v2261) | 2026-11-10 | A JXL made from a rotated JPEG is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex`; one exiftool run less per JXL → JPEG (round 77, 2 fixes) |
 | [v2.26.0](#v2260) | 2026-11-10 | A JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (`JPEG_ORIENTATION`, `--jpeg-orientation`); JXL → PNG of camera JPEGs, and resize/colour conversion of sources with the standard sRGB profile, work; the decoder's opt-in `--exiftool-ignore-minor` (round 76, 6 fixes) |
 | [v2.25.3](#v2253) | 2026-11-10 | A JXL made from a rotated JPEG decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error; the wizard follows the recompressor's policies (round 75, 10 fixes) |
@@ -98,9 +99,22 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.27.1
+
+**Released 2026-11-11.** Supersedes v2.27.0. Hardening for the lossy
+JPEG → JXL conversion (round 79, #641), found by running the scripts on real
+files of kinds the test fixtures did not have. The lossless transcode, the
+default for JPEGs, was never affected. What changes on an existing command
+line: [upgrading.md](upgrading.md).
+
+- **#641 — a lossy JPEG → JXL never deletes a JPEG whose HDR gain map the JXL does not hold (transcoder).** Recent phones write an HDR photo as a standard JPEG followed by a second, smaller image, the gain map (Android's Ultra HDR, ISO 21496-1, Apple's). cjxl encodes the first image of the file, so `--force-convert --from-jpeg` at a distance above 0 gives a JXL with the standard picture only; nothing said so, and with `--delete-source` the JPEG, the only copy of the gain map, was deleted (measured on copies of a Xiaomi 17T Pro JPEG: 459 KB). The transcoder now reads the JPEG's own APP1/APP2 segments for the marks of a gain map (`_jpeg_gain_map`: the `hdrgm` namespace, the ISO 21496-1 segment, Apple's auxiliary type; the rest of the file only when an MPF index announces more images; no exiftool run), warns per converted file (`HDR gain map not carried`) and keeps the JPEG in both lossy delete gates, on the first run and on a later `--delete-skipped` one (`KEEP (the JPEG carries an HDR gain map …)`). A JPEG that cannot be read for the check is kept. A camera's MPO (preview images) has no gain map and is deleted as before; a `jbrd` output holds the whole JPEG and is not judged. The gain map is not carried into the lossy JXL: the format has a box for it (`jhgm`), cjxl and djxl have no option to write or apply one. See [behavior_and_limitations.md](behavior_and_limitations.md#a-jpeg-with-an-hdr-gain-map-converted-lossy-to-jxl).
+- **The way out of maker notes exiftool cannot rewrite is named for every wording (transcoder, completes #639).** A lossy JPEG → JXL of such a JPEG is an error by design, and its message names `--force-transcode` — but only for `Maker notes could not be parsed`. An HTC Desire 626 JPEG gives `Bad MakerNotes offset for …`, a cut-down copy of its block `Overlapping MakerNotes values`: any failure that names the maker notes gets the hint now. Nothing was deleted either way.
+- The real-photo battery reads more real files: camera JPEGs as shot (three-image MPOs with Orientation 6 and 8, eight more makers), lab scans, gray JPEGs with a profile or an odd sampling factor, more colour profiles, PNG structures from phones and screenshots, camera TIFFs with an unflagged thumbnail page, and TIFFs the encoder refuses (1-bit, CMYK). All of them passed as they were, the two items above aside.
+- Tests: `tests/test_gain_map_delete_gate.py` (real codecs and exiftool, in a folder named with Japanese, `[ ]`, a space, parentheses and `%`): 17 checks, 14 of them failing on v2.27.0; five more in `tests/test_lossy_jpeg_malformed_metadata.py`, three failing on v2.27.0.
+
 ## v2.27.0
 
-**Released 2026-11-11.** Supersedes v2.26.1. Two additions for TIFF archives
+**Released 2026-11-11.** Superseded by v2.27.1. Supersedes v2.26.1. Two additions for TIFF archives
 (the IPTC block, a sync that compares the content) and one fix for lossy
 JPEG → JXL (round 78, #638–#640). What changes on an existing command line:
 [upgrading.md](upgrading.md).

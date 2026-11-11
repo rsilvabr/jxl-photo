@@ -101,7 +101,15 @@ The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the
 
 `--force-convert --from-jpeg` (distance above 0) lets `cjxl` copy the JPEG's EXIF into the JXL, and the transcoder then adds its markers with exiftool. A JPEG whose EXIF is malformed — a broken thumbnail IFD, maker notes exiftool cannot parse — makes exiftool refuse every write to that JXL. The file gets **one retry**: `cjxl` again without the EXIF it would copy, and the EXIF written fresh from the JPEG by exiftool (log line `metadata copied again without the EXIF the codec wrote`). That is enough for a broken IFD1 (an HDR program's output, for one); the EXIF and the markers arrive, and an output whose EXIF did not arrive at all is an error (`METADATA PARTIAL`). **A rotated JPEG (EXIF Orientation 2–8) is not retried**: `cjxl` keeps the orientation in the codestream, and the second encode, without the EXIF, would lose it and show the picture sideways in a JXL viewer. It is an error with the same way out (`--force-transcode`); so is a first encode whose orientation cannot be read. Never `-m`: the toolkit does not tell exiftool to ignore minor errors on its own.
 
-**Unparseable maker notes are still an error** (a Nokia N73 JPEG, for one: exiftool says `[minor] Maker notes could not be parsed`): copying them recreates the block, and the next write fails again. The message names the cause and the way out. The lossless transcode (`--force-transcode`, no `--distance`) writes no metadata and keeps the JPEG's EXIF as it is, bit-exact. Nothing is deleted in either case.
+**Unparseable maker notes are still an error** (a Nokia N73 JPEG, for one: exiftool says `[minor] Maker notes could not be parsed`; an HTC Desire 626 one: `[minor] Bad MakerNotes offset`): copying them recreates the block, and the next write fails again. The message names the cause and the way out. The lossless transcode (`--force-transcode`, no `--distance`) writes no metadata and keeps the JPEG's EXIF as it is, bit-exact. Nothing is deleted in either case.
+
+## A JPEG with an HDR gain map, converted lossy to JXL
+
+Phones write HDR photos as a standard JPEG followed by a second, smaller image, the gain map, which an HDR screen uses to show the highlights brighter (Android's Ultra HDR, ISO 21496-1, Apple's HDR gain map). `cjxl` encodes the first image of the file, so a pixel re-encode (`--force-convert --from-jpeg` at a distance above 0) gives a JXL with the standard picture only. The run says so per file (`HDR gain map not carried`), and **`--delete-source` and `--delete-skipped` keep such a JPEG** (`KEEP (the JPEG carries an HDR gain map …)`): it is the only copy of the gain map. There is no flag to release it.
+
+The lossless transcode (the default for JPEGs, `--force-transcode`) keeps the whole file — the JPEG comes back bit for bit, gain map included — and deletes as usual. A camera's MPO (Nikon, Panasonic, Sony: preview images after the picture) has no gain map and is not held back. A JPEG or PNG decoded from such an archive is the standard picture.
+
+The JXL format has a place for a gain map (the `jhgm` box), but `cjxl` and `djxl` have no option to write or apply one, so the toolkit does not carry it into a lossy JXL.
 
 ## A float, deeper-than-16-bit or animated JXL is not deleted by a decode
 

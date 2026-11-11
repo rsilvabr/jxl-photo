@@ -379,6 +379,17 @@
   direct run before the HHMM token (`_lossy_decode_never_deletes`) and drops
   the delete from a manifest row. The bit-exact recovery and a 16-bit PNG
   still delete. Do not reintroduce a lossy-decode delete path.
+- **A lossy JPEG → JXL holds the FIRST image of the JPEG only (#641).** An
+  HDR gain map (Android's Ultra HDR, ISO 21496-1, Apple's: a second image
+  after the picture) is not in it, so both lossy delete gates keep such a
+  JPEG (`_gain_map_keep_reason`, next to `_lossy_decode_keep_reason`) and the
+  encode warns per file. `_jpeg_gain_map` reads the JPEG's APP1/APP2 segments
+  itself (no exiftool run; the whole file only behind an MPF index) and
+  raises OSError = "cannot tell" = keep. A camera's MPO (previews) is not a
+  gain map; a `jbrd` output holds the whole file and is not judged. Any new
+  delete path for a pixel re-encode of a JPEG needs the same gate. Not
+  carried into the JXL: the `jhgm` box exists, cjxl/djxl 0.12 cannot write
+  or apply it.
 - **Orientation of a JXL made from a JPEG (#623, v2.26.0).** cjxl keeps the
   JPEG's pixels as stored and puts the EXIF Orientation in the CODESTREAM
   (lossless and lossy alike); djxl, and cjxl reading a JXL, turn the pixels
@@ -588,11 +599,15 @@
   kills the encoder, the in-place recompressor and the transcoder mid-write
   before running them again. Optional fixture folders add the owner's variety:
   `TIFF16_varied` (37 exports, 18 cameras/phones/a film scanner),
-  `TIFF_scans_varied` (23 film scans: 8/16-bit gray, no ICC, scanner profiles,
-  RGB+IR/alpha 4th sample, 84 MP), `JPEG_varied` (25 JPEG structures, an
-  empty and a non-JPEG file), `silverfast_xmp` (ORIGINAL SilverFast scans:
-  its `LSI/` XMP and private tags must round-trip) and `TIFF_tagless` (camera
-  TIFFs that lost every tag: never a film scan). ~15 minutes with the default
+  `TIFF_scans_varied` (29 film scans: 8/16-bit gray, no ICC, scanner profiles,
+  RGB+IR/alpha 4th sample, 84 MP), `JPEG_varied` (70 JPEG structures — phone
+  Ultra HDR, camera MPOs, lab scans, old phones — plus an empty, a truncated
+  and non-JPEG files), `silverfast_xmp` (ORIGINAL SilverFast scans:
+  its `LSI/` XMP and private tags must round-trip), `TIFF_tagless` (camera
+  TIFFs that lost every tag: never a film scan), `TIFF_camera_thumb` (camera
+  TIFFs with an unflagged thumbnail page), `TIFF_unsupported` (1-bit, CMYK:
+  a clean error) and `PNG_varied` (PNG structures from phones and
+  screenshots). ~21 minutes with the default
   `--jobs 4` (independent sections side by side; the memory cap, the Explorer
   thumbnails and the interrupted runs always run alone, after them; ~20 min
   with `--jobs 1`); the report keeps the same checks in the same order. A new

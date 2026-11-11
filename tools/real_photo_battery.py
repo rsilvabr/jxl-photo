@@ -26,8 +26,11 @@ Fixtures (never modified — everything is copied to a scratch folder first):
                                 RGB+IR / alpha 4th sample, LZW, 84 MP),
                                 lossless bit-exact and lossy colour checks
     <fixtures>/JPEG_varied/*.jpg     optional: JPEG structures (progressive,
-                                4:4:0, gray, MPF, odd ICCs, broken MakerNotes,
-                                an empty and a non-JPEG file) through the
+                                4:4:0, gray, MPF, Ultra HDR, vendor APPn, real
+                                phone orientations, camera JPEGs as shot (3-image
+                                MPO, Orientation 6/8), lab scans, gray with an
+                                ICC, odd ICCs, broken MakerNotes, an empty, a
+                                truncated and non-JPEG files) through the
                                 transcoder, bit-exact, and its deleting mode
     <fixtures>/silverfast_xmp/*.tif  optional: ORIGINAL SilverFast scans (image,
                                 thumbnail, IR, SilverFast's LSI/ XMP and private
@@ -35,6 +38,15 @@ Fixtures (never modified — everything is copied to a scratch folder first):
     <fixtures>/TIFF_tagless/<camera>/*.tif  optional: camera TIFFs that lost every
                                 tag (image + 160x120 thumbnail page) and one as the
                                 camera wrote it: none may count as a film scan
+    <fixtures>/TIFF_camera_thumb/*.tif  optional: camera TIFFs with their tags
+                                (NX Studio, Fuji Hyper Utility) whose second page
+                                is the camera's small thumbnail, not flagged as a
+                                reduced image: both pages archived and back
+    <fixtures>/TIFF_unsupported/*.tif  optional: TIFFs the encoder refuses (1-bit,
+                                CMYK): a clean error per file, nothing deleted
+    <fixtures>/PNG_varied/*.png      optional: PNG structures (palette, RGBA,
+                                interlaced, eXIf/iCCP/XMP chunks, a file that is
+                                not a PNG) through the transcoder, pixels compared
 
 The scratch folder (default <fixtures drive>\\jxlphoto_battery_<date>) is
 deleted at the end unless --keep. Every check runs inside a HOSTILE folder
@@ -1700,16 +1712,143 @@ def tagless_checks(folder):
           "")
 
 
+def _tiff_pages(path):
+    """[(width, height, dtype, pixel array)] of every page of a TIFF."""
+    with tifffile.TiffFile(path) as t:
+        return [(int(pg.imagewidth), int(pg.imagelength), pg.asarray()) for pg in t.pages]
+
+
+def camera_thumb_checks(folder):
+    """<fixtures>/TIFF_camera_thumb: camera TIFFs with their tags whose second
+    page is the camera's small thumbnail WITHOUT the reduced-image flag (NX
+    Studio: 107x160 or 160x107, no SubfileType; Fuji Hyper Utility: 160x120,
+    SubfileType 2 on both pages). The encoder archives it as a page of its
+    own, so the TIFF comes back whole; none is a film scan; --delete-source
+    removes the TIFF only with every page archived."""
+    section("Camera TIFFs with an unflagged thumbnail page (TIFF_camera_thumb)")
+    srcs = sorted(p for p in folder.iterdir() if p.suffix.lower() in (".tif", ".tiff"))
+    e = B / "camthumb"
+    for s in srcs:
+        cp(s, e / s.name)
+    rc, out = run("camthumb_enc", [ENC, e, "--mode", "1", "--distance", "0", "--effort", "2",
+                                   "--no-preflight"])
+    jx = sorted((e / "converted_jxl").glob("*.jxl"))
+    pages_src = {s.name: _tiff_pages(s) for s in srcs}
+    want = sum(len(v) for v in pages_src.values())
+    scans = [j.name for j in jx
+             if any(r.startswith(("jxlphoto-scan:raw", "jxlphoto-scan:final")) for r in relation(j))]
+    check("camera thumbnail TIFFs: every page archived, none taken for a film scan",
+          rc == 0 and bool(srcs) and len(jx) == want and not scans and "only a guess" not in out,
+          f"rc={rc} {len(jx)} JXL for {want} pages of {len(srcs)} TIFFs, scans={scans}")
+    dd = B / "camthumb_dec"
+    for j in jx:
+        cp(j, dd / j.name)
+    rc, _ = run("camthumb_dec", [DEC, dd, "--mode", "1", "--depth-policy", "preserve_original"])
+    bad = []
+    for s in srcs:
+        t = dd / "converted_tiff" / (s.stem + ".tif")
+        if not t.exists():
+            bad.append(f"{s.name}: no decode")
+            continue
+        a, b = pages_src[s.name], _tiff_pages(t)
+        if [(w, h) for w, h, _ in a] != [(w, h) for w, h, _ in b]:
+            bad.append(f"{s.name}: pages {[(w, h) for w, h, _ in a]} -> {[(w, h) for w, h, _ in b]}")
+        elif any(x.dtype != y.dtype or not np.array_equal(x, y) for (_, _, x), (_, _, y) in zip(a, b)):
+            bad.append(f"{s.name}: pixels differ")
+    check("camera thumbnail TIFFs: the TIFF comes back with both pages, bit for bit",
+          rc == 0 and bool(srcs) and not bad, f"rc={rc} {bad[:4]}")
+    g = B / "camthumb_del"
+    for s in srcs:
+        cp(s, g / s.name)
+    rc, out = run("camthumb_del", [ENC, g, "--mode", "1", "--distance", "0", "--effort", "2",
+                                   "--no-preflight", "--delete-source", "--delete-confirm-off"])
+    left = sorted(p.name for p in g.iterdir() if p.suffix.lower() in (".tif", ".tiff"))
+    made = len(list((g / "converted_jxl").glob("*.jxl")))
+    check("camera thumbnail TIFFs: --delete-source deletes each TIFF with all its pages archived",
+          rc == 0 and not left and made == want, f"rc={rc} left={left} {made}/{want} JXL")
+
+
+def unsupported_checks(folder):
+    """<fixtures>/TIFF_unsupported: TIFFs the encoder does not archive (a
+    1-bit document scan, an 8-bit CMYK image). Each is ONE error line that
+    names the file, no traceback, no JXL, and a deleting run keeps them."""
+    section("TIFFs the encoder refuses (TIFF_unsupported)")
+    srcs = sorted(p for p in folder.iterdir() if p.suffix.lower() in (".tif", ".tiff"))
+    e = B / "unsupported"
+    for s in srcs:
+        cp(s, e / s.name)
+    rc, out = run("unsupported_enc", [ENC, e, "--mode", "1", "--distance", "1", "--effort", "2",
+                                      "--no-preflight", "--delete-source", "--delete-confirm-off"])
+    made = list(e.rglob("*.jxl"))
+    unnamed = [s.name for s in srcs if not re.search(r"ERROR \| " + re.escape(s.name), out)]
+    gone = [s.name for s in srcs if not (e / s.name).exists()]
+    check("unsupported TIFFs: an error per file that names it, no JXL, no traceback",
+          rc != 0 and bool(srcs) and not made and not unnamed and "Traceback" not in out,
+          f"rc={rc} jxl={len(made)} unnamed={unnamed}")
+    check("unsupported TIFFs: --delete-source keeps every one", not gone, f"gone={gone}")
+
+
+def png_checks(pngs):
+    """Every file in <fixtures>/PNG_varied (palette, RGBA, Adam7 interlaced,
+    eXIf / iCCP / sBIT / XMP chunks from phones and screenshots, plus a file
+    named .png that is not one) through the transcoder: a valid PNG becomes a
+    lossless JXL whose PNG decode has the same pixels, the other is an error
+    without a traceback, and the deleting run removes only what it proved."""
+    from PIL import Image
+    section("Varied PNGs (PNG_varied)")
+    srcs = sorted(p for p in pngs.iterdir() if p.suffix.lower() == ".png")
+    invalid = {p.name for p in srcs if p.name.startswith("not_a_png")}
+    valid = [p for p in srcs if p.name not in invalid]
+
+    def rgba(path):
+        with Image.open(path) as im:
+            return im.size, hashlib.md5(im.convert("RGBA").tobytes()).hexdigest()
+
+    j = B / "png"
+    for s in srcs:
+        cp(s, j / s.name)
+    rc, out = run("png_encode", [TR, j, "--mode", "1", "--force-convert", "--distance", "0"])
+    made = {p.stem: p for p in (j / "converted_jxl").glob("*.jxl")}
+    missing = [s.name for s in valid if s.stem not in made]
+    check("PNGs: every valid PNG converted to a lossless JXL", bool(valid) and not missing,
+          f"rc={rc} missing={missing[:4]}")
+    check("PNGs: the file that is not a PNG is an error, no output, no traceback",
+          not any(Path(n).stem in made for n in invalid) and "Traceback" not in out
+          and all(re.search(r"ERROR \| " + re.escape(n), out) for n in invalid),
+          f"invalid={sorted(invalid)}")
+    back = B / "png_back"
+    for p in made.values():
+        cp(p, back / p.name)
+    rc, _ = run("png_decode", [TR, back, "--mode", "1", "--force-convert", "--decode",
+                               "--format", "png"])
+    got = {p.stem: p for p in back.rglob("*.png")}
+    bad = [s.name for s in valid if s.stem in made
+           and (s.stem not in got or rgba(got[s.stem]) != rgba(s))]
+    check("PNGs: every JXL decodes back to a PNG with the same pixels (palette and alpha too)",
+          rc == 0 and bool(made) and not bad, f"rc={rc} bad={bad[:4]}")
+    rc, out = run("png_delete", [TR, j, "--mode", "1", "--force-convert", "--distance", "0",
+                                 "--delete-source", "--delete-skipped", "--delete-confirm-off"])
+    left = {p.name for p in j.iterdir() if p.suffix.lower() == ".png"}
+    check("PNGs: a second, deleting run removes the archived PNGs and keeps the other file",
+          left == invalid and "Traceback" not in out, f"rc={rc} left={sorted(left)[:4]}")
+
+
 def jpeg_checks(jpegs):
     """Every file in <fixtures>/JPEG_varied (baseline/progressive, 4:2:0 to
-    4:4:4 and 4:4:0, gray, MPF trailers, P3/Adobe/odd ICCs, broken
-    MakerNotes, plus an EMPTY file and a macOS '._' file named .jpg) through
-    the transcoder: valid JPEGs come back bit for bit, invalid ones are
-    refused without a traceback, and the deleting mode removes only what it
-    proved -- twice, the second run fed its own output."""
+    4:4:4 and 4:4:0, gray, MPF trailers and Ultra HDR gain maps, JUMBF and
+    vendor APPn segments, EXIF Orientation 0/3/6/8 from real phones and
+    cameras, 3-image MPOs, lab scans with APP14 first, gray with an ICC or a
+    2x1 sampling factor, no APP segment at all, P3/Adobe/odd ICCs, broken
+    MakerNotes, plus an EMPTY file, one cut at 512 bytes, a macOS '._' file,
+    a WebP and a PNG, all named .jpg)
+    through the transcoder: valid JPEGs come back bit for bit, invalid ones
+    (under 1 KB, or named not_a_jpeg*) are refused without a traceback, and
+    the deleting mode removes only what it proved -- twice, the second run
+    fed its own output."""
     section("Varied JPEGs (JPEG_varied)")
     srcs = sorted(p for p in jpegs.iterdir() if p.suffix.lower() in (".jpg", ".jpeg"))
-    invalid = {p.name for p in srcs if p.stat().st_size < 1024}
+    invalid = {p.name for p in srcs
+               if p.stat().st_size < 1024 or p.name.startswith("not_a_jpeg")}
     valid = [p for p in srcs if p.name not in invalid]
     j = B / "jpg"
     for s in srcs:
@@ -1719,8 +1858,9 @@ def jpeg_checks(jpegs):
     missing = [s.name for s in valid if s.stem not in made]
     check("JPEGs: every valid JPEG transcoded losslessly",
           not missing, f"rc={rc} missing={missing[:4]}")
-    check("JPEGs: the empty and the non-JPEG file produce no output",
-          not any(Path(n).stem in made for n in invalid), f"invalid={sorted(invalid)}")
+    check("JPEGs: the empty, the truncated and the non-JPEG files produce no output",
+          not any(Path(n).stem in made for n in invalid) and "Traceback" not in out,
+          f"invalid={sorted(invalid)}")
     rj = B / "jpg_rec"
     for p in (j / "converted_jxl").glob("*.jxl"):
         cp(p, rj / p.name)
@@ -1809,7 +1949,7 @@ def jpeg_checks(jpegs):
     made_l = {p.stem: p for p in (ll / "converted_jxl").glob("*.jxl")}
     lost = [s.name for s in valid if s.stem not in made_l]
     unexplained = [n for n in lost if not re.search(
-        re.escape(n) + r" \| .*Maker notes could not be parsed.*--force-transcode", out)]
+        re.escape(n) + r" \| .*(?i:maker ?notes).*--force-transcode", out)]
     check("JPEGs: a lossy convert loses no valid JPEG but maker notes exiftool cannot "
           "parse, which name --force-transcode (#639)",
           not unexplained and "Traceback" not in out and not list(ll.rglob("*.tmp")),
@@ -1820,6 +1960,34 @@ def jpeg_checks(jpegs):
                or not exif(["-s3", "-IFD0:Make", made_l[s.stem]]).strip()]
         check("JPEGs: a broken IFD1 converts lossy with its EXIF (#639)", not bad,
               f"bad={bad}")
+
+    # #641: the lossy JXL holds the first image of the JPEG only. A JPEG with
+    # an HDR gain map (Ultra HDR, ISO 21496-1 -- the battery's own reading of
+    # the bytes) is said so and never deleted, not even on the second run that
+    # finds it "already archived"; every other converted JPEG is deleted.
+    def has_gain_map(p):
+        data = p.read_bytes()
+        return (b"http://ns.adobe.com/hdr-gain-map/1.0/" in data
+                or b"urn:iso:std:iso:ts:21496:-1" in data)
+
+    hdr = {s.name for s in valid if s.stem in made_l and has_gain_map(s)}
+    if hdr:
+        unsaid = [n for n in sorted(hdr)
+                  if not re.search(r"HDR gain map not carried \| " + re.escape(n), out)]
+        check("JPEGs: a lossy convert says which JPEGs carry an HDR gain map it "
+              "does not hold (#641)", not unsaid, f"{len(hdr)} with a gain map, unsaid={unsaid[:4]}")
+        rc, out = run("jpg_lossy_delete", [TR, ll, "--mode", "1", "--force-convert",
+                                           "--from-jpeg", "--distance", "1", "--delete-source",
+                                           "--delete-skipped", "--delete-confirm-off"])
+        left = {p.name for p in ll.iterdir() if p.suffix.lower() in (".jpg", ".jpeg")}
+        ro = {n for n in left if not os.access(ll / n, os.W_OK)}
+        wrong = [s.name for s in valid if s.stem in made_l and s.name not in ro
+                 and (s.name in left) != (s.name in hdr)]
+        check("JPEGs: the deleting lossy run keeps exactly the JPEGs with an HDR "
+              "gain map and deletes the other converted ones (#641)",
+              not wrong and "Traceback" not in out
+              and len(re.findall(r"KEEP \(the JPEG carries an HDR gain map", out)) == len(hdr),
+              f"rc={rc} {len(hdr)} with a gain map, wrong={wrong[:4]} read-only={sorted(ro)[:3]}")
 
     # v2.26.0: a JPEG shot upright-by-tag comes back as the camera wrote it.
     rot = B / "jpg_rot"
@@ -2386,7 +2554,10 @@ def main():
                 ("TIFF_scans_varied", scan_checks, "varied-scan"),
                 ("JPEG_varied", jpeg_checks, "varied-JPEG"),
                 ("silverfast_xmp", silverfast_checks, "SilverFast-original"),
-                ("TIFF_tagless", tagless_checks, "tagless-camera-TIFF")):
+                ("TIFF_tagless", tagless_checks, "tagless-camera-TIFF"),
+                ("TIFF_camera_thumb", camera_thumb_checks, "camera-thumbnail-TIFF"),
+                ("TIFF_unsupported", unsupported_checks, "unsupported-TIFF"),
+                ("PNG_varied", png_checks, "varied-PNG")):
             if (args.fixtures / folder).is_dir():
                 plan.append((fn, (args.fixtures / folder,), "par"))
             else:

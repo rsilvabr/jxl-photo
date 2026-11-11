@@ -634,7 +634,7 @@ entirely on the direction, and the difference is large**:
 | JPEG → JXL (lossless) | `--force-transcode` | **Provenance PROVEN.** `checksums.md5` holds the source's MD5 keyed by the output's name, so the source is re-hashed and must match. A different file with the same name is rejected. A JXL without its line (a run stopped midway, or `--no-md5`) is accepted only when `djxl --reconstruct_jpeg` gives this JPEG back byte for byte; the line is written then |
 | JXL → JPEG (lossless) | `--force-transcode --decode` | **Provenance PROVEN, bound to the JXL's content.** The stored hash is the original JPEG's; the recovered JPEG on disk must match it — **and** the JXL itself must be the file that was archived: its own MD5 is stored beside the original's (a `<name>.jxl-md5` line), and databases written before that fall back to `djxl --reconstruct_jpeg` (djxl ≥ 0.12). A same-named JXL that was never archived fails both, and when no proof can run the source is KEPT |
 | JXL → JPEG/PNG (lossy) | `--force-convert --decode` | ⚠️ **Provenance marker** naming this source + structural check |
-| JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Provenance marker** naming this source + structural check |
+| JPEG/PNG → JXL (lossy) | `--force-convert` | ⚠️ **Provenance marker** naming this source + structural check. A JPEG with an HDR gain map (Ultra HDR, ISO 21496-1, Apple) is always kept: the lossy JXL holds the standard picture only ([details](behavior_and_limitations.md#a-jpeg-with-an-hdr-gain-map-converted-lossy-to-jxl)) |
 
 > ### ⚠️ The lossy directions prove the FILE, not the pixels
 >

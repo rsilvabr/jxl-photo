@@ -128,6 +128,29 @@ def _nokia_exif():
     return b"II*\x00" + struct.pack("<I", ifd0_off) + ifd0 + exif + make + note
 
 
+def _htc_exif():
+    """Make = HTC and the start of an HTC Desire 626's maker notes (a JPEG that
+    went through WhatsApp, found on the owner's disk on 2026-11-11): exiftool
+    finds an IFD in them whose entries point far outside the block and says
+    `[minor] Bad MakerNotes offset for Unknown_0x0000` on every write."""
+    make = b"HTC\x00"
+    note = (b"cameraid_I\x00\x00\x00\x00"
+            + bytes.fromhex("0400" "0000" "0100" "00000100" "00001000"
+                            "0000" "0400" "00000100" "00000d00")
+            + bytes(64))
+    ifd0_off = 8
+    exif_off = ifd0_off + 2 + 2 * 12 + 4
+    make_off = exif_off + 2 + 12 + 4
+    note_off = make_off + len(make)
+    ifd0 = (struct.pack("<H", 2)
+            + struct.pack("<HHII", 0x010F, 2, len(make), make_off)
+            + struct.pack("<HHII", 0x8769, 4, 1, exif_off)
+            + struct.pack("<I", 0))
+    exif = (struct.pack("<H", 1) + struct.pack("<HHII", 0x927C, 7, len(note), note_off)
+            + struct.pack("<I", 0))
+    return b"II*\x00" + struct.pack("<I", ifd0_off) + ifd0 + exif + make + note
+
+
 def _healthy_jpeg(path):
     _plain_jpeg(path)
     r = subprocess.run(["exiftool", "-overwrite_original", "-Make=Nikon", "-Model=Z 7",
@@ -294,6 +317,46 @@ def test_639_unparseable_makernotes_stay_an_error_with_the_way_out(tmp_path):
     assert not _jxls(jpg.parent), out
     assert not _leftovers(jpg.parent)
     assert _sha(jpg) == before and jpg.exists()
+
+
+@needs_tools
+def test_639_a_bad_makernotes_offset_names_the_way_out_too(tmp_path):
+    """exiftool has more than one wording for maker notes it cannot rewrite: an
+    HTC Desire 626 JPEG gives `Bad MakerNotes offset for Unknown_0x0000`, this
+    cut-down copy of its block `Overlapping MakerNotes values`. The same
+    error, so the same way out in the message; nothing written or deleted,
+    and the way out works."""
+    jpg = _jpeg_with_exif(_folder(tmp_path, "htc") / "DSC_0001 (2).jpg", _htc_exif())
+    before = _sha(jpg)
+    rc, out = _lossy(tmp_path, jpg.parent, "--delete-source", "--delete-confirm-off")
+    flat = " ".join(out.split())
+    assert rc != 0, out
+    assert "MakerNotes" in flat and "Maker notes could not be parsed" not in flat, out
+    assert "--force-transcode" in flat, out
+    assert not _jxls(jpg.parent), out
+    assert not _leftovers(jpg.parent)
+    assert _sha(jpg) == before and jpg.exists()
+    rc, out = _run(tmp_path, jpg.parent, "--mode", "1", "--force-transcode")
+    assert rc == 0, out
+    assert len(_jxls(jpg.parent)) == 1, out
+
+
+@pytest.mark.parametrize("wording", [
+    "Error: [minor] Maker notes could not be parsed - x.jxl.tmp",
+    "Error: [minor] Bad MakerNotes offset for Unknown_0x0000 - x.jxl.tmp",
+    "Warning: [minor] Overlapping MakerNotes values - x.jxl.tmp",
+])
+def test_639_the_hint_covers_every_maker_note_wording(wording):
+    m = _tr()
+    msg = m._with_makernote_hint("provenance/history write failed (exiftool rc=1): " + wording)
+    assert msg.startswith("provenance/history write failed") and wording in msg
+    assert "--force-transcode" in msg
+
+
+def test_639_the_hint_stays_off_other_failures():
+    m = _tr()
+    msg = "provenance/history write failed (exiftool rc=1): Error: File not found - x.jxl.tmp"
+    assert m._with_makernote_hint(msg) == msg
 
 
 @needs_tools

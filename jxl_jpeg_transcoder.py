@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.27.0"
+TOOLKIT_VERSION = "2.27.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -2311,8 +2311,11 @@ def _verify_exif_kept(src_path: Path, out_path: Path) -> None:
 def _with_makernote_hint(message: str) -> str:
     """`message`, plus how to get such a JPEG into a JXL when the failure is
     the maker notes exiftool cannot parse: once they are in the output it
-    refuses every write (#639). The lossless transcode writes no metadata."""
-    if "Maker notes could not be parsed" in message:
+    refuses every write (#639). The lossless transcode writes no metadata.
+    exiftool words it in several ways ("Maker notes could not be parsed",
+    "Bad MakerNotes offset for ...", "Overlapping MakerNotes values"): any
+    failure that names the maker notes gets the hint."""
+    if re.search(r"maker ?notes", message, re.IGNORECASE):
         return (message + " | its EXIF carries maker notes exiftool cannot parse; the "
                 "lossy conversion cannot add its markers to it. --force-transcode "
                 "(lossless, bit-exact) keeps the JPEG's EXIF as it is")
@@ -5726,6 +5729,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         # removes the output and the source stays. It used to be logged at
         # DEBUG, and --delete-source then deleted a source whose output had
         # lost its IPTC or its provenance markers.
+        _pixel_reencode = False
         if not has_jbrd_box(write_path):
             try:
                 _write_converted_metadata(src_path, write_path)
@@ -5766,6 +5770,7 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
                     _verify_exif_kept(src_path, write_path)
                 except RuntimeError as _e_retry:
                     raise RuntimeError(_with_makernote_hint(str(_e_retry))) from None
+            _pixel_reencode = is_jpeg_input
 
         # Reorder boxes for IrfanView compatibility — must be the LAST mutation,
         # otherwise exiftool re-appends metadata boxes after the codestream.
@@ -5802,6 +5807,11 @@ def encode_to_jxl(src_path: Path, write_path: Path, final_path: Path,
         n, total = next_count()
         label = "RECONVERT" if overwritten else "OK"
         logger.info(f"[{n}/{total}] {label} | {src_path.name} -> {final_path.name}")
+        # #641: a pixel re-encode holds the first image of the JPEG only. An
+        # HDR gain map after it is not in this JXL: said per file, and the
+        # delete gates keep such a JPEG (_gain_map_keep_reason).
+        if _pixel_reencode:
+            _note_gain_map_left_out(src_path)
         # result[4] carries the JXL self-hash so process_group_convert can
         # file it next to the source hash at the destination (staging runs).
         return (str(src_path), "reconvert" if overwritten else "ok", str(final_path),
@@ -6738,6 +6748,107 @@ def _png_bit_depth(png_path: Path):
     if len(head) < 25 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
         return None
     return head[24]
+
+
+# What says "this JPEG carries an HDR gain map": a second, smaller image after
+# the picture that tells an HDR screen how much brighter each area is (Android's
+# Ultra HDR, ISO 21496-1, Apple's HDR gain map). Only a pixel re-encode loses
+# it: cjxl reads the first image of the file and nothing else (#641).
+_GAIN_MAP_MARKS = (
+    (b"urn:iso:std:iso:ts:21496:-1", "ISO 21496-1"),
+    (b"http://ns.adobe.com/hdr-gain-map/1.0/", "Ultra HDR"),
+    (b"urn:com:apple:photo:2020:aux:hdrgainmap", "Apple"),
+    (b"http://ns.apple.com/HDRGainMap/1.0/", "Apple"),
+)
+
+
+def _jpeg_gain_map(path: Path):
+    """The kind of HDR gain map a JPEG carries ("Ultra HDR", "ISO 21496-1",
+    "Apple"), or None. The APP1/APP2 segments of the first image are read; the
+    rest of the file only when it announces further images (an MPF index) and
+    its own header named no gain map — Apple describes its gain map in the
+    second image. A camera's MPO (preview images) has none of the marks and is
+    not one. Raises OSError when the file cannot be read: "cannot tell" is the
+    caller's to treat as a reason to keep the file."""
+    more_images = False
+    with open(path, "rb") as f:
+        if f.read(2) != b"\xff\xd8":
+            return None
+        while True:
+            head = f.read(4)
+            if len(head) < 4 or head[0] != 0xFF:
+                break
+            marker = head[1]
+            if marker == 0xFF:                        # a fill byte
+                f.seek(-3, 1)
+                continue
+            if marker == 0x01 or 0xD0 <= marker <= 0xD8:   # no length
+                f.seek(-2, 1)
+                continue
+            if marker in (0xDA, 0xD9):                # image data, end of image
+                break
+            size = struct.unpack(">H", head[2:4])[0]
+            if size < 2:
+                break
+            if marker in (0xE1, 0xE2):
+                data = f.read(size - 2)
+                if data.startswith(b"MPF\x00"):
+                    more_images = True
+                for mark, kind in _GAIN_MAP_MARKS:
+                    if mark in data:
+                        return kind
+            else:
+                f.seek(size - 2, 1)
+        if not more_images:
+            return None
+        f.seek(0)
+        keep = max(len(m) for m, _k in _GAIN_MAP_MARKS)
+        tail = b""
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                return None
+            buf = tail + chunk
+            for mark, kind in _GAIN_MAP_MARKS:
+                if mark in buf:
+                    return kind
+            tail = buf[-keep:]
+
+
+def _gain_map_keep_reason(src_path: Path, final_file: Path):
+    """Why a JPEG converted to a JXL without a jbrd box (a pixel re-encode:
+    --force-convert --from-jpeg above distance 0) must not be deleted, or None
+    (#641). cjxl encodes the first image of the JPEG; an HDR gain map after it
+    is not in the JXL, so the JPEG is the only copy of it. The lossless
+    transcode keeps the whole file and is not judged here (its JXL has the
+    jbrd box). A JPEG that cannot be read for the check is kept too."""
+    if (src_path.suffix.lower() not in JPEG_EXTS or final_file is None
+            or final_file.suffix.lower() != ".jxl"):
+        return None
+    try:
+        if has_jbrd_box(final_file):
+            return None
+        kind = _jpeg_gain_map(src_path)
+    except OSError:
+        return "KEEP (could not check the JPEG for an HDR gain map)"
+    if kind:
+        return (f"KEEP (the JPEG carries an HDR gain map ({kind}) this JXL does not "
+                f"hold — only the lossless transcode, --force-transcode, keeps it)")
+    return None
+
+
+def _note_gain_map_left_out(src_path: Path) -> None:
+    """One warning per converted JPEG whose HDR gain map did not reach the JXL
+    (#641): the picture is complete, the HDR rendering is not in it."""
+    try:
+        kind = _jpeg_gain_map(src_path)
+    except OSError:
+        return
+    if kind:
+        logger.warning(f"  >HDR gain map not carried | {src_path.name} | {kind}: the JXL "
+                       f"holds the standard (SDR) picture only; the lossless transcode "
+                       f"(--force-transcode) keeps the whole JPEG. This JPEG is never "
+                       f"deleted by a lossy conversion")
 
 
 def _lossy_decode_keep_reason(src_path: Path, final_file: Path):
@@ -7986,7 +8097,8 @@ def cmd_convert(args, from_jxl: bool = True):
                 _delete_stats["kept"] += 1
                 logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                 continue
-            _why_keep = _lossy_decode_keep_reason(src_path, final_file)
+            _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
+                         or _gain_map_keep_reason(src_path, final_file))
             if _why_keep:
                 _delete_stats["kept"] += 1
                 logger.warning(f" {_why_keep} | {src_path.name}")
@@ -8627,7 +8739,8 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     _delete_stats["kept"] += 1
                     logger.warning(f" KEEP (output never left staging) | {src_path.name}")
                     continue
-                _why_keep = _lossy_decode_keep_reason(src_path, final_file)
+                _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
+                             or _gain_map_keep_reason(src_path, final_file))
                 if _why_keep:
                     _delete_stats["kept"] += 1
                     logger.warning(f" {_why_keep} | {src_path.name}")
