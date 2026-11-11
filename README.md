@@ -2,7 +2,7 @@
 
 Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata preservation**. Designed for photographers working with 16-bit TIFF files who want compact JXL archives without losing color accuracy or metadata. Tested with Capture One, Lightroom, NX Studio, Photoshop, and Fuji Hyper Utility exported 16-bit TIFFs.
 
-**Current version: v2.27.0** (2026-11-11) · [What's new](#whats-new-in-v2270) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
+**Current version: v2.27.1** (2026-11-11) · [What's new](#whats-new-in-v2271) · [Upgrading from an older version](docs/upgrading.md) · [All releases](docs/version_history.md)
 
 **Windows program, no Python needed:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click; cjxl/djxl, ExifTool, ImageMagick and jxl-thumb included.
 
@@ -21,7 +21,7 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 - [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
 - [Good to know](#good-to-know)
 - [Documentation](#documentation)
-- [What's new in v2.27.0](#whats-new-in-v2270)
+- [What's new in v2.27.1](#whats-new-in-v2271)
 - [More about this project](#more-about-this-project)
 - [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
 - [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
@@ -451,7 +451,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## What's new in v2.27.0
+## What's new in v2.27.1
+
+2026-11-11. Hardening that closes an edge case of the lossy JPEG → JXL conversion; the lossless transcode, the default for JPEGs, is unchanged.
+
+- **A lossy JPEG → JXL keeps a JPEG that has an HDR gain map** (Ultra HDR photos from recent phones): the lossy JXL holds the standard picture only, so `--delete-source` no longer deletes such a JPEG, and the run names each one. The lossless transcode keeps the whole file ([upgrading](docs/upgrading.md)).
+- **A JPEG whose maker notes exiftool cannot rewrite** names the way out (`--force-transcode`) for more of exiftool's wordings.
+
+[Version history](docs/version_history.md#v2271).
+
+### In v2.27.0
 
 2026-11-11. Two additions for TIFF archives and one fix; most people have nothing to do.
 
@@ -578,7 +587,8 @@ Full notes: [version history](docs/version_history.md#v2220).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v2.27.0** | 2026-11-11 | A TIFF's IPTC data reaches the master and comes back in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts |
+| **v2.27.1** | 2026-11-11 | A lossy JPEG → JXL keeps a JPEG whose HDR gain map the JXL does not hold; the way out of unparseable maker notes named for more exiftool wordings |
+| [v2.27.0](docs/version_history.md#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master and comes back in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts |
 | [v2.26.1](docs/version_history.md#v2261) | 2026-11-10 | A rotated JPEG's archive is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex` |
 | [v2.26.0](docs/version_history.md#v2260) | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
 | [v2.25.3](docs/version_history.md#v2253) | 2026-11-10 | A rotated JPEG's archive decodes upright; `--delete-source` keeps layered TIFFs and float/animated JXLs; 10/12-bit TIFFs refused; a failed move out of staging is an error |
