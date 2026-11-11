@@ -686,8 +686,14 @@ must-fix / should-fix items and a commit verdict.
 ## Docs map
 - `README.md` — short by design: features, install, quick start, a
   one-line-per-item "Good to know", and a SHORT "What's new" for the current
-  release (calm, a few bullets, links). Long explanations go to the docs
+  release ONLY (calm, a few bullets, one line of links). No "In vX.Y.Z"
+  sections for earlier releases and no release table there (owner's rule,
+  2026-11-11: the README must not grow). Long explanations go to the docs
   below, not here
+- `docs/whats_new.md` — the short "What's new" of every recent release,
+  newest first, with the at-a-glance table of the last releases. Each release
+  adds its section at the top (the same bullets as the README's) and one
+  table row; the README's own section is replaced, never appended to
 - `docs/upgrading.md` — what to check when upgrading, newest first (one
   section per release that changed an existing command line's behaviour)
 - `docs/behavior_and_limitations.md` — defaults, limits and viewer quirks
