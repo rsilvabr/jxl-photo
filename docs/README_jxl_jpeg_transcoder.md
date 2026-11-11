@@ -26,7 +26,7 @@ ImageMagick is needed for colour conversion (`--icc-profile`/`--to-srgb`) and
 for `--resize-long/-short/-percent`/`--sharpen`; the lossless JPEG ↔ JXL path
 works without it.
 
-Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation) in the main README — the same tools serve all four scripts.
+Download, PATH and the checks: [install.md](install.md) — the same tools serve all four scripts.
 
 * * *
 

@@ -22,7 +22,7 @@ ImageMagick →  https://imagemagick.org  (for JXL -> JPEG/PNG ICC conversion)
 
 If `rich` is not installed, the tool falls back to plain text mode automatically.
 
-Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation)
+Download, PATH and the checks: [install.md](install.md)
 in the main README. The menu's status bar then shows what it found.
 
 * * *

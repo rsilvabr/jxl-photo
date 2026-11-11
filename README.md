@@ -8,38 +8,9 @@ Batch JPEG XL conversion tools with **full ICC color profile and EXIF metadata p
 
 ---
 
-## Contents
-
-- [Why JPEG XL?](#why-jpeg-xl)
-- [Features](#features)
-- [Scripts](#scripts)
-- [Requirements & Installation](#requirements--installation)
-- [Quick Start — Interactive Wrapper](#quick-start--interactive-wrapper)
-- [Auto Mode and manifests](#auto-mode-and-manifests)
-- [Individual Scripts](#individual-scripts)
-- [Recommended Settings](#recommended-settings)
-- [How the ICC profile is preserved](#how-the-icc-profile-is-preserved)
-- [Good to know](#good-to-know)
-- [Documentation](#documentation)
-- [What's new in v2.27.1](#whats-new-in-v2271)
-- [More about this project](#more-about-this-project)
-- [Related project: jxl-photo as a Windows program](#related-project-jxl-photo-as-a-windows-program)
-- [Related project: fast JXL thumbnails in Explorer](#related-project-fast-jxl-thumbnails-in-explorer)
-- [Related project: a simpler, TIFF-only alternative](#related-project-a-simpler-tiff-only-alternative)
-- [Related project: selective backup (photo-backup)](#related-project-selective-backup-photo-backup)
-- [Disclaimer](#disclaimer) · [License](#license) · [Acknowledgments](#acknowledgments)
-
----
-
 ## Why JPEG XL?
 
-Spectacular compression with no compromise on bit depth.
-
-- Lossless 16-bit files much smaller than TIFF and TIFF with ZIP/Deflate
-- Lossy 16-bit files — small files that retain full 16-bit tonal information, something no other common format achieves (JPEG is 8-bit, TIFF lossless is large)
-- This is genuinely new: small lossy files, but with 16-bit color depth
-
-Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 photos per resolution, ISO 64–4000). ZIP is the TIFF compression tiff-workflow writes. Detail and noise move the size more than the camera does — [every distance, with the spread across the photos](docs/file_sizes.md#every-distance-from-a-16-bit-and-an-8-bit-tiff):
+Small files that keep the full 16-bit tonal range: lossless at about 60% of the TIFF, near-lossless at about a tenth. Typical sizes in MB of ProPhoto exports from Capture One (medians):
 
 | Format | 45 MP (Z7, Z8) | 24 MP (Zf) | 12 MP (D700) |
 |--------|:--------------:|:----------:|:------------:|
@@ -53,133 +24,43 @@ Typical sizes in MB of ProPhoto exports from Capture One (median of 10–20 phot
 | JXL `d=1.0` (visually lossless) | 5.5 | 2.7 | 1.2 |
 | JXL `d=3.0` (web) | 1.8 | 0.9 | 0.4 |
 
-`d=0.1` is the default and the recommendation for masters. Two tests of the grain ([details](docs/file_sizes.md#grain-after-heavy-editing-and-as-it-is)):
-
-- **After heavy editing.** The worst case: the unlit black background of a flash photo — nothing there but grain (little noise reduction) — decoded back to TIFF and pulled up hard in Capture One (shadows +100, blacks +100, exposure unchanged). In that lifted black, at 100%, `d=0.1` matched lossless; at 300–800% its grain differed slightly, and only when flipping between the two files. `d=0.05` closes even that gap for about a third more space (42 against 31 MB at 45 MP, still a quarter of lossless); I use it for my own masters, out of caution. `d=0.5` softened that grain a little at 100% and `d=1.0` showed artifacts, while the lit subject looked clean even at `d=1.0`.
-- **Without editing**, the photo as it is: `d=0.7` keeps the grain at 200%, where `d=1.0` starts to smooth it — a light file for copies you only look at.
-
-Lossy sizes are about the same from an 8-bit and a 16-bit TIFF; only lossless differs. From an 8-bit TIFF, lossless is about the size of `d=0.05`, so jxl-photo archives 8-bit TIFFs lossless at `d=0.1` and below — see [Features](#features).
-
-Film scans are archived lossless by default; that took 40–70% of the uncompressed TIFF on most scans tested (a 91 MP SilverFast negative with IR: 739 MB → 447 MB).
-
-Effort 7 is the default: on files this size effort 9 gives the same files from `d=0.05` to `d=0.5`, slightly *larger* lossless ones, and only a small gain at `d=1.0`, for up to 16× the time. Per-photo numbers, scans and the quality measurements: [docs/file_sizes.md](docs/file_sizes.md).
-
-The numbers behind these settings are measured and posted on r/jpegxl, on 16-bit ProPhoto exports from Capture One:
-
-- [Distance, error and SNR](https://www.reddit.com/r/jpegxl/comments/1s6k718/analysis_jxl_distance_error_and_snr_analysis/): per-pixel SNR from `d=0.01` to `d=10` on a 45 MP photo. `d=1.0` is the sweet spot for pixels above 30 dB, `d=0.3–0.5` for 40 dB, and `d=0.05` for 50 dB: over 90% of the pixels stay above 50 dB, and not one pixel falls below 20 dB. That is where the archival setting comes from; the stress test above is from the same post.
-- [16-bit vs 8-bit, and JPEG](https://www.reddit.com/r/jpegxl/comments/1sp9qbj/analysis_jxl_distance_and_snr_16bit_vs_8bit_jpeg/): for lossy JXL an 8-bit file is **not** smaller than a 16-bit one, and it keeps less signal, so there is no reason to go 8-bit. JPEG needs 5–15× the file size to get close to JXL.
-- [Generation loss](https://www.reddit.com/r/jpegxl/comments/1wlmfw0/my_jxl_archive_tool_refuses_bad_recompressions_i/): one recompression from an archived `d=0.1` down to `d=1.0` costs 0.02 dB, but reaching the same file size in many small steps costs up to 9 dB. That is why the recompressor goes to the target in one shot, counts generations, and refuses counterproductive re-encodes.
-
-The per-pixel SNR analyzer used in the first two is [jxl-quality-analyzer](https://github.com/rsilvabr/jxl-quality-analyzer); the harness, raw results and figures of the third are in [jxl-generation-loss](https://github.com/rsilvabr/jxl-generation-loss).
+`d=0.1` is the default and the recommendation for masters; film scans and 8-bit TIFFs are archived lossless on their own. The grain tests behind that, the measurements and the comparison with JPEG and ZIP-compressed TIFF: [docs/why_jxl.md](docs/why_jxl.md). Per-photo numbers: [docs/file_sizes.md](docs/file_sizes.md).
 
 ---
 
 ## Features
 
-**TIFF → JXL** — 16-bit lossless or near-lossless archives. The exact original ICC profile comes back on decode, even from a lossy file; EXIF/XMP stay visible in IrfanView, XnView MP and other viewers. Multi-page TIFFs and film scans (IR page included) are split and rebuilt page for page.
+- **The original ICC profile comes back.** Plain cjxl/djxl give back a TIFF with a generic profile; the encoder stores the original profile in the JXL and the decoder puts it back byte for byte, even from a lossy file ([how](docs/commands_and_settings.md#how-the-icc-profile-is-preserved)).
+- **TIFF → JXL masters**: 16-bit, lossless or near-lossless, EXIF/XMP visible in IrfanView and XnView MP; multi-page TIFFs and film scans (IR page included) split and rebuilt page for page.
+- **JXL → TIFF**: the TIFF back in its original profile, to edit again.
+- **JPEG ↔ JXL**: lossless, with the bit-exact JPEG back on demand.
+- **Copies made from the masters**: lighter 16-bit JXLs and JPEG/PNG for sharing, with colour conversion, resize and output sharpening fitted to Capture One's presets.
+- **The right distance for each file**: in one run, 8-bit TIFFs and film scans are archived lossless while the rest gets your distance.
+- **Batch work**: folder modes for flat, recursive and Capture One / Lightroom export layouts, parallel workers, SSD staging, [manifests](docs/README_manifest.md) and presets that run unattended.
+- **Archive and replace, safely**: `--delete-source` deletes a source only after its output is written, checked and decoded back to the same pixels; every output records which source made it.
+- **Fast Explorer thumbnails in the right colours**, with [jxl-thumb](https://github.com/rsilvabr/jxl-thumb).
 
-**JXL → TIFF** — Roundtrip, Basic and Matrix decode modes, a JPEG preview for fast Explorer thumbnails, and a sync that reconverts only what changed.
-
-**JPEG ↔ JXL, JXL → JPEG/PNG** — lossless JPEG → JXL with the bit-exact JPEG back on demand, its EXIF visible in IrfanView too; JPEG/PNG delivery copies with colour conversion (sRGB, AdobeRGB or any profile), resize and output sharpening fitted to Capture One's presets.
-
-**JXL → JXL** — shrink an archive to a new distance in one step, with counterproductive re-encodes refused and metadata carried over; light 16-bit derivatives (sRGB, resized, sharpened) made from the master.
-
-**The right distance for each file** — in one run, each TIFF gets the distance that suits it: an 8-bit TIFF is archived lossless at low distances, where lossy would come out *larger* (43 MB lossless against 47 MB at `d=0.05` for 45 MP); a film scan is archived lossless, since it can only be redone by scanning again. The run says which files got what, and each one's record names its distance ([8-bit](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance), [scans](docs/README_jxl_tiff_encoder.md#film-scans-are-archived-lossless-scan_distance)).
-
-**Viewer compatibility** — every JXL keeps its EXIF where IrfanView reads it: in a plain box, before the XMP and the image data. cjxl compresses it by default, which saves a median 2.3 KB per photo (0.19 %) and hides the EXIF from IrfanView; one setting turns that compression on if you prefer the smallest file ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
-
-**Fast thumbnails in Explorer, in the right colours** — Microsoft's JPEG XL extension decodes the whole image for every thumbnail and ignores the colour profile (ProPhoto and Adobe RGB look washed out). [jxl-thumb](https://github.com/rsilvabr/jxl-thumb), which I also made, fixes both for any lossy JXL: about 40× faster, with each file's own colour profile applied. On jxl-photo's outputs it's faster still — about 2 ms, like a JPEG, lossless included ([details](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)).
-
-**Batch work** — folder modes for flat, recursive and Capture One / Lightroom export layouts, parallel workers, SSD staging, folder exclusions; [manifests](docs/README_manifest.md) (one CSV, many folders, checked before anything runs) and presets that run unattended from Task Scheduler ([setup](docs/README_jxl_tools.md#running-a-preset-unattended-task-scheduler--cron)).
-
-**Archive and replace, safely** — `--delete-source` works in every mode, but a source is deleted only after its output is written, checked, and decoded back to the same pixels (by default for TIFFs, optional elsewhere). Every output records which source made it, so a later run never mistakes one photo's archive for another's, and three confirmations stand before any deletion.
-
----
-
-## Scripts
-
-| Script | Purpose | Key Feature |
-|--------|---------|-------------|
-| [`jxl_photo.py`](jxl_photo.py) | Interactive wizard | Guided workflow with **Auto Mode** — analyzes folders and recommends best mode automatically |
-| [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL encoder | Embeds ICC in XMP for round-trip preservation; multi-page TIFF splitting |
-| [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF decoder | Restores original ICC from XMP using Roundtrip Mode; reconstructs multi-page TIFFs |
-| [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL / JXL → PNG | Lossless transcoding, ICC conversion, PNG output |
-| [`jxl_recompressor.py`](jxl_recompressor.py) | JXL → JXL recompressor | Shrinks an existing archive to a new distance/effort; refuses counterproductive re-encodes (copy/skip/ask), keeps metadata and provenance; colour-converted 16-bit derivatives (sRGB/AdobeRGB/any RGB ICC) |
+| Script | What it does |
+|--------|--------------|
+| [`jxl_photo.py`](jxl_photo.py) | The interactive wizard: guided jobs, Auto Mode, presets, manifests |
+| [`jxl_tiff_encoder.py`](jxl_tiff_encoder.py) | TIFF → JXL masters |
+| [`jxl_tiff_decoder.py`](jxl_tiff_decoder.py) | JXL → TIFF, original profile restored |
+| [`jxl_jpeg_transcoder.py`](jxl_jpeg_transcoder.py) | JPEG ↔ JXL lossless; JXL → JPEG/PNG copies |
+| [`jxl_recompressor.py`](jxl_recompressor.py) | JXL → JXL: smaller archives and 16-bit copies (sRGB, resized, sharpened) |
 
 ---
 
-## Requirements & Installation
+## Install
 
-> Rather not install Python and the tools? A Windows program packages
-> everything: see [jxl-photo-exe](#related-project-jxl-photo-as-a-windows-program).
+**On Windows, without Python:** [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest) — unzip and double-click.
 
-### 1. Python 3.9+ and packages
+**With Python 3.9+:**
 
 ```powershell
 pip install tifffile numpy pillow rich imagecodecs
 ```
 
-Install them in the same Python you will run the scripts with.
-
-### 2. External tools (download the executables, not the source code)
-
-| Tool | Download URL | What to download | Extract to |
-|------|-------------|------------------|------------|
-| **cjxl / djxl** | https://github.com/libjxl/libjxl/releases | `jxl-x64-windows-static.zip` (**not** `jxl-x64-windows.zip`, which has only DLLs) | `C:\tools\libjxl\` or your choice |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` (**not** the `.tar.gz`, which is Perl source) | `C:\tools\exiftool\` or your choice |
-| **ImageMagick** | https://imagemagick.org | Installer `.exe` (Q16-HDRI x64) | Default location |
-
-The scripts find exiftool under either name, `exiftool.exe` or the download's `exiftool(-k).exe`.
-
-`jxlinfo.exe` comes in the same libjxl zip, next to `cjxl.exe` and `djxl.exe`: keep the three together. The scripts ask it whether a JXL holds float or animated content (and came from a rotated JPEG); without it they warn once, skip the float/animation check and read the orientation from the JXL's header themselves.
-
-Tested with libjxl 0.12.0 (0.11.2 still works), exiftool 13.59, ImageMagick 7.1.2-27, numpy 2.5.1, tifffile 2026.6.1, Pillow 12.3.0, imagecodecs 2026.6.26 and rich 15.0.0. The scripts detect the libjxl version and adapt. A high `--workers` is safe: the encoder and the recompressor run only as many cjxl at once as the free memory holds ([how much each takes](docs/README_jxl_tiff_encoder.md#ram-per-worker)).
-
-### 3. Add to PATH (PowerShell)
-
-**Replace the example paths below with YOUR actual installation paths:**
-
-```powershell
-# EDIT THESE PATHS to match where YOU extracted the tools:
-$myPaths = @(
-    "C:\tools\libjxl\bin",                           # where cjxl.exe, djxl.exe and jxlinfo.exe are
-    "C:\tools\exiftool",                              # where exiftool.exe is
-    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
-)
-
-# Add to user PATH
-$p = [Environment]::GetEnvironmentVariable("PATH", "User")
-[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
-
-# RESTART your PowerShell/terminal after this!
-```
-
-### 4. Verify
-
-Restart PowerShell, then:
-
-```powershell
-cjxl --version          # cjxl v0.XX.X
-jxlinfo -h              # prints its usage (it comes in the same zip)
-exiftool -ver           # 12.XX or 13.XX
-magick -version         # ImageMagick version
-python -c "import tifffile, numpy, PIL, rich, imagecodecs; print('All Python packages OK')"
-py jxl_photo.py         # from the repository folder
-```
-
-You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffile | [✓] pillow | [✓] imagecodecs | [✓] rich`
-
-### Troubleshooting
-
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
-| `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
-| `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
-| `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich imagecodecs` with the Python you run the scripts with |
-| PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
-
-Setup feels heavy? [tiff-workflow](#related-project-a-simpler-tiff-only-alternative) needs no libjxl at all.
+plus three tools on PATH: [cjxl / djxl / jxlinfo](https://github.com/libjxl/libjxl/releases) (the `jxl-x64-windows-static.zip`), [ExifTool](https://exiftool.org) and [ImageMagick](https://imagemagick.org). Then run `py jxl_photo.py`: its first line shows what it found. Step by step, with the PATH setup and troubleshooting: [docs/install.md](docs/install.md).
 
 ---
 
@@ -240,20 +121,11 @@ F:\2026\京都・嵐山 [FINAL]\_EXPORT\TIFF,F:\2026\京都・嵐山 [FINAL]\_EX
 # F:\2026\Outtakes (later)\_EXPORT\TIFF,F:\2026\Outtakes (later)\_EXPORT\TIFF,6,tiff2jxl
 ```
 
-A row can also carry its own colour space, resize, sharpening and output folder — the JPEGs for the phone, made from the masters:
-
-```csv
-Source,Destination,Mode,Direction,OutputICC,Resize,Sharpen,RenameFrom,RenameTo,ExportSubfolder,ExportJxlFolder
-G:\2026,G:\2026,7,jxl2jpeg,sRGB,long:2048,screen,ProPhoto-g22,sRGB,16B_JXL,JPG_mobile
-```
-
 The whole manifest is checked before anything runs: two rows writing the same file, or an invalid cell, refuse it up front. Every column, what can be left out, and recipes — among them a whole library from masters to phone JPEGs: [docs/README_manifest.md](docs/README_manifest.md#7-a-whole-library-end-to-end-masters-a-16-bit-srgb-copy-phone-jpegs).
 
 ---
 
-## Individual Scripts
-
-### Typical workflow (script commands)
+## The scripts on their own
 
 ```
 Capture One
@@ -265,148 +137,15 @@ jxl_tiff_encoder.py      TIFF → JXL      the master: 16-bit, lossless or near-
     └─ jxl_tiff_decoder.py    JXL → TIFF      the TIFF back, in its original profile, to edit again
 ```
 
-**The encoder only writes masters — by design.** It has no colour conversion, resize or sharpening: a master must be the TIFF, same pixels (up to the distance), same profile, same metadata, so that it can bring the TIFF back and prove it is safe to delete. A setting left on by mistake should never turn an archive into resized, sharpened files that look like masters. Resize, sharpening and colour conversion live where copies are made, from the master: the recompressor (lighter JXLs) and the transcoder (JPEG/PNG). Copies never delete anything and never pass for a master. [Why](docs/README_jxl_tiff_encoder.md#why-the-encoder-never-converts-colour-or-resizes-design-decision).
-
-### TIFF → JXL
-
 ```powershell
-# Single file
-py jxl_tiff_encoder.py "photo.tif"
-
-# Folder (Capture One _EXPORT workflow)
-py jxl_tiff_encoder.py "F:\Photos\2024" --mode 7
-
-# With settings
-py jxl_tiff_encoder.py "photo.tif" --mode 0 --workers 8
-
-# Multi-page TIFF: also export embedded thumbnails
-py jxl_tiff_encoder.py "F:\Photos\2024" --mode 2 --multipage-mode split --thumbnail-mode include
+py jxl_tiff_encoder.py "F:\Photos\2024" --mode 7                   # TIFF → JXL masters (Capture One _EXPORT layout)
+py jxl_tiff_decoder.py "photo.jxl"                                  # JXL → TIFF, original profile restored
+py jxl_jpeg_transcoder.py "F:\Photos\2024"                          # JPEG → JXL, lossless
+py jxl_jpeg_transcoder.py "F:\Photos\2024" --to-srgb --quality 95   # JXL → sRGB JPEG
+py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run   # simulate a smaller archive
 ```
 
-### JXL → TIFF
-
-```powershell
-# Single file — auto mode (Roundtrip if has ICC, Basic if not)
-py jxl_tiff_decoder.py "photo.jxl"
-
-# Force Matrix mode for color space conversion
-py jxl_tiff_decoder.py "photo.jxl" --matrix --target-icc "C:\icc\sRGB.icc"
-
-# Folder
-py jxl_tiff_decoder.py "F:\Photos\2024" --mode 7
-
-# Reconstruct multi-page TIFF and drop thumbnail pages
-py jxl_tiff_decoder.py "F:\Photos\2024" --mode 2 --thumbnail-handling ignore
-```
-
-### JPEG ↔ JXL / JXL → PNG
-
-```powershell
-# JPEG → JXL (lossless transcoding)
-py jxl_jpeg_transcoder.py "F:\Photos\2024"
-
-# JXL → JPEG (auto: lossless recovery if jbrd present, else lossy)
-py jxl_jpeg_transcoder.py "F:\Photos\2024" --mode 8
-
-# JXL → PNG 16-bit (archival)
-py jxl_jpeg_transcoder.py "F:\Photos\2024" --format png
-
-# JXL → sRGB JPEG (ICC conversion via ImageMagick)
-py jxl_jpeg_transcoder.py "F:\Photos\2024" --to-srgb --quality 95
-```
-
-### JXL → JXL (recompress an archive smaller)
-
-```powershell
-# Shrink a near-lossless archive to "visually lossless"
-py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0
-
-# Simulate first — nothing written, copied or deleted
-py jxl_recompressor.py "F:\Photos\Archive" --mode 1 --distance 1.0 --dry-run
-
-# Replace the archive in place, deleting nothing until verified
-py jxl_recompressor.py "F:\Photos\Archive" --mode 8 --distance 1.0 --verify-roundtrip
-
-# Light 16-bit sRGB derivatives of the Capture One masters, profile swapped in the name
-#   _EXPORT/16B_JXL/_DSC0013_ProPhoto-g22_v1.jxl -> _EXPORT/16B_JXL_sRGB/_DSC0013_sRGB_v1.jxl
-py jxl_recompressor.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jxl-folder 16B_JXL_sRGB --output-icc sRGB --distance 1.0 --sync --rename-from ProPhoto-g22 --rename-to sRGB
-```
-
-A derivative is built from the master JXL, not the TIFF — measured on a real ProPhoto export, the extra generation costs 0.017 dB against a direct encode of the TIFF, at the same size. See [Colour-converted derivatives](docs/README_jxl_recompressor.md#derivatives-colour-conversion-resize-and-sharpening).
-
-Every option of every script: the per-script READMEs under [Documentation](#documentation).
-
-### After conversion
-
-1. Keep both TIFF and JXL — exclude the TIFF export folders from backups to save space (FreeFileSync folder filters make this easy).
-2. Delete the TIFFs, keep only the JXLs — with this toolkit's `--delete-source`: each TIFF is deleted only after its JXL is written and verified (decoded and compared with the TIFF), and a TIFF re-exported during the run is kept. The older [delete-tiff-exports](https://github.com/rsilvabr/delete-tiff-exports) (archived) is a simple script that deletes the `_EXPORT\TIFF16` folders recursively and checks nothing: only for TIFFs whose JXLs you have already verified.
-
-Then back up what you kept. [photo-backup](https://github.com/rsilvabr/photo-backup) copies, for every folder that has an export folder, the JXL master (instead of the TIFF), the RAW or camera JPEG it came from and your Capture One / NX Studio edits — and leaves out the outtakes and the copies this toolkit can make again from the master (sRGB, phone). It was written around one folder layout: the originals beside an export folder (`_EXPORT`, `Lightroom_Export`, … — any name containing "export"), the exports inside it. Run its dry-run first and read what it would copy; a different layout may need its settings, or the script, adapted.
-
----
-
-## Recommended Settings
-
-### Masters (`jxl_tiff_encoder.py`)
-
-```python
-CJXL_DISTANCE = 0.1     # near-lossless, ~31 MB at 45 MP — the default
-# CJXL_DISTANCE = 0.05  # finest lossy, ~42 MB — what I use, out of caution
-CJXL_EFFORT = 7         # effort 9 gains nothing at these distances (docs/file_sizes.md)
-```
-
-Film scans and 8-bit TIFFs get lossless on their own.
-
-### Copies, made from the masters
-
-```powershell
-# A light 16-bit sRGB copy (d=0.7 keeps the grain texture)
-py jxl_recompressor.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jxl-folder sRGB --output-icc sRGB --distance 0.7 --sync --rename-from ProPhoto-g22 --rename-to sRGB
-
-# JPEGs for the phone: sRGB, 2048 px, screen sharpening, quality 70
-py jxl_jpeg_transcoder.py "F:\Photos\2025" --mode 7 --export-subfolder 16B_JXL --export-jpeg-folder JPG_mobile --force-convert --decode --format jpeg --icc-profile sRGB --resize-long 2048 --sharpen screen --quality 70 --sync --rename-from ProPhoto-g22 --rename-to sRGB
-```
-
-The same three steps as manifests and presets: [a whole library, end to end](docs/README_manifest.md#7-a-whole-library-end-to-end-masters-a-16-bit-srgb-copy-phone-jpegs).
-
-### What a re-run redoes
-
-With sync (the wizard's and the presets' default), a run redoes only what changed:
-
-| You change | Master | JXL copy | JPEG / PNG copy |
-|---|---|---|---|
-| The TIFF (re-exported) | redone | redone (its master is newer) | redone (its master is newer) |
-| The distance, up or down | **kept** — run once with `--overwrite` | redone | — |
-| The effort | **kept** | redone if higher, kept if lower | — |
-| Colour, resize, sharpening (`none`/`screen`/`print`) | — | redone | redone (a resized or sharpened copy) |
-| Sharpening sigma / gain / threshold | — | kept | kept |
-| JPEG quality | — | — | redone (a resized or sharpened JPEG) |
-| PNG bit depth | — | — | **kept** — run once with `--overwrite` |
-
-A master is never redone because a setting changed: it is the archive, and a wrong value in a preset should not re-encode it. [Why each one](docs/behavior_and_limitations.md#what-a-re-run-redoes).
-
----
-
-## How the ICC profile is preserved
-
-```
-Plain cjxl/djxl:   TIFF (ProPhoto, Kodak TRC) → JXL (native primaries) → TIFF with a generic profile
-With this toolkit: TIFF (ProPhoto, Kodak TRC) → JXL (+ the original ICC in XMP) → TIFF with the ORIGINAL profile
-```
-
-The encoder stores the original ICC profile, base64-encoded, in the JXL's XMP (a `jxlphoto-iccprofile` item in `dc:Relation`; `xmp:CreatorTool` up to v2.18.x), and the decoder's Roundtrip mode puts it back byte for byte. To check a round trip:
-
-```powershell
-exiftool -ProfileDescription -ProfileCopyright original.tif roundtrip.tif   # should match
-```
-
-XYB, ICC blobs and the table-curve profiles that need special handling: [docs/jxl_color_internals.md](docs/jxl_color_internals.md).
-
-### The encode record
-
-Every JXL the toolkit writes also records how it was encoded, for example `gen=2 | cjxl d=0.05 e=7 | cjxl d=0.7 e=7`. Each `cjxl d= e=` entry is one encode, with its distance and effort, oldest first; `gen=` counts the lossy ones — how many times the photo has lost quality. A file re-encoded from another keeps the old entries and adds its own, so a copy made from a master still shows where it came from. The recompressor reads the record to decide what is worth doing: it asks before an encode that would only lose quality (the same or a finer distance than the file already has) and before a third lossy generation.
-
-The record lives in the file's XMP processing history (`xmpMM:History`), out of the way: your caption stays alone in the photo's Title. To see it in Windows Explorer as well, `--encode-tag comment` copies it into Comments (or `title`, after the caption). Every field the toolkit writes: [docs/metadata_written.md](docs/metadata_written.md#the-encode-record).
+The encoder only writes masters, by design: colour conversion, resize and sharpening live where copies are made, in the recompressor and the transcoder. More commands, the settings I recommend, what a re-run redoes and what to do after converting: [docs/commands_and_settings.md](docs/commands_and_settings.md).
 
 ---
 
@@ -418,11 +157,11 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 - **cjxl 0.12 treats every distance up to 0.05 as 0.05**, so smaller values buy nothing there. [More](docs/behavior_and_limitations.md#the-distance-floor-depends-on-your-cjxl-005-on-libjxl-012-001-on-011)
 - **Every page of a multi-page TIFF is converted by default**, embedded previews included, except Capture One's. [More](docs/behavior_and_limitations.md#multi-page-tiffs-every-page-is-converted-by-default)
 - **The decoder never overwrites an original TIFF**, nor a decode you edited since. [More](docs/behavior_and_limitations.md#the-decoder-never-overwrites-an-original-tiff)
-- **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs; a changed distance redoes the copies but not the masters ([table](#what-a-re-run-redoes)). [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
+- **Re-runs differ per script:** the TIFF encoder/decoder sync by date, the JPEG transcoder skips existing outputs; a changed distance redoes the copies but not the masters ([table](docs/commands_and_settings.md#what-a-re-run-redoes)). [More](docs/behavior_and_limitations.md#default-re-run-behavior-differs-per-script)
 - **Renaming folders:** a re-export after renaming its folder is refused by default; if you rename folders and never delete sources, turn the overwrite guard off. [More](docs/behavior_and_limitations.md#renamed-folders-and-the-overwrite-guard)
 - **8-bit TIFFs** are archived lossless when the distance is 0.1 or less, where lossy saves little (`d=0.1`) or comes out larger (`d=0.05`); `--eight-bit-distance same` turns it off. [More](docs/README_jxl_tiff_encoder.md#8-bit-tiffs-are-archived-lossless-at-low-distances-eight_bit_distance)
 - **Film scans** are archived lossless by default, and SilverFast recognises the IR channel and dust removal after the round trip; other scanner programs were not tested — test one file first. [More](docs/behavior_and_limitations.md#film-scanners-ir-channel--digital-ice)
-- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](#related-project-fast-jxl-thumbnails-in-explorer) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
+- **Viewers:** Windows Explorer thumbnails are slow and not colour-managed ([jxl-thumb](https://github.com/rsilvabr/jxl-thumb) fixes both; the menu reminds you when no JXL thumbnail handler is installed); IrfanView reads the EXIF only from an uncompressed box placed first, which jxl-photo writes by default. [More](docs/behavior_and_limitations.md#viewer-quirks-not-data-loss)
 - **New releases:** the menu checks GitHub at most once a day and adds a line when a newer release is out; nothing is downloaded, and `--run-preset` never checks. [More](docs/README_jxl_tools.md#new-release-notice)
 - **What goes into your files:** your metadata is copied; the toolkit adds the original ICC, the encode record, a few `jxlphoto-*` markers and one `xmpMM:History` entry per write — no readable path or name. [More](docs/metadata_written.md)
 
@@ -432,16 +171,20 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 | Document | Contents |
 |----------|----------|
+| [docs/install.md](docs/install.md) | Installing the Python version step by step: downloads, PATH, troubleshooting |
 | [docs/README_jxl_tools.md](docs/README_jxl_tools.md) | The interactive wrapper |
 | [docs/README_manifest.md](docs/README_manifest.md) | Manifests: every column, what can be omitted, recipes, and manifest → preset → Task Scheduler |
 | [docs/README_jxl_tiff_encoder.md](docs/README_jxl_tiff_encoder.md) | TIFF → JXL encoding |
 | [docs/README_jxl_tiff_decoder.md](docs/README_jxl_tiff_decoder.md) | JXL → TIFF decoding |
 | [docs/README_jxl_jpeg_transcoder.md](docs/README_jxl_jpeg_transcoder.md) | JPEG ↔ JXL / JXL → PNG |
 | [docs/README_jxl_recompressor.md](docs/README_jxl_recompressor.md) | JXL → JXL recompression |
+| [docs/commands_and_settings.md](docs/commands_and_settings.md) | Everyday commands of each script, recommended settings, what a re-run redoes |
 | [docs/behavior_and_limitations.md](docs/behavior_and_limitations.md) | Defaults, limits and viewer quirks worth knowing before a large batch |
+| [docs/why_jxl.md](docs/why_jxl.md) | Why JPEG XL: sizes, the grain tests and the measurements behind the settings |
 | [docs/file_sizes.md](docs/file_sizes.md) | File sizes per camera and for film scans, and what effort 9 buys |
 | [docs/metadata_written.md](docs/metadata_written.md) | Every field the toolkit writes into your photos, and what it reveals |
 | [docs/jxl_color_internals.md](docs/jxl_color_internals.md) | Deep dive: XYB, ICC blobs vs primaries, troubleshooting |
+| [docs/related_projects.md](docs/related_projects.md) | The Windows program, Explorer thumbnails, the TIFF-only alternative, the backup script |
 | [docs/whats_new.md](docs/whats_new.md) | What changed in each release, in a few lines |
 | [docs/upgrading.md](docs/upgrading.md) | What to check when you upgrade from an older version |
 | [docs/version_history.md](docs/version_history.md) | Every release in detail, and the full release table |
@@ -463,60 +206,16 @@ One line each; the detail is in [docs/behavior_and_limitations.md](docs/behavior
 
 ---
 
-## More about this project
-I am sharing these scripts because getting all of this to work correctly was unexpectedly difficult. The challenges were:
+## About this project
 
-- Preserving 16-bit depth through the conversion pipeline
-- Embedding EXIF so it is visible in IrfanView and other applications
-- Correctly handling ICC profiles from Capture One exports (sRGB, AdobeRGB, ProPhoto RGB)
-- Fixing XMP overwrite bug that destroyed original metadata
-- Fixing EXIF binary extraction that produced corrupted data
-- Sync mode — reconverting only re-exported photos in existing folders
-- Performance — RAM usage, parallelism, and staging to minimize I/O
+I am sharing these scripts because getting all of this to work correctly was unexpectedly difficult: preserving 16-bit depth through the conversion pipeline, embedding EXIF so it is visible in IrfanView and other applications, handling the ICC profiles of Capture One exports (sRGB, AdobeRGB, ProPhoto RGB), fixing an XMP overwrite bug that destroyed original metadata and an EXIF extraction that produced corrupted data, a sync mode that reconverts only re-exported photos, and performance (RAM usage, parallelism, staging). Several of those bugs appear because of the specific combination of programs I use (Capture One, cjxl, exiftool, IrfanView); they and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
 
-Getting there required finding and fixing several bugs that appear because of the specific combination of programs I use (Capture One, cjxl, exiftool, IrfanView). Those bugs and their fixes are documented in [`docs/bugs_fixes_explained.md`](docs/bugs_fixes_explained.md).
+Related projects, all mine ([more on each](docs/related_projects.md)):
 
----
-
-## Related project: jxl-photo as a Windows program
-
-[jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe) packages this toolkit as `jxl-photo.exe`: no Python to install, and cjxl/djxl, ExifTool, ImageMagick and jxl-thumb come in the same folder. Unzip and double-click for the wizard, or use the same command lines as here (`jxl-photo.exe encode ...`). The five scripts inside are byte-for-byte those of a jxl-photo release, and it passes the same real-photo battery.
-
-This Python version, the one I run on my own archive every day, remains by far the more tested. Use the program if you would rather not install Python; otherwise use the scripts here.
-
----
-
-## Related project: fast JXL thumbnails in Explorer
-
-[jxl-thumb](https://github.com/rsilvabr/jxl-thumb) is a Windows thumbnail provider for the archives this toolkit writes (and any other JPEG XL). It reads only the small 1:8 image a lossy JXL stores at the start of the file and converts it to sRGB, so Explorer thumbnails come out about 40× faster than with the Microsoft extension on 25–45 MP masters (the preview pane about 14×), with the right colours for ProPhoto and Adobe RGB. Existing files work as they are; install is per user, no admin rights.
-
----
-
-## Related project: a simpler, TIFF-only alternative
-
-If this toolkit's setup is more than you want to deal with, [tiff-workflow](https://github.com/rsilvabr/tiff-workflow) is a PowerShell toolkit (with an optional Python wizard UI) that losslessly re-compresses TIFFs with ZIP/Deflate compression — pixel data stays identical, only the compression is re-optimized. It also covers related TIFF chores: copying EXIF from JPEG to TIFF (Fuji S3/S5 Pro workflow), diagnosing padded 16-bit files, and generating colour-managed sRGB thumbnails.
-
-- **What you need:** PowerShell 7 (or Windows PowerShell 5.1), ImageMagick, ExifTool — Python 3.9+ with `rich` only if you want the wizard UI
-- **What's NOT needed:** Python or Python packages for the direct PowerShell usage, libjxl (cjxl/djxl)
-
-A 45 MP photo (medians, MB):
-
-| Format | 16-bit | 8-bit |
-|--------|:------:|:-----:|
-| Uncompressed TIFF | 273 | 136 |
-| **ZIP/Deflate (tiff-workflow)** | 227 (~17% smaller) | 61 (~55% smaller) |
-| JXL lossless (this toolkit) | 173 (~37% smaller) | 43 (~68% smaller) |
-| **JXL `d=0.1` (this toolkit)** | 31 (~89% smaller) | 43 — kept lossless: lossy would save only ~10 MB |
-
-**Trade-off:** easier to install, but much less compression, and the output stays a TIFF. Still better than nothing. Once you are comfortable with ImageMagick and ExifTool, the setup here is the same two tools plus Python and libjxl.
-
----
-
-## Related project: selective backup (photo-backup)
-
-[photo-backup](https://github.com/rsilvabr/photo-backup) backs up what this toolkit leaves you with. For every folder that has an export folder it copies the exports (the JXL master instead of the TIFF), the originals of the exported photos (RAW, camera JPEG, sidecars) and your Capture One / NX Studio edits, mirroring the folder tree on the destination. It leaves out the outtakes and the copies jxl-photo can make again from the master (sRGB, phone). The source is only read, nothing on the destination is ever deleted, and a later run can verify that the backup still matches.
-
-It was written around one folder layout: the originals beside an export folder (`_EXPORT`, `Lightroom_Export`, … — any name containing "export"), the exports inside it. Run its dry-run first and read what it would copy; a different layout may need its settings, or the script, adapted.
+- [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe) — this toolkit as a Windows program, no Python needed. The scripts inside are byte for byte those of a release; the Python version here is the one I run every day and remains the more tested.
+- [jxl-thumb](https://github.com/rsilvabr/jxl-thumb) — fast, colour-managed JXL thumbnails in Windows Explorer.
+- [tiff-workflow](https://github.com/rsilvabr/tiff-workflow) — a simpler, TIFF-only alternative: lossless ZIP recompression, no libjxl needed, much less compression.
+- [photo-backup](https://github.com/rsilvabr/photo-backup) — backs up what this toolkit leaves you with: the JXL masters, the originals of the exported photos and your edits.
 
 ---
 

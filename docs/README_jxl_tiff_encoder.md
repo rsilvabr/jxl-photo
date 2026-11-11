@@ -29,7 +29,7 @@ djxl decodes each output for the round-trip check (`VERIFY_ROUNDTRIP`, on by
 default) and for the Explorer thumbnail; without ImageMagick the thumbnail is
 left out, nothing else changes.
 
-Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation) in the main README — the same tools serve all four scripts.
+Download, PATH and the checks: [install.md](install.md) — the same tools serve all four scripts.
 
 ---
 

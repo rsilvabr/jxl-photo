@@ -26,7 +26,7 @@ ImageMagick is needed only for lossy JXLs that carry their ICC profile as a
 blob (table-curve profiles, see [jxl_color_internals.md](jxl_color_internals.md)):
 without it such a file is refused, never decoded to wrong colours.
 
-Download, PATH and the checks: [Requirements & Installation](../README.md#requirements--installation) in the main README — the same tools serve all four scripts.
+Download, PATH and the checks: [install.md](install.md) — the same tools serve all four scripts.
 
 ---
 

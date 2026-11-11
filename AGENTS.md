@@ -684,12 +684,23 @@ trusting the report; write the review with
 must-fix / should-fix items and a commit verdict.
 
 ## Docs map
-- `README.md` — short by design: features, install, quick start, a
-  one-line-per-item "Good to know", and a SHORT "What's new" for the current
+- `README.md` — short by design (about 240 lines since 2026-11-11, from 690):
+  the size table, features one line each, a five-line install, the wizard's
+  quick start, one command per script, a one-line-per-item "Good to know",
+  the documentation table and a SHORT "What's new" for the current
   release ONLY (calm, a few bullets, one line of links). No "In vX.Y.Z"
-  sections for earlier releases and no release table there (owner's rule,
-  2026-11-11: the README must not grow). Long explanations go to the docs
-  below, not here
+  sections for earlier releases, no release table, no table of contents
+  (owner's rule, 2026-11-11: the README must not grow). Anything longer goes
+  to a page below with a link and a row in the documentation table
+- `docs/install.md` — the Python install step by step (downloads, PATH,
+  verify, troubleshooting); the per-script pages link to it
+- `docs/why_jxl.md` — the long "Why JPEG XL": the size table again, the
+  grain tests, the r/jpegxl measurements, the comparison with ZIP TIFF
+- `docs/commands_and_settings.md` — everyday commands per script, "After
+  conversion", recommended settings, "What a re-run redoes", how the ICC
+  profile is kept, the encode record
+- `docs/related_projects.md` — jxl-photo-exe, jxl-thumb, tiff-workflow,
+  photo-backup (the README keeps one line each)
 - `docs/whats_new.md` — the short "What's new" of every recent release,
   newest first, with the at-a-glance table of the last releases. Each release
   adds its section at the top (the same bullets as the README's) and one
@@ -700,8 +711,9 @@ must-fix / should-fix items and a commit verdict.
   (the README's "Good to know" links into it)
 - `docs/file_sizes.md` — measured file sizes per camera and for film scans,
   effort 7 vs 9 (sizes, time, ssimulacra2/butteraugli) and `--buffering 0`;
-  libjxl 0.12.0, 2026-10-30. The README's size table is its summary — update
-  both together, and never name the owner's shoots or folders there
+  libjxl 0.12.0, 2026-10-30. The README's size table is its summary (the
+  same table is in `docs/why_jxl.md`) — update the three together, and never
+  name the owner's shoots or folders there
 - `docs/metadata_written.md` — every field the toolkit writes into a photo
   (CreatorTool ICC, encode record, each `jxlphoto-*` token, xmpMM:History)
   and what it reveals. A new token or a new written field goes there in the
