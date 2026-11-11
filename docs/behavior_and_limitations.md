@@ -89,7 +89,7 @@ A JXL decoded to a JPEG, or to an 8-bit PNG, is not a copy of the master: it has
 
 ## What a JXL cannot hold: layers, odd bit depths, IPTC
 
-- **Layered TIFFs.** A TIFF with Photoshop layers (tag 37724) or a private tag too large to carry (Affinity Photo's document) is archived flattened. `--delete-source` and `--delete-skipped` **keep** such a TIFF (`KEEP source`); there is no flag to release it. A tag 34377 on its own (paths, resources) does not block the delete.
+- **Layered TIFFs.** A TIFF with Photoshop layers (tag 37724) or a private tag too large to carry (Affinity Photo's document) is archived flattened. `--delete-source` and `--delete-skipped` **keep** such a TIFF (`KEEP source`); there is no flag to release it. The Photoshop image resources (tag 34377) never block the delete: a block of 4 KB or less is carried and comes back in the decoded TIFF, a larger one (a preview, print settings, saved paths) is left out — the run says how many, and names a file whose block holds saved paths.
 - **10/12-bit (and 1/2/4-bit) TIFFs are refused.** The values would be archived unscaled, 16 times darker than the original. The file gets an ERROR and stays. A master an earlier version wrote from such a TIFF holds those unscaled values: `--delete-skipped` never takes it as the TIFF's archive (`KEEP source`). 8- and 16-bit TIFFs are unaffected.
 - **IPTC (IIM) is not carried into a JXL.** Keywords, captions and authors that exist only there (older Photoshop, Photo Mechanic, agencies) are not in the master; EXIF and XMP are. The lossless JPEG archive (`jbrd`) keeps everything.
 
@@ -105,7 +105,7 @@ The JXL's codestream carries the JPEG's orientation, so `djxl` already turns the
 
 ## A JPEG with an HDR gain map, converted lossy to JXL
 
-Phones write HDR photos as a standard JPEG followed by a second, smaller image, the gain map, which an HDR screen uses to show the highlights brighter (Android's Ultra HDR, ISO 21496-1, Apple's HDR gain map). `cjxl` encodes the first image of the file, so a pixel re-encode (`--force-convert --from-jpeg` at a distance above 0) gives a JXL with the standard picture only. The run says so per file (`HDR gain map not carried`), and **`--delete-source` and `--delete-skipped` keep such a JPEG** (`KEEP (the JPEG carries an HDR gain map …)`): it is the only copy of the gain map. There is no flag to release it.
+Phones write HDR photos as a standard JPEG followed by a second, smaller image, the gain map, which an HDR screen uses to show the highlights brighter (Android's Ultra HDR, ISO 21496-1, Apple's HDR gain map). `cjxl` encodes the first image of the file, so a pixel re-encode (`--force-convert --from-jpeg` at a distance above 0) gives a JXL with the standard picture only. The run says so per file (`HDR gain map not carried`), and **`--delete-source` and `--delete-skipped` keep such a JPEG** (`KEEP (the JPEG carries an HDR gain map …)`): it is the only copy of the gain map. There is no flag to release it. The XMP that announces a gain map (`hdrgm:Version`, the container directory) is removed from the lossy JXL and from every JPEG/PNG decoded from one, since the file does not hold it (v2.28.0).
 
 The lossless transcode (the default for JPEGs, `--force-transcode`) keeps the whole file — the JPEG comes back bit for bit, gain map included — and deletes as usual. A camera's MPO (Nikon, Panasonic, Sony: preview images after the picture) has no gain map and is not held back. A JPEG or PNG decoded from such an archive is the standard picture.
 

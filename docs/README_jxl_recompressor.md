@@ -485,7 +485,10 @@ A derivative is made of the photo, never of the **thumbnail page** a split
 TIFF carried (`<name>_page1_thumbnail.jxl`, marked `jxlphoto-thumb`): those are
 skipped and counted in one line (since v2.18.0; v2.17.0 wrote a 160×120
 derivative of each). A plain recompression still includes them, so a split
-stays complete.
+stays complete. The same goes for the 160 px thumbnail a camera or its
+software writes into its own TIFF without flagging it (NX Studio, Fuji Hyper
+Utility; archived as `<name>_page1.jxl`): a page other than the first that is
+at most 160 px on its long side gets no derivative (v2.28.0).
 
 `--output-icc sRGB|AdobeRGB|<path to .icc>` converts the master: it is decoded
 at 16 bits, converted with ImageMagick from its own profile (fixed **relative

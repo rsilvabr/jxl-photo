@@ -251,7 +251,12 @@
   the run rewrote completely (same `jxlphoto-src`, a group id the new pages do
   not carry, the TIFF still on disk) and only reports a leftover REAL page —
   never delete one. Derivative runs of the recompressor skip `jxlphoto-thumb`
-  pages (#552); a plain recompression keeps them so the split stays complete.
+  pages (#552) and a camera's UNFLAGGED thumbnail page (#642:
+  `_is_camera_thumbnail_page`, parity-pinned with the transcoder — a page
+  other than the first, at most 160 px; the encoder keeps archiving it as a
+  real page so the TIFF comes back whole, do not reclassify it there: the
+  decoder restores every thumbnail as SubfileType 1 and `exclude` would drop
+  it); a plain recompression keeps them so the split stays complete.
   So does the transcoder's resized/sharpened/colour-converted JXL -> JPEG/PNG
   (`_skip_thumbnail_pages`, #555; no marker read on a dry run).
 - **Each manifest entry runs as a SEPARATE child process.** A child's own safety
@@ -311,8 +316,14 @@
   never empties the page's other private tags and is never a #620 veto, and
   a program's own oversized tag — Affinity Photo's document — never costs
   the IPTC block; `_iptc_left_out_note` logs a block left out). The decoder writes it back;
-  recompressed copies and the transcoder's JPEG/PNG carry the token like
-  `35243`. `_exiftool_source`'s MIE dump keeps EXIF and XMP text but turns
+  recompressed JXL copies carry the `jxlphoto-tifftag` tokens (they can
+  still be decoded to a TIFF); a JPEG/PNG never does (#646: `_copy_metadata`
+  on a JXL source, `_derivative_metadata_args`). The Photoshop image
+  resources (tag 34377, #643) follow the IPTC block's rule — carried at 4 KB
+  or less, left out alone when larger (`_photoshop_left_out_note`: one line
+  at the end of the run, a warning only for saved paths), never a #620 veto —
+  and an IPTC block that lives only inside them is found by `_iptc_stream`
+  (both routes of the fill). `_exiftool_source`'s MIE dump keeps EXIF and XMP text but turns
   non-Latin IPTC text into `?` (measured 2026-11-11): never copy IPTC from
   its result — a `%` path goes through `_iptc_only_source`. The two routes
   differ, so a test of the IPTC copy runs in a `%` folder AND in one without.
@@ -389,7 +400,9 @@
   gain map; a `jbrd` output holds the whole file and is not judged. Any new
   delete path for a pixel re-encode of a JPEG needs the same gate. Not
   carried into the JXL: the `jhgm` box exists, cjxl/djxl 0.12 cannot write
-  or apply it.
+  or apply it. The XMP that announces a gain map (`XMP-hdrgm`,
+  `XMP-GContainer`) is removed by `_copy_metadata` from every output of the
+  convert path (#645); the lossless archive is never edited.
 - **Orientation of a JXL made from a JPEG (#623, v2.26.0).** cjxl keeps the
   JPEG's pixels as stored and puts the EXIF Orientation in the CODESTREAM
   (lossless and lossy alike); djxl, and cjxl reading a JXL, turn the pixels
@@ -528,7 +541,10 @@
   `-charset filename=utf8`, `_run_exiftool_argfile`; the argfile's own PATH is
   on that command line too, so `_run_captured` hands an argfile whose path the
   code page cannot hold to exiftool on stdin, `_argfile_via_stdin`, #553); ImageMagick globs `[ ]` and
-  expands `%`; a hard link cannot cross drives (a fallback copy must be released
+  formats the name it WRITES like printf (`%d`, `%o`, `%x`: `100%off` became
+  `1000ff`, #647) — every path magick writes goes through `_magick_out_path`
+  (parity-pinned, four backends), inputs as they are; a test folder ending in
+  `%` proves nothing, name it `100%off %d`; a hard link cannot cross drives (a fallback copy must be released
   per file); the 260-character limit (cjxl/djxl cannot open such a path:
   `_long_codec_paths` inside `_run_captured` gives them the `\\?\` prefix,
   #541 — never pass that prefix to ImageMagick, `?` is a wildcard there); exiftool

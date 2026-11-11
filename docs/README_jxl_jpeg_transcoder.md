@@ -880,7 +880,10 @@ disposable by construction:
   a split TIFF carried (`<name>_page1_thumbnail.jxl`, marked `jxlphoto-thumb`)
   is skipped, and so it is with `--icc-profile`/`--to-srgb` alone (since
   v2.18.0; v2.17.0 wrote a 160×120 JPEG of each). A plain decode still
-  converts every file; a dry run still lists them (it reads no marker).
+  converts every file; a dry run still lists them (it reads no marker). The
+  160 px thumbnail a camera or its software writes into its own TIFF without
+  flagging it (NX Studio, Fuji Hyper Utility; archived as
+  `<name>_page1.jxl`) is skipped the same way (v2.28.0).
 
 - **It never deletes its source.** `--delete-source`/`--delete-skipped` are
   refused (exit 2).

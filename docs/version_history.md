@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.27.1](#v2271)** | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
+| **[v2.28.0](#v2280)** | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
+| [v2.27.1](#v2271) | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
 | [v2.27.0](#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master (copied into the XMP where it is missing) and comes back byte for byte in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts (round 78, 3 fixes) |
 | [v2.26.1](#v2261) | 2026-11-10 | A JXL made from a rotated JPEG is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex`; one exiftool run less per JXL → JPEG (round 77, 2 fixes) |
 | [v2.26.0](#v2260) | 2026-11-10 | A JPEG decoded from the JXL of a rotated JPEG comes back as the camera wrote it (`JPEG_ORIENTATION`, `--jpeg-orientation`); JXL → PNG of camera JPEGs, and resize/colour conversion of sources with the standard sRGB profile, work; the decoder's opt-in `--exiftool-ignore-minor` (round 76, 6 fixes) |
@@ -99,9 +100,25 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.28.0
+
+**Released 2026-11-11.** Supersedes v2.27.1. The smaller findings of the
+same sweep, all decided as "fix" (round 80, #642–#647): edge cases of what is
+carried into a master and into its copies, and one path bug the new tests
+found. No delete gate changes; nothing here deleted or damaged a file. What
+changes on an existing command line: [upgrading.md](upgrading.md).
+
+- **Changed — the Photoshop image resources of a TIFF are carried when small (encoder, #643).** Tag 34377 was skipped outright, so a TIFF → JXL → TIFF round trip dropped it. It now follows the IPTC block's rule: a block of 4 KB or less rides in a `jxlphoto-tifftag:34377` token and comes back byte for byte (on the test set, 7 of 13 blocks: a 28-byte caption digest written by SilverFast, VueScan and others); a larger one — a Lightroom or Photoshop TIFF keeps a preview and print settings there, 5 KB to 540 KB measured — is left out, counted in one line at the end of the run, and a file whose block holds saved paths is named in a warning. Its size never keeps a TIFF from being deleted. An IPTC block that exists only inside it (Sony's Edit) is copied into the XMP like the IPTC tag's (`_iptc_stream`).
+- **Changed — JPEG and PNG copies no longer carry the `jxlphoto-tifftag` markers (transcoder, #646).** Only the decoder reads them; they are the IPTC block, the Photoshop block and a scanner's private tags in hex. A JXL copy made by the recompressor keeps them.
+- **#642 — no copy is made of a camera TIFF's own thumbnail page (recompressor, transcoder).** NX Studio and Fuji Hyper Utility write a 160 px thumbnail as a second page without the reduced-image flag; it is archived as `<name>_page1.jxl` so the TIFF comes back whole, and a resize/sharpen/colour run made a copy and a JPEG of it. A page other than the first that is at most 160 px on its long side now gets no derivative.
+- **#644 — the padding Windows Photos reserves in a TIFF (tag 59932, 2 060 zero bytes) is not carried** (it became a 4 KB marker).
+- **#645 — a lossy JXL and a JPEG/PNG made from an Ultra HDR JPEG no longer carry the XMP that announces a gain map** they do not hold (`hdrgm:Version`, the container directory).
+- **#647 — a resized, sharpened or colour-converted JPEG/PNG in a folder named like `100%off` works.** ImageMagick formats the name it writes like printf (`%d`, `%o`, `%x`), so the write failed with "No such file or directory"; every path it writes is escaped now, in the four scripts (`_magick_out_path`).
+- Tests: `tests/test_sweep_fixes_261111.py` (real codecs, exiftool and ImageMagick, in folders named with Japanese, `[ ]`, a space, parentheses, with and without `%`): 42 checks, 39 of them failing on v2.27.1. The real-photo battery's folder is now named `… 100%off %d`, and it checks each of the six on the real files.
+
 ## v2.27.1
 
-**Released 2026-11-11.** Supersedes v2.27.0. Hardening for the lossy
+**Released 2026-11-11.** Superseded by v2.28.0. Supersedes v2.27.0. Hardening for the lossy
 JPEG → JXL conversion (round 79, #641), found by running the scripts on real
 files of kinds the test fixtures did not have. The lossless transcode, the
 default for JPEGs, was never affected. What changes on an existing command

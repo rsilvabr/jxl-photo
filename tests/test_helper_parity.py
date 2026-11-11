@@ -281,6 +281,12 @@ SHARED_HELPERS = [
     # Resize/sharpening geometry and the derivative label: a copy drifting
     # would derive a DIFFERENT label for the same recipe, so one backend would
     # re-derive in a loop what the other considers up to date.
+    # A camera's unflagged thumbnail page: the two derivative makers must
+    # leave out the same pages.
+    "_is_camera_thumbnail_page",
+    # Every path ImageMagick writes: one backend forgetting the escape fails
+    # in a folder named "100%off" (#647).
+    "_magick_out_path",
     "_png_size",
     "_resize_geometry",
     "_sharpen_args",

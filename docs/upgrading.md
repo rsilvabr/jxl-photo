@@ -11,6 +11,25 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.28.0: a small Photoshop block is carried; JPEG/PNG copies drop the TIFF-tag markers
+
+- **New masters of TIFFs with a small Photoshop resource block** (tag 34377,
+  4 KB or less: SilverFast, VueScan and others write a 28-byte one) carry it
+  in one more marker, `jxlphoto-tifftag:34377`, and the decoded TIFF has it
+  back. A larger block (Lightroom and Photoshop TIFFs: a preview, print
+  settings) is still not carried; the end of the run says how many. Existing
+  masters are not touched.
+- **JPEG and PNG copies made from a master no longer carry the
+  `jxlphoto-tifftag` markers** (the IPTC block and a scanner's tags, which
+  only a JXL → TIFF decode uses). Copies already made keep them; they are
+  harmless. `--overwrite` remakes a copy without them.
+- **A resize, sharpening or colour run makes no copy of a camera TIFF's own
+  thumbnail page** (`<name>_page1.jxl`, at most 160 px, from NX Studio or Fuji
+  Hyper Utility TIFFs). If an earlier run made such copies
+  (`<name>_page1.jxl` in the copies' folder, `<name>_page1.jpg`), they can be
+  deleted by hand; the master's own `_page1.jxl` is part of the archive and
+  stays.
+
 ## v2.27.1: a lossy JPEG → JXL keeps a JPEG that has an HDR gain map
 
 - **`jxl_jpeg_transcoder.py --force-convert --from-jpeg` (distance above 0)

@@ -48,7 +48,7 @@ from typing import Optional
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.27.1"
+TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1763,6 +1763,14 @@ ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
 # "jxlphoto-iccprofile:<base64>" (XMP CreatorTool "ICC:<base64>" in JXLs
 # written up to v2.18.x). Read as the source profile of a decode; never left
 # in a delivered JPEG/PNG, whose profile is in the normal place.
+TIFFTAG_PREFIX = "jxlphoto-tifftag:"
+# Must match the encoder's TIFFTAG_XMP_PREFIX: a TIFF tag of the master's
+# source that only a JXL -> TIFF decode writes back (the IPTC and Photoshop
+# blocks, a scanner's private tags), as hex. Never left in a delivered
+# JPEG/PNG (v2.28.0): nothing reads it there.
+_GAIN_MAP_XMP_REMOVAL = ["-XMP-hdrgm:all=", "-XMP-GContainer:all="]
+# The XMP that announces an HDR gain map (Android's Ultra HDR): removed from
+# every output of the convert path, which never holds the gain map itself.
 ORIGIN_PREFIX = "jxlphoto-origin:"
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
@@ -2213,6 +2221,11 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
                  # again on a colour-converted output.
                  "-InteropIFD:InteropIndex", "-InteropIFD:InteropVersion",
                  "-xmp:all", "-iptc:all"]
+                # No output of this path holds an HDR gain map (#641): the
+                # XMP that announces one (Ultra HDR's hdrgm:Version and the
+                # container directory listing a "GainMap" item of N bytes)
+                # must not describe a file that has none.
+                + _GAIN_MAP_XMP_REMOVAL
                 + _reset + [str(dst_path)],
                 timeout=EXIFTOOL_TIMEOUT
             )
@@ -2224,9 +2237,16 @@ def _copy_metadata(src_path: Path, dst_path: Path) -> None:
         # decoder's cleanup_xmp_icc) — one read, one write. A read that
         # fails raises: the token would stay in the delivered file.
         content, _toks = _read_creator_and_relation(dst_path)
+        # A JPEG/PNG also drops the TIFF tags a master carries for the
+        # decoder (jxlphoto-tifftag: the IPTC and Photoshop blocks, a
+        # scanner's private tags): only a JXL -> TIFF decode reads them, and
+        # they are up to 8 KB of hex per tag in a file meant to be light.
+        _drop = (ICC_PROFILE_PREFIX, ORIENTATION_PREFIX)
+        if src_path.suffix.lower() in JXL_EXTS:
+            _drop += (TIFFTAG_PREFIX,)
         strip = ["-XMP-dc:Relation-=" + _argfile_safe(t)
                  for t in dict.fromkeys(_toks)
-                 if t.startswith((ICC_PROFILE_PREFIX, ORIENTATION_PREFIX))]
+                 if t.startswith(_drop)]
         if "ICC:" in content:
             content = content.strip()
             # Blob is bounded: base64 chars only up to the next pipe or EOL,
@@ -2612,6 +2632,45 @@ DERIVED_XMP_PREFIX = "jxlphoto-derived:"
 # The encoder's THUMB_XMP_FLAG: the JXL is the THUMBNAIL page of a split TIFF
 # (the reduced preview it carried). A derivative is never made of one (#555).
 THUMB_FLAG = "jxlphoto-thumb"
+PAGE_PREFIX = "jxlphoto-page:"
+# The encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL holds.
+_CAMERA_THUMB_MAX_SIDE = 160
+
+
+def _magick_out_path(path) -> str:
+    """`path` as an ImageMagick OUTPUT operand. ImageMagick formats the name
+    it writes like printf does (%d, %o, %x: the scene number), so a folder
+    named "100%off" became "1000ff" and the write failed with "No such file
+    or directory" (#647). A doubled percent sign is a literal one. Inputs are
+    not formatted and must not be escaped. Parity-pinned (four backends)."""
+    return str(path).replace("%", "%%")
+
+
+def _is_camera_thumbnail_page(tokens, width, height) -> bool:
+    """True for a page other than the first of a split TIFF that is at most
+    160 px on its long side: the thumbnail a camera or its software writes
+    into its own TIFF WITHOUT the reduced-image flag (NX Studio: 160x107 or
+    107x160; Fuji Hyper Utility: 160x120). The encoder archives it as a page
+    like any other, so the TIFF comes back whole; a derivative run makes no
+    copy of it, like the flagged thumbnail pages. Pure: `tokens` are the
+    JXL's dc:Relation values, width/height its pixel size (0 or None when
+    unknown: then it is not one)."""
+    try:
+        side = max(int(width or 0), int(height or 0))
+    except (TypeError, ValueError):
+        return False
+    if not 0 < side <= _CAMERA_THUMB_MAX_SIDE:
+        return False
+    for t in tokens or ():
+        t = str(t).strip()
+        if t.startswith(PAGE_PREFIX):
+            try:
+                return int(t[len(PAGE_PREFIX):]) > 0
+            except ValueError:
+                return False
+    return False
+
+
 # Final paths (normcase) whose existing jxlphoto-derived label names another
 # recipe: the skip logic must re-derive them instead of keeping them.
 _FORCE_REDERIVE = set()
@@ -6962,13 +7021,14 @@ def _derived_label(icc_label, resize_mode=None, resize_value=None,
 
 def _read_thumb_markers_batch(paths: list) -> set:
     """normcased paths of the JXLs among `paths` marked jxlphoto-thumb (the
-    thumbnail page of a split TIFF), in as few exiftool calls as possible. A
-    batch that cannot be read marks nothing: its files are converted as
-    before."""
+    thumbnail page of a split TIFF) or that are a camera's unflagged 160 px
+    thumbnail page (_is_camera_thumbnail_page), in as few exiftool calls as
+    possible. A batch that cannot be read marks nothing: its files are
+    converted as before."""
     found = set()
     if not paths:
         return found
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
+    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation", "-ImageWidth", "-ImageHeight",
                    "-charset", "FileName=UTF8", "-charset", "UTF8"]
     BATCH = 400
     _prog = _batch_read_state("Thumbnail markers", len(paths))
@@ -6994,7 +7054,9 @@ def _read_thumb_markers_batch(paths: list) -> set:
                 if src is None or rel is None:
                     continue
                 values = rel if isinstance(rel, list) else [str(rel)]
-                if any(str(t).strip() == THUMB_FLAG for t in values):
+                if (any(str(t).strip() == THUMB_FLAG for t in values)
+                        or _is_camera_thumbnail_page(values, entry.get("ImageWidth"),
+                                                     entry.get("ImageHeight"))):
                     found.add(os.path.normcase(str(Path(src))))
         except Exception as e:
             logger.debug(f"Thumbnail-page check: marker batch failed ({e})")
@@ -7164,8 +7226,9 @@ def _derivative_metadata_args(jxl_path: Path, label: str, size) -> list:
     _creator, tokens = _read_creator_and_relation(jxl_path)
     # ICC_PROFILE_PREFIX too: a delivered JPEG/PNG has its profile in the
     # normal place (_copy_metadata strips the copied token the same way).
+    # TIFFTAG_PREFIX: only a JXL -> TIFF decode reads those.
     drop = (SRC_PREFIX, SRCSUM_PREFIX, DERIVED_XMP_PREFIX, ICC_PROFILE_PREFIX,
-            ORIENTATION_PREFIX)
+            ORIENTATION_PREFIX, TIFFTAG_PREFIX)
     keep = [t for t in tokens if t and not t.startswith(drop)]
     lines = ["-XMP-dc:Relation+=" + _argfile_safe(t) for t in keep]
     lines.append("-XMP-dc:Relation+=" + DERIVED_XMP_PREFIX + label)
@@ -7352,7 +7415,7 @@ def decode_to_image(jxl_path: Path, write_path: Path, final_path: Path,
         # bytes into a JPEG deliverable). With staging the extension is real
         # and the explicit spec is a harmless no-op.
         _fmt_flag = "--output_format=png" if is_png else "--output_format=jpeg"
-        _magick_out = ("png:" if is_png else "jpg:") + str(actual_out)
+        _magick_out = ("png:" if is_png else "jpg:") + _magick_out_path(actual_out)
 
         derivative = _is_derivative()
         if output_icc and not MAGICK_AVAILABLE:

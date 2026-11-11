@@ -31,7 +31,7 @@ from PIL import Image
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.27.1"
+TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1654,15 +1654,32 @@ _PRIVATE_TAG_SKIP = frozenset({
     #   (_private_tiff_tags: any of BYTE/ASCII/SBYTE/UNDEFINED/LONG, written
     #   back as UNDEFINED, its own size limit) and its fields are also copied
     #   into the XMP (IPTC_TO_XMP_FILL).
-    34377,                          # Photoshop image resources
+    #   34377 (Photoshop image resources) is NOT here since v2.28.0: carried
+    #   like the IPTC block, judged apart, when it fits the limit
+    #   (_private_tiff_tags, _photoshop_left_out_note).
     34665, 34853, 40965,            # Exif / GPS / Interop IFD pointers
     34675,                          # ICC profile
     37724,                          # Photoshop ImageSourceData (layers)
     40091, 40092, 40093, 40094, 40095,  # Windows XP* tags (exiftool copies them)
     50341,                          # PrintIM
     50740,                          # DNGPrivateData (holds offsets)
+    59932,                          # Padding: zeros Windows Photos reserves for
+                                    # edits in place (2 KB of nothing, a 4 KB token)
+    59933,                          # OffsetSchema (an offset, meaningless in a new file)
 })
 _PRIVATE_TAG_TYPES = frozenset({1, 2, 6, 7})   # BYTE, ASCII, SBYTE, UNDEFINED
+
+_PHOTOSHOP_TAG = 34377
+# The Photoshop image resources of a TIFF ("8BIM" records: a caption digest,
+# print settings, slices, clipping paths, a preview, sometimes the IPTC).
+# exiftool does not copy it into a JXL, so it is carried as a token like any
+# private tag when it fits PRIVATE_TAG_MAX_BYTES and left out when it does
+# not (a Lightroom or Photoshop TIFF: most of the block is a JPEG preview).
+# Judged apart from the program's own tags, like the IPTC block: its size is
+# never a reason to keep the TIFF (#620 decided that for this tag), and an
+# oversized tag of another program never costs it.
+_IRB_IPTC = 0x0404                  # the IPTC (IIM) stream inside the block
+_IRB_PATHS = range(2000, 2999)      # saved paths, the clipping path among them
 
 _IPTC_TAG = 33723
 # The IPTC block (IIM) of a TIFF: exiftool itself writes it as a LONG array
@@ -2161,6 +2178,9 @@ _d50_patch_lock = threading.Lock()
 # can say it out loud: per-file warnings scroll away in a large batch.
 _multipage_ignored = {"files": 0, "pages": 0}
 _multipage_ignored_lock = threading.Lock()
+# Pages whose Photoshop image resources were too big to carry
+# (_photoshop_left_out_note): one line in the summary, under the same lock.
+_photoshop_left_out = {"files": 0}
 # Thumbnail pages dropped WITHOUT their real page being dropped too — by
 # --multipage-mode split + --thumbnail-mode exclude, and by --multipage-mode
 # skip, which encodes the single real page and silently left its embedded
@@ -3463,7 +3483,7 @@ def _make_explorer_thumbnail(jxl_path, tmp_dir):
             cmd += ["-profile", str(icc)]
         cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
                 "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
-                "jpeg:" + str(jpg)]
+                "jpeg:" + _magick_out_path(jpg)]
         r = _run_captured(cmd, CJXL_TIMEOUT)
         if r.returncode != 0 or not jpg.exists():
             raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
@@ -3726,6 +3746,10 @@ def _private_tiff_tags(tif, page):
     delete gate (#620): its fields are in the XMP. And when ANOTHER tag is too
     large (Affinity Photo's document), the list still holds the IPTC block,
     beside the `why` that keeps the TIFF from being deleted.
+
+    The Photoshop image resources (_PHOTOSHOP_TAG) follow the same rule:
+    carried with their own type when they fit, left out alone when they do
+    not (_photoshop_left_out_note), never a veto.
     """
     found, iptc, why = [], [], None
     for tag in page.tags.values():
@@ -3741,6 +3765,11 @@ def _private_tiff_tags(tif, page):
             if dtype in _IPTC_TAG_TYPES and size <= PRIVATE_TAG_MAX_BYTES:
                 tif.filehandle.seek(tag.valueoffset)
                 iptc.append((code, 7, tif.filehandle.read(size)))
+            continue
+        if code == _PHOTOSHOP_TAG:
+            if dtype in _PRIVATE_TAG_TYPES and size <= PRIVATE_TAG_MAX_BYTES:
+                tif.filehandle.seek(tag.valueoffset)
+                iptc.append((code, dtype, tif.filehandle.read(size)))
             continue
         if dtype not in _PRIVATE_TAG_TYPES or why:
             continue
@@ -3778,13 +3807,95 @@ def _iptc_left_out_note(page):
     return None
 
 
-def _has_iptc(tif) -> bool:
-    """True when the TIFF's first page has the IPTC tag: the only fact that
-    decides whether _fill_xmp_from_iptc runs (no exiftool call to find out)."""
+def _irb_resources(data: bytes) -> list:
+    """[(id, payload)] of a Photoshop image resource block ("8BIM" records,
+    big-endian whatever the TIFF's byte order). Stops at the first record that
+    does not parse: what was read so far is returned."""
+    out, pos = [], 0
+    while pos + 12 <= len(data) and data[pos:pos + 4] == b"8BIM":
+        rid = struct.unpack(">H", data[pos + 4:pos + 6])[0]
+        name_len = data[pos + 6]
+        pos += 6 + 1 + name_len + ((name_len + 1) % 2)       # the name is padded to even
+        if pos + 4 > len(data):
+            break
+        size = struct.unpack(">I", data[pos:pos + 4])[0]
+        if pos + 4 + size > len(data):
+            break
+        out.append((rid, data[pos + 4:pos + 4 + size]))
+        pos += 4 + size + (size % 2)
+    return out
+
+
+def _photoshop_block(tif, page):
+    """The page's Photoshop image resources as stored, or None (no tag, a type
+    that is not a byte stream, or unreadable)."""
+    tag = page.tags.get(_PHOTOSHOP_TAG)
+    if tag is None:
+        return None
     try:
-        return _IPTC_TAG in tif.pages[0].tags
+        if int(tag.dtype) not in _PRIVATE_TAG_TYPES:
+            return None
+        tif.filehandle.seek(tag.valueoffset)
+        return tif.filehandle.read(int(tag.valuebytecount))
+    except Exception:
+        return None
+
+
+def _photoshop_left_out_note(tif, page):
+    """(note, has_paths) for a page whose Photoshop image resources are NOT
+    carried as a token (bigger than PRIVATE_TAG_MAX_BYTES), else (None, False).
+    The note says what the block holds; has_paths is True when a saved path
+    (a clipping path) is among it — the one item a user drew by hand, so the
+    caller warns for it and only mentions the rest."""
+    tag = page.tags.get(_PHOTOSHOP_TAG)
+    if tag is None:
+        return None, False
+    try:
+        size = int(tag.valuebytecount)
+    except (TypeError, ValueError):
+        return None, False
+    if size <= PRIVATE_TAG_MAX_BYTES:
+        return None, False
+    ids = [rid for rid, _p in _irb_resources(_photoshop_block(tif, page) or b"")]
+    has_paths = any(rid in _IRB_PATHS for rid in ids)
+    what = []
+    if any(rid in (0x0409, 0x040C) for rid in ids):
+        what.append("a preview")
+    if has_paths:
+        what.append("saved paths")
+    what.append("print and document settings")
+    return (f"Photoshop resource block is {size:,} bytes (limit {PRIVATE_TAG_MAX_BYTES:,}): "
+            f"not kept ({', '.join(what)})", has_paths)
+
+
+def _iptc_stream(tif):
+    """Page 0's IPTC (IIM) stream, byte for byte: the IPTC tag when the TIFF
+    has one, else the copy inside the Photoshop image resources (Sony's Edit
+    and other programs write it only there). None when there is none."""
+    try:
+        page = tif.pages[0]
+        tag = page.tags.get(_IPTC_TAG)
+        if tag is not None:
+            tif.filehandle.seek(tag.valueoffset)
+            return tif.filehandle.read(int(tag.valuebytecount))
+        for rid, payload in _irb_resources(_photoshop_block(tif, page) or b""):
+            if rid == _IRB_IPTC and payload:
+                return payload
+    except Exception:
+        return None
+    return None
+
+
+def _has_iptc(tif) -> bool:
+    """True when the TIFF's first page has an IPTC block, in its own tag or
+    inside the Photoshop image resources: the only fact that decides whether
+    _fill_xmp_from_iptc runs (no exiftool call to find out)."""
+    try:
+        if _IPTC_TAG in tif.pages[0].tags:
+            return True
     except Exception:
         return False
+    return bool(_iptc_stream(tif))
 
 
 def _iptc_only_source(tiff_path, tmp_dir) -> str:
@@ -3792,11 +3903,9 @@ def _iptc_only_source(tiff_path, tmp_dir) -> str:
     for byte (any size: the token's limit does not apply here). Raises when
     the tag cannot be read: an output must not go out without the fields."""
     with tifffile.TiffFile(str(tiff_path)) as tif:
-        tag = tif.pages[0].tags.get(_IPTC_TAG)
-        if tag is None:
+        raw = _iptc_stream(tif)
+        if raw is None:
             raise RuntimeError("the IPTC block disappeared from the TIFF while encoding")
-        tif.filehandle.seek(tag.valueoffset)
-        raw = tif.filehandle.read(int(tag.valuebytecount))
     out = os.path.join(str(tmp_dir), "iptc_source.tif")
     tifffile.imwrite(out, np.zeros((1, 1), dtype=np.uint8),
                      extratags=[(_IPTC_TAG, 7, len(raw), raw, True)])
@@ -4706,6 +4815,15 @@ def reorder_jxl_boxes(jxl_path):
         for h, p in parts:
             f.write(h)
             f.write(p)
+
+def _magick_out_path(path) -> str:
+    """`path` as an ImageMagick OUTPUT operand. ImageMagick formats the name
+    it writes like printf does (%d, %o, %x: the scene number), so a folder
+    named "100%off" became "1000ff" and the write failed with "No such file
+    or directory" (#647). A doubled percent sign is a literal one. Inputs are
+    not formatted and must not be escaped. Parity-pinned (four backends)."""
+    return str(path).replace("%", "%%")
+
 
 def _is_thumbnail_page(page) -> bool:
     """Return True if the TIFF page is a thumbnail or pyramid level.
@@ -6470,6 +6588,17 @@ def convert_one(tiff_path: Path, write_path: Path, final_path: Path, page_idx: i
                 _iptc_note = _iptc_left_out_note(page)
                 if _iptc_note and not STRIP_METADATA:
                     logger.warning(f"  >{tiff_path.name} (page {page_idx}): {_iptc_note}")
+                # The Photoshop block that is too big to carry: every
+                # Lightroom/Photoshop TIFF has one (a preview), so it is one
+                # line at the end of the run — but a saved path is said here.
+                _ps_note, _ps_paths = _photoshop_left_out_note(tif, page)
+                if _ps_note and not STRIP_METADATA:
+                    with _multipage_ignored_lock:
+                        _photoshop_left_out["files"] += 1
+                    if _ps_paths:
+                        logger.warning(f"  >{tiff_path.name} (page {page_idx}): {_ps_note}")
+                    else:
+                        logger.debug(f"  >{tiff_path.name} (page {page_idx}): {_ps_note}")
                 # IPTC -> XMP fill (_fill_xmp_from_iptc): decided from the tag
                 # of page 0, no exiftool call to find out; every page of a
                 # split gets it (same source, same XMP).
@@ -8567,6 +8696,7 @@ def main():
     with _multipage_ignored_lock:
         _multipage_ignored["files"] = 0
         _multipage_ignored["pages"] = 0
+        _photoshop_left_out["files"] = 0
         _thumbnails_dropped["files"] = 0
         _thumbnails_dropped["pages"] = 0
         _thumbnails_dropped["archived"] = 0
@@ -9405,6 +9535,11 @@ def main():
             logger.warning(f"  -> ... and {len(unreadable_files) - 10} more (see the list above in this log)")
 
     _log_discard_summary()
+    if _photoshop_left_out["files"]:
+        logger.info(
+            f"Photoshop resources: {_photoshop_left_out['files']} page(s) have a block over "
+            f"{PRIVATE_TAG_MAX_BYTES:,} bytes (a preview, print settings) that is not kept; "
+            f"pixels, ICC, EXIF, XMP and IPTC are. A file with saved paths is named above.")
     _log_scans_at_scan_distance(_scans_written, done=True)
     _log_eight_bit_at_other_distance(_eight_written, done=True)
     if _thumbs_written and MULTIPAGE_TIFF_MODE.lower() == "split":

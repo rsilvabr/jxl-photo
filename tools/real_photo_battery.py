@@ -88,7 +88,9 @@ ENC, DEC, REC, TR = (str(REPO / n) for n in (
 results = []        # (section, name, ok, detail)
 # The folder every check runs in (see the docstring). The owner's library has
 # all of these in one path: G:\2025\250118_吾妻山公園_菜の花 [FINAL]\01_Z7\...
-HOSTILE_DIR = "250118_吾妻山公園 [FINAL] (2) 100%"
+# "%off" and "%d": ImageMagick formats the name it writes like printf (%o, %d,
+# %x) and exiftool expands %d/%f/%e in a source name (#550, #647).
+HOSTILE_DIR = "250118_吾妻山公園 [FINAL] (2) 100%off %d"
 B = LOGS = None
 _section = ""
 # Sections run in parallel (--jobs): each thread keeps its own section name,
@@ -1261,27 +1263,28 @@ def interaction_checks(A1, A2):
           not list((g2).rglob("recompressed_jxl/*.jxl")) and rc == 0, f"rc={rc}")
 
 
-def _iim_block(path):
-    """The raw bytes of page 0's IPTC block (TIFF tag 33723), or None."""
+def _iim_block(path, code=33723):
+    """The raw bytes of page 0's IPTC block (TIFF tag 33723) — or of another
+    tag carried the same way (34377, the Photoshop resources) — or None."""
     with tifffile.TiffFile(path) as t:
-        tg = t.pages[0].tags.get(33723)
+        tg = t.pages[0].tags.get(code)
         if tg is None:
             return None
         t.filehandle.seek(tg.valueoffset)
         return t.filehandle.read(int(tg.valuebytecount))
 
 
-def _iim_round_trip(pairs):
+def _iim_round_trip(pairs, code=33723):
     """(how many sources carry an IPTC block, the names whose decoded TIFF does
     not hold the same bytes) for (source TIFF, decoded TIFF) pairs. A block
     over the encoder's 4 KB limit is not carried and is not counted."""
     have, bad = 0, []
     for s, t in pairs:
-        a = _iim_block(s)
+        a = _iim_block(s, code)
         if a is None or len(a) > 4096 or not Path(t).exists():
             continue
         have += 1
-        if _iim_block(t) != a:
+        if _iim_block(t, code) != a:
             bad.append(Path(s).name)
     return have, bad
 
@@ -1499,6 +1502,21 @@ def scan_checks(scans):
             if n_iim:
                 check("scans: every IPTC block (tag 33723) comes back byte for byte (#640)",
                       not bad_iim, f"{n_iim} with a block, bad={bad_iim[:4]}")
+            # #643: the Photoshop image resources (tag 34377) of 4 KB or less
+            # come back too; a larger block (a preview) is left out, no error.
+            n_ps, bad_ps = _iim_round_trip(
+                ((s, dd / "converted_tiff" / (s.stem + ".tif")) for s in srcs), code=34377)
+            if n_ps:
+                big = [s.name for s in srcs if len(_iim_block(s, 34377) or b"") > 4096]
+                check("scans: every Photoshop resource block of 4 KB or less (tag 34377) "
+                      "comes back byte for byte, a larger one is left out and said (#643)",
+                      not bad_ps and (not big or "Photoshop resources:" in out),
+                      f"{n_ps} with a small block, {len(big)} larger, bad={bad_ps[:4]}")
+            # #644: the zeros Windows Photos reserves (tag 59932) are not a marker.
+            padded = [p.name for p in jx.values()
+                      if any(r.startswith("jxlphoto-tifftag:59932:") for r in relation(p))]
+            check("scans: no master carries the Windows Photos padding tag (#644)",
+                  not padded, f"with it: {padded[:4]}")
         else:
             check("scans lossy: same shape/depth/ICC after the round trip",
                   rc == 0 and not bad, f"rc={rc} {bad[:5]}")
@@ -1757,6 +1775,30 @@ def camera_thumb_checks(folder):
             bad.append(f"{s.name}: pixels differ")
     check("camera thumbnail TIFFs: the TIFF comes back with both pages, bit for bit",
           rc == 0 and bool(srcs) and not bad, f"rc={rc} {bad[:4]}")
+    # #642: a resized copy and a resized JPEG are made of the photo, not of
+    # the camera's 160 px thumbnail page (archived above as *_page1.jxl).
+    rr = B / "camthumb_copies"
+    for j in jx:
+        cp(j, rr / j.name)
+    rc, out = run("camthumb_recompress", [REC, rr, "--mode", "1", "--distance", "1",
+                                          "--effort", "3", "--resize-long", "1024",
+                                          "--no-preflight"])
+    copies = sorted(p.name for p in rr.rglob("*.jxl") if p.parent != rr)
+    check("camera thumbnail TIFFs: a resized JXL copy of each photo, none of its "
+          "thumbnail page (#642)",
+          rc == 0 and len(copies) == len(srcs) and not any("_page" in n for n in copies),
+          f"rc={rc} copies={copies[:6]}")
+    rj = B / "camthumb_jpegs"
+    for j in jx:
+        cp(j, rj / j.name)
+    rc, out = run("camthumb_jpeg", [TR, rj, "--mode", "8", "--force-convert", "--decode",
+                                    "--format", "jpeg", "--resize-long", "1024"])
+    jpegs = sorted(p.name for p in rj.glob("*.jp*g"))
+    tt = [n for n in jpegs if any(r.startswith("jxlphoto-tifftag:") for r in relation(rj / n))]
+    check("camera thumbnail TIFFs: a resized JPEG of each photo, none of its thumbnail "
+          "page, and no TIFF-tag marker in it (#642, #646)",
+          rc == 0 and len(jpegs) == len(srcs) and not any("_page" in n for n in jpegs)
+          and not tt, f"rc={rc} jpegs={jpegs[:6]} with tifftag={tt[:3]}")
     g = B / "camthumb_del"
     for s in srcs:
         cp(s, g / s.name)
@@ -1976,6 +2018,12 @@ def jpeg_checks(jpegs):
                   if not re.search(r"HDR gain map not carried \| " + re.escape(n), out)]
         check("JPEGs: a lossy convert says which JPEGs carry an HDR gain map it "
               "does not hold (#641)", not unsaid, f"{len(hdr)} with a gain map, unsaid={unsaid[:4]}")
+        # #645: such a JXL does not announce the gain map it does not hold.
+        stale = [n for n in sorted(hdr)
+                 if exif(["-s", "-XMP-hdrgm:all", "-XMP-GContainer:all",
+                          made_l[Path(n).stem]]).strip()]
+        check("JPEGs: the lossy JXL of an HDR JPEG carries no gain-map XMP (#645)",
+              not stale, f"still announcing one: {stale[:4]}")
         rc, out = run("jpg_lossy_delete", [TR, ll, "--mode", "1", "--force-convert",
                                            "--from-jpeg", "--distance", "1", "--delete-source",
                                            "--delete-skipped", "--delete-confirm-off"])

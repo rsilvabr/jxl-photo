@@ -40,7 +40,7 @@ import tifffile
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.27.1"
+TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -3935,7 +3935,7 @@ def decode_jxl_to_numpy(jxl_path, tmp_dir, target_icc_path=None, target_depth=No
                                "-profile", str(float_icc),
                                "-intent", "Relative",
                                "-profile", str(target_path),
-                               "-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + str(conv_png)],
+                               "-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)],
                               DJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
                 err = _stderr_tail(r.stderr)
@@ -5591,6 +5591,15 @@ _extrasamples_by_jxl: dict = {}
 # JXL (normcased) -> [(code, type, bytes)] from its jxlphoto-tifftag markers
 # (TIFFTAG_PREFIX). Same bookkeeping as _extrasamples_by_jxl.
 _tifftags_by_jxl: dict = {}
+
+
+def _magick_out_path(path) -> str:
+    """`path` as an ImageMagick OUTPUT operand. ImageMagick formats the name
+    it writes like printf does (%d, %o, %x: the scene number), so a folder
+    named "100%off" became "1000ff" and the write failed with "No such file
+    or directory" (#647). A doubled percent sign is a literal one. Inputs are
+    not formatted and must not be escaped. Parity-pinned (four backends)."""
+    return str(path).replace("%", "%%")
 
 
 def _parse_tifftag(token: str):

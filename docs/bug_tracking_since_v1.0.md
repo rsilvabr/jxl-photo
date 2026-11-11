@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #642.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #648.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
 | [Round-79 — real files the fixtures did not have](#round-79--real-files-the-fixtures-did-not-have-2026-11-11) | 2026-11-11 | v2.27.1 | #641 (1) |
 | [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | v2.27.0 | #638–#640 (3) |
 | [Round-77 — the should-fix list of the v2.26.0 review](#round-77--the-should-fix-list-of-the-v2260-review-2026-11-10) | 2026-11-10 | v2.26.1 | #636–#637 (2) |
@@ -95,6 +96,25 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-80 — what the sweep left to decide (2026-11-11)
+
+The smaller findings of round 79's sweep, decided by the owner ("fix them
+all"), plus one the new tests found on the way (#647: their folder was named
+`100%off`). Regression tests: `tests/test_sweep_fixes_261111.py` (real cjxl,
+djxl, exiftool and ImageMagick; folders named with Japanese, brackets, a
+space, parentheses, with and without `%`). The real-photo battery's own folder
+is now named `… 100%off %d`, and it checks #642–#646 on the real files.
+Nothing here deleted or damaged a file.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 642 | **A derivative run made a copy of a camera TIFF's own thumbnail page**: NX Studio and Fuji Hyper Utility write a 160 px thumbnail as a second page WITHOUT the reduced-image flag (NX Studio: no SubfileType at all; Hyper Utility: SubfileType 2 on both pages), so the encoder archives it as a page like any other (`<name>_page1.jxl`) — and a resize/sharpen/colour run then made a JXL copy and a JPEG of it beside the photo's | `jxl_recompressor.py`, `jxl_jpeg_transcoder.py` | ✅ Fixed — `_is_camera_thumbnail_page` (parity-pinned): a page other than the first (`jxlphoto-page:N`, N > 0) at most 160 px on its long side gets no derivative, like the flagged thumbnail pages of #552/#555 (the transcoder's marker batch also reads the size). The master is unchanged: both pages are archived and the decoder writes the TIFF back whole; a plain recompression or decode still includes the page |
+| 643 | **The Photoshop image resources of a TIFF (tag 34377) were never carried, and an IPTC block that lives only inside them did not reach the XMP**: the tag was on the encoder's skip list since the private tags were introduced, so a round trip dropped it without a word (the same shape as the IPTC block before #640); and `_has_iptc` looked at tag 33723 alone, so the capture date and keywords of a TIFF that keeps its IPTC inside the block (Sony's Edit) were not filled into the master's XMP | `jxl_tiff_encoder.py` | ✅ Fixed — the block follows the IPTC block's rule: 4 KB or less (most scanner programs write a 28-byte caption digest) rides in a `jxlphoto-tifftag:34377` token and comes back byte for byte; a larger one (a Lightroom or Photoshop TIFF: a preview, print settings) is left out, counted in one line at the end of the run, with a warning that names a file whose block holds saved paths. Judged apart from the program's own tags, and never a reason to keep the TIFF (the #620 decision stands). `_iptc_stream` reads the IIM from tag 33723 or from resource 0x0404, for both routes of the IPTC → XMP fill (a `%` path goes through `_iptc_only_source`) |
+| 644 | **The padding Windows Photos reserves in a TIFF became a 4 KB marker**: tag 59932 is 2 060 zero bytes kept for edits in place, and the encoder carried it as a `jxlphoto-tifftag` like a scanner's private tag (4 120 hex characters in every such master, and in its copies) | `jxl_tiff_encoder.py` | ✅ Fixed — 59932 (and 59933, OffsetSchema, an offset) are in `_PRIVATE_TAG_SKIP`. Masters written before keep the token; the decoder still writes it back |
+| 645 | **A lossy JXL and a JPEG/PNG made from an Ultra HDR JPEG kept the XMP that announces a gain map they do not hold**: `hdrgm:Version` and the container directory (`Item:Semantic="GainMap"`, `Item:Length`) came along with the rest of the XMP, describing a second image that is not in the file | `jxl_jpeg_transcoder.py` | ✅ Fixed — `_copy_metadata` (every output of the convert path, both directions) removes `XMP-hdrgm:all` and `XMP-GContainer:all` in the call that copies the metadata. The lossless archive is untouched: it holds the JPEG as it is |
+| 646 | **The `jxlphoto-tifftag` markers rode along into every JPEG and PNG**: only a JXL → TIFF decode reads them, and they are the IPTC block, the Photoshop block and a scanner's private tags in hex — up to 8 KB each in a file meant to be light (and a JPEG's XMP segment holds 64 KB at most) | `jxl_jpeg_transcoder.py` | ✅ Fixed — `_copy_metadata` strips them from a JPEG/PNG decoded from a JXL, and `_derivative_metadata_args` from a resized, sharpened or colour-converted one, like the `jxlphoto-iccprofile` token. A JXL copy made by the recompressor keeps them: it can still be decoded to a TIFF |
+| 647 | **A `%d`, `%o` or `%x` in the destination folder's name made every resized, sharpened or colour-converted JPEG/PNG fail**: ImageMagick formats the name it WRITES like printf (the scene number), so a folder named `100%off` became `1000ff` and the run ended, per file, in `magick: … No such file or directory`. The same held for the Explorer thumbnail and the float-decode intermediates when the temp folder had such a name (the thumbnail was skipped with a warning). Found by this round's own tests; the battery's folder ended in `100%`, which is not a format | all four backends | ✅ Fixed — `_magick_out_path` (parity-pinned) doubles the `%` in every path ImageMagick writes: the transcoder's output, the Explorer thumbnail (encoder, recompressor) and the converted PNG (decoder, recompressor). Inputs are not formatted and are passed as they are |
 
 ## Round-79 — real files the fixtures did not have (2026-11-11)
 

@@ -1372,7 +1372,16 @@ recompressed. What that takes:
   `jxlphoto-tifftag:33723` marker (stored as UNDEFINED, its own 4 KB limit that
   does not affect the page's other private tags). A SilverFast scan whose
   capture date lived only in the IPTC keeps it as `XMP-photoshop:DateCreated`.
-  The table of fields is in `docs/metadata_written.md`.
+  The table of fields is in `docs/metadata_written.md`;
+- **the Photoshop image resources** (tag 34377, v2.28.0) follow the IPTC
+  block's rule: 4 KB or less (most scanner programs write a 28-byte caption
+  digest) rides in a `jxlphoto-tifftag:34377` marker and comes back byte for
+  byte; a larger block — a Lightroom or Photoshop TIFF keeps a preview there,
+  with print settings — is left out, and the end of the run says how many
+  (a file whose block holds saved paths is named in a warning). Its size
+  never keeps a TIFF from being deleted. An IPTC block that lives only inside
+  it (Sony's Edit) is copied into the XMP like the IPTC tag's. The zeros
+  Windows Photos reserves for edits in place (tag 59932) are not carried.
 
 Other scanner programs were not tested. If yours relies on something else,
 test one file before converting a whole archive.

@@ -42,7 +42,7 @@ import numpy as np
 # even when only one script changed — tests/test_toolkit_version.py pins the
 # five to each other and to the newest section of docs/version_history.md.
 TOOLKIT_NAME = "jxl-photo"
-TOOLKIT_VERSION = "2.27.1"
+TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -1669,6 +1669,45 @@ SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
 # The encoder's THUMB_XMP_FLAG: this JXL is the THUMBNAIL page of a split TIFF
 # (a reduced-resolution preview). A derivative run makes none of it.
 THUMB_FLAG = "jxlphoto-thumb"
+PAGE_PREFIX = "jxlphoto-page:"
+# The encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL holds.
+_CAMERA_THUMB_MAX_SIDE = 160
+
+
+def _magick_out_path(path) -> str:
+    """`path` as an ImageMagick OUTPUT operand. ImageMagick formats the name
+    it writes like printf does (%d, %o, %x: the scene number), so a folder
+    named "100%off" became "1000ff" and the write failed with "No such file
+    or directory" (#647). A doubled percent sign is a literal one. Inputs are
+    not formatted and must not be escaped. Parity-pinned (four backends)."""
+    return str(path).replace("%", "%%")
+
+
+def _is_camera_thumbnail_page(tokens, width, height) -> bool:
+    """True for a page other than the first of a split TIFF that is at most
+    160 px on its long side: the thumbnail a camera or its software writes
+    into its own TIFF WITHOUT the reduced-image flag (NX Studio: 160x107 or
+    107x160; Fuji Hyper Utility: 160x120). The encoder archives it as a page
+    like any other, so the TIFF comes back whole; a derivative run makes no
+    copy of it, like the flagged thumbnail pages. Pure: `tokens` are the
+    JXL's dc:Relation values, width/height its pixel size (0 or None when
+    unknown: then it is not one)."""
+    try:
+        side = max(int(width or 0), int(height or 0))
+    except (TypeError, ValueError):
+        return False
+    if not 0 < side <= _CAMERA_THUMB_MAX_SIDE:
+        return False
+    for t in tokens or ():
+        t = str(t).strip()
+        if t.startswith(PAGE_PREFIX):
+            try:
+                return int(t[len(PAGE_PREFIX):]) > 0
+            except ValueError:
+                return False
+    return False
+
+
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
 # re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
@@ -3360,8 +3399,10 @@ def _read_encode_params_batch(paths: list) -> dict:
                                         camera=any(entry.get(k) is not None for k in
                                                    ("ExposureTime", "FNumber",
                                                     "FocalLength"))),
-                                    "thumb": any(str(t).strip() == THUMB_FLAG
-                                                 for t in rel_values)}
+                                    "thumb": (any(str(t).strip() == THUMB_FLAG
+                                                  for t in rel_values)
+                                              or _is_camera_thumbnail_page(
+                                                  rel_values, width, height))}
         except Exception as e:
             logger.warning(f"Encode-tag batch failed ({e}); {len(chunk)} file(s) "
                            f"treated as unknown origin")
@@ -5060,7 +5101,7 @@ def _make_explorer_thumbnail(jxl_path, tmp_dir):
             cmd += ["-profile", str(icc)]
         cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
                 "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
-                "jpeg:" + str(jpg)]
+                "jpeg:" + _magick_out_path(jpg)]
         r = _run_captured(cmd, CJXL_TIMEOUT)
         if r.returncode != 0 or not jpg.exists():
             raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
@@ -5823,7 +5864,7 @@ def _derive_pixels(jxl_path: Path, write_path: Path) -> tuple:
                 # profile; re-assign the one that describes the pixels now.
                 args += ["-profile", str(out_profile)]
             cmd = (["magick", str(magick_in)] + args
-                   + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + str(conv_png)])
+                   + ["-depth", "16"] + _TEMP_PNG_ARGS + ["png:" + _magick_out_path(conv_png)])
             r = _run_captured(cmd, CJXL_TIMEOUT)
             if r.returncode != 0 or not conv_png.exists():
                 raise RuntimeError(f"magick: {_stderr_tail(r.stderr)}")
@@ -8176,8 +8217,9 @@ def main():
                 it["category"] = "film scan"
             it["action"] = combined
         # A derivative of a split TIFF's THUMBNAIL page (the reduced preview it
-        # carried) is no delivery copy of the photo: none is made. Not a policy
-        # skip — no flag would make one worth writing.
+        # carried, flagged or a camera's unflagged 160 px one:
+        # _is_camera_thumbnail_page) is no delivery copy of the photo: none is
+        # made. Not a policy skip — no flag would make one worth writing.
         it["thumb"] = info.get("thumb", False)
         if DERIVATIVE and it["thumb"]:
             it["action"] = "skip_thumbnail"

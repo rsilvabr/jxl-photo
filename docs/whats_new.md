@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.27.1](version_history.md#v2271)** | 2026-11-11 | A lossy JPEG → JXL keeps a JPEG whose HDR gain map the JXL does not hold; the way out of unparseable maker notes named for more exiftool wordings |
+| **[v2.28.0](version_history.md#v2280)** | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies drop the TIFF-tag markers; no copy of a camera TIFF's thumbnail page; resized copies work in a folder named like `100%off` |
+| [v2.27.1](version_history.md#v2271) | 2026-11-11 | A lossy JPEG → JXL keeps a JPEG whose HDR gain map the JXL does not hold; the way out of unparseable maker notes named for more exiftool wordings |
 | [v2.27.0](version_history.md#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master and comes back in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts |
 | [v2.26.1](version_history.md#v2261) | 2026-11-10 | A rotated JPEG's archive is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex` |
 | [v2.26.0](version_history.md#v2260) | 2026-11-10 | The JPEG of a rotated JPEG's archive comes back as the camera wrote it; JXL → PNG of camera JPEGs and resizing sources with the standard sRGB profile work; `--exiftool-ignore-minor` |
@@ -30,6 +31,16 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.28.0
+
+2026-11-11. Small fixes to what a master and its copies carry; most people have nothing to do ([upgrading](upgrading.md)).
+
+- **A TIFF's small Photoshop resource block comes back** in the decoded TIFF, like the IPTC block; a large one (a Lightroom preview) is still left out, and the run says so.
+- **JPEG and PNG copies are lighter**: they no longer carry the markers only a TIFF decode uses, and no copy is made of a camera TIFF's own 160 px thumbnail page.
+- **Resized copies work in a folder named like `100%off`**, where ImageMagick misread the name.
+
+[Version history](version_history.md#v2280).
 
 ## v2.27.1
 
