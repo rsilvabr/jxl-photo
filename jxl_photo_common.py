@@ -459,7 +459,7 @@ def _carried_icc(creator, tokens):
     jxlphoto-iccprofile token in dc:Relation first, else the ICC:<base64>
     segment of CreatorTool (where JXLs written up to v2.18.x keep it). Same
     validation for both: strict base64, >= 128 bytes, 'acsp' at offset 36.
-    Parity-pinned (decoder + transcoder + recompressor)."""
+    """
     for token in tokens or ():
         token = str(token).strip()
         if not token.startswith(ICC_PROFILE_PREFIX):
@@ -529,7 +529,7 @@ def _djxl_icc_args(tmp_dir: Path) -> tuple:
 
 def _icc_profile_token(icc_bytes: bytes) -> str:
     """The dc:Relation token that carries an ICC profile byte for byte.
-    Parity-pinned (encoder + recompressor)."""
+    """
     return ICC_PROFILE_PREFIX + base64.b64encode(icc_bytes).decode("ascii")
 
 
@@ -684,7 +684,7 @@ def _magick_out_path(path) -> str:
     it writes like printf does (%d, %o, %x: the scene number), so a folder
     named "100%off" became "1000ff" and the write failed with "No such file
     or directory" (#647). A doubled percent sign is a literal one. Inputs are
-    not formatted and must not be escaped. Parity-pinned (four backends)."""
+    not formatted and must not be escaped."""
     return str(path).replace("%", "%%")
 
 
@@ -1097,7 +1097,6 @@ def _collapse_list_reset(lines, tag="-XMP-dc:Relation"):
     into the file as a block first, the old list would survive — stale
     jxlphoto-src/srcsum on a derivative, doubled markers. Lines without the
     bare reset are returned unchanged (add mode is what they ask for).
-    Parity-pinned (encoder + recompressor).
     """
     reset, add = tag + "=", tag + "+="
     if reset not in lines:
@@ -1490,8 +1489,7 @@ def _argfile_via_stdin(g, cmd):
     path from its command line in the ANSI code page: with %TEMP% outside it
     (a Windows user name in another script) every call failed with "Error
     opening arg file". The file's CONTENT is UTF-8 with `-charset
-    filename=utf8` and is read the same way from stdin. Parity-pinned (four
-    backends)."""
+    filename=utf8` and is read the same way from stdin."""
     try:
         i = list(cmd).index("-@")
     except ValueError:
@@ -2431,7 +2429,7 @@ def _exiftool_source(g, path, tmp_dir) -> str:
     tmp_dir (the SOURCE operand is not expanded) and that is copied from
     instead; any other path is returned unchanged, at no cost. Raises when the
     dump fails: an output must not go out without the metadata it should
-    carry. Parity-pinned (four backends).
+    carry.
     """
     p = str(path)
     if "%" not in p:
@@ -2472,7 +2470,7 @@ def _xmp_block_args(g, path, tmp_dir) -> list:
     exiftool would expand (#550, _exiftool_source). A MIE container does not
     carry the XMP as a block, so the raw packet is read (the source operand is
     not expanded) into tmp_dir and written back with -XMP<=. [] when the file
-    has no XMP. Parity-pinned (decoder + recompressor).
+    has no XMP.
     """
     p = str(path)
     if "%" not in p:
@@ -3066,7 +3064,7 @@ def _run_exiftool_argfile(g, args_lines, timeout=60):
                                          dir=g.TEMP_DIR, encoding="utf-8", newline="\n") as af:
             argfile = af.name
             af.write(g._ARGFILE_CHARSET)
-            if g._g.get("EXIFTOOL_IGNORE_MINOR"):
+            if _script_get(g, "EXIFTOOL_IGNORE_MINOR"):
                 # Only the decoder has this setting: -m makes exiftool write
                 # past an error it calls minor (maker notes it cannot parse).
                 af.write("-m\n")
@@ -3260,7 +3258,7 @@ def _log_gen_notes_once(g, stored: int, counted: int) -> None:
 def _log_settings_overlay(g) -> None:
     """The overlay's audit lines (setup_logger calls it): which file and which
     settings it changed, and every entry it refused."""
-    result = g._g.get("_SETTINGS_OVERLAY") or {}
+    result = _script_get(g, "_SETTINGS_OVERLAY") or {}
     if result.get("applied"):
         g.logger.info(f"Script settings overlay: {result['path']}: "
                     f"{len(result['applied'])} value(s): {', '.join(result['applied'])}")
@@ -3318,3 +3316,63 @@ def _log_rejected_file(g, file_path, reason):
                 f.write(f"{timestamp} | {reason} | {file_path}\n")
     except Exception:
         pass
+
+
+# === Pixel verification ===
+
+
+def _decode_jxl_for_verify(g, jxl_path: Path, tmp_dir: Path,
+                           require_original_space=False):
+    """Decode a JXL back to pixels. Raises on any failure — a verification that
+    cannot run must never read as a verification that passed.
+
+    require_original_space: also raise when djxl did not return the pixels in
+    the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
+    a comparison against the SOURCE pixels says why it cannot run (#584)."""
+    png_path = tmp_dir / "verify.png"
+    icc_args, out_icc, orig_icc = (g._djxl_icc_args(tmp_dir) if require_original_space
+                                   else ([], None, None))
+    r = g._run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, g.CJXL_TIMEOUT)
+    if r.returncode != 0 or not png_path.exists():
+        raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
+    if require_original_space and g._decoded_in_original_space(out_icc, orig_icc) is False:
+        raise RuntimeError(
+            "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
+            "cannot compare it with the source — source kept "
+            "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
+    # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
+    # 8-bit, which would make every lossless comparison fail for a reason that
+    # has nothing to do with the encode. Checked up front in main().
+    import imagecodecs
+    return imagecodecs.png_decode(png_path.read_bytes())
+
+
+def _canon_for_compare(g, a):
+    """Both sides of the comparison in one shape/dtype convention.
+
+    The encoder feeds cjxl a 3D array (2D pages get a trailing axis) and
+    promotes 8-bit to 16-bit with *257; djxl gives back 2D for a grayscale JXL.
+    Squeeze the single-channel axis away on both so a grayscale page compares
+    as (H, W) either way.
+    """
+    if a.ndim == 3 and a.shape[2] == 1:
+        a = a[:, :, 0]
+    if a.dtype == g.np.uint8:
+        return a.astype(g.np.uint16) * 257
+    if a.dtype != g.np.uint16:
+        return a.astype(g.np.uint16)
+    return a
+
+
+def _compare_stats(g, src, dec):
+    """(source mean, decoded mean, MSE), accumulated over row blocks."""
+    total = src.size
+    s_sum = d_sum = sq = 0.0
+    for y in range(0, src.shape[0], g._VERIFY_CHUNK_ROWS):
+        a = src[y:y + g._VERIFY_CHUNK_ROWS].astype(g.np.float64)
+        b = dec[y:y + g._VERIFY_CHUNK_ROWS].astype(g.np.float64)
+        s_sum += float(a.sum())
+        d_sum += float(b.sum())
+        diff = a - b
+        sq += float((diff * diff).sum())
+    return s_sum / total, d_sum / total, sq / total

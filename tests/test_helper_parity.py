@@ -1,16 +1,19 @@
-"""The four scripts deliberately carry their own copy of a few helpers, so each
-stays standalone (see AGENTS.md). The cost of that choice is a rule nobody can
-enforce by reading: a bug fixed in one copy has to be fixed in all of them.
+"""The helpers the scripts share live ONCE, in jxl_photo_common.py (see
+AGENTS.md, "The common module"; tests/test_common_module.py guards that). What
+is left here is what still exists in more than one script on purpose:
+`_import_common`, which loads the common module and so cannot live in it, and
+the variants of a few helpers whose copies differ in shape but not in what
+they do. A bug fixed in one copy has to be fixed in all of them.
 
 This test enforces it. Each helper is compared across every script that defines
 it, on normalised AST — docstrings dropped, comments and formatting invisible to
 `ast`, and local names alpha-renamed. What survives that is the logic itself, so
-the test stays quiet about cosmetic differences (the copies already differ in a
-loop variable name and a docstring line) and fails only when one copy actually
-starts behaving differently from the others.
+the test stays quiet about cosmetic differences and fails only when one copy
+actually starts behaving differently from the others.
 
 When it fails: apply the same fix to every copy listed, or, if the difference is
-deliberate, drop the helper from SHARED_HELPERS with a comment saying why.
+deliberate, drop the helper from SHARED_HELPERS with a comment saying why. A
+helper that is identical everywhere belongs in jxl_photo_common.py instead.
 """
 from __future__ import annotations
 
@@ -37,149 +40,8 @@ SHARED_HELPERS = [
     # The one helper that cannot live in jxl_photo_common.py: it LOADS it (the
     # copy next to the script, refused when its version differs).
     "_import_common",
-    # Provenance: which source made an output. A copy drifting would make an
-    # archive written by one script unverifiable by another, and the delete
-    # gates fail closed on that — silently keeping every source forever.
-    # The delete-side proof for a SKIPPED source (path AND current srcsum).
-    # A copy drifting back to the path alone is one backend deleting a source
-    # replaced in place since its archive was written.
-    # The argfile lines that RECORD which source made an output. Encoder,
-    # decoder and transcoder each write the markers their delete gates read
-    # back; a copy that dropped `srcsum` would silently write an archive no
-    # other backend could verify.
-    # Every refusal gives the same way out (the two likely causes and the
-    # options), so the sentence must not drift between the four backends.
-    # The jxlphoto-origin read/decision pair: a copy diverging would make one
-    # script inherit the origin while another guesses it (or drops it).
-    # Derived (non-archive) marker reads and the partial-output cleanup that
-    # guards a derivative write. Duplicated transcoder/recompressor; a drift
-    # either mislabels a derivative or leaves a truncated output behind.
-    # Which runs need that check at all. A copy drifting would leave one backend
-    # deleting sources in a layout another one guards.
-    # E-H: which folder anchors modes 6/7 (the first marker at or below the
-    # input root, else the closest above). A copy drifting is one script
-    # writing a mode 6 output where another one looks for it.
-    # --exclude-folders discovery filter (encoder/decoder finders + the
-    # wrapper's collision walk): a drifting copy would let one site see a file
-    # set another does not.
-    # X-B: the decoder's and the recompressor's modes 6/7 skip the OTHER
-    # tools' JXL output folders below the marker (tables differ per script,
-    # the logic must not). A copy drifting is one finder taking a derivative
-    # for a master again.
-    # Phase 4: the script settings overlay. The four copies must find the
-    # same file, refuse the same values and keep the same safety settings out
-    # (each script's own _OVERLAY_SETTINGS table differs, the rules must not).
-    # W-A: progress between planning-time batches. A copy drifting is one
-    # backend silent for an hour again, and the wrapper stopping it as hung.
-    # --export-jxl-folder: the same name rules must reject the same values in
-    # the encoder and the recompressor.
+    # Pinned by shape below (PINNED_VARIANTS): the transcoder's copy differs.
     "_abort_on_duplicate_outputs",
-    # An argfile path outside the ANSI code page goes to exiftool on stdin: a
-    # copy drifting is one backend failing every exiftool call with a temp
-    # folder the others handle.
-    # #578: a run writing into staging marks it as in use, and --clean-staging
-    # of another run sweeps nothing meanwhile. A copy drifting is one backend
-    # sweeping the outputs another one has waiting there.
-    # The "still the file that was copied?" check before an in-place edit
-    # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
-    # TEMP_DIR / staging checked before the run (2026-11-08): the transcoder
-    # had no check, and a dry run with a missing TEMP_DIR failed every marker
-    # read in all four. One copy drifting brings either back.
-    # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
-    # failing on the long paths the others now handle.
-    # #622/#623: what `jxlinfo` says about a JXL. A copy drifting is one
-    # backend turning a rotated JPEG's pixels twice, or deleting a float or
-    # animated JXL after a 16-bit / first-frame decode, that the others keep.
-    # #636: the codestream orientation read in Python when jxlinfo cannot
-    # answer (decoder, transcoder, recompressor). A copy drifting is one
-    # backend turning a rotated JPEG's picture twice again without jxlinfo.
-    # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
-    # recompressor). A copy drifting is one backend failing again on every
-    # source whose profile is a standard sRGB one.
-    # Explorer thumbnail box (encoder + recompressor). jxl-thumb trusts a
-    # thumbnail only while the recorded fingerprint names the file's
-    # codestream: a copy computing or storing it differently would write
-    # thumbnails it then never shows.
-    # An argfile is one argument per LINE, so a value carrying a newline has to
-    # be flattened by every writer. The transcoder was the copy that did not
-    # have this at all, and its CreatorTool write went out raw.
-    # The xmpMM:History entry: a copy drifting would make one script write a
-    # History entry the others do not (or one exiftool cannot parse).
-    # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
-    # leaves stale jxlphoto-src/srcsum on one script's derivatives.
-    # Exif box before the XMP box in every output (#561): IrfanView shows no
-    # EXIF otherwise.
-    # The box reorder itself (encoder, recompressor, transcoder). Not pinned
-    # until the 261103 review (S3): the copies differed only cosmetically, and
-    # the E-G fix had to be applied three times by hand.
-    # A '%' in a source name (#550): a copy drifting is one script writing an
-    # output with none of its source's metadata.
-    # Disk-full abort. These decide whether a run stops or grinds on, so a copy
-    # drifting would make one backend keep failing file after file.
-    # Promotion out of staging. It DELETES a partial destination file and can
-    # latch the disk-full abort, so a copy drifting is one backend leaving
-    # truncated outputs behind where another cleans them up.
-    # Directory-scan progress. A copy drifting would leave one backend silent
-    # through the exact 25-second pause that looks like a freeze.
-    # Staging sweep. These DELETE files, so a copy drifting is the worst kind:
-    # one backend could start sweeping what another still needs.
-    # JXL structural integrity — the delete gate itself. A copy drifting is one
-    # backend deleting a source whose output another would have rejected.
-    # jbrd detection and file hashing, born in the transcoder. The recompressor
-    # keys its JPEG-recovery preservation policy off the first and its
-    # copy-then-delete MD5 proof off the second.
-    # Which ICC profiles cannot be a conversion TARGET (A2B tables, no B2A —
-    # scanner profiles). The recompressor refuses such derivatives, the
-    # decoder keeps the source of such a decode, the transcoder refuses the
-    # "keep" conversion: a copy drifting would let one backend do it anyway.
-    # Source identity between the read and the unlink (X2 of the 2026-10-08
-    # audit): a copy drifting would let one backend delete a source that was
-    # re-exported mid-run while the others keep it.
-    # The distance dead-zone warning: the user must hear the SAME sentence from
-    # every script that takes --distance.
-    # The lossy distance floor of the installed cjxl (0.05 from libjxl 0.12,
-    # 0.01 before): a copy drifting would warn — or classify — against the
-    # wrong floor in one script only.
-    # Skip decision and pixel-verification helpers, born in the encoder. The
-    # recompressor verifies source-vs-output decodes with the same statistics.
-    # (_would_skip is NOT here since v2.27: the encoder's also answers "same
-    # TIFF bytes" -- a TIFF newer than its JXL but with the bytes the JXL was
-    # made from is up to date. The recompressor keeps its own rules and guards.)
-    "_decode_jxl_for_verify",
-    "_canon_for_compare",
-    "_compare_stats",
-    # The encode-record lineage (gen= token + append-only cjxl d=/e= chain).
-    # Encoder and recompressor must count, reconcile, strip and append in
-    # EXACTLY the same way: a drift here means one script writes a field the
-    # other miscounts, and the recompressor's --on-regeneration guard reads a
-    # generation count that is wrong in the damaging direction.
-    # Union of the dc:Description and Software machine blocks: the record can
-    # be split across the two fields, and both scripts must merge entries and
-    # stored gen= identically or one of them undercounts generations when the
-    # field changes.
-    # The record's home since v2.24.0 (xmpMM:History parameters): both scripts
-    # must find the same record, and stop at the same "no encode record".
-    # Where the record's VISIBLE copy goes (history/comment/title/software/off)
-    # and the "xmp" = "history" alias: both writers must agree.
-    # Lossy ICC-blob detection (djxl --icc_out vs --orig_icc_out): the decoder,
-    # the recompressor, the transcoder and the encoder's cautious probe must
-    # all recognise the "djxl returned linear sRGB" case the same way — one
-    # copy drifting is one backend pasting the original ICC on linear pixels.
-    # Source-profile detection for colour conversion (B1): the transcoder and
-    # the recompressor must read XMP ICC / iCCP / sRGB chunk the same way.
-    # Where the original ICC is carried (v2.19.0): the jxlphoto-iccprofile
-    # token first, the v2.18.x CreatorTool copy second. The decoder, the
-    # transcoder and the recompressor must find the SAME profile in the same
-    # file, and the encoder and the recompressor write the same token.
-    # Resize/sharpening geometry and the derivative label: a copy drifting
-    # would derive a DIFFERENT label for the same recipe, so one backend would
-    # re-derive in a loop what the other considers up to date.
-    # A camera's unflagged thumbnail page: the two derivative makers must
-    # leave out the same pages.
-    # Every path ImageMagick writes: one backend forgetting the escape fails
-    # in a folder named "100%off" (#647).
-    # worker cap: the encoder and the recompressor must estimate the same
-    # memory for the same settings
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:

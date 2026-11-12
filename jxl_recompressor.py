@@ -1938,61 +1938,13 @@ def _restamp_args(desc: str, software: str, label: str = "", history: str = "",
 _VERIFY_CHUNK_ROWS = 512
 
 
-def _canon_for_compare(a):
-    """Both sides of the comparison in one shape/dtype convention.
-
-    The encoder feeds cjxl a 3D array (2D pages get a trailing axis) and
-    promotes 8-bit to 16-bit with *257; djxl gives back 2D for a grayscale JXL.
-    Squeeze the single-channel axis away on both so a grayscale page compares
-    as (H, W) either way.
-    """
-    if a.ndim == 3 and a.shape[2] == 1:
-        a = a[:, :, 0]
-    if a.dtype == np.uint8:
-        return a.astype(np.uint16) * 257
-    if a.dtype != np.uint16:
-        return a.astype(np.uint16)
-    return a
+def _canon_for_compare(*a, **k): return _common._canon_for_compare(_G, *a, **k)
 
 
-def _decode_jxl_for_verify(jxl_path: Path, tmp_dir: Path,
-                           require_original_space=False):
-    """Decode a JXL back to pixels. Raises on any failure — a verification that
-    cannot run must never read as a verification that passed.
-
-    require_original_space: also raise when djxl did not return the pixels in
-    the file's own colour space (a lossy ICC blob decodes to linear sRGB), so
-    a comparison against the SOURCE pixels says why it cannot run (#584)."""
-    png_path = tmp_dir / "verify.png"
-    icc_args, out_icc, orig_icc = (_djxl_icc_args(tmp_dir) if require_original_space
-                                   else ([], None, None))
-    r = _run_captured(["djxl", str(jxl_path), str(png_path)] + icc_args, CJXL_TIMEOUT)
-    if r.returncode != 0 or not png_path.exists():
-        raise RuntimeError(f"djxl: {_stderr_tail(r.stderr)}")
-    if require_original_space and _decoded_in_original_space(out_icc, orig_icc) is False:
-        raise RuntimeError(
-            "lossy ICC blob: djxl decodes it to linear sRGB, so the pixel check "
-            "cannot compare it with the source — source kept "
-            "(ICC_PNG_STRATEGY 'cautious' never writes such files)")
-    # imagecodecs, never PIL: PIL silently quantises 16-bit RGB/RGBA PNGs to
-    # 8-bit, which would make every lossless comparison fail for a reason that
-    # has nothing to do with the encode. Checked up front in main().
-    import imagecodecs
-    return imagecodecs.png_decode(png_path.read_bytes())
+def _decode_jxl_for_verify(*a, **k): return _common._decode_jxl_for_verify(_G, *a, **k)
 
 
-def _compare_stats(src, dec):
-    """(source mean, decoded mean, MSE), accumulated over row blocks."""
-    total = src.size
-    s_sum = d_sum = sq = 0.0
-    for y in range(0, src.shape[0], _VERIFY_CHUNK_ROWS):
-        a = src[y:y + _VERIFY_CHUNK_ROWS].astype(np.float64)
-        b = dec[y:y + _VERIFY_CHUNK_ROWS].astype(np.float64)
-        s_sum += float(a.sum())
-        d_sum += float(b.sum())
-        diff = a - b
-        sq += float((diff * diff).sum())
-    return s_sum / total, d_sum / total, sq / total
+def _compare_stats(*a, **k): return _common._compare_stats(_G, *a, **k)
 
 
 def _verify_roundtrip_jxl(src_jxl: Path, out_jxl: Path, src_distance,
