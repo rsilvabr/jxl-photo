@@ -2028,6 +2028,24 @@ def _would_skip(jxl_path: Path, final_path: Path) -> bool:
     return False        # OVERWRITE True: always reconvert, never a skip
 
 
+# The two questions the code asks about a planned item's action (refactor
+# plan 261113, A4; AGENTS.md: a check that must see every planned file has to
+# handle "skip_uptodate", the up-to-date items set aside before classification).
+_RUNNING_ACTIONS = ("convert", "copy")
+_WRITING_ACTIONS = ("convert", "copy", "skip_uptodate")
+
+
+def _action_runs(action) -> bool:
+    """convert_one runs this item now: it is converted or copied."""
+    return action in _RUNNING_ACTIONS
+
+
+def _action_writes(action) -> bool:
+    """The item has an output at its destination after the run: written now,
+    or an up-to-date one set aside before classification (skip_uptodate)."""
+    return action in _WRITING_ACTIONS
+
+
 def _plan_item_would_skip(it) -> bool:
     """Would the real run report SKIP for this planned item?
 
@@ -2038,7 +2056,7 @@ def _plan_item_would_skip(it) -> bool:
     and by the space preflight, which must not count skips."""
     if it["action"] == "skip_uptodate":
         return True
-    return (not it["in_place"] and it["action"] in ("convert", "copy")
+    return (not it["in_place"] and _action_runs(it["action"])
             and os.path.normcase(str(it["final"])) not in _FORCE_REDERIVE
             and _would_skip(it["src"], it["final"]))
 
@@ -4157,7 +4175,7 @@ def _foreign_overwrite_refusals(items):
     """
     targets = [it for it in items
                if not it["in_place"]
-               and it["action"] in ("convert", "copy")
+               and _action_runs(it["action"])
                and it["final"].exists()
                and not _would_skip(it["src"], it["final"])]
     if not targets:
@@ -4238,12 +4256,11 @@ def _hold_incomplete_in_place_groups(items):
             # Same (folder, id) keying as the delete gate: two copies of one
             # split in different folders are different documents.
             groups.setdefault((str(it["src"].parent), g), []).append(it)
-    runnable = ("convert", "copy")
     for members in groups.values():
-        if all(m["action"] in runnable for m in members):
+        if all(_action_runs(m["action"]) for m in members):
             continue
         for m in members:
-            if m["action"] not in runnable:
+            if not _action_runs(m["action"]):
                 continue
             m["action"] = "skip"
             m["reason"] = ((m.get("reason") or "")
@@ -5605,17 +5622,16 @@ def main():
     # An up-to-date item counts as one: before it skipped planning it was a
     # convert/copy like the others, and two sources sharing a destination are
     # a collision whether or not this run happens to write it.
-    _writing = ("convert", "copy", "skip_uptodate")
     _planned_outputs.clear()        # run-scoped (#615)
     _promoted_identity.clear()      # run-scoped (#618)
     _abort_on_duplicate_outputs(
         [(it["src"], it["final"]) for it in items
-         if it["action"] in _writing])
+         if _action_writes(it["action"])])
     if not args.dry_run:
         _sweep_orphan_temps(it["final"] for it in items
-                            if it["action"] in _writing)
+                            if _action_writes(it["action"]))
         _record_planned_outputs((it["src"], it["final"]) for it in items
-                                if it["action"] in _writing
+                                if _action_writes(it["action"])
                                 and not it.get("in_place"))
 
     # Timed from here, not from _t_plan: the batch prompt above waits on a
@@ -5687,7 +5703,7 @@ def main():
     if (DELETE_SOURCE
             and _run_collapses_structure(args.mode, args.output, args.input)):
         existing = [it for it in items
-                    if it["action"] in ("convert", "copy") and not it["in_place"]
+                    if _action_runs(it["action"]) and not it["in_place"]
                     and it["final"].exists()]
         if existing:
             marker_info = _read_source_markers_batch(
@@ -5783,7 +5799,7 @@ def main():
         def _dry_deletable(it):
             # Mirrors the real _delete_gate for one item (multi-page veto is
             # not previewed here, as before).
-            if it["in_place"] or it["action"] not in ("convert", "copy"):
+            if it["in_place"] or not _action_runs(it["action"]):
                 return False
             ws = _would_skip(it["src"], it["final"])
             if not DELETE_SKIPPED and ws:
@@ -5844,7 +5860,7 @@ def main():
         delete-skipped would try to delete. Fail closed: anything uncertain
         counts as a reason to ask."""
         for it in items:
-            if it["action"] not in ("convert", "copy"):
+            if not _action_runs(it["action"]):
                 continue
             if it["in_place"]:
                 return True
@@ -5869,7 +5885,7 @@ def main():
     # needs no space (a nightly sync counted the whole library).
     if not args.no_preflight:
         _preflight_space([it for it in items
-                          if it["action"] in ("convert", "copy")
+                          if _action_runs(it["action"])
                           and not _plan_item_would_skip(it)])
 
     # --- Work ----------------------------------------------------------------
