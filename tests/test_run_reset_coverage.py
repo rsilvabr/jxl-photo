@@ -69,11 +69,14 @@ def _uncovered(fn: ast.FunctionDef, resets: set) -> list:
 
 
 def _entry_points():
+    """main(), the transcoder's cmd_*, and _configure_run (the configuration
+    step moved out of main by the refactor): where the flags become globals."""
     for name in SCRIPTS:
         tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
         resets = _reset_names(tree)
         for fn in tree.body:
-            if isinstance(fn, ast.FunctionDef) and (fn.name == "main" or fn.name.startswith("cmd_")):
+            if isinstance(fn, ast.FunctionDef) and (fn.name in ("main", "_configure_run")
+                                                    or fn.name.startswith("cmd_")):
                 yield f"{name}::{fn.name}", fn, resets
 
 
@@ -117,3 +120,30 @@ def test_the_recompressor_puts_the_export_settings_back_between_two_runs(tmp_pat
         "_OUT", "SUB", "XJXL"), "the flags did not apply: the test proves nothing"
     run()
     assert (rec.EXPORT_MARKER, rec.EXPORT_JXL_SUBFOLDER, rec.EXPORT_JXL_FOLDER) == shipped
+
+
+def test_no_function_assigns_a_setting_without_global():
+    """A function that assigns an ALL-CAPS module name (a setting, or run state
+    named like one) without `global` creates a local: the flag that set it
+    silently stops applying. Moving a block out of main() into its own
+    function is exactly where a `global` gets left behind."""
+    import re
+    caps = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+    bad = []
+    for name in SCRIPTS + ("jxl_photo.py", "jxl_photo_common.py"):
+        tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
+        module = set()
+        for st in tree.body:
+            targets = st.targets if isinstance(st, ast.Assign) else (
+                [st.target] if isinstance(st, (ast.AnnAssign, ast.AugAssign)) else [])
+            for t in targets:
+                module |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name) and caps.match(n.id)}
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            declared = {g for n in ast.walk(fn) if isinstance(n, ast.Global) for g in n.names}
+            params = {a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs}
+            stores = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+            for setting in sorted((stores & module) - declared - params):
+                bad.append(f"{name}::{fn.name} (line {fn.lineno}) assigns {setting}")
+    assert not bad, "assigned without `global` (a local that hides the setting): " + "; ".join(bad)

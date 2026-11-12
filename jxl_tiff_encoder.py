@@ -6279,45 +6279,17 @@ def build_parser():
 _work_dir_problem = _common._work_dir_problem
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-
-    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, EIGHT_BIT_DISTANCE, EIGHT_BIT_LOSSLESS_UP_TO, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
-    global _gen_divergence_logged
-    _gen_divergence_logged = False
-
-    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here,
-    # BEFORE the flag overrides below (the recompressor's canonical R-2
-    # pattern, same round): the assignments further down only fire when their
-    # flag was passed, so a second main() in the SAME process (the test
-    # suite, or anything importing this module) inherited the first run's
-    # armed state — a `--delete-source --delete-confirm-off` run left
-    # DELETE_SOURCE on with no confirmation for the next run, and `--staging`
-    # leaked TEMP2_DIR. _RUN_DEFAULTS restores each global to its SCRIPT
-    # setting (captured at import), so a user-edited setting survives while
-    # cross-run leakage does not.
-    for _gname, _gvalue in _RUN_DEFAULTS.items():
-        globals()[_gname] = _gvalue
-    _PAGE_PIXELS.clear()
-
-    # ICC cache override and clearing must be processed before any logging or conversion.
-    if args.icc_cache_dir is not None:
-        ICC_CACHE_DIR_OVERRIDE = Path(args.icc_cache_dir)
-    if args.clear_icc_cache:
-        cleared = _clear_icc_cache()
-        # UTF-8 like setup_logger's console (which this early exit never
-        # reaches): through a pipe (the wrapper's menu C) stdout is the ANSI
-        # code page, and a cache folder under a Japanese user name raised
-        # UnicodeEncodeError after the cache was cleared (#605).
-        try:
-            if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-        print(f"ICC cache {'cleared' if cleared else 'was already empty'}: {_icc_cache_dir()}")
-        return
-
+def _configure_run(parser, args):
+    """The configuration step of main(), moved here unchanged (refactor plan 261113, A3):
+    the flags into the run's settings, the checks of the command line, the log
+    and the tools. Every check keeps its order; the run state reset before it
+    stays in main()."""
+    global ADOPT_SCAN, CJXL_BUFFERING, CJXL_DISTANCE, CJXL_EFFORT, CJXL_MODULAR
+    global D50_PATCH_MODE, DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE
+    global EIGHT_BIT_DISTANCE, EIGHT_BIT_LOSSLESS_UP_TO, ENCODE_TAG_MODE, ICC_PNG_STRATEGY
+    global MULTIPAGE_TIFF_MODE, OVERWRITE, OVERWRITE_GUARD, PROVENANCE_CHECK
+    global SCAN_DISTANCE, SCAN_SCOPE, TEMP2_DIR, THUMBNAIL_MODE, THUMBNAIL_SUFFIX
+    global USE_RAM_FOR_PNG, VERIFY_ROUNDTRIP, WARN_DISCARDED_THUMBNAILS
     if args.input is None:
         parser.error("the following arguments are required: input")
 
@@ -6692,6 +6664,49 @@ def main():
                     f"{VERIFY_LOSSY_MIN_MEAN_RATIO}x and PSNR >= {VERIFY_LOSSY_MIN_PSNR} dB.")
             else:
                 logger.info("Round-trip verification (lossless): decoded pixels must be identical.")
+    return log_file, _needs_decode
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    global OVERWRITE, CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, CJXL_MODULAR, USE_RAM_FOR_PNG, DELETE_SOURCE, DELETE_CONFIRM, TEMP2_DIR, ENCODE_TAG_MODE, D50_PATCH_MODE, MULTIPAGE_TIFF_MODE, THUMBNAIL_MODE, THUMBNAIL_SUFFIX, SCAN_DISTANCE, SCAN_SCOPE, EIGHT_BIT_DISTANCE, EIGHT_BIT_LOSSLESS_UP_TO, WARN_DISCARDED_THUMBNAILS, ICC_PNG_STRATEGY, ICC_CACHE_DIR_OVERRIDE, VERIFY_ROUNDTRIP, DELETE_SKIPPED, PROVENANCE_CHECK, ADOPT_SCAN, OVERWRITE_GUARD
+    global _gen_divergence_logged
+    _gen_divergence_logged = False
+
+    # Every CLI-mutated, run-scoped global is reset UNCONDITIONALLY here,
+    # BEFORE the flag overrides below (the recompressor's canonical R-2
+    # pattern, same round): the assignments further down only fire when their
+    # flag was passed, so a second main() in the SAME process (the test
+    # suite, or anything importing this module) inherited the first run's
+    # armed state — a `--delete-source --delete-confirm-off` run left
+    # DELETE_SOURCE on with no confirmation for the next run, and `--staging`
+    # leaked TEMP2_DIR. _RUN_DEFAULTS restores each global to its SCRIPT
+    # setting (captured at import), so a user-edited setting survives while
+    # cross-run leakage does not.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
+    _PAGE_PIXELS.clear()
+
+    # ICC cache override and clearing must be processed before any logging or conversion.
+    if args.icc_cache_dir is not None:
+        ICC_CACHE_DIR_OVERRIDE = Path(args.icc_cache_dir)
+    if args.clear_icc_cache:
+        cleared = _clear_icc_cache()
+        # UTF-8 like setup_logger's console (which this early exit never
+        # reaches): through a pipe (the wrapper's menu C) stdout is the ANSI
+        # code page, and a cache folder under a Japanese user name raised
+        # UnicodeEncodeError after the cache was cleared (#605).
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"ICC cache {'cleared' if cleared else 'was already empty'}: {_icc_cache_dir()}")
+        return
+
+    log_file, _needs_decode = _configure_run(parser, args)
 
     _modular_label = "modular" if (CJXL_MODULAR and CJXL_DISTANCE > 0) else "VarDCT"
     _delete_label  = f"delete_source=ON (confirm={'ON' if DELETE_CONFIRM else 'OFF'})" if DELETE_SOURCE else "delete_source=OFF"

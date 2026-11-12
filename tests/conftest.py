@@ -100,7 +100,7 @@ def _reset_at_entry(path: str) -> tuple:
     names = []
     for fn in tree.body:
         if not (isinstance(fn, ast.FunctionDef)
-                and (fn.name == "main" or fn.name.startswith("cmd_"))):
+                and (fn.name in ("main", "_configure_run") or fn.name.startswith("cmd_"))):
             continue
         declared = {n for node in ast.walk(fn) if isinstance(node, ast.Global)
                     for n in node.names}
