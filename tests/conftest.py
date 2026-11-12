@@ -83,6 +83,19 @@ _TRANSCODER_EXTRA_GLOBALS = (
     "SHARPEN", "SHARPEN_SIGMA", "SHARPEN_GAIN", "SHARPEN_THRESHOLD",
 )
 
+# Reset inline at the top of the recompressor's main(), outside _RUN_DEFAULTS.
+# Without them, a test that ran its main() with --resize-long or --output-icc
+# in-process left DERIVATIVE on, and a later convert_one() test in the same
+# worker took the derivative route (test_uptodate_prefilter.py or
+# test_subprocess_capture.py before test_recompressor.py::TestConvertOne: 6
+# failures, already on v2.28.0).
+_RECOMPRESSOR_EXTRA_GLOBALS = (
+    "RESIZE_MODE", "RESIZE_VALUE", "ALLOW_UPSCALE",
+    "SHARPEN", "SHARPEN_SIGMA", "SHARPEN_GAIN", "SHARPEN_THRESHOLD",
+    "DERIVATIVE", "_DERIVED_LABEL", "_FORCE_REDERIVE",
+    "_OUTPUT_ICC_LABEL", "_OUTPUT_ICC_BYTES", "_OUTPUT_ICC_PATH", "_SRGB_ICC_PATH",
+)
+
 _CHILD_MODULES = (
     "jxl_tiff_encoder",
     "jxl_tiff_decoder",
@@ -101,6 +114,8 @@ def _run_global_names(mod) -> tuple:
         names.extend(assignable)
     if mod.__name__ == "jxl_jpeg_transcoder":
         names.extend(_TRANSCODER_EXTRA_GLOBALS)
+    if mod.__name__ == "jxl_recompressor":
+        names.extend(_RECOMPRESSOR_EXTRA_GLOBALS)
     return tuple(dict.fromkeys(names))
 
 
