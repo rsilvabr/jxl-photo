@@ -52,15 +52,20 @@ def _stored(nodes) -> set:
     return out
 
 
-def _uncovered(fn: ast.FunctionDef, resets: set) -> list:
-    declared = {name for n in ast.walk(fn) if isinstance(n, ast.Global) for name in n.names}
-    # A plain top-level assignment runs on every call: it resets the name itself.
-    every_run = set()
+def _every_run(fn: ast.FunctionDef) -> set:
+    """Names a plain top-level statement assigns: reset on every call."""
+    out = set()
     for stmt in fn.body:
         if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
             for t in targets:
-                every_run |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+                out |= {n.id for n in ast.walk(t) if isinstance(n, ast.Name)}
+    return out
+
+
+def _uncovered(fn: ast.FunctionDef, resets: set) -> list:
+    declared = {name for n in ast.walk(fn) if isinstance(n, ast.Global) for name in n.names}
+    every_run = _every_run(fn)
     sometimes = set()
     for stmt in fn.body:
         if isinstance(stmt, (ast.If, ast.Try, ast.For, ast.While, ast.With)):
@@ -74,10 +79,16 @@ def _entry_points():
     for name in SCRIPTS:
         tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
         resets = _reset_names(tree)
+        main = next((fn for fn in tree.body
+                     if isinstance(fn, ast.FunctionDef) and fn.name == "main"), None)
+        # main() resets some run state with plain assignments at its top and
+        # only then calls _configure_run: those names are covered there too.
+        main_resets = _every_run(main) if main is not None else set()
         for fn in tree.body:
             if isinstance(fn, ast.FunctionDef) and (fn.name in ("main", "_configure_run")
                                                     or fn.name.startswith("cmd_")):
-                yield f"{name}::{fn.name}", fn, resets
+                extra = main_resets if fn.name == "_configure_run" else set()
+                yield f"{name}::{fn.name}", fn, resets | extra
 
 
 @pytest.mark.parametrize("label,fn,resets", list(_entry_points()),
