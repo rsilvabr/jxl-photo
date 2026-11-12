@@ -18,10 +18,11 @@ AGENTS.md "The common module"):
    and each script logs to its own logger.
 4. The common module defines no setting: nothing a script lists as overlay-
    able, as a safety setting or as a run-scoped global.
-5. A test double the code there would not see is refused. conftest's
-   `monkeypatch` raises on a setattr of a script's binding of a name the common
-   module reads directly (the code there would keep the original); the
-   `mock.patch.object` forms are checked statically here.
+5. A test double reaches the code that moved there. conftest's `monkeypatch`
+   mirrors a setattr of a script's binding into the common module for the
+   test, when the common code that script uses reads the name directly (as it
+   did when that code lived in the script); the `mock.patch.object` forms,
+   which it cannot see, are refused statically here.
 6. Each script loads the common module of ITS OWN folder, and refuses to start
    without one or with one of another version.
 """
@@ -212,8 +213,7 @@ def _direct_names() -> set:
     return names
 
 
-def test_c5_the_monkeypatch_guard_refuses_a_double_the_common_code_misses(
-        tmp_path, monkeypatch):
+def test_c5_a_double_on_the_script_reaches_the_common_code(tmp_path, monkeypatch):
     folder = tmp_path / HOSTILE
     folder.mkdir()
     (folder / "fake_common_c5.py").write_text(
@@ -228,11 +228,15 @@ def test_c5_the_monkeypatch_guard_refuses_a_double_the_common_code_misses(
     script.inner = common.inner
     script.outer = common.outer
     script.own = lambda: "own"
-    with pytest.raises(AssertionError, match="jxl_photo_common"):
-        monkeypatch.setattr(script, "inner", lambda: "fake")
-    # A name the common code does not read directly is fine to replace.
-    monkeypatch.setattr(script, "outer", lambda: "fake")
+    # outer() lives in the common module and calls inner() directly: the
+    # double on the script must reach it, as it did when outer was the script's.
+    monkeypatch.setattr(script, "inner", lambda: "fake")
+    assert script.outer() == "fake"
+    # A name the common code does not read is not mirrored.
     monkeypatch.setattr(script, "own", lambda: "fake")
+    assert not hasattr(common, "own")
+    monkeypatch.undo()
+    assert common.inner() == "real" and script.outer() == "real"
 
 
 def test_c5_no_mock_patch_object_on_a_name_the_common_module_reads():

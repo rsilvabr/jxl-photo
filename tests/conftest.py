@@ -176,13 +176,19 @@ def _no_worker_memory_cap():
 
 
 # ---------------------------------------------------------------------------
-# The common module (jxl_photo_common.py): a test double the code there would
-# not see. A script binds a pure shared helper by name (`X = _common.X`), so
-# `monkeypatch.setattr(enc, "X", fake)` replaces the script's binding only: a
-# function in the common module that calls X directly keeps calling the real
-# one, and the test passes without testing anything. Refused here, loudly
-# (tests/test_common_module.py checks that this guard is armed). The helpers
-# that read the script call through `g.` and are never affected.
+# The common module (jxl_photo_common.py): a test double must reach the code
+# that moved there. A script binds a pure shared helper by name
+# (`X = _common.X`) and shares the standard modules with it (`os`, `time`,
+# `subprocess`), so `monkeypatch.setattr(enc, "X", fake)` alone replaces the
+# SCRIPT's binding: a common function reading X directly would keep the real
+# one, and the test would pass without testing what it did when that code
+# lived in the script. So the double is MIRRORED into the common module for
+# the test, whenever the common code the script uses (the functions it binds
+# or shims, and what they call) reads that name directly and the script's
+# binding was the common module's own object. The functions that read the
+# script through `g.` need nothing: they see the script's binding.
+# tests/test_common_module.py checks the mirror; the `mock.patch.object`
+# forms, which this cannot see, are checked there statically.
 # ---------------------------------------------------------------------------
 
 _COMMON_READS = {}
@@ -237,18 +243,14 @@ def _names_read_for(target, common) -> set:
     return names
 
 
-def _refuse_silent_double(target, name) -> None:
+def _mirror_target(target, name):
+    """The common module to mirror `target.name` into, or None."""
     common = getattr(target, "_common", None)
     if not isinstance(common, types.ModuleType) or not isinstance(name, str):
-        return
+        return None
     if getattr(target, name, _MISSING) is not getattr(common, name, _MISSING):
-        return
-    if name in _names_read_for(target, common):
-        raise AssertionError(
-            f"monkeypatch.setattr({getattr(target, '__name__', target)!s}, {name!r}, ...): "
-            f"jxl_photo_common reads {name} directly, so the code there would keep "
-            f"the real one. Make the common function that uses {name} read it "
-            f"through g (a g-function), or patch it in the common module too.")
+        return None
+    return common if name in _names_read_for(target, common) else None
 
 
 @pytest.fixture
@@ -256,16 +258,19 @@ def monkeypatch(monkeypatch):
     original = monkeypatch.setattr
 
     def setattr(*args, **kwargs):
-        if args and isinstance(args[0], str):
-            modpath, _, attr = args[0].rpartition(".")
-            mod = sys.modules.get(modpath)
-            if mod is not None:
-                _refuse_silent_double(mod, attr)
+        target = name = None
+        if args and isinstance(args[0], str) and "." in args[0]:
+            modpath, _, name = args[0].rpartition(".")
+            target = sys.modules.get(modpath)
         elif len(args) >= 2:
-            _refuse_silent_double(args[0], args[1])
+            target, name = args[0], args[1]
         elif args and "name" in kwargs:
-            _refuse_silent_double(args[0], kwargs["name"])
-        return original(*args, **kwargs)
+            target, name = args[0], kwargs["name"]
+        common = _mirror_target(target, name) if target is not None else None
+        result = original(*args, **kwargs)
+        if common is not None:
+            original(common, name, getattr(target, name))
+        return result
 
     monkeypatch.setattr = setattr
     return monkeypatch
