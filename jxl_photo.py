@@ -30,6 +30,46 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 TOOLKIT_NAME = "jxl-photo"
 TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
+
+
+def _import_common():
+    """jxl_photo_common.py from THIS script's folder, never another copy found
+    on sys.path (a test or a pre-fix proof loads a script from another folder;
+    the exe also carries a frozen copy). Refused when its version differs."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    for key in ("jxl_photo_common", f"jxl_photo_common@{here}"):
+        mod = sys.modules.get(key)
+        where = getattr(mod, "__file__", None)
+        if where and Path(where).resolve().parent == here:
+            break
+    else:
+        path = here / "jxl_photo_common.py"
+        if not path.is_file():
+            raise ImportError(f"jxl_photo_common.py is missing next to {Path(__file__).name}: "
+                              "copy every file of the release into the same folder")
+        key = ("jxl_photo_common" if "jxl_photo_common" not in sys.modules
+               else f"jxl_photo_common@{here}")
+        spec = importlib.util.spec_from_file_location(key, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[key] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(key, None)
+            raise
+    if getattr(mod, "TOOLKIT_VERSION", None) != TOOLKIT_VERSION:
+        raise ImportError(f"jxl_photo_common.py is version {getattr(mod, 'TOOLKIT_VERSION', None)} "
+                          f"and {Path(__file__).name} is {TOOLKIT_VERSION}: copy every file of the "
+                          "release together")
+    return mod
+
+
+# The helpers the scripts share live in jxl_photo_common.py, next to this file
+# (AGENTS.md, "The common module"). _G is this script's namespace, which the
+# shared helpers that read a setting, the logger or the run state are given.
+_common = _import_common()
+_G = _common.Script(globals())
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"
 
@@ -91,7 +131,7 @@ def _rich_safe(value) -> str:
 
 # Backport of Path.is_relative_to for Python < 3.9
 def _is_relative_to(path: Path, anchor: Path) -> bool:
-    """Return True if path is relative to anchor (Python < 3.9 compatible)."""
+    """Backport of Path.is_relative_to for Python < 3.9."""
     try:
         path.relative_to(anchor)
         return True
@@ -449,7 +489,6 @@ def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
     when it is a complete token (bounded by _, -, space, or string edges) —
     otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
     returns the name unchanged (caller applies the append fallback).
-    Same rule as the three backend scripts.
     """
     import re as _re
     pat = _re.compile(
@@ -469,7 +508,7 @@ def _marker_matches(part_lower: str, marker_lower: str) -> bool:
     Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
     and, for underscore-wrapped markers, also the bare word — so the default
     '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
-    documentation promises. Same rule as the three backend scripts.
+    documentation promises.
     """
     # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
     # (a backup folder, different thing) would match the '_EXPORT' marker.
@@ -2466,9 +2505,11 @@ def _child_bool_setting(module: str, name: str, fallback: bool) -> bool:
     return fallback if value is None else bool(value)
 
 
-# The four child scripts whose TOOLKIT_VERSION must match the wrapper's.
+# The four child scripts and the common module whose TOOLKIT_VERSION must
+# match the wrapper's.
 _VERSIONED_CHILDREN = ("jxl_tiff_encoder.py", "jxl_tiff_decoder.py",
-                       "jxl_jpeg_transcoder.py", "jxl_recompressor.py")
+                       "jxl_jpeg_transcoder.py", "jxl_recompressor.py",
+                       "jxl_photo_common.py")
 _TOOLKIT_VERSION_RE = re.compile(r'^TOOLKIT_VERSION\s*=\s*"([^"]+)"', re.MULTILINE)
 
 

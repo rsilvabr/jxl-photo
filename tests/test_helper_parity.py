@@ -34,6 +34,9 @@ SCRIPTS = [
 # Helpers duplicated on purpose. Not every script defines every one — the test
 # only compares the copies that exist, and requires at least two.
 SHARED_HELPERS = [
+    # The one helper that cannot live in jxl_photo_common.py: it LOADS it (the
+    # copy next to the script, refused when its version differs).
+    "_import_common",
     # Provenance: which source made an output. A copy drifting would make an
     # archive written by one script unverifiable by another, and the delete
     # gates fail closed on that — silently keeping every source forever.

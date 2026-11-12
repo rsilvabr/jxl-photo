@@ -23,6 +23,7 @@ SCRIPTS = [
     "jxl_jpeg_transcoder.py",
     "jxl_recompressor.py",
     "jxl_photo.py",
+    "jxl_photo_common.py",
 ]
 # A token literal in the source: "jxlphoto-src:", "jxlphoto-grayscale",
 # "jxlphoto-icc:inherited". The bare namespace "jxlphoto-" is not a token.

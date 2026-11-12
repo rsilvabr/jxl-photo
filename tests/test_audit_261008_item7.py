@@ -43,8 +43,9 @@ def _load_wrapper():
 
 
 def test_e7_encoder_skips_the_decoders_configured_folder(tmp_path):
-    (tmp_path / "jxl_tiff_encoder.py").write_text(
-        (SCRIPTS / "jxl_tiff_encoder.py").read_text(encoding="utf-8"), encoding="utf-8")
+    for name in ("jxl_tiff_encoder.py", "jxl_photo_common.py"):
+        (tmp_path / name).write_text(
+            (SCRIPTS / name).read_text(encoding="utf-8"), encoding="utf-8")
     dec = (SCRIPTS / "jxl_tiff_decoder.py").read_text(encoding="utf-8")
     assert dec.count('EXPORT_TIFF_FOLDER = "16B_TIFF"') == 1
     (tmp_path / "jxl_tiff_decoder.py").write_text(

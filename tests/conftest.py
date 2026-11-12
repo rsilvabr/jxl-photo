@@ -35,6 +35,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 
 import pytest
 
@@ -172,3 +173,79 @@ def _no_worker_memory_cap():
     finally:
         for mod, value in saved:
             mod.WORKER_MEMORY_FRACTION = value
+
+
+# ---------------------------------------------------------------------------
+# The common module (jxl_photo_common.py): a test double the code there would
+# not see. A script binds a pure shared helper by name (`X = _common.X`), so
+# `monkeypatch.setattr(enc, "X", fake)` replaces the script's binding only: a
+# function in the common module that calls X directly keeps calling the real
+# one, and the test passes without testing anything. Refused here, loudly
+# (tests/test_common_module.py checks that this guard is armed). The helpers
+# that read the script call through `g.` and are never affected.
+# ---------------------------------------------------------------------------
+
+_COMMON_DIRECT = {}
+_MISSING = object()
+
+
+def _common_direct_names(common) -> frozenset:
+    """Globals the functions of a common module read directly (not via g)."""
+    path = getattr(common, "__file__", None)
+    if not path:
+        return frozenset()
+    try:
+        key = (path, os.path.getmtime(path))
+    except OSError:
+        return frozenset()
+    if key not in _COMMON_DIRECT:
+        import symtable
+        with open(path, encoding="utf-8") as f:
+            table = symtable.symtable(f.read(), path, "exec")
+        names = set()
+
+        def walk(t):
+            for s in t.get_symbols():
+                if s.is_global() and s.is_referenced():
+                    names.add(s.get_name())
+            for c in t.get_children():
+                walk(c)
+
+        for child in table.get_children():
+            walk(child)
+        _COMMON_DIRECT[key] = frozenset(names)
+    return _COMMON_DIRECT[key]
+
+
+def _refuse_silent_double(target, name) -> None:
+    common = getattr(target, "_common", None)
+    if not isinstance(common, types.ModuleType) or not isinstance(name, str):
+        return
+    if name not in _common_direct_names(common):
+        return
+    if getattr(target, name, _MISSING) is getattr(common, name, _MISSING):
+        raise AssertionError(
+            f"monkeypatch.setattr({getattr(target, '__name__', target)!s}, {name!r}, ...): "
+            f"jxl_photo_common reads {name} directly, so the code there would keep "
+            f"the real one. Make the common function that uses {name} read it "
+            f"through g (a g-function), or patch it in the common module too.")
+
+
+@pytest.fixture
+def monkeypatch(monkeypatch):
+    original = monkeypatch.setattr
+
+    def setattr(*args, **kwargs):
+        if args and isinstance(args[0], str):
+            modpath, _, attr = args[0].rpartition(".")
+            mod = sys.modules.get(modpath)
+            if mod is not None:
+                _refuse_silent_double(mod, attr)
+        elif len(args) >= 2:
+            _refuse_silent_double(args[0], args[1])
+        elif args and "name" in kwargs:
+            _refuse_silent_double(args[0], kwargs["name"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr = setattr
+    return monkeypatch

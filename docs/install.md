@@ -66,6 +66,7 @@ You should see: `[✓] cjxl/djxl | [✓] exiftool | [✓] magick | [✓] tifffil
 | `cjxl` not recognized | Downloaded `jxl-x64-windows.zip` (runtime DLLs only) | Download `jxl-x64-windows-static.zip` |
 | `exiftool` not recognized at the prompt | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` — the scripts accept that name, your shell does not | Add the folder to PATH (step 3) and reopen the terminal; rename or copy to `exiftool.exe` if you want the bare command to work too |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download `.zip` with `_64` suffix |
+| `jxl_photo_common.py is missing next to ...` or `jxl_photo_common.py is version ... and ... is ...` | Only some of the files were copied, or files from two releases were mixed | Keep every `.py` file of one release together in the same folder: the five scripts and `jxl_photo_common.py`, which holds the code they share |
 | `ModuleNotFoundError` | Packages in different Python version | Run `python -m pip install tifffile numpy pillow rich imagecodecs` with the Python you run the scripts with |
 | PATH not working | Terminal not restarted | Close and reopen PowerShell completely |
 

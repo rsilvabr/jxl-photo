@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = ("jxl_photo.py", "jxl_tiff_encoder.py", "jxl_tiff_decoder.py",
+SCRIPTS = ("jxl_photo.py", "jxl_photo_common.py", "jxl_tiff_encoder.py", "jxl_tiff_decoder.py",
            "jxl_jpeg_transcoder.py", "jxl_recompressor.py")
 
 

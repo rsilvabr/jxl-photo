@@ -49,6 +49,13 @@ def test_v1_the_five_scripts_define_the_same_constants():
     assert len(urls) == 1, f"TOOLKIT_URL differs between scripts: {urls}"
 
 
+def test_v1b_the_common_module_has_the_same_version():
+    """jxl_photo_common.py ships with the scripts: a release bumps it too, and
+    each script refuses a common module of another version."""
+    assert _value("TOOLKIT_VERSION", "jxl_photo_common.py") == \
+        _value("TOOLKIT_VERSION", "jxl_photo.py")
+
+
 def test_v2_the_version_is_a_release_version():
     version = _value("TOOLKIT_VERSION", "jxl_photo.py")
     assert re.fullmatch(r"\d+\.\d+\.\d+(_beta\d+)?", version), version
@@ -136,3 +143,8 @@ def test_v7_mixed_version_messages(tmp_path):
     (script_dir / "jxl_jpeg_transcoder.py").unlink()
     msgs = jxl_photo._mixed_version_messages(script_dir)
     assert msgs == [], msgs
+
+    script_dir = _copy_children(tmp_path / "d")
+    _rewrite_version(script_dir / "jxl_photo_common.py", "0.0.1")
+    msgs = jxl_photo._mixed_version_messages(script_dir)
+    assert len(msgs) == 1 and "jxl_photo_common.py is 0.0.1" in msgs[0], msgs

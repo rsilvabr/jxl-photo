@@ -34,6 +34,46 @@ TOOLKIT_NAME = "jxl-photo"
 TOOLKIT_VERSION = "2.28.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/jxl-photo"
 
+
+def _import_common():
+    """jxl_photo_common.py from THIS script's folder, never another copy found
+    on sys.path (a test or a pre-fix proof loads a script from another folder;
+    the exe also carries a frozen copy). Refused when its version differs."""
+    import importlib.util
+    here = Path(__file__).resolve().parent
+    for key in ("jxl_photo_common", f"jxl_photo_common@{here}"):
+        mod = sys.modules.get(key)
+        where = getattr(mod, "__file__", None)
+        if where and Path(where).resolve().parent == here:
+            break
+    else:
+        path = here / "jxl_photo_common.py"
+        if not path.is_file():
+            raise ImportError(f"jxl_photo_common.py is missing next to {Path(__file__).name}: "
+                              "copy every file of the release into the same folder")
+        key = ("jxl_photo_common" if "jxl_photo_common" not in sys.modules
+               else f"jxl_photo_common@{here}")
+        spec = importlib.util.spec_from_file_location(key, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[key] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(key, None)
+            raise
+    if getattr(mod, "TOOLKIT_VERSION", None) != TOOLKIT_VERSION:
+        raise ImportError(f"jxl_photo_common.py is version {getattr(mod, 'TOOLKIT_VERSION', None)} "
+                          f"and {Path(__file__).name} is {TOOLKIT_VERSION}: copy every file of the "
+                          "release together")
+    return mod
+
+
+# The helpers the scripts share live in jxl_photo_common.py, next to this file
+# (AGENTS.md, "The common module"). _G is this script's namespace, which the
+# shared helpers that read a setting, the logger or the run state are given.
+_common = _import_common()
+_G = _common.Script(globals())
+
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
 GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
@@ -955,7 +995,7 @@ def _get_exiftool_cmd():
                 _exiftool_cmd = cmd
                 break
         else:
-            _exiftool_cmd = "exiftool"
+            _exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
     return _exiftool_cmd
 
 # cjxl detection - early exit with a clear message if the encoder is missing
@@ -2539,7 +2579,7 @@ _rejected_log_lock = threading.Lock()
 
 
 def _log_rejected_file(file_path, reason):
-    """Log rejected files to Logs/jxl_tiff_encoder/rejected_files.log for easy review."""
+    """Log rejected files to Logs/<script>/rejected_files.log for easy review."""
     try:
         rej_dir = LOG_DIR
         rej_dir.mkdir(parents=True, exist_ok=True)
@@ -3261,8 +3301,10 @@ def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
     (native colour, lossless, or an encoder 'skip' file): pasting/assigning
     that profile is correct. False for a LOSSY file carrying an ICC blob:
     djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
-    float decode. None when djxl did not write the profiles (unknown ->
-    callers keep today's behaviour and log it)."""
+    float decode. None when djxl did not write the profiles: nothing then
+    proves the pixels kept the file's own colour space, and pasting the
+    original ICC on a lossy ICC-blob decode is exactly the linear-sRGB trap
+    (round 43, D-5) — the decoder fails CLOSED on it."""
     try:
         a, b = out_icc.read_bytes(), orig_icc.read_bytes()
     except OSError:

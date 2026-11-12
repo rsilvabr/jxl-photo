@@ -101,6 +101,8 @@
   the overlay, reset, move), D dependencies; the beta's letters R/C/S stay
   aliases. A New job = task (`TASKS`) → folder → mode step (`[A]`/`[M]`/
   `[D]`) → quality → review (`_review_screen`)
+- `jxl_photo_common.py` — not a script: the helpers the five share, one copy
+  each. It must sit next to them (see "The common module").
 
 ## Settings are never hardcoded
 - Every script's user-editable settings live at the TOP of the script
@@ -141,6 +143,47 @@
   the battery run with `JXLPHOTO_SETTINGS=""`; the battery's
   `--settings-overlay <file>` runs with one. The wrapper's menu S edits the
   file from the child's own table (no copy of types in the wrapper).
+
+## The common module (`jxl_photo_common.py`)
+- The helpers the scripts share live there, ONE copy each (plan
+  `AI_tools/261112_Claude_plan_common-module.md`; being moved family by
+  family on the `common-module` branch — what is not there yet is still
+  duplicated and parity-pinned, see "Helper functions are deliberately
+  duplicated" below). It sits next to the five scripts and ships with them:
+  the exe's `scripts\`, `jxl-photo_LOCAL`, `tools/ui_tour.py`'s app folder.
+- Each script loads the copy in ITS OWN folder (`_import_common`, the one
+  helper every script keeps, parity-pinned) — never another copy found on
+  `sys.path`: a test or a pre-fix proof loads scripts from another folder,
+  and the exe also carries a frozen copy. A missing one or one of another
+  `TOOLKIT_VERSION` is an `ImportError` with the way out ("copy every file
+  of the release together"); the wrapper's version warning lists it with
+  the children (`_VERSIONED_CHILDREN`).
+- **Two kinds of function.** A pure helper (reads nothing from the script)
+  is bound by name: `X = _common.X`. A helper that reads a setting, the
+  logger, `__file__`, the run state or calls another toolkit helper takes
+  the script's namespace `g` as its first parameter and reads all of it
+  through `g` at CALL time (`g.TEMP_DIR`, `g.logger.warning(...)`,
+  `g._run_captured(...)`); the script keeps a one-line shim
+  `def X(*a, **k): return _common.X(_G, *a, **k)`. Why: the overlay, the
+  per-run reset (`_RUN_DEFAULTS`) and the wrapper's `_with_child_marker`
+  change the SCRIPT's globals; a test's `monkeypatch.setattr(enc, ...)`
+  must reach the code; each script logs to its own logger (a
+  `getLogger("jxl_photo_common")` has no handler); `_history_args` writes
+  the script's name (`g.__file__`) into every photo's xmpMM:History. The
+  state (caches, staging holds, the abort flag, `_planned_outputs`) stays
+  defined in each script and is read through `g`: the suite loads the four
+  modules in one process.
+- **Never** a setting there (the settings stay at the top of each script),
+  never `__file__`, `__name__`, `logger` or `globals()` read directly
+  there. `tests/test_common_module.py` enforces it, plus: every global read
+  there is defined there (a moved helper with a bare `TEMP_DIR` would raise
+  NameError only on its rare path), one copy only (a script binds or shims
+  a common name, never defines it again). conftest's `monkeypatch` refuses
+  a setattr on a script's binding of a name the common module reads
+  DIRECTLY (that code would keep the real one and the test would pass
+  without testing): when it fires, make the reader a `g`-function.
+- A pre-fix proof extracts `jxl_photo_common.py` from the same commit as
+  the scripts (see Verification).
 
 ## Architecture gotchas
 - **djxl returns a lossy ICC-blob file in LINEAR sRGB**: never paste/assign the
@@ -327,7 +370,9 @@
   non-Latin IPTC text into `?` (measured 2026-11-11): never copy IPTC from
   its result — a `%` path goes through `_iptc_only_source`. The two routes
   differ, so a test of the IPTC copy runs in a `%` folder AND in one without.
-- Helper functions are deliberately duplicated across the scripts
+- Helper functions are deliberately duplicated across the scripts (until
+  they move to `jxl_photo_common.py`: a helper already there has one copy
+  and is not in `SHARED_HELPERS` any more)
   (`_marker_matches`, `_validate_export_folder_name`, `_replace_suffix_token`,
   `_is_relative_to`,
   `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`,
@@ -584,6 +629,7 @@
   stashing:
   ```
   git show HEAD:jxl_photo.py > <tmpdir>/jxl_photo.py   # then run the test there
+  git show HEAD:jxl_photo_common.py > <tmpdir>/jxl_photo_common.py   # always with it
   ```
   Do **not** use `git stash` for this: the repo can carry unrelated stashes, and
   a `stash pop` may apply the wrong one and leave a merge conflict.
@@ -773,8 +819,9 @@ must-fix / should-fix items and a commit verdict.
   rule, 2026-11-08): `> **Windows program, no Python needed:**
   [jxl-photo-exe](https://github.com/rsilvabr/jxl-photo-exe/releases/latest)
   — …`; the README says it right under "Current version" too.
-- **Every release bumps `TOOLKIT_VERSION` in ALL FIVE scripts**, even
-  when only one changed, to the version of the newest
+- **Every release bumps `TOOLKIT_VERSION` in ALL FIVE scripts and in
+  `jxl_photo_common.py`** (each script refuses a common module of another
+  version), even when only one changed, to the version of the newest
   `docs/version_history.md` section — `tests/test_toolkit_version.py`
   fails until they match.
 - Commits carry the repo owner's authorship only — **no `Co-Authored-By` or
