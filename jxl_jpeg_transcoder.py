@@ -7162,34 +7162,12 @@ _RUN_DEFAULTS = {
 _work_dir_problem = _common._work_dir_problem
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-
-    # Every run-scoped global starts from its SCRIPT setting (captured at
-    # import) — a second main() in the same process used to inherit the first
-    # run's armed flags (the one-way `if args.x:` pattern). Import-time values,
-    # never hardcoded literals: a setting the user edited at the top of this
-    # file (EXPORT_MARKER, DELETE_CONFIRM, TEMP2_DIR, ...) stays in force.
-    for _gname, _gvalue in _RUN_DEFAULTS.items():
-        globals()[_gname] = _gvalue
-    _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
-
-    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
-    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD, LABEL_QUALITY
-    RESIZE_MODE = None
-    RESIZE_VALUE = None
-    ALLOW_UPSCALE = False
-    SHARPEN = "none"
-    LABEL_QUALITY = None
-    SHARPEN_SIGMA = None
-    SHARPEN_GAIN = None
-    SHARPEN_THRESHOLD = None
-    _FORCE_REDERIVE.clear()
-
-    # --resize-*/--sharpen: resolve to module globals (mutual exclusion is
-    # charged by argparse itself; the positivity checks exit 2 like the other
-    # argument errors).
+def _configure_run(parser, args):
+    """The configuration step of main(), moved here unchanged (refactor plan 261113, A3):
+    the flags into the run's settings, the command-line checks, the command this
+    run is (transcode, convert, auto) and the tool checks. setup_logger runs in
+    each cmd_*."""
+    global ALLOW_UPSCALE, LABEL_QUALITY, RESIZE_MODE, RESIZE_VALUE, SHARPEN, SHARPEN_GAIN, SHARPEN_SIGMA, SHARPEN_THRESHOLD
     if args.resize_long is not None:
         if args.resize_long <= 0:
             parser.error("--resize-long must be a positive number of pixels")
@@ -7548,6 +7526,38 @@ def main():
                 print(f"WARNING: {_exe} {'.'.join(map(str, _v))} is older than the "
                       f"supported minimum (0.11.2); conversions may fail in "
                       f"confusing ways. https://github.com/libjxl/libjxl/releases")
+    return cmd, auto_decode
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Every run-scoped global starts from its SCRIPT setting (captured at
+    # import) — a second main() in the same process used to inherit the first
+    # run's armed flags (the one-way `if args.x:` pattern). Import-time values,
+    # never hardcoded literals: a setting the user edited at the top of this
+    # file (EXPORT_MARKER, DELETE_CONFIRM, TEMP2_DIR, ...) stays in force.
+    for _gname, _gvalue in _RUN_DEFAULTS.items():
+        globals()[_gname] = _gvalue
+    _DERIVED_INPUT_LABELS.clear()       # per run (_drop_derivative_pairs)
+
+    global RESIZE_MODE, RESIZE_VALUE, ALLOW_UPSCALE
+    global SHARPEN, SHARPEN_SIGMA, SHARPEN_GAIN, SHARPEN_THRESHOLD, LABEL_QUALITY
+    RESIZE_MODE = None
+    RESIZE_VALUE = None
+    ALLOW_UPSCALE = False
+    SHARPEN = "none"
+    LABEL_QUALITY = None
+    SHARPEN_SIGMA = None
+    SHARPEN_GAIN = None
+    SHARPEN_THRESHOLD = None
+    _FORCE_REDERIVE.clear()
+
+    # --resize-*/--sharpen: resolve to module globals (mutual exclusion is
+    # charged by argparse itself; the positivity checks exit 2 like the other
+    # argument errors).
+    cmd, auto_decode = _configure_run(parser, args)
 
     # NOTE: --clean-staging runs inside each cmd_* (see _apply_staging_args),
     # not here: it needs the EFFECTIVE staging dir (which may come from the
