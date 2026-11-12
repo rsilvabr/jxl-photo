@@ -10,7 +10,8 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.29.0_beta1](version_history.md#v2290_beta1)** | 2026-11-12 | Pre-release. A release is six files that go together: the five scripts and `jxl_photo_common.py`, the code they share; nothing changes in what they do |
+| **[v2.29.1](version_history.md#v2291)** | 2026-11-13 | A release is six files that go together; yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file |
+| [v2.29.0_beta1](version_history.md#v2290_beta1) | 2026-11-12 | Pre-release. A release is six files that go together: the five scripts and `jxl_photo_common.py`, the code they share; nothing changes in what they do |
 | [v2.28.0](version_history.md#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies drop the TIFF-tag markers; no copy of a camera TIFF's thumbnail page; resized copies work in a folder named like `100%off` |
 | [v2.27.1](version_history.md#v2271) | 2026-11-11 | A lossy JPEG → JXL keeps a JPEG whose HDR gain map the JXL does not hold; the way out of unparseable maker notes named for more exiftool wordings |
 | [v2.27.0](version_history.md#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master and comes back in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts |
@@ -32,6 +33,17 @@ as [GitHub Releases](https://github.com/rsilvabr/jxl-photo/releases).
 | [v2.17.0](version_history.md#v2170) | 2026-10-24 | Film scans archived lossless and never recompressed lossy unless asked; they keep what their scanner software needs (whole XMP, private tags); thumbnail pages kept by default, except Capture One's |
 
 Every release since v1.0: [version_history.md](version_history.md#release-history).
+
+## v2.29.1
+
+2026-11-13. The first stable release since v2.28.0; it includes the v2.29.0_beta1 pre-release.
+
+- **A release is now six files that go together**: the five scripts and `jxl_photo_common.py`, which holds the code they share. Keep them in one folder ([upgrading](upgrading.md)); a script copied on its own stops with a line that says so. The Windows program already carries all of them.
+- **Yes/no questions in the wizard read the answer the same way on both screens**: `y`/`yes`/`s`/`sim` and `n`/`no`/`nao`/`não`, `Enter` for the default, and anything else asks again (the plain screen took an answer that did not start with `n` as a yes).
+- **The log file now holds the scripts' detail lines** (`DEBUG`: why a delete gate kept a file, which ICC profile was used); the console shows what it always did.
+- The code behind the delete gates and the start of each run was reorganized and is now tested directly; same command lines, settings and files written.
+
+[Version history](version_history.md#v2291).
 
 ## v2.29.0_beta1
 

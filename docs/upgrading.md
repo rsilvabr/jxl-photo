@@ -11,7 +11,7 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
-## v2.29.0: the scripts need `jxl_photo_common.py` next to them
+## v2.29.1 (and the v2.29.0_beta1 pre-release): the scripts need `jxl_photo_common.py` next to them
 
 - **A release is six files that go together**: `jxl_photo.py`, the four
   `jxl_*` scripts and `jxl_photo_common.py`, the code they share. When you

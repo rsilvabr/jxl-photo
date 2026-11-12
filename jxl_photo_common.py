@@ -46,7 +46,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-TOOLKIT_VERSION = "2.29.0_beta1"
+TOOLKIT_VERSION = "2.29.1"
 
 
 class Script:

@@ -1066,7 +1066,7 @@ Each underlying script writes its own log:
 
 The log file holds the console's lines plus the `DEBUG` ones (why a file was
 kept by a delete gate, which ICC profile was used, why a stamp was skipped);
-the console shows only `INFO` and above. (Before v2.30.0 the `DEBUG` lines were
+the console shows only `INFO` and above. (Before v2.29.1 the `DEBUG` lines were
 written nowhere.)
 
 `jxl_photo.py` streams the selected script's output in real-time and only writes

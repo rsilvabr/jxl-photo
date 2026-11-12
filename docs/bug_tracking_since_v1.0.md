@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0 (not released yet) | #648–#651 (4) |
+| [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.29.1 | #648–#651 (4) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
 | [Round-79 — real files the fixtures did not have](#round-79--real-files-the-fixtures-did-not-have-2026-11-11) | 2026-11-11 | v2.27.1 | #641 (1) |
 | [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | v2.27.0 | #638–#640 (3) |
@@ -100,8 +100,8 @@ were never tagged and never shipped.
 
 ## Round-81 — the Python refactor (2026-11-13)
 
-Found while restructuring the code of the four backends and the wizard for
-v2.30.0: each is fixed with its own regression test before the restructuring
+Found while restructuring the code of the four backends and the wizard
+(v2.29.1): each is fixed with its own regression test before the restructuring
 moves the code around.
 
 | # | Bug | Script | Status |

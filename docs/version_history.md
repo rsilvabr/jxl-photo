@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.29.0_beta1](#v2290_beta1)** | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
+| **[v2.29.1](#v2291)** | 2026-11-13 | The code the scripts share lives in one file, `jxl_photo_common.py` (a release is six files); yes/no answers read the same way on both wizard screens; the scripts' detail lines reach the log file; the delete gates' code reorganized and tested directly |
+| [v2.29.0_beta1](#v2290_beta1) | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
 | [v2.28.0](#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
 | [v2.27.1](#v2271) | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
 | [v2.27.0](#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master (copied into the XMP where it is missing) and comes back byte for byte in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts (round 78, 3 fixes) |
@@ -101,9 +102,50 @@ Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refac
 
 ---
 
+## v2.29.1
+
+**Released 2026-11-13.** Supersedes v2.29.0_beta1, and is the first stable
+release since v2.28.0: the common module of the beta, four fixes, and an
+internal reorganization that changes nothing in what the scripts do. What to
+check: [upgrading.md](upgrading.md) (the six files).
+
+- **The common module of v2.29.0_beta1** (the section below): the helpers the
+  scripts share have one copy, in `jxl_photo_common.py`, next to them.
+- **Fixed — yes/no answers (#649).** The plain screen read any answer not
+  starting with `n` as a yes on a question whose default is yes (`sair` at
+  "Run this job? [Y/n]" ran the job), and `confirm()` read `sim` as a no; the
+  Rich screen asked again on `yes` and `sim`. Both now take `y`, `yes`, `s`,
+  `sim` and `n`, `no`, `nao`, `não`; Enter is the default and anything else
+  asks again. Deleting still needs the typed HHMM token.
+- **Fixed — the scripts' DEBUG lines reached no file (#651).** The logger stayed
+  at INFO while the file handler was at DEBUG; the 57 debug lines of the four
+  scripts (why a delete gate kept a source, which ICC profile was used, why a
+  stamp was skipped) now go to the log file. The console is unchanged.
+- **Fixed — two of the transcoder's lossy delete gates passed over an unpaired
+  result in silence (#650)**: it is now logged as `KEEP (final output
+  missing)` and counted, like in the lossless gate. Nothing was deleted by it.
+- **Fixed — the recompressor kept a previous run's export marker and folders
+  when it ran twice in one process (#648).** Only the test suite and in-process
+  callers do that; a real run is a process of its own.
+- **Changed, internal — the delete gates and the start of every run have
+  names.** Each backend's delete gate is a function of its own (the
+  transcoder's two identical lossy gates became one), tested directly on real
+  files; each `main()` hands its configuration, its choice of files and, in
+  the encoder, its guard over existing outputs to named functions (the
+  encoder's `main()` went from 1 175 lines to 614). Every move was checked to
+  be only a move (`tools/move_check.py`: same statements, every variable passed
+  in and out). A result status the end-of-run count does not know now counts
+  as an error instead of being left out. The encoder's `--help` explains
+  `--mode` and `--workers`.
+- New tools for this kind of change: `tools/side_by_side.py` (the same 27
+  scenarios on real photos with two versions, compared file by file, tag by
+  tag and log line by line), `tools/wizard_transcripts.py` (the wizard's
+  screens and child command lines, both screens, two versions),
+  `tools/move_check.py` and `tools/mutate.py` (mutation tests on a copy).
+
 ## v2.29.0_beta1
 
-**Pre-release, 2026-11-12.** The last stable release is v2.28.0. An internal
+**Pre-release, 2026-11-12.** Superseded by v2.29.1. The last stable release before it is v2.28.0. An internal
 change with one thing to know: the scripts now need `jxl_photo_common.py`
 next to them. What to check: [upgrading.md](upgrading.md).
 
