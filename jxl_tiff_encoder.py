@@ -1613,21 +1613,7 @@ _OVERLAY_SAFETY_SETTINGS = frozenset({
     "EMBED_ICC_IN_JXL"})
 
 
-def _settings_overlay_path():
-    """The overlay file to read (it may not exist), or None when
-    JXLPHOTO_SETTINGS is set but empty. Same places as the wrapper's own
-    config (ConfigManager._get_config_path): next to the scripts first."""
-    env = os.environ.get(_SETTINGS_OVERLAY_ENV)
-    if env is not None:
-        return Path(env) if env.strip() else None
-    portable = Path(__file__).resolve().parent / _SETTINGS_OVERLAY_FILE
-    if portable.exists():
-        return portable
-    if os.name == "nt":
-        home = Path(os.environ.get("USERPROFILE") or Path.home())
-    else:
-        home = Path.home()
-    return home / _SETTINGS_OVERLAY_FILE
+def _settings_overlay_path(*a, **k): return _common._settings_overlay_path(_G, *a, **k)
 
 
 _settings_overlay_section = _common._settings_overlay_section
@@ -1636,56 +1622,7 @@ _settings_overlay_section = _common._settings_overlay_section
 _overlay_value = _common._overlay_value
 
 
-def _apply_settings_overlay(namespace: dict, module: str, specs: dict,
-                            derived: dict) -> dict:
-    """Apply `module`'s section of the overlay file to `namespace` (this
-    script's globals(), right after the settings block): only the names in
-    `specs`, each checked by _overlay_value. A `derived` setting
-    ({"EXIFTOOL_TIMEOUT": "CJXL_TIMEOUT"}) follows its source when the
-    overlay changes the source and the script had it equal. Returns
-    {"path", "applied", "warnings"} for _log_settings_overlay. Never raises:
-    an overlay that cannot be read changes nothing."""
-    result = {"path": None, "applied": [], "warnings": []}
-    try:
-        result["path"] = _settings_overlay_path()
-        if ((os.environ.get(_SETTINGS_OVERLAY_ENV) or "").strip()
-                and not result["path"].is_file()):
-            # #632: a mistyped JXLPHOTO_SETTINGS ran with the script's own
-            # settings and not one line in the log.
-            result["warnings"].append(
-                f"{_SETTINGS_OVERLAY_ENV} names a file that does not exist "
-                f"({result['path']}); no setting changed")
-            return result
-        section = _settings_overlay_section(result["path"], module)
-    except Exception as e:
-        result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
-        return result
-    if not section:
-        return result
-    before = {name: namespace.get(name) for name in specs}
-    for name, value in section.items():
-        if name in _OVERLAY_SAFETY_SETTINGS:
-            result["warnings"].append(
-                f"{name} is a safety setting: it is chosen per run (or in the "
-                f"script itself), never by the overlay; ignored")
-            continue
-        spec = specs.get(name)
-        if spec is None:
-            result["warnings"].append(f"{name} is not a setting the overlay can "
-                                      f"change in {module}; ignored")
-            continue
-        ok, checked = _overlay_value(spec, value)
-        if not ok:
-            result["warnings"].append(f"{name} = {json.dumps(value)} is not "
-                                      f"{checked}; the script's value is kept")
-            continue
-        namespace[name] = checked
-        result["applied"].append(name)
-    for name, source in derived.items():
-        if (source in result["applied"] and name not in section
-                and before.get(name) == before.get(source)):
-            namespace[name] = namespace[source]
-    return result
+def _apply_settings_overlay(*a, **k): return _common._apply_settings_overlay(_G, *a, **k)
 
 
 def _log_settings_overlay() -> None:
