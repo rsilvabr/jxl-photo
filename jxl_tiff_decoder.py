@@ -5628,6 +5628,11 @@ def main():
             # result[0] is the source JXL path; result[2] is the reason.
             failed_files.append((str(result[0]),
                                  str(result[2]) if len(result) > 2 else "unknown error"))
+        else:
+            # A status no branch above counts (a new one, forgotten here) is an
+            # error, never silence (refactor plan 261113, A4).
+            err += 1
+            failed_files.append((str(result[0]), f"internal: status {status!r} is not counted"))
 
     logger.info("\n" + "-"*50)
     if args.sync:

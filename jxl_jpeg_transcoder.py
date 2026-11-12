@@ -4029,6 +4029,11 @@ def cmd_transcode(args, auto_decode: bool = False):
         elif status == "error":
             err += 1
             failed_files.append((str(result[0]), str(result[2])))
+        else:
+            # A status no branch above counts (a new one, forgotten here) is an
+            # error, never silence (refactor plan 261113, A4).
+            err += 1
+            failed_files.append((str(result[0]), f"internal: status {status!r} is not counted"))
 
     logger.info(f"\n{'-'*50}")
     if decode and md5_fail:
@@ -6282,6 +6287,11 @@ def cmd_convert(args, from_jxl: bool = True):
         elif status == "error":
             err += 1
             failed_files.append((str(src), str(detail)))
+        else:
+            # A status no branch above counts (a new one, forgotten here) is an
+            # error, never silence (refactor plan 261113, A4).
+            err += 1
+            failed_files.append((str(src), f"internal: status {status!r} is not counted"))
 
     logger.info(f"\n{'-'*50}")
     logger.info(f"Done: {ok} OK | {overwritten} reconverts | {skipped} skipped | {err} errors")

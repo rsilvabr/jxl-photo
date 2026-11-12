@@ -5947,6 +5947,13 @@ def main():
     for src_str, (s, _f) in results.items():
         if s in ("error", "aborted"):
             failures.append((src_str, _error_details.pop(src_str, s)))
+    # A status none of the sums above counts (a new one, forgotten here) is an
+    # error, never silence (refactor plan 261113, A4).
+    counted = ("ok", "copied", "overwrite", "skipped", "aborted", "error")
+    for src_str, (s, _f) in results.items():
+        if s not in counted:
+            errors += 1
+            failures.append((src_str, f"internal: status {s!r} is not counted"))
 
     done_line = (f"\nDone: {ok} recompressed | {copied} copied | {overwritten} overwrites "
                  f"| {skipped} skipped | {errors} errors")

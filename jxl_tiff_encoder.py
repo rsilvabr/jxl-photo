@@ -7324,6 +7324,11 @@ def main():
             err += 1
             # result[0] is (path, page_idx); result[2] is the exception text.
             failed_files.append((str(result[0][0]), str(result[2])))
+        else:
+            # A status no branch above counts (a new one, forgotten here) is an
+            # error, never silence (refactor plan 261113, A4).
+            err += 1
+            failed_files.append((str(result[0][0]), f"internal: status {status!r} is not counted"))
 
     # Account for files intentionally skipped by the multipage policy AND for
     # mode 6/7 files that fell outside the export marker. The DRY-RUN summary
