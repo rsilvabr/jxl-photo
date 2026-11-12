@@ -1426,7 +1426,10 @@ def setup_logger():
         n += 1
 
     logger = logging.getLogger("jxl_jpeg_transcoder")
-    logger.setLevel(logging.INFO)
+    # DEBUG on the logger: its level filters a record before any handler sees
+    # it, so at INFO the file handler's DEBUG was never reached (#651). The
+    # console stays at INFO through its own handler level.
+    logger.setLevel(logging.DEBUG)
 
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)

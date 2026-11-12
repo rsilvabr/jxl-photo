@@ -1064,6 +1064,11 @@ Each underlying script writes its own log:
 <script_folder>/Logs/<script_name>/YYYYMMDD_HHMMSS_<pid>.log
 ```
 
+The log file holds the console's lines plus the `DEBUG` ones (why a file was
+kept by a delete gate, which ICC profile was used, why a stamp was skipped);
+the console shows only `INFO` and above. (Before v2.30.0 the `DEBUG` lines were
+written nowhere.)
+
 `jxl_photo.py` streams the selected script's output in real-time and only writes
 a log of its own for **manifest runs** — a combined summary across all entries:
 ```

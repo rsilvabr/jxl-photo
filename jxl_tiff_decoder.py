@@ -967,7 +967,10 @@ def setup_logger():
         n += 1
 
     logger = logging.getLogger("jxl_decode")
-    logger.setLevel(logging.INFO)
+    # DEBUG on the logger, DEBUG on the file, INFO on the console (#651): at
+    # INFO the logger filtered every debug line before the file saw it, and
+    # these handlers had no level of their own.
+    logger.setLevel(logging.DEBUG)
 
     # Remove old handlers so a second call in the same process (tests,
     # wrapper-driven runs) does not duplicate log lines.
@@ -975,6 +978,7 @@ def setup_logger():
         logger.removeHandler(handler)
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
     # Ensure stdout writes UTF-8 to prevent Mojibake on Windows console
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -982,6 +986,7 @@ def setup_logger():
     except Exception:
         pass
     ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S")
     fh.setFormatter(fmt)

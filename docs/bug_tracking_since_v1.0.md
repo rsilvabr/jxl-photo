@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #651.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #652.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,7 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
-| [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0 (not released yet) | #648–#650 (3) |
+| [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0 (not released yet) | #648–#651 (4) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
 | [Round-79 — real files the fixtures did not have](#round-79--real-files-the-fixtures-did-not-have-2026-11-11) | 2026-11-11 | v2.27.1 | #641 (1) |
 | [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | v2.27.0 | #638–#640 (3) |
@@ -109,6 +109,7 @@ moves the code around.
 | 648 | **The recompressor kept a previous run's export marker and folders when it ran twice in one process**: `--export-marker`, `--export-subfolder` and `--export-jxl-folder` are assigned only when given, and the three were missing from the per-run reset (`_RUN_DEFAULTS`), so a second `main()` in the same process (the test suite, a script driving another one in-process) kept the first run's values. The wizard, the presets and the Windows program run every backend as a process of its own, so no real run was affected | `jxl_recompressor.py` | ✅ Fixed — the three are in `_RUN_DEFAULTS`; `tests/test_run_reset_coverage.py` reads every `main()`/`cmd_*` of the four backends and fails on a global a flag sets without a reset |
 | 649 | **On the plain screen, "sair" at "Run this job? [Y/n]" ran the job**: the plain renderer read any answer not starting with `n` as YES on a question whose default is yes, and `confirm()` read `sim` as NO; the Rich renderer asked again on `yes` and `sim`. A typo or an answer in Portuguese could start a run nobody meant (deleting still needed the typed HHMM token) | `jxl_photo.py` | ✅ Fixed — one reading for both screens (`_yes_no`): `y`/`yes`/`s`/`sim`, `n`/`no`/`nao`/`não`, Enter = the default, anything else asks again; Rich keeps its own screen (`_YesNoConfirm`). `tests/test_yes_no_answers.py` (28 of its cases failed before) |
 | 650 | **Two of the transcoder's lossy delete gates skipped an unpaired result in silence**: in `cmd_convert` and in the auto mode's convert gate (`_process_file_group`), a result whose path matched no planned pair was skipped with a bare `continue`: nothing was deleted (fail-closed), but no `KEEP` line was written and nothing was counted, while the transcode gate (`process_group_transcode`) logged and counted the same case | `jxl_jpeg_transcoder.py` | ✅ Fixed — both log `KEEP (final output missing)` and count it, like the transcode gate. `tests/test_delete_gate_unpaired_result.py` (both routes failed before) |
+| 651 | **The scripts' DEBUG lines were written nowhere**: each `setup_logger` gave the file handler the DEBUG level but left the logger itself at INFO, which drops a record before any handler sees it; the 57 `logger.debug` lines of the four scripts (why a delete gate kept a source, which ICC profile was used, why an adopt stamp was skipped) never reached the log file. The decoder's handlers had no level of their own | all four backends | ✅ Fixed — the logger is at DEBUG, the file handler at DEBUG, the console handler at INFO (the console and what the wizard reads are unchanged). `tests/test_debug_lines_reach_the_log_file.py` (all four failed before) |
 
 ## Round-80 — what the sweep left to decide (2026-11-11)
 
