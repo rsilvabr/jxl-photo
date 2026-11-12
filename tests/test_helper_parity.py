@@ -40,7 +40,6 @@ SHARED_HELPERS = [
     # Provenance: which source made an output. A copy drifting would make an
     # archive written by one script unverifiable by another, and the delete
     # gates fail closed on that — silently keeping every source forever.
-    "_source_path_id",
     "_file_content_id",
     "_file_digest_cached",
     "_read_source_markers_batch",
@@ -69,8 +68,6 @@ SHARED_HELPERS = [
     "_delete_partial_if_written",
     # Which runs need that check at all. A copy drifting would leave one backend
     # deleting sources in a layout another one guards.
-    "_run_collapses_structure",
-    "_marker_matches",
     # E-H: which folder anchors modes 6/7 (the first marker at or below the
     # input root, else the closest above). A copy drifting is one script
     # writing a mode 6 output where another one looks for it.
@@ -78,7 +75,6 @@ SHARED_HELPERS = [
     # --exclude-folders discovery filter (encoder/decoder finders + the
     # wrapper's collision walk): a drifting copy would let one site see a file
     # set another does not.
-    "_path_excluded_below_root",
     # X-B: the decoder's and the recompressor's modes 6/7 skip the OTHER
     # tools' JXL output folders below the marker (tables differ per script,
     # the logic must not). A copy drifting is one finder taking a derivative
@@ -102,15 +98,12 @@ SHARED_HELPERS = [
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_validate_export_folder_name",
-    "_replace_suffix_token",
-    "_is_relative_to",
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_run_captured",
     # An argfile path outside the ANSI code page goes to exiftool on stdin: a
     # copy drifting is one backend failing every exiftool call with a temp
     # folder the others handle.
-    "_ansi_encodable",
     "_argfile_via_stdin",
     # #578: a run writing into staging marks it as in use, and --clean-staging
     # of another run sweeps nothing meanwhile. A copy drifting is one backend
@@ -126,10 +119,8 @@ SHARED_HELPERS = [
     # TEMP_DIR / staging checked before the run (2026-11-08): the transcoder
     # had no check, and a dry run with a missing TEMP_DIR failed every marker
     # read in all four. One copy drifting brings either back.
-    "_work_dir_problem",
     # #541: cjxl/djxl past MAX_PATH. A copy drifting would leave one backend
     # failing on the long paths the others now handle.
-    "_long_codec_paths",
     # #622/#623: what `jxlinfo` says about a JXL. A copy drifting is one
     # backend turning a rotated JPEG's pixels twice, or deleting a float or
     # animated JXL after a 16-bit / first-frame decode, that the others keep.
@@ -153,11 +144,9 @@ SHARED_HELPERS = [
     "_jxl_thumb_installed",
     "_make_explorer_thumbnail",
     "_add_explorer_thumbnail",
-    "_stderr_tail",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.
-    "_argfile_safe",
     # The xmpMM:History entry: a copy drifting would make one script write a
     # History entry the others do not (or one exiftool cannot parse).
     "_struct_escape",
@@ -271,7 +260,6 @@ SHARED_HELPERS = [
     "_is_camera_thumbnail_page",
     # Every path ImageMagick writes: one backend forgetting the escape fails
     # in a folder named "100%off" (#647).
-    "_magick_out_path",
     "_resize_geometry",
     "_sharpen_args",
     "_resize_label",

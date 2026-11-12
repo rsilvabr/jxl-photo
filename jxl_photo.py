@@ -129,14 +129,7 @@ def _rich_safe(value) -> str:
     return _markup_escape(str(value))
 
 
-# Backport of Path.is_relative_to for Python < 3.9
-def _is_relative_to(path: Path, anchor: Path) -> bool:
-    """Backport of Path.is_relative_to for Python < 3.9."""
-    try:
-        path.relative_to(anchor)
-        return True
-    except ValueError:
-        return False
+_is_relative_to = _common._is_relative_to
 
 
 def _display_cmd(cmd: List) -> List[str]:
@@ -484,85 +477,13 @@ def _session_int(session: Dict, field: str, fallback: Optional[int]) -> Optional
         return fallback
 
 
-def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
-    """Replace the FIRST occurrence of suffix_from in a folder name, but only
-    when it is a complete token (bounded by _, -, space, or string edges) —
-    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
-    returns the name unchanged (caller applies the append fallback).
-    """
-    import re as _re
-    pat = _re.compile(
-        _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
-    # A non-token match must NOT stop the search: in 'MyTIFF_TIFF' the
-    # embedded 'TIFF' fails the left-boundary test, but the trailing '_TIFF'
-    # is a valid token and gets replaced.
-    for m in pat.finditer(name):
-        if m.start() == 0 or name[m.start() - 1] in '_- ':
-            return name[:m.start()] + suffix_to + name[m.end():]
-    return name
+_replace_suffix_token = _common._replace_suffix_token
 
 
-def _marker_matches(part_lower: str, marker_lower: str) -> bool:
-    """Folder-name part matches the export marker.
-
-    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
-    and, for underscore-wrapped markers, also the bare word — so the default
-    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
-    documentation promises.
-    """
-    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
-    # (a backup folder, different thing) would match the '_EXPORT' marker.
-    # endswith is inherently safe: the marker's own leading underscore anchors it.
-    if not marker_lower:
-        # An empty marker matches nothing: without this, endswith("") is True
-        # and marker_lower[0] raises IndexError. Fail closed — a run without a
-        # marker must not silently treat every folder as an anchor.
-        return False
-    if part_lower.startswith(marker_lower):
-        rest = part_lower[len(marker_lower):]
-        if not rest or rest[0] in '_- ':
-            return True
-    if part_lower.endswith(marker_lower):
-        s = len(part_lower) - len(marker_lower)
-        # endswith also needs a left anchor: either the marker brings its own
-        # (a leading underscore, as in the default '_EXPORT') or the name
-        # must boundary it — otherwise marker 'EXPORT' would match 'ReExport'.
-        if s == 0 or marker_lower[0] in '_- ' or part_lower[s - 1] in '_- ':
-            return True
-    bare = marker_lower.strip('_')
-    if not bare or bare == marker_lower:
-        return False
-    # The bare word must be a complete TOKEN at the START or END of the name
-    # (bounded by _, -, space, or the string edges). This keeps the documented
-    # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
-    # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
-    # 'backup_export_old'.
-    import re as _re
-    if part_lower.startswith(bare):
-        e = len(bare)
-        if e == len(part_lower) or part_lower[e] in '_- ':
-            return True
-    if part_lower.endswith(bare):
-        s = len(part_lower) - len(bare)
-        if s == 0 or part_lower[s - 1] in '_- ':
-            return True
-    return False
+_marker_matches = _common._marker_matches
 
 
-def _path_excluded_below_root(file_path: Path, root, names) -> bool:
-    """True when any folder segment of file_path BELOW root matches one
-    of `names` (lower-cased). Relative to root, segment match,
-    fail-closed."""
-    if not names or root is None:
-        return False
-    try:
-        rel = file_path.parent.relative_to(root)
-    except ValueError:
-        try:
-            rel = file_path.parent.resolve().relative_to(root.resolve())
-        except (ValueError, OSError):
-            rel = file_path.parent  # fail closed, like _is_tool_output_path
-    return any(seg.lower() in names for seg in rel.parts)
+_path_excluded_below_root = _common._path_excluded_below_root
 
 
 def _append_expert_flags(cmd: List[str], flags: str) -> None:
@@ -762,7 +683,7 @@ _RECURSIVE_MANIFEST_MODES = frozenset({2, 3, 4, 5, 6, 7, 8})
 # Modes whose output path DROPS folder structure, so two sources in different
 # folders resolve to the same output and an archive can be overwritten by an
 # unrelated photo. Mirrors _COLLAPSING_MODES in jxl_tiff_encoder.py.
-_COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
+_COLLAPSING_MODES = _common._COLLAPSING_MODES
 
 
 def _recompress_entry_in_place(source, dest_path, mode) -> bool:
@@ -797,30 +718,7 @@ def _recompress_entry_in_place(source, dest_path, mode) -> bool:
         return True     # cannot tell -> treat as destructive (fail closed)
 
 
-def _run_collapses_structure(mode, output_arg, source_root) -> bool:
-    """Does THIS run drop the source's folder from the output path?
-
-    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
-    when an output folder was given: every file then lands in that one folder,
-    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
-    writes the same names into it, and with --delete-source it overwrites the
-    first archive after that archive's own source is already gone. Mode 0 is
-    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
-    the only defence there is.
-
-    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
-    as one: demanding a marker there would refuse existing archives that can
-    never collide, which is the dead end #271 exists to avoid.
-    """
-    if mode in _COLLAPSING_MODES:
-        return True
-    if mode != 0 or not output_arg:
-        return False
-    try:
-        return (os.path.normcase(os.path.abspath(str(output_arg)))
-                != os.path.normcase(os.path.abspath(str(source_root))))
-    except (OSError, ValueError):
-        return True     # cannot tell -> assume it collapses (fail closed)
+_run_collapses_structure = _common._run_collapses_structure
 
 
 def _supports_provenance_adopt(origin: str, dest: str) -> bool:

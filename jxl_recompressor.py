@@ -199,31 +199,10 @@ def _verify_jxl_integrity(jxl_path: Path) -> bool:
         return False
 
 
-def _is_relative_to(path: Path, anchor: Path) -> bool:
-    """Backport of Path.is_relative_to for Python < 3.9."""
-    try:
-        path.relative_to(anchor)
-        return True
-    except ValueError:
-        return False
+_is_relative_to = _common._is_relative_to
 
 
-def _replace_suffix_token(name: str, suffix_from: str, suffix_to: str) -> str:
-    """Replace the FIRST occurrence of suffix_from in a folder name, but only
-    when it is a complete token (bounded by _, -, space, or string edges) —
-    otherwise 'MyJXLArchive' would become 'MyTIFFArchive'. No token match
-    returns the name unchanged (caller applies the append fallback).
-    """
-    import re as _re
-    pat = _re.compile(
-        _re.escape(suffix_from) + r'(?=$|[_\- ])', _re.IGNORECASE)
-    # A non-token match must NOT stop the search: in 'MyTIFF_TIFF' the
-    # embedded 'TIFF' fails the left-boundary test, but the trailing '_TIFF'
-    # is a valid token and gets replaced.
-    for m in pat.finditer(name):
-        if m.start() == 0 or name[m.start() - 1] in '_- ':
-            return name[:m.start()] + suffix_to + name[m.end():]
-    return name
+_replace_suffix_token = _common._replace_suffix_token
 
 
 def _apply_rename(name: str, rename_from: str, rename_to: str) -> str:
@@ -938,51 +917,7 @@ def _clean_staging(staging_dir):
     return removed, freed
 
 
-def _marker_matches(part_lower: str, marker_lower: str) -> bool:
-    """Folder-name part matches the export marker.
-
-    Matches start/end with the marker (e.g. _EXPORT, _Export_2024, My_EXPORT)
-    and, for underscore-wrapped markers, also the bare word — so the default
-    '_EXPORT' also detects 'Export_Lightroom' and 'Lightroom_Export', as the
-    documentation promises.
-    """
-    # startswith needs a token boundary after the marker, otherwise '_EXPORTS'
-    # (a backup folder, different thing) would match the '_EXPORT' marker.
-    # endswith is inherently safe: the marker's own leading underscore anchors it.
-    if not marker_lower:
-        # An empty marker matches nothing: without this, endswith("") is True
-        # and marker_lower[0] raises IndexError. Fail closed — a run without a
-        # marker must not silently treat every folder as an anchor.
-        return False
-    if part_lower.startswith(marker_lower):
-        rest = part_lower[len(marker_lower):]
-        if not rest or rest[0] in '_- ':
-            return True
-    if part_lower.endswith(marker_lower):
-        s = len(part_lower) - len(marker_lower)
-        # endswith also needs a left anchor: either the marker brings its own
-        # (a leading underscore, as in the default '_EXPORT') or the name
-        # must boundary it — otherwise marker 'EXPORT' would match 'ReExport'.
-        if s == 0 or marker_lower[0] in '_- ' or part_lower[s - 1] in '_- ':
-            return True
-    bare = marker_lower.strip('_')
-    if not bare or bare == marker_lower:
-        return False
-    # The bare word must be a complete TOKEN at the START or END of the name
-    # (bounded by _, -, space, or the string edges). This keeps the documented
-    # cases (Export_Lightroom, Lightroom_Export, My_EXPORT) while rejecting
-    # 'exports', 'EXPORTED_RAWS', 'reexport' — and mid-name tokens like
-    # 'backup_export_old'.
-    import re as _re
-    if part_lower.startswith(bare):
-        e = len(bare)
-        if e == len(part_lower) or part_lower[e] in '_- ':
-            return True
-    if part_lower.endswith(bare):
-        s = len(part_lower) - len(bare)
-        if s == 0 or part_lower[s - 1] in '_- ':
-            return True
-    return False
+_marker_matches = _common._marker_matches
 
 
 
@@ -1714,13 +1649,7 @@ PAGE_PREFIX = "jxlphoto-page:"
 _CAMERA_THUMB_MAX_SIDE = 160
 
 
-def _magick_out_path(path) -> str:
-    """`path` as an ImageMagick OUTPUT operand. ImageMagick formats the name
-    it writes like printf does (%d, %o, %x: the scene number), so a folder
-    named "100%off" became "1000ff" and the write failed with "No such file
-    or directory" (#647). A doubled percent sign is a literal one. Inputs are
-    not formatted and must not be escaped. Parity-pinned (four backends)."""
-    return str(path).replace("%", "%%")
+_magick_out_path = _common._magick_out_path
 
 
 def _is_camera_thumbnail_page(tokens, width, height) -> bool:
@@ -2411,39 +2340,13 @@ def md5_of_file(path: Path) -> str:
 # source (the TIFF), which is exactly what the decoder's delete gates compare.
 # ---------------------------------------------------------------------------
 
-_COLLAPSING_MODES = frozenset({2, 4, 5, 6, 7})
+_COLLAPSING_MODES = _common._COLLAPSING_MODES
 
 
-def _run_collapses_structure(mode, output_arg, source_root) -> bool:
-    """Does THIS run drop the source's folder from the output path?
-
-    _COLLAPSING_MODES holds the modes that always do. Mode 0 also does, but only
-    when an output folder was given: every file then lands in that one folder,
-    flat, exactly like mode 2 — so a second run over a DIFFERENT source folder
-    writes the same names into it, and with --delete-source it overwrites the
-    first archive after that archive's own source is already gone. Mode 0 is
-    flat, so _abort_on_duplicate_outputs never sees this: the recorded marker is
-    the only defence there is.
-
-    Mode 0 IN PLACE (no output folder) is NOT collapsing and must not be treated
-    as one: demanding a marker there would refuse existing archives that can
-    never collide, which is the dead end #271 exists to avoid.
-    """
-    if mode in _COLLAPSING_MODES:
-        return True
-    if mode != 0 or not output_arg:
-        return False
-    try:
-        return (os.path.normcase(os.path.abspath(str(output_arg)))
-                != os.path.normcase(os.path.abspath(str(source_root))))
-    except (OSError, ValueError):
-        return True     # cannot tell -> assume it collapses (fail closed)
+_run_collapses_structure = _common._run_collapses_structure
 
 
-def _source_path_id(src_path) -> str:
-    """Stable id for a source's LOCATION. Free to compute."""
-    norm = os.path.normcase(os.path.abspath(str(src_path)))
-    return hashlib.sha256(norm.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+_source_path_id = _common._source_path_id
 
 
 # {(normcased path, size, mtime_ns): sha256 digest} for the run. A multi-page
@@ -2711,14 +2614,7 @@ def _markers_prove_archive(out_info: dict, src_info: dict,
                 and out_info["srcsum"] == src_info["srcsum"])
 
 
-def _argfile_safe(value) -> str:
-    """Sanitize a value for inclusion in an exiftool argfile (-@).
-
-    Argfiles are parsed one argument per line, so embedded newlines in XMP
-    text (multi-line captions, etc.) would split one argument into several
-    bogus ones. Collapse all CR/LF runs into a single space.
-    """
-    return re.sub(r"[\r\n]+", " ", str(value))
+_argfile_safe = _common._argfile_safe
 
 
 def _struct_escape(value) -> str:
@@ -2801,66 +2697,13 @@ _CompletedProcess = subprocess.CompletedProcess
 # files of the owner's library reach the limit that way. exiftool handles long
 # paths itself, and ImageMagick only ever sees short temp paths (and would
 # read the '?' of the prefix as a wildcard), so only the two codecs get it.
-_LONG_PATH_THRESHOLD = 240
+_LONG_PATH_THRESHOLD = _common._LONG_PATH_THRESHOLD
 
 
-def _long_codec_paths(cmd):
-    """`cmd` with every long absolute path argument of cjxl/djxl/jxlinfo given the
-    Windows extended-length prefix (Windows only; otherwise unchanged)."""
-    if os.name != "nt" or not cmd:
-        return cmd
-    exe = os.path.basename(str(cmd[0])).lower()
-    if not exe.startswith(("cjxl", "djxl", "jxlinfo")):
-        return cmd
-    out = [cmd[0]]
-    for a in cmd[1:]:
-        s = str(a) if isinstance(a, (str, os.PathLike)) else None
-        if s is None or s.startswith("-") or s.startswith("\\\\?\\"):
-            out.append(a)
-            continue
-        if not os.path.isabs(s):
-            # A relative path is long by its ABSOLUTE form (#575: an input
-            # given relative to a deep working folder). Only a token that
-            # looks like a path counts: a separator or an extension, no '='
-            # and not a number — option values (-d 0.1, --effort 7,
-            # -x strip=xmp) are never paths (261104 review, M1).
-            looks_like_path = (
-                "=" not in s
-                and (os.sep in s or (os.altsep and os.altsep in s)
-                     or bool(os.path.splitext(s)[1])))
-            try:
-                float(s)
-                looks_like_path = False
-            except ValueError:
-                pass
-            if not looks_like_path:
-                out.append(a)
-                continue
-        s = os.path.abspath(s)
-        if len(s) < _LONG_PATH_THRESHOLD:
-            out.append(a)
-            continue
-        out.append("\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s)
-    return out
+_long_codec_paths = _common._long_codec_paths
 
 
-def _ansi_encodable(text) -> bool:
-    """Whether a program that reads its command line in the ANSI code page
-    gets `text` intact. Always True off Windows and with the UTF-8 code page."""
-    if os.name != "nt":
-        return True
-    try:
-        import ctypes
-        acp = ctypes.windll.kernel32.GetACP()
-    except Exception:
-        return True
-    if acp == 65001:
-        return True
-    try:
-        str(text).encode(f"cp{acp}")
-    except (UnicodeEncodeError, LookupError):
-        return False
-    return True
+_ansi_encodable = _common._ansi_encodable
 
 
 def _argfile_via_stdin(cmd):
@@ -2975,15 +2818,7 @@ def _run_captured(cmd, timeout, text=False, input=None, stall=None):
     return _CompletedProcess(cmd, rc, o, e)
 
 
-def _stderr_tail(stderr, limit=200):
-    """The LAST `limit` characters of a tool's stderr, CRLF folded, for an
-    error message. The head is the wrong end: cjxl prints its version banner
-    and an "Encoding [...]" line first, which filled the old [:200] slice — 97
-    of the 314 errors of the 2026-10-04 run were logged without the line that
-    said what failed."""
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode(errors="replace")
-    return (stderr or "").replace("\r\n", "\n").strip()[-limit:]
+_stderr_tail = _common._stderr_tail
 
 
 def _timeout_detail(exc) -> str:
@@ -7138,30 +6973,7 @@ def build_parser():
     return parser
 
 
-def _work_dir_problem(path, label, dry_run, dry_run_uses_it=False):
-    """Why a work folder (TEMP_DIR, staging) cannot be used, or None. A real
-    run creates it. A DRY RUN creates nothing (a simulation that leaves new
-    folders on disk is not a simulation): a path that exists but is not a
-    folder is refused, and a folder the dry run itself writes into
-    (dry_run_uses_it: TEMP_DIR holds the exiftool argfiles and the captured
-    output of every planning read) must already exist, or every marker read
-    fails and a good archive is refused as unreadable."""
-    if path is None:
-        return None
-    p = Path(path)
-    try:
-        if dry_run:
-            if p.exists() and not p.is_dir():
-                return f"{label} is not a directory: {path}"
-            if dry_run_uses_it and not p.is_dir():
-                return (f"{label} does not exist: {path}. A dry run creates no "
-                        f"folders: create it, or run without --dry-run (a real "
-                        f"run creates it).")
-            return None
-        p.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return f"{label} is not usable: {path} ({e})"
-    return None
+_work_dir_problem = _common._work_dir_problem
 
 
 def main():
