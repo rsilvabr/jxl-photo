@@ -6263,6 +6263,11 @@ def cmd_convert(args, from_jxl: bool = True):
                 continue
             src_path, final_file = src_map.get(result[0], (None, None))
             if src_path is None:
+                # Logged and counted like every other refusal of this gate, as
+                # process_group_transcode does (#650): a bare continue made the
+                # result vanish from the report.
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (final output missing) | {result[0]}")
                 continue
             if not src_path.exists():
                 logger.warning(f" {_SOURCE_GONE} | {src_path.name}")      # #619
@@ -6905,6 +6910,9 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
                     continue
                 src_path, final_file = src_map.get(result[0], (None, None))
                 if src_path is None:
+                    # Logged and counted like the transcode gate (#650).
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (final output missing) | {result[0]}")
                     continue
                 if not src_path.exists():
                     logger.warning(f" {_SOURCE_GONE} | {src_path.name}")  # #619
