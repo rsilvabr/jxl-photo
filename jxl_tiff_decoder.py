@@ -314,100 +314,13 @@ _try_lock_nb = _common._try_lock_nb
 _unlock_nb = _common._unlock_nb
 
 
-@contextlib.contextmanager
-def _staging_hold(staging_dir):
-    """Mark `staging_dir` as in use by this run while the block runs (#578).
-    Reentrant; a no-op without a staging folder."""
-    if not staging_dir:
-        yield
-        return
-    key = os.path.normcase(os.path.abspath(str(staging_dir)))
-    entry = _STAGING_HOLDS.get(key)
-    if entry is None:
-        path = Path(staging_dir) / f"{_STAGING_LIVE_PREFIX}{uuid.uuid4().hex}"
-        fh = None
-        try:
-            Path(staging_dir).mkdir(parents=True, exist_ok=True)
-            fh = open(path, "w+b")
-            fh.write(str(os.getpid()).encode("ascii"))
-            fh.flush()
-            if not _try_lock_nb(fh):
-                raise OSError("the lock could not be taken")
-            entry = [path, fh, 0]
-        except OSError as e:
-            logger.warning(f"Staging: could not mark {staging_dir} as in use ({e}) "
-                           f"— a --clean-staging run started meanwhile may sweep "
-                           f"this run's waiting outputs")
-            if fh is not None:
-                fh.close()
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-            entry = [None, None, 0]
-        _STAGING_HOLDS[key] = entry
-    entry[2] += 1
-    try:
-        yield
-    finally:
-        entry[2] -= 1
-        if entry[2] <= 0:
-            _STAGING_HOLDS.pop(key, None)
-            if entry[1] is not None:
-                _unlock_nb(entry[1])
-                entry[1].close()
-                try:
-                    entry[0].unlink()
-                except OSError:
-                    pass
+def _staging_hold(*a, **k): return _common._staging_hold(_G, *a, **k)
 
 
 def _holds_staging(*a, **k): return _common._holds_staging(_G, *a, **k)
 
 
-def _staging_used_by_another_run(staging_dir) -> bool:
-    """True while another live process holds a `.jxlphoto-live-*` file in
-    `staging_dir`. One nobody holds is from a run that died: it is removed."""
-    own = {os.path.normcase(str(e[0])) for e in _STAGING_HOLDS.values()
-           if e[0] is not None}
-    try:
-        marks = [f for f in Path(staging_dir).iterdir()
-                 if f.name.startswith(_STAGING_LIVE_PREFIX)]
-    except OSError:
-        return False
-    busy = False
-    for f in marks:
-        if os.path.normcase(str(f)) in own:
-            continue
-        try:
-            fresh = time.time() - f.stat().st_mtime < _STAGING_LIVE_GRACE_SECONDS
-        except FileNotFoundError:
-            continue
-        except OSError:
-            busy = True
-            continue
-        if fresh:
-            busy = True             # just created: maybe not locked yet
-            continue
-        try:
-            fh = open(f, "r+b")
-        except FileNotFoundError:
-            continue
-        except OSError:
-            busy = True             # cannot even open it: a live holder (fail closed)
-            continue
-        try:
-            if not _try_lock_nb(fh):
-                busy = True
-                continue
-            _unlock_nb(fh)
-        finally:
-            fh.close()
-        try:
-            f.unlink()
-        except OSError:
-            pass
-    return busy
+def _staging_used_by_another_run(*a, **k): return _common._staging_used_by_another_run(_G, *a, **k)
 
 
 def _clean_staging(*a, **k): return _common._clean_staging(_G, *a, **k)

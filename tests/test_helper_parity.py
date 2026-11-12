@@ -84,8 +84,6 @@ SHARED_HELPERS = [
     # #578: a run writing into staging marks it as in use, and --clean-staging
     # of another run sweeps nothing meanwhile. A copy drifting is one backend
     # sweeping the outputs another one has waiting there.
-    "_staging_hold",
-    "_staging_used_by_another_run",
     # The "still the file that was copied?" check before an in-place edit
     # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
     # TEMP_DIR / staging checked before the run (2026-11-08): the transcoder
