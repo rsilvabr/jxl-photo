@@ -41,7 +41,6 @@ SHARED_HELPERS = [
     # archive written by one script unverifiable by another, and the delete
     # gates fail closed on that — silently keeping every source forever.
     "_file_digest_cached",
-    "_read_source_markers_batch",
     # The delete-side proof for a SKIPPED source (path AND current srcsum).
     # A copy drifting back to the path alone is one backend deleting a source
     # replaced in place since its archive was written.
@@ -53,11 +52,9 @@ SHARED_HELPERS = [
     # options), so the sentence must not drift between the four backends.
     # The jxlphoto-origin read/decision pair: a copy diverging would make one
     # script inherit the origin while another guesses it (or drops it).
-    "_read_origin_inputs",
     # Derived (non-archive) marker reads and the partial-output cleanup that
     # guards a derivative write. Duplicated transcoder/recompressor; a drift
     # either mislabels a derivative or leaves a truncated output behind.
-    "_read_derived_markers_batch",
     # Which runs need that check at all. A copy drifting would leave one backend
     # deleting sources in a layout another one guards.
     # E-H: which folder anchors modes 6/7 (the first marker at or below the
@@ -81,7 +78,6 @@ SHARED_HELPERS = [
     # the encoder and the recompressor.
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
-    "_run_captured",
     # An argfile path outside the ANSI code page goes to exiftool on stdin: a
     # copy drifting is one backend failing every exiftool call with a temp
     # folder the others handle.
@@ -127,8 +123,6 @@ SHARED_HELPERS = [
     # the E-G fix had to be applied three times by hand.
     # A '%' in a source name (#550): a copy drifting is one script writing an
     # output with none of its source's metadata.
-    "_exiftool_source",
-    "_xmp_block_args",
     "_get_exiftool_cmd",
     # Disk-full abort. These decide whether a run stops or grinds on, so a copy
     # drifting would make one backend keep failing file after file.
@@ -144,7 +138,6 @@ SHARED_HELPERS = [
     # one backend could start sweeping what another still needs.
     # JXL structural integrity — the delete gate itself. A copy drifting is one
     # backend deleting a source whose output another would have rejected.
-    "_verify_jxl_integrity",
     # jbrd detection and file hashing, born in the transcoder. The recompressor
     # keys its JPEG-recovery preservation policy off the first and its
     # copy-then-delete MD5 proof off the second.
@@ -190,7 +183,6 @@ SHARED_HELPERS = [
     # copy drifting is one backend pasting the original ICC on linear pixels.
     # Source-profile detection for colour conversion (B1): the transcoder and
     # the recompressor must read XMP ICC / iCCP / sRGB chunk the same way.
-    "_read_creator_and_relation",
     # Where the original ICC is carried (v2.19.0): the jxlphoto-iccprofile
     # token first, the v2.18.x CreatorTool copy second. The decoder, the
     # transcoder and the recompressor must find the SAME profile in the same

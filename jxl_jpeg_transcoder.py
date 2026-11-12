@@ -1084,117 +1084,13 @@ _ansi_encodable = _common._ansi_encodable
 def _argfile_via_stdin(*a, **k): return _common._argfile_via_stdin(_G, *a, **k)
 
 
-def _run_captured(cmd, timeout, text=False, input=None, stall=None):
-    """subprocess.run with stdout/stderr captured through temp FILES.
-
-    capture_output=True makes communicate() start two reader threads per call
-    on Windows. Under memory exhaustion a thread can fail in its bootstrap
-    (MemoryError) before it signals "started", and Thread.start() then waits
-    forever — before the timeout is even armed. The 2026-10-04 scheduled run
-    lost a manifest that way (one worker hung 60 min until the wrapper killed
-    the child). With files there is no thread: a failed spawn raises OSError,
-    which the callers already handle.
-
-    `input` (bytes) goes to the child's stdin, written from THIS thread:
-    communicate() starts reader threads only for PIPE stdout/stderr, never
-    for stdin.
-
-    `stall` (seconds) is for the planning-time exiftool BATCH reads (#537):
-    the child is stopped only when its stdout has not grown for `stall`
-    seconds, or after `timeout` seconds in all — a slow disk keeps printing
-    and is left to finish, a hung exiftool prints nothing. Polled with
-    Popen.wait(timeout=1), which starts no thread. Not combinable with
-    `input`.
-    """
-    cmd = _long_codec_paths(cmd)
-    if stall is not None and input is not None:
-        raise ValueError("_run_captured: stall cannot be combined with input")
-    # An exiftool argfile whose path the ANSI code page cannot carry goes in
-    # on stdin (_argfile_via_stdin) — in a stall run too: exiftool reads its
-    # whole -@ list before it opens the first file.
-    cmd, _argfile_bytes = _argfile_via_stdin(cmd)
-    if _argfile_bytes is not None:
-        input = _argfile_bytes
-    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
-    with tempfile.TemporaryFile(dir=TEMP_DIR) as out, \
-            tempfile.TemporaryFile(dir=TEMP_DIR) as err:
-        if stall is None:
-            r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout,
-                               **stdin_kw)
-            rc, o, e = r.returncode, r.stdout, r.stderr
-        else:
-            p = subprocess.Popen(cmd, stdout=out, stderr=err,
-                                 stdin=_DEVNULL if input is None else subprocess.PIPE)
-            try:
-                if input is not None:
-                    p.stdin.write(input)
-                    p.stdin.close()
-                started = grew = time.monotonic()
-                size = 0
-                while True:
-                    try:
-                        rc = p.wait(timeout=1)
-                        break
-                    except subprocess.TimeoutExpired:
-                        pass
-                    now = time.monotonic()
-                    cur = os.fstat(out.fileno()).st_size
-                    if cur != size:
-                        size, grew = cur, now
-                    if now - grew >= stall or now - started >= timeout:
-                        raise subprocess.TimeoutExpired(
-                            cmd, stall if now - grew >= stall else timeout)
-            except BaseException:
-                # Like subprocess.run: a timeout, a Ctrl+C or an fstat error
-                # never leaves the child running.
-                p.kill()
-                p.wait()
-                raise
-            o = e = None
-        out.seek(0)
-        err.seek(0)
-        o = o if o is not None else out.read()
-        e = e if e is not None else err.read()
-    if text:
-        if isinstance(o, bytes):
-            o = o.decode("utf-8", "replace").replace("\r\n", "\n")
-        if isinstance(e, bytes):
-            e = e.decode("utf-8", "replace").replace("\r\n", "\n")
-    return _CompletedProcess(cmd, rc, o, e)
+def _run_captured(*a, **k): return _common._run_captured(_G, *a, **k)
 
 
 _stderr_tail = _common._stderr_tail
 
 
-def _exiftool_source(path, tmp_dir) -> str:
-    """The path to give exiftool as a -tagsFromFile source.
-
-    exiftool format-expands that argument ('%d', '%f', '%e', with modifiers):
-    'photo 5%.tif' opened a different, missing file — a warning, exit 0 — and
-    the output silently got none of the source's metadata (#550). Doubling the
-    '%' does not escape it. A path with a '%' is dumped to a MIE container in
-    tmp_dir (the SOURCE operand is not expanded) and that is copied from
-    instead; any other path is returned unchanged, at no cost. Raises when the
-    dump fails: an output must not go out without the metadata it should
-    carry. Parity-pinned (four backends).
-    """
-    p = str(path)
-    if "%" not in p:
-        return p
-    mie = os.path.join(str(tmp_dir), "metadata_source.mie")
-    try:
-        os.unlink(mie)
-    except OSError:
-        pass
-    # -unsafe: exiftool leaves its "unsafe" tags (InteropIndex, ...) out of
-    # -all:all, and a caller that names one (#637) would find it missing.
-    r = _run_exiftool_argfile(["-o", mie, "-all:all", "-unsafe", p], timeout=EXIFTOOL_TIMEOUT)
-    if os.path.exists(mie):
-        return mie
-    if "Nothing to write" in (r.stderr or "") + (r.stdout or ""):
-        return p        # no metadata at all: there is nothing to lose
-    raise RuntimeError(f"exiftool could not read the metadata of {os.path.basename(p)} "
-                       f"(a '%' in its path): {(r.stderr or r.stdout or '')[:200].strip()}")
+def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 
 
 def _run_exiftool_argfile(args_lines, timeout=60):
@@ -1319,157 +1215,10 @@ def _file_digest_cached(path) -> bytes:
 def _file_content_id(*a, **k): return _common._file_content_id(_G, *a, **k)
 
 
-def _read_source_markers_batch(outputs: list) -> dict:
-    """{output path: {'src': id|None, 'srcsum': id|None}} in as few exiftool
-    calls as possible — one per file would be minutes on a large library.
-
-    A file whose markers cannot be read comes back with both None, which the
-    caller treats as "cannot prove anything": fail closed. It ALSO carries
-    'unread': True — "cannot tell" is not "no marker" (X-A of the 2026-11-03
-    audit): an overwrite guard that took a failed batch for a legacy,
-    markerless archive let the overwrite through. Unread = the batch failed
-    or stalled, or exiftool returned no entry (or an Error) for that file.
-    """
-    markers = {str(o): {"src": None, "srcsum": None} for o in outputs}
-    # normcase -> the exact key the caller will look up by.
-    index = {os.path.normcase(str(o)): str(o) for o in outputs}
-    if not outputs:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = _batch_read_state("Provenance markers", len(outputs))
-    for i in range(0, len(outputs), BATCH):
-        chunk = outputs[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        answered = set()
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
-                logger.warning(f"Provenance: could not read markers for a batch of "
-                               f"{len(chunk)} file(s) (rc={r.returncode})")
-                continue
-            # exiftool exits non-zero when it fails on ANY file of the batch but
-            # still prints valid JSON for the rest — use what came back.
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                if src is not None and not entry.get("Error"):
-                    # Answered, with or without a Relation: a file with no
-                    # Relation at all is a real "no marker", not an unread one.
-                    answered.add(os.path.normcase(str(Path(src))))
-                rel = entry.get("Relation")
-                if src is None or rel is None:
-                    continue
-                values = rel if isinstance(rel, list) else [str(rel)]
-                info = {"src": None, "srcsum": None}
-                for token in values:
-                    token = str(token).strip()
-                    if token.startswith(SRC_PREFIX):
-                        info["src"] = token[len(SRC_PREFIX):]
-                    elif token.startswith(SRCSUM_PREFIX):
-                        info["srcsum"] = token[len(SRCSUM_PREFIX):]
-                # normcase, like every other path comparison in the provenance
-                # layer: exiftool can hand back a differently-cased drive letter
-                # or flipped separators, and a lookup miss left the file with
-                # both markers None. That reads downstream as "no marker at
-                # all", so a file whose provenance is perfectly recorded was
-                # refused with "written by an older version" — a reason that
-                # sends the user looking for the wrong problem.
-                key = os.path.normcase(str(Path(src)))
-                if key in index:
-                    markers[index[key]] = info
-                else:
-                    logger.warning(f"Provenance: marker read came back for a path "
-                                   f"this run did not ask about, so it cannot be "
-                                   f"matched | {src}")
-        except Exception as e:
-            logger.warning(f"Provenance: marker batch failed ({e}); "
-                           f"{len(chunk)} file(s) cannot be verified")
-        finally:
-            for o in chunk:
-                if os.path.normcase(str(o)) not in answered:
-                    markers[str(o)]["unread"] = True
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
-    return markers
+def _read_source_markers_batch(*a, **k): return _common._read_source_markers_batch(_G, *a, **k)
 
 
-def _read_derived_markers_batch(paths: list) -> dict:
-    """{path str: label | None | False}: the jxlphoto-derived label, None when
-    the file has no such token (NOT a derivative), False when it could not be
-    read at all (unknown -> the caller must fail closed).
-
-    Same batched argfile scheme as _read_source_markers_batch: one exiftool
-    call per 400 files instead of one per file.
-    """
-    markers = {str(o): False for o in paths}
-    # normcase -> the exact key the caller will look up by.
-    index = {os.path.normcase(str(o)): str(o) for o in paths}
-    if not paths:
-        return markers
-    batch_lines = ["-j", "-s", "-s", "-XMP-dc:Relation",
-                   "-charset", "FileName=UTF8", "-charset", "UTF8"]
-    BATCH = 400
-    _prog = _batch_read_state("Derivative markers", len(paths))
-    for i in range(0, len(paths), BATCH):
-        chunk = paths[i:i + BATCH]
-        _batch_read_tick(_prog, i)
-        argfile = None
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                             dir=TEMP_DIR, encoding="utf-8",
-                                             newline=chr(10)) as af:
-                af.write(chr(10).join(batch_lines + [str(o) for o in chunk]))
-                af.write(chr(10))
-                argfile = af.name
-            r = _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                              EXIFTOOL_BATCH_TIMEOUT, text=True,
-                              stall=EXIFTOOL_BATCH_STALL)
-            if not r.stdout:
-                logger.warning(f"Derivative check: could not read markers for a batch "
-                               f"of {len(chunk)} file(s) (rc={r.returncode})")
-                continue
-            data = json.loads(r.stdout)
-            for entry in data:
-                src = entry.get("SourceFile")
-                if src is None:
-                    continue
-                key = os.path.normcase(str(Path(src)))
-                if key not in index:
-                    continue
-                rel = entry.get("Relation")
-                label = None
-                if rel is not None:
-                    values = rel if isinstance(rel, list) else [str(rel)]
-                    for token in values:
-                        token = str(token).strip()
-                        if token.startswith(DERIVED_XMP_PREFIX):
-                            label = token[len(DERIVED_XMP_PREFIX):]
-                            break
-                markers[index[key]] = label
-        except Exception as e:
-            logger.warning(f"Derivative check: marker batch failed ({e}); "
-                           f"{len(chunk)} file(s) cannot be verified")
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
-    return markers
+def _read_derived_markers_batch(*a, **k): return _common._read_derived_markers_batch(_G, *a, **k)
 
 
 def _read_all_source_marker_values(jxl_path: Path):
@@ -1538,27 +1287,7 @@ def _provenance_proves_archive(*a, **k): return _common._provenance_proves_archi
 def _provenance_marker_args(*a, **k): return _common._provenance_marker_args(_G, *a, **k)
 
 
-def _read_origin_inputs(path):
-    """(dc:Relation tokens, has_record) of an INPUT file, for
-    _origin_for_output. tokens is None when exiftool could not read the file:
-    the caller then writes no origin (unknown is never guessed)."""
-    try:
-        r = _run_exiftool_argfile(
-            ["-j", "-XMP-dc:Relation", "-XMP-dc:Description", "-EXIF:Software",
-             "-XMP-xmpMM:HistoryParameters", str(path)], timeout=EXIFTOOL_TIMEOUT)
-        if r.returncode != 0 or not r.stdout:
-            return None, False
-        data = json.loads(r.stdout)
-        entry = data[0] if data else {}
-    except Exception:
-        return None, False
-    rel = entry.get("Relation")
-    values = [] if rel is None else (rel if isinstance(rel, list) else [rel])
-    tokens = [str(v).strip() for v in values if str(v).strip()]
-    hist = entry.get("HistoryParameters")
-    hist = "\n".join(str(v) for v in (hist if isinstance(hist, list) else [hist or ""]))
-    text = f"{entry.get('Description') or ''}\n{entry.get('Software') or ''}\n{hist}"
-    return tokens, bool(_ORIGIN_RECORD_RE.search(text))
+def _read_origin_inputs(*a, **k): return _common._read_origin_inputs(_G, *a, **k)
 
 
 _origin_for_output = _common._origin_for_output
@@ -5052,17 +4781,7 @@ _xmp_icc_from_creator_tool = _common._xmp_icc_from_creator_tool
 _carried_icc = _common._carried_icc
 
 
-def _read_creator_and_relation(jxl_path: Path):
-    """(creator_tool str, [relation tokens]) of one file. Raises on failure:
-    a derivative whose source profile cannot be read must not be produced."""
-    r = _run_exiftool_argfile(["-j", "-s", "-s", "-XMP-xmp:CreatorTool",
-                               "-XMP-dc:Relation", str(jxl_path)], timeout=EXIFTOOL_TIMEOUT)
-    if not r.stdout:
-        raise RuntimeError(f"exiftool could not read {jxl_path.name} (rc={r.returncode})")
-    entry = json.loads(r.stdout)[0]
-    rel = entry.get("Relation")
-    tokens = [] if rel is None else [str(t).strip() for t in (rel if isinstance(rel, list) else [rel])]
-    return str(entry.get("CreatorTool") or ""), tokens
+def _read_creator_and_relation(*a, **k): return _common._read_creator_and_relation(_G, *a, **k)
 
 
 _srgb_icc_cache = None

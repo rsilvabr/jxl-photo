@@ -7,6 +7,8 @@ limit, and the recompressor reported each one as "codec timed out after 900s".
 Every per-file exiftool call in the four backends now uses EXIFTOOL_TIMEOUT
 (defaults to the script's codec timeout); only the planning-time batch reads
 keep their per-batch limit. The recompressor names the tool that timed out.
+The shared helpers in jxl_photo_common.py read the setting from the calling
+script (`g.EXIFTOOL_TIMEOUT`).
 """
 
 import ast
@@ -63,14 +65,28 @@ def _exiftool_calls(src: str):
 
 @pytest.mark.parametrize("script", sorted(SCRIPTS))
 def test_per_file_exiftool_calls_use_the_setting(script):
-    src = (REPO / f"{script}.py").read_text(encoding="utf-8")
+    _check_per_file_calls(f"{script}.py")
+
+
+def test_per_file_exiftool_calls_in_the_common_module_use_the_setting():
+    _check_per_file_calls("jxl_photo_common.py")
+
+
+def _is_the_setting(val) -> bool:
+    """EXIFTOOL_TIMEOUT in a script, g.EXIFTOOL_TIMEOUT in the common module."""
+    return ((isinstance(val, ast.Name) and val.id == "EXIFTOOL_TIMEOUT")
+            or (isinstance(val, ast.Attribute) and val.attr == "EXIFTOOL_TIMEOUT"
+                and isinstance(val.value, ast.Name) and val.value.id == "g"))
+
+
+def _check_per_file_calls(filename):
+    src = (REPO / filename).read_text(encoding="utf-8")
     calls = [(ln, fn, val) for ln, fn, val in _exiftool_calls(src)
              if fn not in EXEMPT and not fn.endswith("_batch")]
     assert calls, "no per-file exiftool call found — the scan is broken"
     bad = [(ln, fn, ast.unparse(val) if val is not None else "<default 60>")
-           for ln, fn, val in calls
-           if not (isinstance(val, ast.Name) and val.id == "EXIFTOOL_TIMEOUT")]
-    assert not bad, f"{script}: per-file exiftool calls with a fixed timeout: {bad}"
+           for ln, fn, val in calls if not _is_the_setting(val)]
+    assert not bad, f"{filename}: per-file exiftool calls with a fixed timeout: {bad}"
 
 
 @pytest.mark.parametrize("script", sorted(SCRIPTS))

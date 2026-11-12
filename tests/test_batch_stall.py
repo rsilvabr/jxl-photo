@@ -47,8 +47,12 @@ EXTRA_BATCH_FUNCS = {"_read_mpg_markers"}
 # Transcoder: + _read_thumb_markers_batch (v2.18.0, no derivative of a thumbnail
 # page, #555).
 # The recompressor's fifth: _read_mpg_pages_batch (#574).
-EXPECTED_SITES = {"jxl_tiff_encoder": 3, "jxl_tiff_decoder": 3,
-                  "jxl_jpeg_transcoder": 3, "jxl_recompressor": 5}
+# Since the common-module work, _read_source_markers_batch (all four) and
+# _read_derived_markers_batch (transcoder, recompressor) live ONCE in
+# jxl_photo_common.py: 2 sites there, read through g.
+EXPECTED_SITES = {"jxl_tiff_encoder": 2, "jxl_tiff_decoder": 2,
+                  "jxl_jpeg_transcoder": 1, "jxl_recompressor": 3,
+                  "jxl_photo_common": 2}
 
 _REAL = all(shutil.which(t) for t in ("cjxl", "exiftool"))
 real = pytest.mark.skipif(not _REAL, reason="needs cjxl and exiftool on PATH")
@@ -149,7 +153,9 @@ def _batch_exiftool_calls(script):
         def visit_Call(self, node):
             fn = self.stack[-1] if self.stack else ""
             is_batch = fn.endswith("_batch") or fn in EXTRA_BATCH_FUNCS
-            if (getattr(node.func, "id", None) == "_run_captured" and is_batch
+            called = (getattr(node.func, "id", None)
+                      or getattr(node.func, "attr", None))     # g._run_captured
+            if (called == "_run_captured" and is_batch
                     and '"-@"' in (ast.get_source_segment(src, node) or "")):
                 rows.append((fn, node))
             self.generic_visit(node)
@@ -158,18 +164,25 @@ def _batch_exiftool_calls(script):
     return rows
 
 
-@pytest.mark.parametrize("script", SCRIPTS)
+def _reads_setting(node, name) -> bool:
+    """`name` in a script, `g.name` in the common module."""
+    return ((isinstance(node, ast.Name) and node.id == name)
+            or (isinstance(node, ast.Attribute) and node.attr == name
+                and isinstance(node.value, ast.Name) and node.value.id == "g"))
+
+
+@pytest.mark.parametrize("script", SCRIPTS + ["jxl_photo_common"])
 def test_w5_every_batch_site_uses_the_settings(script):
     calls = _batch_exiftool_calls(script)
     assert len(calls) == EXPECTED_SITES[script], [fn for fn, _ in calls]
     for fn, node in calls:
         timeout = node.args[1] if len(node.args) > 1 else next(
             (kw.value for kw in node.keywords if kw.arg == "timeout"), None)
-        assert isinstance(timeout, ast.Name) and \
-            timeout.id == "EXIFTOOL_BATCH_TIMEOUT", (script, fn, ast.unparse(timeout))
+        assert _reads_setting(timeout, "EXIFTOOL_BATCH_TIMEOUT"), \
+            (script, fn, ast.unparse(timeout))
         stall = next((kw.value for kw in node.keywords if kw.arg == "stall"), None)
-        assert isinstance(stall, ast.Name) and \
-            stall.id == "EXIFTOOL_BATCH_STALL", (script, fn, "no stall=EXIFTOOL_BATCH_STALL")
+        assert _reads_setting(stall, "EXIFTOOL_BATCH_STALL"), \
+            (script, fn, "no stall=EXIFTOOL_BATCH_STALL")
 
 
 # ---------------------------------------------------------------------------

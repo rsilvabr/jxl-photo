@@ -39,6 +39,8 @@ _SCRIPTS = (
     "jxl_tiff_decoder.py",
     "jxl_jpeg_transcoder.py",
     "jxl_recompressor.py",
+    # _run_captured and _tool_version live there since the common-module work
+    "jxl_photo_common.py",
 )
 _SUBPROCESS_ATTRS = {"run", "Popen", "call", "check_call", "check_output"}
 # The only module-level functions allowed to call subprocess directly.
