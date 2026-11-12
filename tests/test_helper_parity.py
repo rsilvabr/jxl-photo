@@ -76,7 +76,6 @@ SHARED_HELPERS = [
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_abort_on_duplicate_outputs",
-    "_run_exiftool_argfile",
     # An argfile path outside the ANSI code page goes to exiftool on stdin: a
     # copy drifting is one backend failing every exiftool call with a temp
     # folder the others handle.
@@ -93,7 +92,6 @@ SHARED_HELPERS = [
     # #622/#623: what `jxlinfo` says about a JXL. A copy drifting is one
     # backend turning a rotated JPEG's pixels twice, or deleting a float or
     # animated JXL after a 16-bit / first-frame decode, that the others keep.
-    "_jxlinfo_text",
     # #636: the codestream orientation read in Python when jxlinfo cannot
     # answer (decoder, transcoder, recompressor). A copy drifting is one
     # backend turning a rotated JPEG's picture twice again without jxlinfo.
@@ -120,7 +118,6 @@ SHARED_HELPERS = [
     # the E-G fix had to be applied three times by hand.
     # A '%' in a source name (#550): a copy drifting is one script writing an
     # output with none of its source's metadata.
-    "_get_exiftool_cmd",
     # Disk-full abort. These decide whether a run stops or grinds on, so a copy
     # drifting would make one backend keep failing file after file.
     # Promotion out of staging. It DELETES a partial destination file and can

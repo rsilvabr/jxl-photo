@@ -3024,3 +3024,93 @@ def _file_digest_cached(g, path) -> bytes:
     if key is not None:
         g._content_id_cache[key] = digest
     return digest
+
+
+# === Tool commands and exiftool argfiles ===
+
+
+def _get_exiftool_cmd(g):
+    if g._exiftool_cmd is None:
+        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                g._exiftool_cmd = cmd
+                break
+        else:
+            g._exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
+    return g._exiftool_cmd
+
+
+def _get_cjxl_cmd(g):
+    if g._cjxl_cmd is None:
+        candidates = ["cjxl", "cjxl.exe"]
+        for cmd in candidates:
+            if shutil.which(cmd) is not None:
+                g._cjxl_cmd = cmd
+                break
+    return g._cjxl_cmd
+
+
+def _run_exiftool_argfile(g, args_lines, timeout=60):
+    """Run exiftool with an argfile (UTF-8 + FileName charset).
+
+    Using an argfile instead of raw argv avoids two Windows pitfalls:
+    paths containing [ ] being treated as wildcards, and non-ASCII paths
+    being decoded with the wrong codepage.
+    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
+    through temp files — see _run_captured).
+    """
+    argfile = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         dir=g.TEMP_DIR, encoding="utf-8", newline="\n") as af:
+            argfile = af.name
+            af.write(g._ARGFILE_CHARSET)
+            if g._g.get("EXIFTOOL_IGNORE_MINOR"):
+                # Only the decoder has this setting: -m makes exiftool write
+                # past an error it calls minor (maker notes it cannot parse).
+                af.write("-m\n")
+            af.write("\n".join(str(a) for a in args_lines))
+            af.write("\n")
+        return g._run_captured([g._get_exiftool_cmd(), "-@", argfile],
+                             timeout, text=True)
+    finally:
+        if argfile:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
+
+
+def _jxlinfo_text(g, jxl_path):
+    """`jxlinfo -v` output of a JXL (a header read, no decode), or None when
+    jxlinfo is not installed, fails or times out. An answer is remembered
+    while the file keeps its size and mtime."""
+    exe = shutil.which("jxlinfo")
+    if not exe:
+        if "missing" not in g._JXLINFO_NOTES:
+            g._JXLINFO_NOTES.add("missing")
+            g.logger.warning("jxlinfo not found (it ships with libjxl, next to djxl): "
+                           "float or animated JXLs are not recognised before a "
+                           "delete")
+        return None
+    try:
+        _st = os.stat(jxl_path)
+        key = (os.path.normcase(str(jxl_path)), _st.st_size, _st.st_mtime_ns)
+    except OSError:
+        key = None
+    if key is not None:
+        with g._JXLINFO_CACHE_LOCK:
+            if key in g._JXLINFO_CACHE:
+                return g._JXLINFO_CACHE[key]
+    try:
+        r = g._run_captured([exe, "-v", str(jxl_path)], g.EXIFTOOL_TIMEOUT, text=True)
+    except Exception:
+        return None
+    text = (r.stdout or "") if r.returncode == 0 else None
+    if key is not None and text is not None:
+        with g._JXLINFO_CACHE_LOCK:
+            if len(g._JXLINFO_CACHE) >= g._JXLINFO_CACHE_MAX:
+                g._JXLINFO_CACHE.clear()
+            g._JXLINFO_CACHE[key] = text
+    return text

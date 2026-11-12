@@ -321,29 +321,11 @@ _validate_export_folder_name = _common._validate_export_folder_name
 
 # ExifTool detection - try multiple name variants
 _exiftool_cmd = None
-def _get_exiftool_cmd():
-    global _exiftool_cmd
-    if _exiftool_cmd is None:
-        candidates = ["exiftool", "exiftool-k", "exiftool(-k)"]
-        for cmd in candidates:
-            if shutil.which(cmd) is not None:
-                _exiftool_cmd = cmd
-                break
-        else:
-            _exiftool_cmd = "exiftool"  # defer and let subprocess fail naturally
-    return _exiftool_cmd
+def _get_exiftool_cmd(*a, **k): return _common._get_exiftool_cmd(_G, *a, **k)
 
 # cjxl detection - early exit with a clear message if the encoder is missing
 _cjxl_cmd = None
-def _get_cjxl_cmd():
-    global _cjxl_cmd
-    if _cjxl_cmd is None:
-        candidates = ["cjxl", "cjxl.exe"]
-        for cmd in candidates:
-            if shutil.which(cmd) is not None:
-                _cjxl_cmd = cmd
-                break
-    return _cjxl_cmd
+def _get_cjxl_cmd(*a, **k): return _common._get_cjxl_cmd(_G, *a, **k)
 
 _tool_version = _common._tool_version
 
@@ -1897,35 +1879,7 @@ _stderr_tail = _common._stderr_tail
 def _exiftool_source(*a, **k): return _common._exiftool_source(_G, *a, **k)
 
 
-def _run_exiftool_argfile(args_lines, timeout=60):
-    """Run exiftool with an argfile (UTF-8 + FileName charset).
-
-    Using an argfile instead of raw argv avoids two Windows pitfalls:
-    paths containing [ ] being treated as wildcards, and non-ASCII paths
-    being decoded with the wrong codepage.
-    Returns the CompletedProcess (stdout/stderr decoded as UTF-8, captured
-    through temp files — see _run_captured).
-    """
-    argfile = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
-                                         dir=TEMP_DIR, encoding="utf-8", newline="\n") as af:
-            argfile = af.name
-            af.write(_ARGFILE_CHARSET)
-            if globals().get("EXIFTOOL_IGNORE_MINOR"):
-                # Only the decoder has this setting: -m makes exiftool write
-                # past an error it calls minor (maker notes it cannot parse).
-                af.write("-m\n")
-            af.write("\n".join(str(a) for a in args_lines))
-            af.write("\n")
-        return _run_captured([_get_exiftool_cmd(), "-@", argfile],
-                             timeout, text=True)
-    finally:
-        if argfile:
-            try:
-                os.unlink(argfile)
-            except OSError:
-                pass
+def _run_exiftool_argfile(*a, **k): return _common._run_exiftool_argfile(_G, *a, **k)
 
 
 def _tiff_byte_order(tiff_path) -> str:
