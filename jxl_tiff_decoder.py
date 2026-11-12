@@ -4810,29 +4810,16 @@ Examples:
 _work_dir_problem = _common._work_dir_problem
 
 
-def main():
-    # Every module global this function assigns (D-1). Declared as one block at
-    # the top so no assignment can ever textually precede its declaration when
-    # the validation order below changes.
-    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
-    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
-    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
-    global EXIFTOOL_IGNORE_MINOR
-
-    _minor_metadata_failures.clear()        # per run
-    _minor_metadata_unchecked.clear()
-    parser = build_parser()
-    args = parser.parse_args()
-
-    # (Round 43, D-1 class fix) Restore whatever a PREVIOUS main() call in
-    # this process assigned, so every run starts from the settings as the
-    # module was entered with — never from a previous run's flags. Record the
-    # pre-run values now; the deltas are stored right after the assignments.
-    for _name, _val in _prev_run_globals.items():
-        globals()[_name] = _val
-    _prev_run_globals.clear()
-    _pre_run_globals = {n: globals()[n] for n in _RUN_ASSIGNABLE}
-
+def _configure_run(parser, args, _pre_run_globals):
+    """The configuration step of main(), moved here unchanged (refactor plan 261113, A3):
+    the flags into the run's settings, the command-line checks, the record of
+    what this run changed (_prev_run_globals), the log and the tools."""
+    global ADD_JPEG_PREVIEW, ALLOW_INCOMPLETE_GROUPS, CLEANUP_XMP_ICC_MARKER
+    global DELETE_CONFIRM, DELETE_SKIPPED, DELETE_SOURCE, DEPTH_POLICY, DJXL_OUTPUT_DEPTH
+    global EXCLUDE_FOLDERS, EXIFTOOL_IGNORE_MINOR, EXPORT_JXL_SUBFOLDER, EXPORT_MARKER
+    global FORCE_BASIC_MODE, FORCE_NONE_MODE, OVERWRITE, OVERWRITE_GUARD, PROVENANCE_CHECK
+    global RECONSTRUCT_MULTIPAGE, TEMP2_DIR, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX
+    global TIFF_COMPRESSION, USE_MATRIX_MODE
     if not args.input.exists():
         parser.error(f"input path does not exist: {args.input}")
 
@@ -5054,6 +5041,33 @@ def main():
         logger.warning("--target-icc only applies in --matrix mode; ignoring target-icc in roundtrip/basic/none modes")
     if args.thumbnail_handling == "generate":
         logger.warning("--thumbnail-handling=generate is not yet implemented; falling back to include behavior")
+    return log_file
+
+
+def main():
+    # Every module global this function assigns (D-1). Declared as one block at
+    # the top so no assignment can ever textually precede its declaration when
+    # the validation order below changes.
+    global OVERWRITE, USE_MATRIX_MODE, FORCE_BASIC_MODE, FORCE_NONE_MODE
+    global CLEANUP_XMP_ICC_MARKER, DJXL_OUTPUT_DEPTH, TIFF_COMPRESSION, TEMP2_DIR, DELETE_SOURCE, DELETE_CONFIRM, ADD_JPEG_PREVIEW, THUMBNAIL_HANDLING, THUMBNAIL_SUFFIX, RECONSTRUCT_MULTIPAGE, DEPTH_POLICY, DELETE_SKIPPED, PROVENANCE_CHECK, ALLOW_INCOMPLETE_GROUPS, OVERWRITE_GUARD
+    global EXPORT_JXL_SUBFOLDER, EXPORT_MARKER, EXCLUDE_FOLDERS
+    global EXIFTOOL_IGNORE_MINOR
+
+    _minor_metadata_failures.clear()        # per run
+    _minor_metadata_unchecked.clear()
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # (Round 43, D-1 class fix) Restore whatever a PREVIOUS main() call in
+    # this process assigned, so every run starts from the settings as the
+    # module was entered with — never from a previous run's flags. Record the
+    # pre-run values now; the deltas are stored right after the assignments.
+    for _name, _val in _prev_run_globals.items():
+        globals()[_name] = _val
+    _prev_run_globals.clear()
+    _pre_run_globals = {n: globals()[n] for n in _RUN_ASSIGNABLE}
+
+    log_file = _configure_run(parser, args, _pre_run_globals)
 
     # Mode 8 delete confirmation happens AFTER the dry-run block below, so a
     # simulation never asks for the deletion token (consistent with the
