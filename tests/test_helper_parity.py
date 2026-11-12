@@ -67,7 +67,6 @@ SHARED_HELPERS = [
     # E-H: which folder anchors modes 6/7 (the first marker at or below the
     # input root, else the closest above). A copy drifting is one script
     # writing a mode 6 output where another one looks for it.
-    "_marker_anchor_index",
     # --exclude-folders discovery filter (encoder/decoder finders + the
     # wrapper's collision walk): a drifting copy would let one site see a file
     # set another does not.
@@ -90,14 +89,12 @@ SHARED_HELPERS = [
     "_batch_read_tick",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
-    "_validate_export_folder_name",
     "_abort_on_duplicate_outputs",
     "_run_exiftool_argfile",
     "_run_captured",
     # An argfile path outside the ANSI code page goes to exiftool on stdin: a
     # copy drifting is one backend failing every exiftool call with a temp
     # folder the others handle.
-    "_argfile_via_stdin",
     # #578: a run writing into staging marks it as in use, and --clean-staging
     # of another run sweeps nothing meanwhile. A copy drifting is one backend
     # sweeping the outputs another one has waiting there.
@@ -138,7 +135,6 @@ SHARED_HELPERS = [
     # have this at all, and its CreatorTool write went out raw.
     # The xmpMM:History entry: a copy drifting would make one script write a
     # History entry the others do not (or one exiftool cannot parse).
-    "_struct_escape",
     "_history_mime",
     "_history_args",
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting

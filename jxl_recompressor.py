@@ -853,54 +853,9 @@ _marker_matches = _common._marker_matches
 
 
 
-def _marker_anchor_index(dir_parts, root, marker_lower):
-    """Index in `dir_parts` (the folder parts of a file's path) of the export
-    marker folder that anchors modes 6/7: the FIRST matching folder at or
-    below the input `root` (the root folder itself included), else the
-    CLOSEST matching one above it (a run pointed inside an export folder).
-    A folder ABOVE the root used to win whenever it came first — a library
-    under 'Lightroom_Export' or 'C1_Export' (both match '_EXPORT') anchored
-    there instead of on the real '_EXPORT' below (E-H of the 2026-11-03
-    audit). A path that is not under `root` keeps the old rule (the first
-    match from the top). None when no folder matches."""
-    dir_parts = list(dir_parts)
-    start = 0
-    if root is not None:
-        try:
-            rp = [os.path.normcase(p) for p in Path(root).parts]
-        except TypeError:
-            rp = []
-        dp = [os.path.normcase(p) for p in dir_parts]
-        if rp and dp[:len(rp)] == rp:
-            start = len(rp) - 1         # the root folder itself counts
-        elif rp and dp == rp[:-1]:
-            start = len(dp)             # the root is this very file
-    for i in range(start, len(dir_parts)):
-        if _marker_matches(dir_parts[i].lower(), marker_lower):
-            return i
-    for i in range(min(start, len(dir_parts)) - 1, -1, -1):
-        if _marker_matches(dir_parts[i].lower(), marker_lower):
-            return i
-    return None
+_marker_anchor_index = _common._marker_anchor_index
 
-def _validate_export_folder_name(name: str, marker: str, subfolder: str):
-    """None when `name` is usable as the modes 6/7 output folder, else the reason.
-
-    The output folder is created directly under the export marker, so it must be
-    ONE plain path component; a name that itself matches the marker would be
-    read as a second anchor by every later mode 6/7 scan; and a name equal to
-    the requested input subfolder would write the outputs among the sources.
-    """
-    n = (name or "").strip()
-    if not n:
-        return "the folder name is empty"
-    if n in (".", "..") or any(c in n for c in '/\\:*?"<>|'):
-        return f"'{n}' is not a single plain folder name"
-    if marker and _marker_matches(n.lower(), marker.lower()):
-        return f"'{n}' matches the export marker '{marker}' — it would become a new anchor"
-    if subfolder and n.lower() == subfolder.lower():
-        return f"'{n}' is the input subfolder itself — outputs would land among the sources"
-    return None
+_validate_export_folder_name = _common._validate_export_folder_name
 
 
 # ExifTool detection - try multiple name variants
@@ -2441,11 +2396,7 @@ def _markers_prove_archive(out_info: dict, src_info: dict,
 _argfile_safe = _common._argfile_safe
 
 
-def _struct_escape(value) -> str:
-    """A value inside an exiftool serialized structure ({Field=value,...}):
-    , [ ] { } and | are escaped with a leading |, and newlines are flattened
-    like every other argfile value."""
-    return re.sub(r"([,\[\]{}|])", r"|\1", _argfile_safe(value))
+_struct_escape = _common._struct_escape
 
 
 def _history_mime(path):
@@ -2511,27 +2462,7 @@ _long_codec_paths = _common._long_codec_paths
 _ansi_encodable = _common._ansi_encodable
 
 
-def _argfile_via_stdin(cmd):
-    """(cmd, None) unchanged — or, when `cmd` names an exiftool argfile
-    (`-@ <file>`) whose PATH the ANSI code page cannot carry, (the same
-    command with `-@ -`, the file's bytes for its stdin). exiftool reads that
-    path from its command line in the ANSI code page: with %TEMP% outside it
-    (a Windows user name in another script) every call failed with "Error
-    opening arg file". The file's CONTENT is UTF-8 with `-charset
-    filename=utf8` and is read the same way from stdin. Parity-pinned (four
-    backends)."""
-    try:
-        i = list(cmd).index("-@")
-    except ValueError:
-        return cmd, None
-    if i + 1 >= len(cmd):
-        return cmd, None
-    path = str(cmd[i + 1])
-    if path == "-" or _ansi_encodable(path):
-        return cmd, None
-    with open(path, "rb") as f:
-        data = f.read()
-    return list(cmd[:i + 1]) + ["-"] + list(cmd[i + 2:]), data
+def _argfile_via_stdin(*a, **k): return _common._argfile_via_stdin(_G, *a, **k)
 
 
 # The PNG ImageMagick hands to the next step is a temp file, read once and
