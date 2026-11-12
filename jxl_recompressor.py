@@ -90,9 +90,7 @@ GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
-_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
-                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
-                 ".jpeg": "image/jpeg", ".png": "image/png"}
+_HISTORY_MIME = _common._HISTORY_MIME
 
 # Module-level logger; setup_logger() replaces it with a configured instance when main() runs.
 logger = logging.getLogger("jxl_recompress")
@@ -737,15 +735,7 @@ _overlay_value = _common._overlay_value
 def _apply_settings_overlay(*a, **k): return _common._apply_settings_overlay(_G, *a, **k)
 
 
-def _log_settings_overlay() -> None:
-    """The overlay's audit lines (setup_logger calls it): which file and which
-    settings it changed, and every entry it refused."""
-    result = globals().get("_SETTINGS_OVERLAY") or {}
-    if result.get("applied"):
-        logger.info(f"Script settings overlay: {result['path']}: "
-                    f"{len(result['applied'])} value(s): {', '.join(result['applied'])}")
-    for warning in result.get("warnings", ()):
-        logger.warning(f"Script settings overlay: {warning}")
+def _log_settings_overlay(*a, **k): return _common._log_settings_overlay(_G, *a, **k)
 
 # What the overlay may change in this script: name -> (kind, ...) checked by
 # _overlay_value. A setting that is not here keeps the script's value.
@@ -1057,60 +1047,7 @@ _MEMORY_BUDGET_TEXT = {"commit": "the system can still commit (RAM + pagefile)",
 def _available_memory_bytes(*a, **k): return _common._available_memory_bytes(_G, *a, **k)
 
 
-def _memory_capped_workers(requested, max_pixels, distance, effort,
-                           buffering=None, modular=False,
-                           extra_bytes_per_pixel=0):
-    """--workers lowered so `requested` parallel cjxl processes fit in memory.
-    Logs the estimate; warns when it had to lower the count.
-
-    extra_bytes_per_pixel: what each worker holds on the CALLER's side on top
-    of its cjxl (the encoder's page array and PNG, #569)."""
-    if WORKER_MEMORY_FRACTION <= 0:
-        return requested
-    if WORKER_MEMORY_LIMIT not in _MEMORY_LIMITS:
-        logger.warning(f"WORKER_MEMORY_LIMIT = {WORKER_MEMORY_LIMIT!r} is not one of "
-                       f"{', '.join(_MEMORY_LIMITS)} — using 'both'")
-    pixels = max_pixels if max_pixels > 0 else _UNKNOWN_IMAGE_PIXELS
-    per_job = pixels * (_cjxl_bytes_per_pixel(distance, effort, buffering, modular)
-                        + extra_bytes_per_pixel)
-    avail, budget = _available_memory_bytes()
-    if avail is None:
-        logger.info("Memory: could not read the available memory — "
-                    "--workers not capped")
-        return requested
-    cap = max(1, int(avail * WORKER_MEMORY_FRACTION // per_job))
-    workers = min(requested, cap)
-    if modular and distance > 0:
-        kind = "modular"
-    elif _cjxl_whole_image(distance, effort, buffering):
-        kind = "whole-image"
-    else:
-        kind = "streaming"
-    _extra = (f", incl. ~{pixels * extra_bytes_per_pixel / 2**30:.1f} GB in Python"
-              if extra_bytes_per_pixel > 0 else "")
-    logger.info(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({kind} encode, "
-                f"{pixels / 1e6:.0f} MP, d={distance} e={effort}{_extra}) | "
-                f"{avail / 2**30:.1f} GB available ({budget}) | workers {workers}")
-    if cap < requested:
-        hint = ""
-        if kind == "whole-image" and effort >= 8:
-            # Measured (cjxl 0.12, docs/README_jxl_recompressor.md, "Streaming
-            # vs whole-image"): streaming skips the extra effort-9 work.
-            hint = (" This distance/effort makes cjxl encode the whole image at "
-                    "once. --buffering 1 would stream it, but a streamed effort "
-                    "8+ encode is effort 7's file (~8% larger): for a light run "
-                    "use effort 7 instead.")
-        elif kind == "whole-image":
-            hint = (" This distance/effort makes cjxl encode the whole image at "
-                    "once; --buffering 1 keeps it streaming (~3x less memory, "
-                    "files ~1.5% larger, same quality).")
-        logger.warning(f"--workers {requested} reduced to {cap}: {requested} cjxl "
-                       f"processes at ~{per_job / 2**30:.1f} GB each would not "
-                       f"fit in the {avail / 2**30:.1f} GB "
-                       f"{_MEMORY_BUDGET_TEXT[budget]} (WORKER_MEMORY_FRACTION="
-                       f"{WORKER_MEMORY_FRACTION}, WORKER_MEMORY_LIMIT="
-                       f"{WORKER_MEMORY_LIMIT}).{hint}")
-    return workers
+def _memory_capped_workers(*a, **k): return _common._memory_capped_workers(_G, *a, **k)
 
 
 def _largest_encode_pixels(items):
@@ -1355,25 +1292,10 @@ def emit_summary_json(enabled: bool, *, ok: int, overwritten: int, skipped: int,
 _rejected_log_lock = threading.Lock()
 
 
-def _log_rejected_file(file_path, reason):
-    """Log rejected files to Logs/<script>/rejected_files.log for easy review."""
-    try:
-        rej_dir = LOG_DIR
-        rej_dir.mkdir(parents=True, exist_ok=True)
-        rej_file = rej_dir / "rejected_files.log"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Locked: called from worker threads; concurrent appends would interleave.
-        with _rejected_log_lock:
-            with open(rej_file, "a", encoding="utf-8") as f:
-                f.write(f"{timestamp} | {reason} | {file_path}\n")
-    except Exception:
-        pass
+def _log_rejected_file(*a, **k): return _common._log_rejected_file(_G, *a, **k)
 
 
-def next_count():
-    with counter_lock:
-        _counter["done"] += 1
-        return _counter["done"], _counter["total"]
+def next_count(*a, **k): return _common.next_count(_G, *a, **k)
 
 
 def confirm_deletion_jxl(is_lossy: bool) -> bool:
@@ -1542,13 +1464,7 @@ _argfile_safe = _common._argfile_safe
 _struct_escape = _common._struct_escape
 
 
-def _history_mime(path):
-    """MIME type of a path for the History entry, or None. A staging temp
-    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
-    p = Path(str(path))
-    if p.suffix.lower() == ".tmp":
-        p = Path(p.stem)
-    return _HISTORY_MIME.get(p.suffix.lower())
+_history_mime = _common._history_mime
 
 
 def _history_args(*a, **k): return _common._history_args(_G, *a, **k)
@@ -1972,18 +1888,7 @@ def _scan_action(scan_kind, new_d: float):
 _gen_divergence_logged = False
 
 
-def _log_gen_notes_once(stored: int, counted: int) -> None:
-    """Divergence between the stored gen= and the chain length is information,
-    not an error (max() already kept the safer value) — log it once per run,
-    not per file. Legacy files (no gen= token, stored == 0) are the normal
-    case and never count as divergence.
-    """
-    global _gen_divergence_logged
-    if stored and stored != counted and not _gen_divergence_logged:
-        _gen_divergence_logged = True
-        logger.info("At least one file's stored gen= disagrees with its cjxl "
-                    "chain length — kept the larger (safer) value; the field "
-                    "was corrected on the restamp.")
+def _log_gen_notes_once(*a, **k): return _common._log_gen_notes_once(_G, *a, **k)
 
 
 def _encode_tag_mode(*a, **k): return _common._encode_tag_mode(_G, *a, **k)
@@ -2432,42 +2337,7 @@ _other_tool_folders_cache = None
 def _sibling_str_settings(*a, **k): return _common._sibling_str_settings(_G, *a, **k)
 
 
-def _other_tool_output_folders() -> tuple:
-    """(names, suffixes, masters), lowercased: the JXL OUTPUT folders of the
-    OTHER tools (_OTHER_TOOL_FOLDER_SOURCES, _OTHER_TOOL_FIXED_FOLDERS,
-    _OTHER_TOOL_SUFFIX_SOURCES) — each configured value AND its shipped
-    default — and the folders the encoder writes masters into
-    (_MASTER_FOLDER_SOURCES, same rule), which are never among them: masters
-    are what these modes are for, and a name both tools use (converted_jxl)
-    must keep its masters. Read from the siblings' settings once (X-B of the
-    2026-11-03 audit; the encoder's _decoder_output_folders is the mirror),
-    then cached."""
-    global _other_tool_folders_cache
-    if _other_tool_folders_cache is None:
-        wanted = {}
-        for script, setting, _default in (_OTHER_TOOL_FOLDER_SOURCES
-                                          + _OTHER_TOOL_SUFFIX_SOURCES
-                                          + _MASTER_FOLDER_SOURCES):
-            wanted.setdefault(script, set()).add(setting)
-        read = {s: _sibling_str_settings(s, n) for s, n in wanted.items()}
-
-        def _values(script, setting, default):
-            got = (read.get(script) or {}).get(setting) or ""
-            return {v.strip().lower() for v in (got, default) if v.strip()}
-
-        masters = set()
-        for src in _MASTER_FOLDER_SOURCES:
-            masters |= _values(*src)
-        names = {n.lower() for n in _OTHER_TOOL_FIXED_FOLDERS}
-        for src in _OTHER_TOOL_FOLDER_SOURCES:
-            names |= _values(*src)
-        suffixes = set()
-        for src in _OTHER_TOOL_SUFFIX_SOURCES:
-            suffixes |= {"_" + v for v in _values(*src)}
-        names -= masters
-        _other_tool_folders_cache = (frozenset(names), frozenset(suffixes),
-                                     frozenset(masters))
-    return _other_tool_folders_cache
+def _other_tool_output_folders(*a, **k): return _common._other_tool_output_folders(_G, *a, **k)
 
 
 def _skip_other_tool_output(*a, **k): return _common._skip_other_tool_output(_G, *a, **k)
@@ -2860,32 +2730,7 @@ _JXL_THUMB_HANDLER_KEYS = (
 _jxl_thumb_seen = []
 
 
-def _jxl_thumb_installed() -> bool:
-    """True when jxl-thumb is Explorer's thumbnail handler for .jxl for this
-    Windows user (one registry read per run). JXLPHOTO_JXL_THUMB=1/0
-    overrides the check — for the test suite, and for a run whose thumbnails
-    are meant for another user or PC."""
-    env = os.environ.get("JXLPHOTO_JXL_THUMB")
-    if env in ("0", "1"):
-        return env == "1"
-    if not _jxl_thumb_seen:
-        found = False
-        if os.name == "nt":
-            try:
-                import winreg
-                for sub in _JXL_THUMB_HANDLER_KEYS:
-                    try:
-                        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, sub) as key:
-                            value = str(winreg.QueryValue(key, None) or "").strip()
-                    except OSError:
-                        continue
-                    if value:
-                        found = value.upper() == _JXL_THUMB_CLSID
-                        break
-            except Exception:
-                found = False
-        _jxl_thumb_seen.append(found)
-    return _jxl_thumb_seen[0]
+def _jxl_thumb_installed(*a, **k): return _common._jxl_thumb_installed(_G, *a, **k)
 
 
 def _explorer_thumbnail_wanted(*a, **k): return _common._explorer_thumbnail_wanted(_G, *a, **k)
@@ -3136,26 +2981,7 @@ _png_size = _common._png_size
 _resize_geometry = _common._resize_geometry
 
 
-def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
-    """ImageMagick args for output sharpening, or [] for none. Colour images are
-    sharpened on the Lab L channel only (no colour fringes); a grey image has a
-    single channel and is sharpened directly. `-colorspace Lab ... -colorspace
-    sRGB` DROPS the ICC profile — the caller must re-assign the output profile
-    right after these args (verified: pixels stay identical)."""
-    if not preset or preset == "none":
-        return []
-    p = dict(SHARPEN_PRESETS[preset])
-    if sigma is not None:
-        p["sigma"] = float(sigma)
-    if gain is not None:
-        p["gain"] = float(gain)
-    if threshold is not None:
-        p["threshold"] = float(threshold)
-    op = f"0x{p['sigma']}+{p['gain']}+{p['threshold']}"
-    if grey:
-        return ["-unsharp", op]
-    return ["-colorspace", "Lab", "-channel", "R", "-unsharp", op, "+channel",
-            "-colorspace", "sRGB"]
+def _sharpen_args(*a, **k): return _common._sharpen_args(_G, *a, **k)
 
 
 _resize_label = _common._resize_label

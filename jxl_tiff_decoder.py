@@ -88,9 +88,7 @@ GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
-_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
-                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
-                 ".jpeg": "image/jpeg", ".png": "image/png"}
+_HISTORY_MIME = _common._HISTORY_MIME
 
 logger = logging.getLogger(__name__)
 
@@ -305,13 +303,7 @@ _argfile_safe = _common._argfile_safe
 _struct_escape = _common._struct_escape
 
 
-def _history_mime(path):
-    """MIME type of a path for the History entry, or None. A staging temp
-    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
-    p = Path(str(path))
-    if p.suffix.lower() == ".tmp":
-        p = Path(p.stem)
-    return _HISTORY_MIME.get(p.suffix.lower())
+_history_mime = _common._history_mime
 
 
 def _history_args(*a, **k): return _common._history_args(_G, *a, **k)
@@ -903,15 +895,7 @@ _overlay_value = _common._overlay_value
 def _apply_settings_overlay(*a, **k): return _common._apply_settings_overlay(_G, *a, **k)
 
 
-def _log_settings_overlay() -> None:
-    """The overlay's audit lines (setup_logger calls it): which file and which
-    settings it changed, and every entry it refused."""
-    result = globals().get("_SETTINGS_OVERLAY") or {}
-    if result.get("applied"):
-        logger.info(f"Script settings overlay: {result['path']}: "
-                    f"{len(result['applied'])} value(s): {', '.join(result['applied'])}")
-    for warning in result.get("warnings", ()):
-        logger.warning(f"Script settings overlay: {warning}")
+def _log_settings_overlay(*a, **k): return _common._log_settings_overlay(_G, *a, **k)
 
 # What the overlay may change in this script: name -> (kind, ...) checked by
 # _overlay_value. A setting that is not here keeps the script's value.
@@ -1050,10 +1034,7 @@ def emit_summary_json(enabled, *, ok, overwritten, skipped, errors, log_file,
         pass  # a summary line must never take down a finished run
 
 
-def next_count():
-    with counter_lock:
-        _counter["done"] += 1
-        return _counter["done"], _counter["total"]
+def next_count(*a, **k): return _common.next_count(_G, *a, **k)
 
 # Leftover temps of an interrupted run (#546). Every output is written to a
 # '<uuid>_<name>.tmp' beside it (or rewritten through one) and renamed into
@@ -3850,42 +3831,7 @@ _other_tool_folders_cache = None
 def _sibling_str_settings(*a, **k): return _common._sibling_str_settings(_G, *a, **k)
 
 
-def _other_tool_output_folders() -> tuple:
-    """(names, suffixes, masters), lowercased: the JXL OUTPUT folders of the
-    OTHER tools (_OTHER_TOOL_FOLDER_SOURCES, _OTHER_TOOL_FIXED_FOLDERS,
-    _OTHER_TOOL_SUFFIX_SOURCES) — each configured value AND its shipped
-    default — and the folders the encoder writes masters into
-    (_MASTER_FOLDER_SOURCES, same rule), which are never among them: masters
-    are what these modes are for, and a name both tools use (converted_jxl)
-    must keep its masters. Read from the siblings' settings once (X-B of the
-    2026-11-03 audit; the encoder's _decoder_output_folders is the mirror),
-    then cached."""
-    global _other_tool_folders_cache
-    if _other_tool_folders_cache is None:
-        wanted = {}
-        for script, setting, _default in (_OTHER_TOOL_FOLDER_SOURCES
-                                          + _OTHER_TOOL_SUFFIX_SOURCES
-                                          + _MASTER_FOLDER_SOURCES):
-            wanted.setdefault(script, set()).add(setting)
-        read = {s: _sibling_str_settings(s, n) for s, n in wanted.items()}
-
-        def _values(script, setting, default):
-            got = (read.get(script) or {}).get(setting) or ""
-            return {v.strip().lower() for v in (got, default) if v.strip()}
-
-        masters = set()
-        for src in _MASTER_FOLDER_SOURCES:
-            masters |= _values(*src)
-        names = {n.lower() for n in _OTHER_TOOL_FIXED_FOLDERS}
-        for src in _OTHER_TOOL_FOLDER_SOURCES:
-            names |= _values(*src)
-        suffixes = set()
-        for src in _OTHER_TOOL_SUFFIX_SOURCES:
-            suffixes |= {"_" + v for v in _values(*src)}
-        names -= masters
-        _other_tool_folders_cache = (frozenset(names), frozenset(suffixes),
-                                     frozenset(masters))
-    return _other_tool_folders_cache
+def _other_tool_output_folders(*a, **k): return _common._other_tool_output_folders(_G, *a, **k)
 
 
 def _skip_other_tool_output(*a, **k): return _common._skip_other_tool_output(_G, *a, **k)

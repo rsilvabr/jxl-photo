@@ -96,9 +96,7 @@ GUARD_DOC_URL = (f"{TOOLKIT_URL}/blob/main/docs/behavior_and_limitations.md"
                  f"#renamed-folders-and-the-overwrite-guard")
 
 # MIME types named in the xmpMM:History entry (_history_args).
-_HISTORY_MIME = {".tif": "image/tiff", ".tiff": "image/tiff",
-                 ".jxl": "image/jxl", ".jpg": "image/jpeg",
-                 ".jpeg": "image/jpeg", ".png": "image/png"}
+_HISTORY_MIME = _common._HISTORY_MIME
 
 
 def _jpeg_main_eoi(file_path: Path) -> bool:
@@ -825,13 +823,7 @@ _argfile_safe = _common._argfile_safe
 _struct_escape = _common._struct_escape
 
 
-def _history_mime(path):
-    """MIME type of a path for the History entry, or None. A staging temp
-    '<uuid>_<name>.tmp' is named by the extension before '.tmp'."""
-    p = Path(str(path))
-    if p.suffix.lower() == ".tmp":
-        p = Path(p.stem)
-    return _HISTORY_MIME.get(p.suffix.lower())
+_history_mime = _common._history_mime
 
 
 def _history_args(*a, **k): return _common._history_args(_G, *a, **k)
@@ -1274,15 +1266,7 @@ _overlay_value = _common._overlay_value
 def _apply_settings_overlay(*a, **k): return _common._apply_settings_overlay(_G, *a, **k)
 
 
-def _log_settings_overlay() -> None:
-    """The overlay's audit lines (setup_logger calls it): which file and which
-    settings it changed, and every entry it refused."""
-    result = globals().get("_SETTINGS_OVERLAY") or {}
-    if result.get("applied"):
-        logger.info(f"Script settings overlay: {result['path']}: "
-                    f"{len(result['applied'])} value(s): {', '.join(result['applied'])}")
-    for warning in result.get("warnings", ()):
-        logger.warning(f"Script settings overlay: {warning}")
+def _log_settings_overlay(*a, **k): return _common._log_settings_overlay(_G, *a, **k)
 
 # What the overlay may change in this script: name -> (kind, ...) checked by
 # _overlay_value. A setting that is not here keeps the script's value.
@@ -1471,25 +1455,10 @@ def setup_logger():
 _rejected_log_lock = threading.Lock()
 
 
-def _log_rejected_file(file_path, reason):
-    """Log rejected files to Logs/<script>/rejected_files.log for easy review."""
-    try:
-        rej_dir = LOG_DIR
-        rej_dir.mkdir(parents=True, exist_ok=True)
-        rej_file = rej_dir / "rejected_files.log"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Locked: called from worker threads; concurrent appends would interleave.
-        with _rejected_log_lock:
-            with open(rej_file, "a", encoding="utf-8") as f:
-                f.write(f"{timestamp} | {reason} | {file_path}\n")
-    except Exception:
-        pass
+def _log_rejected_file(*a, **k): return _common._log_rejected_file(_G, *a, **k)
 
 
-def next_count():
-    with counter_lock:
-        _counter["done"] += 1
-        return _counter["done"], _counter["total"]
+def next_count(*a, **k): return _common.next_count(_G, *a, **k)
 
 # --------------------------------------------─
 # MD5 UTILITIES (Transcode only)
@@ -5150,26 +5119,7 @@ def _origin_marker_lines(src_path: Path) -> list:
 _resize_geometry = _common._resize_geometry
 
 
-def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
-    """ImageMagick args for output sharpening, or [] for none. Colour images are
-    sharpened on the Lab L channel only (no colour fringes); a grey image has a
-    single channel and is sharpened directly. `-colorspace Lab ... -colorspace
-    sRGB` DROPS the ICC profile — the caller must re-assign the output profile
-    right after these args (verified: pixels stay identical)."""
-    if not preset or preset == "none":
-        return []
-    p = dict(SHARPEN_PRESETS[preset])
-    if sigma is not None:
-        p["sigma"] = float(sigma)
-    if gain is not None:
-        p["gain"] = float(gain)
-    if threshold is not None:
-        p["threshold"] = float(threshold)
-    op = f"0x{p['sigma']}+{p['gain']}+{p['threshold']}"
-    if grey:
-        return ["-unsharp", op]
-    return ["-colorspace", "Lab", "-channel", "R", "-unsharp", op, "+channel",
-            "-colorspace", "sRGB"]
+def _sharpen_args(*a, **k): return _common._sharpen_args(_G, *a, **k)
 
 
 _resize_label = _common._resize_label

@@ -66,11 +66,9 @@ SHARED_HELPERS = [
     # tools' JXL output folders below the marker (tables differ per script,
     # the logic must not). A copy drifting is one finder taking a derivative
     # for a master again.
-    "_other_tool_output_folders",
     # Phase 4: the script settings overlay. The four copies must find the
     # same file, refuse the same values and keep the same safety settings out
     # (each script's own _OVERLAY_SETTINGS table differs, the rules must not).
-    "_log_settings_overlay",
     # W-A: progress between planning-time batches. A copy drifting is one
     # backend silent for an hour again, and the wrapper stopping it as hung.
     # --export-jxl-folder: the same name rules must reject the same values in
@@ -102,13 +100,11 @@ SHARED_HELPERS = [
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write
     # thumbnails it then never shows.
-    "_jxl_thumb_installed",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.
     # The xmpMM:History entry: a copy drifting would make one script write a
     # History entry the others do not (or one exiftool cannot parse).
-    "_history_mime",
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
     # leaves stale jxlphoto-src/srcsum on one script's derivatives.
     # Exif box before the XMP box in every output (#561): IrfanView shows no
@@ -157,7 +153,6 @@ SHARED_HELPERS = [
     # EXACTLY the same way: a drift here means one script writes a field the
     # other miscounts, and the recompressor's --on-regeneration guard reads a
     # generation count that is wrong in the damaging direction.
-    "_log_gen_notes_once",
     # Union of the dc:Description and Software machine blocks: the record can
     # be split across the two fields, and both scripts must merge entries and
     # stored gen= identically or one of them undercounts generations when the
@@ -183,10 +178,8 @@ SHARED_HELPERS = [
     # leave out the same pages.
     # Every path ImageMagick writes: one backend forgetting the escape fails
     # in a folder named "100%off" (#647).
-    "_sharpen_args",
     # worker cap: the encoder and the recompressor must estimate the same
     # memory for the same settings
-    "_memory_capped_workers",
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:
