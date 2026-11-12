@@ -40,6 +40,8 @@ must be reported.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import difflib
 import hashlib
 import json
@@ -263,6 +265,21 @@ def _exiftool(paths: List[Path]) -> Dict[str, dict]:
     return {os.path.normcase(os.path.normpath(d.get("SourceFile", ""))): d for d in items}
 
 
+def _mask_icc_token(value):
+    """A `jxlphoto-iccprofile:` token whose profile the toolkit generates at run
+    time (the sRGB of --output-icc) carries that moment in the ICC header's
+    creation date (bytes 24-35): compared without it, the rest byte for byte."""
+    if not (isinstance(value, str) and value.startswith("jxlphoto-iccprofile:")):
+        return value
+    try:
+        raw = bytearray(base64.b64decode(value.split(":", 1)[1], validate=True))
+    except (ValueError, binascii.Error):
+        return value
+    if len(raw) >= 36:
+        raw[24:36] = bytes(12)
+    return f"jxlphoto-iccprofile:<icc without its date {_sha(bytes(raw))}>"
+
+
 def _mask_meta(d: dict) -> dict:
     out = {}
     for k, v in d.items():
@@ -273,6 +290,11 @@ def _mask_meta(d: dict) -> dict:
     if isinstance(hist, list):
         out["XMP-xmpMM:History"] = [{**h, "When": "<when>"} if isinstance(h, dict) and "When" in h else h
                                     for h in hist]
+    rel = out.get("XMP-dc:Relation")
+    if isinstance(rel, list):
+        out["XMP-dc:Relation"] = [_mask_icc_token(v) for v in rel]
+    elif isinstance(rel, str):
+        out["XMP-dc:Relation"] = _mask_icc_token(rel)
     return out
 
 
