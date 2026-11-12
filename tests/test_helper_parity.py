@@ -70,10 +70,7 @@ SHARED_HELPERS = [
     # tools' JXL output folders below the marker (tables differ per script,
     # the logic must not). A copy drifting is one finder taking a derivative
     # for a master again.
-    "_sibling_str_settings",
     "_other_tool_output_folders",
-    "_skip_other_tool_output",
-    "_log_other_tool_skips",
     # Phase 4: the script settings overlay. The four copies must find the
     # same file, refuse the same values and keep the same safety settings out
     # (each script's own _OVERLAY_SETTINGS table differs, the rules must not).
@@ -104,11 +101,9 @@ SHARED_HELPERS = [
     # backend turning a rotated JPEG's pixels twice, or deleting a float or
     # animated JXL after a 16-bit / first-frame decode, that the others keep.
     "_jxlinfo_text",
-    "_orientation_reset_args",
     # #636: the codestream orientation read in Python when jxlinfo cannot
     # answer (decoder, transcoder, recompressor). A copy drifting is one
     # backend turning a rotated JPEG's picture twice again without jxlinfo.
-    "_jxl_orientation",
     # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
     # recompressor). A copy drifting is one backend failing again on every
     # source whose profile is a standard sRGB one.
@@ -135,7 +130,6 @@ SHARED_HELPERS = [
     "_exiftool_source",
     "_xmp_block_args",
     "_get_exiftool_cmd",
-    "_tool_at_least",
     # Disk-full abort. These decide whether a run stops or grinds on, so a copy
     # drifting would make one backend keep failing file after file.
     "_reset_abort",
@@ -165,11 +159,9 @@ SHARED_HELPERS = [
     "_source_changed_since_read",
     # The distance dead-zone warning: the user must hear the SAME sentence from
     # every script that takes --distance.
-    "_warn_distance_clamp",
     # The lossy distance floor of the installed cjxl (0.05 from libjxl 0.12,
     # 0.01 before): a copy drifting would warn — or classify — against the
     # wrong floor in one script only.
-    "_min_effective_distance",
     # Skip decision and pixel-verification helpers, born in the encoder. The
     # recompressor verifies source-vs-output decodes with the same statistics.
     # (_would_skip is NOT here since v2.27: the encoder's also answers "same

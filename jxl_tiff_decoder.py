@@ -1815,25 +1815,10 @@ _codestream_head = _common._codestream_head
 _header_orientation = _common._header_orientation
 
 
-def _jxl_orientation(jxl_path):
-    """The orientation (1-8) a JXL's codestream carries: jxlinfo's answer,
-    else the header read in Python (#636: without jxlinfo the copied EXIF
-    tag turned the picture a second time). None when neither can tell."""
-    o = _codestream_orientation(_jxlinfo_text(jxl_path))
-    return o if o is not None else _header_orientation(jxl_path)
+def _jxl_orientation(*a, **k): return _common._jxl_orientation(_G, *a, **k)
 
 
-def _orientation_reset_args(jxl_path) -> list:
-    """exiftool arguments that set the copied EXIF Orientation to 1 when the
-    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
-    already turned the pixels, so the tag copied from the Exif box would turn
-    them a second time. A JXL made from a TIFF has codestream orientation 1
-    and keeps its tag."""
-    o = _jxl_orientation(jxl_path)
-    # The XMP mirror of the tag goes too (#634): a reader that prefers the
-    # XMP would turn the upright pixels again.
-    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
-            if o not in (None, 1) else [])
+def _orientation_reset_args(*a, **k): return _common._orientation_reset_args(_G, *a, **k)
 
 
 _reduced_by_integer_decode = _common._reduced_by_integer_decode
@@ -4312,36 +4297,7 @@ _MASTER_FOLDER_SOURCES = (
     ("jxl_tiff_encoder.py", "JXL_FOLDER_NAME", "JXL_16bits"),
 )
 _other_tool_folders_cache = None
-def _sibling_str_settings(script_name: str, names) -> dict:
-    """{name: value} of the plain string settings `names` at the top of the
-    sibling script `script_name` (next to this one), read with `ast` —
-    nothing is imported or executed. Missing or unreadable -> {}."""
-    out = {}
-    try:
-        import ast
-        src = (Path(__file__).resolve().parent / script_name).read_text(
-            encoding="utf-8")
-        for node in ast.parse(src).body:
-            if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id in names
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)):
-                out[node.targets[0].id] = node.value.value.strip()
-    except Exception:
-        pass
-    # The script settings overlay changes the sibling's value too: what it
-    # sets for that script is the setting its run uses.
-    try:
-        section = _settings_overlay_section(_settings_overlay_path(),
-                                            Path(script_name).stem) or {}
-        for name in names:
-            ok, value = _overlay_value(("name",), section.get(name))
-            if ok:
-                out[name] = value
-    except Exception:
-        pass
-    return out
+def _sibling_str_settings(*a, **k): return _common._sibling_str_settings(_G, *a, **k)
 
 
 def _other_tool_output_folders() -> tuple:
@@ -4382,31 +4338,10 @@ def _other_tool_output_folders() -> tuple:
     return _other_tool_folders_cache
 
 
-def _skip_other_tool_output(parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
-    """True if a folder below the export marker is another tool's JXL output
-    folder (_other_tool_output_folders) — never a folder the encoder writes
-    masters into, and, in mode 7, never the EXPORT_JXL_SUBFOLDER explicitly requested (an
-    explicit request wins over this heuristic; mode 6 has none and passes
-    honor_requested_subfolder=False). Without it a derivative or a JPEG
-    archive next to the master resolved to the master's output: the run
-    aborted on the duplicate, or decoded/recompressed the derivative as a
-    master."""
-    names, suffixes, masters = _other_tool_output_folders()
-    requested = EXPORT_JXL_SUBFOLDER.lower() if honor_requested_subfolder else ""
-    return any(p != requested and p not in masters
-               and (p in names or any(p.endswith(s) for s in suffixes))
-               for p in parts_below_marker)
+def _skip_other_tool_output(*a, **k): return _common._skip_other_tool_output(_G, *a, **k)
 
 
-def _log_other_tool_skips(count: int) -> None:
-    if count:
-        names, suffixes, _masters = _other_tool_output_folders()
-        logger.info(f"Ignored {count} JXL(s) in other tools' output folders "
-                    f"({', '.join(sorted(names))}"
-                    + (f", or any folder ending in {', '.join(sorted(suffixes))}"
-                       if suffixes else "")
-                    + ") — derivatives and JPEG archives, not masters; use another "
-                      "mode to process them")
+def _log_other_tool_skips(*a, **k): return _common._log_other_tool_skips(_G, *a, **k)
 
 
 def find_jxls_mode6(input_path):

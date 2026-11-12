@@ -647,9 +647,7 @@ def _get_cjxl_cmd():
 
 _tool_version = _common._tool_version
 
-def _tool_at_least(exe: str, major: int, minor: int) -> bool:
-    v = _tool_version(exe)
-    return v is not None and v[:2] >= (major, minor)
+_tool_at_least = _common._tool_at_least
 
 def _cjxl_buffering_flag():
     """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
@@ -4099,29 +4097,19 @@ _SAMPLE_COUNT = 3
 _PREFLIGHT_MIN_BYTES = 5 * 1024 ** 3
 # Projecting the preflight from a distance below the installed cjxl's floor
 # would model a file that cjxl will never write — see the constants below.
-_MIN_EFFECTIVE_DISTANCE = 0.05
+_MIN_EFFECTIVE_DISTANCE = _common._MIN_EFFECTIVE_DISTANCE
 # cjxl >= 0.12 clamps every lossy distance below this to the same value:
 # --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
 # (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
 # coefficients stay inside int16 — below it the bitstream leaves Level 5 of
 # the JPEG XL spec.
-_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
+_MIN_EFFECTIVE_DISTANCE_PRE_012 = _common._MIN_EFFECTIVE_DISTANCE_PRE_012
 # cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
 # 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
 # the size of d=0.05). Older builds share the pre-#4238 code.
 
 
-def _min_effective_distance(exe: str) -> float:
-    """The lossy distance floor of the cjxl that `exe` names.
-
-    0.05 from libjxl 0.12 on, 0.01 before it. An unknown version reads as the
-    current behaviour (0.05): the only consequence is a warning that may be
-    one version too cautious, never a skipped encode.
-    """
-    v = _tool_version(exe)
-    if v is not None and v[:2] < (0, 12):
-        return _MIN_EFFECTIVE_DISTANCE_PRE_012
-    return _MIN_EFFECTIVE_DISTANCE
+_min_effective_distance = _common._min_effective_distance
 
 # TIFF compression tag -> what tifffile needs to reproduce it. The crop must be
 # stored the way the source is, because the ratio's denominator is a TIFF size:

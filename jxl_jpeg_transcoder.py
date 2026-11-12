@@ -933,9 +933,7 @@ def _get_exiftool_cmd():
 
 _tool_version = _common._tool_version
 
-def _tool_at_least(exe: str, major: int, minor: int) -> bool:
-    v = _tool_version(exe)
-    return v is not None and v[:2] >= (major, minor)
+_tool_at_least = _common._tool_at_least
 
 def _cjxl_buffering_flag():
     """--buffering flag for cjxl >= 0.12; empty list otherwise (flag doesn't exist there).
@@ -965,50 +963,22 @@ def _metadata_boxes_flag():
 # encode_to_jxl when that copy is malformed and exiftool cannot rewrite it).
 _CJXL_STRIP_EXIF = ["-x", "strip=exif"]
 
-_MIN_EFFECTIVE_DISTANCE = 0.05
+_MIN_EFFECTIVE_DISTANCE = _common._MIN_EFFECTIVE_DISTANCE
 # cjxl >= 0.12 clamps every lossy distance below this to the same value:
 # --distance 0.005 ... 0.05 were measured producing BYTE-IDENTICAL output
 # (VarDCT and lossy modular alike). libjxl PR #4238 set the floor so the DC
 # coefficients stay inside int16 — below it the bitstream leaves Level 5 of
 # the JPEG XL spec.
-_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
+_MIN_EFFECTIVE_DISTANCE_PRE_012 = _common._MIN_EFFECTIVE_DISTANCE_PRE_012
 # cjxl 0.11.2 (measured, 2026-09-24): only 0.005 and 0.01 were identical;
 # 0.02/0.03/0.04 were real steps above 0.05 (d=0.01: +8.7 dB PSNR at 1.75x
 # the size of d=0.05). Older builds share the pre-#4238 code.
 
 
-def _min_effective_distance(exe: str) -> float:
-    """The lossy distance floor of the cjxl that `exe` names.
-
-    0.05 from libjxl 0.12 on, 0.01 before it. An unknown version reads as the
-    current behaviour (0.05): the only consequence is a warning that may be
-    one version too cautious, never a skipped encode.
-    """
-    v = _tool_version(exe)
-    if v is not None and v[:2] < (0, 12):
-        return _MIN_EFFECTIVE_DISTANCE_PRE_012
-    return _MIN_EFFECTIVE_DISTANCE
+_min_effective_distance = _common._min_effective_distance
 
 
-def _warn_distance_clamp(distance, floor: float = _MIN_EFFECTIVE_DISTANCE) -> None:
-    """Say so when a requested distance buys nothing.
-
-    `floor` is the installed cjxl's lossy floor (_min_effective_distance):
-    0.05 from libjxl 0.12 on, 0.01 before it.
-
-    Call AFTER setup_logger(): on the module-level logger a warning falls
-    through to logging.lastResort — unformatted on stderr, never in the log
-    file (bug #238).
-    """
-    try:
-        d = float(distance)
-    except (TypeError, ValueError):
-        return
-    if 0 < d < floor:
-        logger.warning(
-            f"--distance {d} behaves exactly like {floor}: this cjxl "
-            f"clamps every lossy distance below that to the same output. "
-            f"Use --distance 0 for true lossless.")
+def _warn_distance_clamp(*a, **k): return _common._warn_distance_clamp(_G, *a, **k)
 
 
 # Leftover temps of an interrupted run (#546). Every output is written to a
@@ -4987,25 +4957,10 @@ _codestream_head = _common._codestream_head
 _header_orientation = _common._header_orientation
 
 
-def _jxl_orientation(jxl_path):
-    """The orientation (1-8) a JXL's codestream carries: jxlinfo's answer,
-    else the header read in Python (#636: without jxlinfo the copied EXIF
-    tag turned the picture a second time). None when neither can tell."""
-    o = _codestream_orientation(_jxlinfo_text(jxl_path))
-    return o if o is not None else _header_orientation(jxl_path)
+def _jxl_orientation(*a, **k): return _common._jxl_orientation(_G, *a, **k)
 
 
-def _orientation_reset_args(jxl_path) -> list:
-    """exiftool arguments that set the copied EXIF Orientation to 1 when the
-    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
-    already turned the pixels, so the tag copied from the Exif box would turn
-    them a second time. A JXL made from a TIFF has codestream orientation 1
-    and keeps its tag."""
-    o = _jxl_orientation(jxl_path)
-    # The XMP mirror of the tag goes too (#634): a reader that prefers the
-    # XMP would turn the upright pixels again.
-    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
-            if o not in (None, 1) else [])
+def _orientation_reset_args(*a, **k): return _common._orientation_reset_args(_G, *a, **k)
 
 
 # ImageMagick operations that put upright pixels back into the order a JPEG

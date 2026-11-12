@@ -2211,3 +2211,129 @@ def _encode_tag_mode(g) -> str:
     a test) means the same."""
     mode = str(g.ENCODE_TAG_MODE or "history").strip().lower()
     return "history" if mode == "xmp" else mode
+
+
+# === Other tools' folders, orientation and distance ===
+
+_MIN_EFFECTIVE_DISTANCE = 0.05
+
+_MIN_EFFECTIVE_DISTANCE_PRE_012 = 0.01
+
+
+def _sibling_str_settings(g, script_name: str, names) -> dict:
+    """{name: value} of the plain string settings `names` at the top of the
+    sibling script `script_name` (next to this one), read with `ast` —
+    nothing is imported or executed. Missing or unreadable -> {}."""
+    out = {}
+    try:
+        import ast
+        src = (Path(g.__file__).resolve().parent / script_name).read_text(
+            encoding="utf-8")
+        for node in ast.parse(src).body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in names
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                out[node.targets[0].id] = node.value.value.strip()
+    except Exception:
+        pass
+    # The script settings overlay changes the sibling's value too: what it
+    # sets for that script is the setting its run uses.
+    try:
+        section = g._settings_overlay_section(g._settings_overlay_path(),
+                                            Path(script_name).stem) or {}
+        for name in names:
+            ok, value = g._overlay_value(("name",), section.get(name))
+            if ok:
+                out[name] = value
+    except Exception:
+        pass
+    return out
+
+
+def _skip_other_tool_output(g, parts_below_marker, honor_requested_subfolder: bool = True) -> bool:
+    """True if a folder below the export marker is another tool's JXL output
+    folder (_other_tool_output_folders) — never a folder the encoder writes
+    masters into, and, in mode 7, never the EXPORT_JXL_SUBFOLDER explicitly requested (an
+    explicit request wins over this heuristic; mode 6 has none and passes
+    honor_requested_subfolder=False). Without it a derivative or a JPEG
+    archive next to the master resolved to the master's output: the run
+    aborted on the duplicate, or decoded/recompressed the derivative as a
+    master."""
+    names, suffixes, masters = g._other_tool_output_folders()
+    requested = g.EXPORT_JXL_SUBFOLDER.lower() if honor_requested_subfolder else ""
+    return any(p != requested and p not in masters
+               and (p in names or any(p.endswith(s) for s in suffixes))
+               for p in parts_below_marker)
+
+
+def _log_other_tool_skips(g, count: int) -> None:
+    if count:
+        names, suffixes, _masters = g._other_tool_output_folders()
+        g.logger.info(f"Ignored {count} JXL(s) in other tools' output folders "
+                    f"({', '.join(sorted(names))}"
+                    + (f", or any folder ending in {', '.join(sorted(suffixes))}"
+                       if suffixes else "")
+                    + ") — derivatives and JPEG archives, not masters; use another "
+                      "mode to process them")
+
+
+def _orientation_reset_args(g, jxl_path) -> list:
+    """exiftool arguments that set the copied EXIF Orientation to 1 when the
+    JXL's CODESTREAM carries one (#623): djxl, and cjxl reading a JXL, have
+    already turned the pixels, so the tag copied from the Exif box would turn
+    them a second time. A JXL made from a TIFF has codestream orientation 1
+    and keeps its tag."""
+    o = g._jxl_orientation(jxl_path)
+    # The XMP mirror of the tag goes too (#634): a reader that prefers the
+    # XMP would turn the upright pixels again.
+    return (["-IFD0:Orientation#=1", "-XMP-tiff:Orientation="]
+            if o not in (None, 1) else [])
+
+
+def _jxl_orientation(g, jxl_path):
+    """The orientation (1-8) a JXL's codestream carries: jxlinfo's answer,
+    else the header read in Python (#636: without jxlinfo the copied EXIF
+    tag turned the picture a second time). None when neither can tell."""
+    o = g._codestream_orientation(g._jxlinfo_text(jxl_path))
+    return o if o is not None else g._header_orientation(jxl_path)
+
+
+def _warn_distance_clamp(g, distance, floor: float = _MIN_EFFECTIVE_DISTANCE) -> None:
+    """Say so when a requested distance buys nothing.
+
+    `floor` is the installed cjxl's lossy floor (_min_effective_distance):
+    0.05 from libjxl 0.12 on, 0.01 before it.
+
+    Call AFTER setup_logger(): on the module-level logger a warning falls
+    through to logging.lastResort — unformatted on stderr, never in the log
+    file (bug #238).
+    """
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        return
+    if 0 < d < floor:
+        g.logger.warning(
+            f"--distance {d} behaves exactly like {floor}: this cjxl "
+            f"clamps every lossy distance below that to the same output. "
+            f"Use --distance 0 for true lossless.")
+
+
+def _min_effective_distance(exe: str) -> float:
+    """The lossy distance floor of the cjxl that `exe` names.
+
+    0.05 from libjxl 0.12 on, 0.01 before it. An unknown version reads as the
+    current behaviour (0.05): the only consequence is a warning that may be
+    one version too cautious, never a skipped encode.
+    """
+    v = _tool_version(exe)
+    if v is not None and v[:2] < (0, 12):
+        return _MIN_EFFECTIVE_DISTANCE_PRE_012
+    return _MIN_EFFECTIVE_DISTANCE
+
+
+def _tool_at_least(exe: str, major: int, minor: int) -> bool:
+    v = _tool_version(exe)
+    return v is not None and v[:2] >= (major, minor)
