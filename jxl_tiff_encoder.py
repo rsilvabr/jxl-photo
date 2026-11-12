@@ -6079,8 +6079,11 @@ def build_parser():
     parser.add_argument("output", nargs="?", type=Path,
                         help="Output folder (modes 0 and 2; ignored by the others, "
                              "which derive the destination from each source's folder)")
-    parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8])
-    parser.add_argument("--workers",         type=int, default=min(os.cpu_count() or 4, 16))
+    parser.add_argument("--mode",            type=int, default=0, choices=[0,1,2,3,4,5,6,7,8],
+                        help="Output folder mode 0-8 (default 0); 6/7 = below the export "
+                             "marker, 8 = next to each TIFF. See docs/README_jxl_tiff_encoder.md")
+    parser.add_argument("--workers",         type=int, default=min(os.cpu_count() or 4, 16),
+                        help="Parallel workers (default: min(CPU, 16); fewer when memory is short)")
     parser.add_argument("--overwrite",       action="store_true",
                         help="Always overwrite existing JXLs")
     parser.add_argument("--sync",            action="store_true",
