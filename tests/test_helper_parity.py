@@ -86,7 +86,6 @@ SHARED_HELPERS = [
     "_log_settings_overlay",
     # W-A: progress between planning-time batches. A copy drifting is one
     # backend silent for an hour again, and the wrapper stopping it as hung.
-    "_batch_read_tick",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
     "_abort_on_duplicate_outputs",
@@ -99,7 +98,6 @@ SHARED_HELPERS = [
     # of another run sweeps nothing meanwhile. A copy drifting is one backend
     # sweeping the outputs another one has waiting there.
     "_staging_hold",
-    "_holds_staging",
     "_staging_used_by_another_run",
     # The "still the file that was copied?" check before an in-place edit
     # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
@@ -155,20 +153,13 @@ SHARED_HELPERS = [
     "_reset_abort",
     "_aborted",
     "_signal_abort",
-    "_abort_if_disk_full",
     # Promotion out of staging. It DELETES a partial destination file and can
     # latch the disk-full abort, so a copy drifting is one backend leaving
     # truncated outputs behind where another cleans them up.
-    "_promote_from_staging",
     # Directory-scan progress. A copy drifting would leave one backend silent
     # through the exact 25-second pause that looks like a freeze.
-    "_scan_tick",
-    "_scan_done",
     # Staging sweep. These DELETE files, so a copy drifting is the worst kind:
     # one backend could start sweeping what another still needs.
-    "_sweep_orphan_temps",
-    "_report_staging_leftovers",
-    "_clean_staging",
     # JXL structural integrity — the delete gate itself. A copy drifting is one
     # backend deleting a source whose output another would have rejected.
     "_verify_jxl_integrity",

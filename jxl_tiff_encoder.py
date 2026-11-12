@@ -367,26 +367,7 @@ def _refresh_planned_output(path) -> None:
         _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
 
 
-def _flush_to_disk(path) -> bool:
-    """Force `path`'s data to the disk (#617). False when it cannot be done:
-    the delete gates then keep the source — a file that only exists in the
-    OS cache does not justify an irreversible delete. The flush needs write
-    access: a read-only output (an archive the owner protected) keeps its
-    source too, and the reason is logged."""
-    try:
-        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
-    except OSError as e:
-        logger.warning(f"  could not open {Path(path).name} to flush it to disk "
-                       f"(read-only or in use?): {e}")
-        return False
-    try:
-        os.fsync(fd)
-        return True
-    except OSError as e:
-        logger.warning(f"  could not flush {Path(path).name} to disk: {e}")
-        return False
-    finally:
-        os.close(fd)
+def _flush_to_disk(*a, **k): return _common._flush_to_disk(_G, *a, **k)
 
 
 def _reset_abort():
@@ -431,83 +412,10 @@ def _signal_abort(reason):
     logger.error("  Free space, then re-run: sync mode resumes where this stopped.")
 
 
-def _abort_if_disk_full(write_dir, needed):
-    """Latch an abort when `write_dir` can no longer take a `needed`-byte file.
-
-    Only ever called from a failure path, so a healthy run never pays for the
-    stat. A volume that cannot be queried returns False: "cannot tell" must
-    never be reported to the user as "disk full".
-    """
-    try:
-        free = shutil.disk_usage(write_dir).free
-    except OSError:
-        return False
-    required = max(int(needed or 0), _MIN_FREE_BYTES)
-    if free >= required:
-        return False
-    _signal_abort(f"no space left on {write_dir} "
-                  f"({free // (1024 * 1024)} MB free, "
-                  f"needs at least {required // (1024 * 1024)} MB)")
-    return True
+def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
 
 
-def _promote_from_staging(write_path, final_path) -> bool:
-    """Move one finished output out of staging. True when it landed.
-
-    The move goes to a temp file IN THE DESTINATION FOLDER first and only then
-    over the final name with an atomic os.replace (E6/X3 of the 2026-10-08
-    audit). A plain shutil.move onto an existing output is copy2 + unlink on
-    Windows — even on one volume, since os.rename refuses an existing target —
-    and copy2 TRUNCATES the destination first: a kill or power cut mid-copy
-    left the old archive destroyed and a partial file with a fresh mtime that
-    smart sync then treats as up to date forever. Now the final name holds
-    either the old file or the complete new one, never a mix.
-
-    When the move raises, what reached the temp decides: a COMPLETE copy (the
-    copy finished, only the staging unlink or the final rename failed) is put
-    in place — after a successful copy+unlink it may be the only copy left —
-    and a partial one is removed (the good copy is still in staging; the
-    destination was never touched). A destination volume that is simply FULL
-    also has to stop the run rather than produce one MOVE FAILED line per
-    remaining file, which is what the disk-full abort exists for.
-    """
-    try:
-        size = write_path.stat().st_size
-    except OSError:
-        size = 0
-    tmp = final_path.parent / f"{uuid.uuid4().hex}_{final_path.name}.tmp"
-    try:
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(write_path), str(tmp))
-        os.replace(str(tmp), str(final_path))
-        return True
-    except OSError as e:
-        logger.error(f"  MOVE FAILED, kept in staging | {write_path.name} -> "
-                     f"{final_path} | {e}")
-        try:
-            landed = tmp.stat().st_size if tmp.exists() else None
-        except OSError:
-            landed = None
-        if landed is not None:
-            if size > 0 and landed == size:
-                try:
-                    os.replace(str(tmp), str(final_path))
-                    logger.error("    The copy itself finished — the destination now "
-                                 "holds the COMPLETE output.")
-                except OSError as e2:
-                    logger.error(f"    The COMPLETE output is at {tmp}: rename it to "
-                                 f"{final_path.name} once the problem is fixed ({e2}).")
-            else:
-                try:
-                    tmp.unlink()
-                    logger.error("    Removed the partial copy; the destination was "
-                                 "never touched and the complete copy is still in "
-                                 "staging.")
-                except OSError as e2:
-                    logger.error(f"    Could NOT remove the partial copy {tmp} ({e2}); "
-                                 f"the destination itself was never touched.")
-        _abort_if_disk_full(final_path.parent, size)
-        return False
+def _promote_from_staging(*a, **k): return _common._promote_from_staging(_G, *a, **k)
 
 
 # --- Directory-scan progress ----------------------------------------------
@@ -543,56 +451,16 @@ _SCAN_CHECK_INTERVAL = 512   # entries between clock reads
 def _scan_state(*a, **k): return _common._scan_state(_G, *a, **k)
 
 
-def _scan_tick(st, found):
-    """Report that a slow walk is still moving; stay quiet while it is fast.
-
-    The clock is read once every _SCAN_CHECK_INTERVAL entries rather than on
-    every one: this runs for every file on the volume, not just the matches.
-    """
-    st["scanned"] += 1
-    if st["scanned"] % _SCAN_CHECK_INTERVAL:
-        return
-    now = time.monotonic()
-    if now < st["next"]:
-        return
-    if not st["announced"]:
-        logger.info(f"Searching for files under {st['root']} -- a large or "
-                    f"network drive can take a while...")
-        st["announced"] = True
-    logger.info(f"  Scanned {st['scanned']} entries, {found} match(es) so far "
-                f"({now - st['t0']:.0f}s)")
-    st["gap"] = min(st["gap"] * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
-    st["next"] = now + st["gap"]
+def _scan_tick(*a, **k): return _common._scan_tick(_G, *a, **k)
 
 
 def _batch_read_state(*a, **k): return _common._batch_read_state(_G, *a, **k)
 
 
-def _batch_read_tick(st, done: int) -> None:
-    """Between two batches of a planning-time read: "<label>: N/M read" once
-    the read is slow, quiet while it is fast (W-A of the 2026-11-03 audit).
-    A busy disk made one 400-file batch take minutes (#537), and these reads
-    printed nothing until they finished: the wrapper, which stops a child
-    that prints nothing for its idle timeout, took a long planning phase for
-    a hung child. Same pacing as _scan_tick."""
-    if not 0 < done < st["total"]:
-        return
-    now = time.monotonic()
-    if now < st["next"]:
-        return
-    elapsed = now - st["t0"]
-    left = max(0.0, elapsed / done * (st["total"] - done))
-    eta = f"~{left / 60:.0f} min left" if left >= 60 else f"~{left:.0f}s left"
-    logger.info(f"  {st['label']}: {done}/{st['total']} read ({elapsed:.0f}s, {eta})")
-    st["gap"] = min(st["gap"] * _SCAN_REPORT_FACTOR, _SCAN_REPORT_MAX)
-    st["next"] = now + st["gap"]
+def _batch_read_tick(*a, **k): return _common._batch_read_tick(_G, *a, **k)
 
 
-def _scan_done(st, found):
-    """Close the report, but only if one was ever opened."""
-    if st["announced"]:
-        logger.info(f"  Scan finished: {found} match(es) from {st['scanned']} "
-                    f"entries in {time.monotonic() - st['t0']:.0f}s")
+def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 
 
 # --- Staging leftovers ------------------------------------------------------
@@ -621,21 +489,7 @@ _fmt_size = _common._fmt_size
 _staging_leftovers = _common._staging_leftovers
 
 
-def _report_staging_leftovers(staging_dir):
-    """Say what is still sitting in staging, so the leak cannot stay invisible."""
-    if not staging_dir:
-        return
-    found, total = _staging_leftovers(staging_dir)
-    if not found:
-        return
-    logger.warning(f"Staging holds {len(found)} leftover file(s) ({_fmt_size(total)}) "
-                   f"in {staging_dir}")
-    for f in sorted(found)[:5]:
-        logger.warning(f"    {f.name}")
-    if len(found) > 5:
-        logger.warning(f"    ... and {len(found) - 5} more")
-    logger.warning("  These are outputs whose conversion failed, kept for inspection. "
-                   "Pass --clean-staging on a later run to sweep the older ones.")
+def _report_staging_leftovers(*a, **k): return _common._report_staging_leftovers(_G, *a, **k)
 
 
 # --clean-staging of one run must not sweep the outputs ANOTHER run left
@@ -705,16 +559,7 @@ def _staging_hold(staging_dir):
                     pass
 
 
-def _holds_staging(fn):
-    """Run `fn` holding TEMP2_DIR (read at call time) as in use (#578): its
-    outputs wait in staging until their destination folder is complete."""
-    def wrapper(*args, **kwargs):
-        with _staging_hold(TEMP2_DIR):
-            return fn(*args, **kwargs)
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__ = fn.__doc__
-    wrapper.__wrapped__ = fn
-    return wrapper
+def _holds_staging(*a, **k): return _common._holds_staging(_G, *a, **k)
 
 
 def _staging_used_by_another_run(staging_dir) -> bool:
@@ -762,39 +607,7 @@ def _staging_used_by_another_run(staging_dir) -> bool:
     return busy
 
 
-def _clean_staging(staging_dir):
-    """Delete leftovers that have been idle long enough to be nobody's.
-
-    Deliberately runs BEFORE the batch, not after: sweeping at the end would
-    delete this run's own failures, which are the evidence the KEEP path exists
-    to preserve. Sweeping first clears the previous runs' orphans instead.
-    """
-    if not staging_dir:
-        return 0, 0
-    if _staging_used_by_another_run(staging_dir):
-        logger.warning(f"Staging: another run is using {staging_dir} — nothing swept "
-                       f"(its outputs may be waiting there for their folder to finish)")
-        return 0, 0
-    found, _ = _staging_leftovers(staging_dir)
-    if not found:
-        return 0, 0
-    cutoff = time.time() - _STAGING_MIN_AGE_SECONDS
-    removed, freed = 0, 0
-    for f in found:
-        try:
-            st = f.stat()
-            if st.st_mtime > cutoff:
-                continue        # young enough that a live run may own it
-            size = st.st_size
-            f.unlink()
-        except OSError as e:
-            logger.warning(f"  Could not remove staging leftover {f.name}: {e}")
-            continue
-        removed += 1
-        freed += size
-    if removed:
-        logger.info(f"Staging: removed {removed} leftover file(s), freed {_fmt_size(freed)}")
-    return removed, freed
+def _clean_staging(*a, **k): return _common._clean_staging(_G, *a, **k)
 
 
 _marker_matches = _common._marker_matches
@@ -2139,36 +1952,7 @@ def _log_discard_summary():
 _ORPHAN_TEMP_RE = re.compile(r"^(?:[0-9a-f]{32}_)+(?:repair_)?(.+?)(?:\.tmp)+$")
 
 
-def _sweep_orphan_temps(finals):
-    """Remove the leftover temps of these output paths (name or stem form:
-    '<uuid>_photo.jxl.tmp', '<uuid>_photo.tmp', a temp of a temp). Returns how
-    many were removed; a folder or file that cannot be read is skipped."""
-    names = {}
-    for f in finals:
-        if f is None:
-            continue
-        f = Path(f)
-        names.setdefault(f.parent, set()).update((f.name, f.stem))
-    removed = 0
-    for folder, wanted in names.items():
-        try:
-            entries = list(os.scandir(folder))
-        except OSError:
-            continue
-        for e in entries:
-            m = _ORPHAN_TEMP_RE.match(e.name)
-            if not m or m.group(1) not in wanted:
-                continue
-            try:
-                if not e.is_file(follow_symlinks=False):
-                    continue
-                os.unlink(e.path)
-            except OSError as exc:
-                logger.warning(f"Could not remove a leftover temp: {e.path} ({exc})")
-                continue
-            removed += 1
-            logger.info(f"Removed a leftover temp from an interrupted run: {e.path}")
-    return removed
+def _sweep_orphan_temps(*a, **k): return _common._sweep_orphan_temps(_G, *a, **k)
 
 
 def _abort_on_duplicate_outputs(pairs):
