@@ -123,7 +123,6 @@ SHARED_HELPERS = [
     # The xmpMM:History entry: a copy drifting would make one script write a
     # History entry the others do not (or one exiftool cannot parse).
     "_history_mime",
-    "_history_args",
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
     # leaves stale jxlphoto-src/srcsum on one script's derivatives.
     # Exif box before the XMP box in every output (#561): IrfanView shows no
@@ -193,8 +192,6 @@ SHARED_HELPERS = [
     # must find the same record, and stop at the same "no encode record".
     # Where the record's VISIBLE copy goes (history/comment/title/software/off)
     # and the "xmp" = "history" alias: both writers must agree.
-    "_encode_tag_mode",
-    "_visible_record_args",
     # Lossy ICC-blob detection (djxl --icc_out vs --orig_icc_out): the decoder,
     # the recompressor, the transcoder and the encoder's cautious probe must
     # all recognise the "djxl returned linear sRGB" case the same way — one

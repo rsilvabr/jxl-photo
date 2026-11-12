@@ -1076,26 +1076,7 @@ def _history_mime(path):
     return _HISTORY_MIME.get(p.suffix.lower())
 
 
-def _history_args(action: str, src_path, dst_path, record: str = "") -> list:
-    """The one exiftool line appending this run's entry to xmpMM:History:
-    which toolkit version wrote the file, when, and from what. Write-only:
-    nothing in the toolkit reads it back. Callers never use it for a jbrd
-    container or a verbatim copy."""
-    when = datetime.now().astimezone().isoformat(timespec="seconds")
-    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
-    params = Path(__file__).stem
-    src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
-    if src_mime and dst_mime:
-        params += f": from {src_mime} to {dst_mime}"
-    # Since v2.24.0 the encode record ("gen=1 | cjxl d=0.05 e=9", or
-    # _NO_RECORD_SEGMENT for --encode-tag off) ends the entry's parameters:
-    # the History is where the toolkit keeps it (_history_record reads it).
-    if record:
-        params += f" | {record}"
-    fields = [f"Action={_struct_escape(action)}", f"When={when}",
-              f"SoftwareAgent={_struct_escape(agent)}",
-              f"Parameters={_struct_escape(params)}"]
-    return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
+def _history_args(*a, **k): return _common._history_args(_G, *a, **k)
 
 
 def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k)

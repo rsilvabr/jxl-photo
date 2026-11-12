@@ -2152,26 +2152,7 @@ def _history_mime(path):
     return _HISTORY_MIME.get(p.suffix.lower())
 
 
-def _history_args(action: str, src_path, dst_path, record: str = "") -> list:
-    """The one exiftool line appending this run's entry to xmpMM:History:
-    which toolkit version wrote the file, when, and from what. Write-only:
-    nothing in the toolkit reads it back. Callers never use it for a jbrd
-    container or a verbatim copy."""
-    when = datetime.now().astimezone().isoformat(timespec="seconds")
-    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
-    params = Path(__file__).stem
-    src_mime, dst_mime = _history_mime(src_path), _history_mime(dst_path)
-    if src_mime and dst_mime:
-        params += f": from {src_mime} to {dst_mime}"
-    # Since v2.24.0 the encode record ("gen=1 | cjxl d=0.05 e=9", or
-    # _NO_RECORD_SEGMENT for --encode-tag off) ends the entry's parameters:
-    # the History is where the toolkit keeps it (_history_record reads it).
-    if record:
-        params += f" | {record}"
-    fields = [f"Action={_struct_escape(action)}", f"When={when}",
-              f"SoftwareAgent={_struct_escape(agent)}",
-              f"Parameters={_struct_escape(params)}"]
-    return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
+def _history_args(*a, **k): return _common._history_args(_G, *a, **k)
 
 
 def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k)
@@ -3185,43 +3166,10 @@ def _log_gen_notes_once(stored: int, counted: int) -> None:
                     "was corrected on the restamp.")
 
 
-def _encode_tag_mode() -> str:
-    """ENCODE_TAG_MODE with its old name resolved: "xmp" (the default before
-    v2.24.0) means "history" — the record IS in the XMP; the Title copy is
-    "title". Read at use time, so a value set without main() (the wrapper,
-    a test) means the same."""
-    mode = str(ENCODE_TAG_MODE or "history").strip().lower()
-    return "history" if mode == "xmp" else mode
+def _encode_tag_mode(*a, **k): return _common._encode_tag_mode(_G, *a, **k)
 
 
-def _visible_record_args(mode, record, desc, software, comment, label="a file") -> list:
-    """exiftool lines for the encode record's VISIBLE copies (v2.24.0).
-
-    The record itself lives in the History entry; this only writes it where
-    `mode` shows it — "title" in dc:Description, "software" in Software,
-    "comment" in XMP exif:UserComment (Explorer's Comments) — after any user
-    text, and removes the machine block from every OTHER field that holds one
-    (user text kept). A field is written only when its value changes.
-    "history" and "off" show it nowhere. Pure apart from the orphan-token
-    warnings."""
-    mode = "history" if mode == "xmp" else mode
-    lines = []
-    for tag, name, value, shown_in in (
-            ("-XMP-dc:Description=", "dc:Description", desc, "title"),
-            ("-Software=", "Software", software, "software"),
-            ("-XMP-exif:UserComment=", "exif:UserComment", comment, "comment")):
-        value = str(value or "")
-        user, orphans = _strip_encode_params(value)
-        if orphans:
-            logger.warning(f"Stripped {orphans} orphaned gen= token(s) from {name} "
-                           f"of {label} — the field was written badly earlier")
-        if mode == shown_in and record:
-            new = f"{user} | {record}" if user else record
-        else:
-            new = user
-        if new != value:
-            lines.append(tag + _argfile_safe(new))
-    return lines
+def _visible_record_args(*a, **k): return _common._visible_record_args(_G, *a, **k)
 
 
 def _read_record_fields(tiff_path, tmp_dir):
