@@ -142,6 +142,11 @@ check: [upgrading.md](upgrading.md) (the six files).
   tag and log line by line), `tools/wizard_transcripts.py` (the wizard's
   screens and child command lines, both screens, two versions),
   `tools/move_check.py` and `tools/mutate.py` (mutation tests on a copy).
+- Tests: 3816 tests and the real-photo battery pass (174 checks in 1533 s, in
+  folders named with Japanese characters, `[ ]`, a space and `%`). The
+  side-by-side comparison of 27 scenarios against v2.29.0_beta1 found no
+  difference in what the scripts write, apart from the new DEBUG lines in the
+  log file.
 
 ## v2.29.0_beta1
 
