@@ -3171,204 +3171,210 @@ def process_group_transcode(group_pairs: list, workers: int, decode: bool,
     # the source is a separate opt-in. Every gate below certifies THIS run's
     # output at its FINAL path, which is mode-independent.
     if DELETE_SOURCE:
-        deleted = 0
-        deleted_skipped = 0
-        src_map = {str(s): (s, f) for s, _, f in tasks}
-        for result in results:
-            status = result[1]
-            src_md5 = result[3] if len(result) > 3 else None
-            # A skip is admitted only with DELETE_SKIPPED, and only so the
-            # checks below can judge it on the FILE — never on the timestamp
-            # that produced the skip.
-            was_skipped = status == "skipped"
-            if status not in ("ok", "reconvert") and not (DELETE_SKIPPED and was_skipped):
-                continue
-            src_path, final_file = src_map.get(result[0], (None, None))
-            if src_path is None or not final_file.exists():
-                # Every other refusal in this gate logs KEEP(reason) and counts;
-                # a bare continue made an unverifiable output vanish from the
-                # report entirely — a silent bypass of the fail-closed rule.
-                _delete_stats["kept"] += 1
-                logger.warning(
-                    f" KEEP (final output missing) | "
-                    f"{src_path.name if src_path is not None else result[0]}")
-                continue
-            if not src_path.exists():
-                # #619: nothing left to delete. Said as such — it used to
-                # reach the reconstruction check and blame the jbrd box.
-                logger.warning(f" {_SOURCE_GONE} | {src_path.name}")
-                continue
-            # A staged output whose move FAILED leaves a stale pre-existing
-            # file at the final path: it passes exists()+integrity below, but
-            # it is not the file this run wrote and verified. Fail closed.
-            #
-            # A SKIPPED file is the one legitimate exception: nothing was
-            # written, so nothing was staged, so it can never be in
-            # moved_finals. Without this the flag would look like it worked and
-            # silently delete nothing whenever staging is configured.
-            if (use_staging and not was_skipped
-                    and os.path.normcase(str(final_file)) not in moved_finals):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output never left staging) | {src_path.name}")
-                continue
-            if was_skipped:
-                # This run wrote nothing, so there is no src_md5 from it — but
-                # checksums.md5 can PROVE provenance, which is stronger than
-                # anything the encoder's pixel comparison offers: it holds the
-                # SOURCE's md5 keyed by the OUTPUT's name.
-                #   encode (JPEG -> JXL): hash the source JPEG, compare.
-                #   decode (JXL -> JPEG): the stored md5 IS the original JPEG's,
-                #     so compare it against the recovered JPEG on disk.
-                stored = read_md5_db(final_file if not decode else src_path)
-                if (stored is None and not decode
-                        and _adopt_reconstructed_archive(src_path, final_file)):
-                    stored = read_md5_db(final_file)      # #556
-                if stored is None:
-                    if DELETE_SOURCE_REQUIRE_MD5:
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (already archived, but no checksum to prove it came "
-                            f"from this file) | {src_path.name}")
-                        continue
-                    if decode:
-                        # #581: deleting the JXL on the strength of ANY
-                        # same-named JPEG needs a real proof without the
-                        # checksum — the reconstruction (the encode side has
-                        # its own reconstruction gate below).
-                        if not (_tool_at_least("djxl", 0, 12)
-                                and _jxl_reconstructs_to(src_path, final_file)):
-                            _delete_stats["kept"] += 1
-                            logger.warning(
-                                f" KEEP (already archived, no checksum, and the JXL "
-                                f"does not reconstruct this JPEG) | {src_path.name}")
-                            continue
-                        logger.debug(f" provenance OK (reconstruction) | {src_path.name}")
-                    else:
-                        logger.warning(
-                            f" DELETING an already-archived source with NO provenance check "
-                            f"(no checksum stored) | {src_path.name}")
-                else:
-                    try:
-                        actual = md5_of_file(src_path if not decode else final_file)
-                    except OSError as e:
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (checksum could not be verified: {e}) | "
-                            f"{src_path.name}")
-                        continue
-                    if actual != stored:
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (already-archived output does NOT match this source: "
-                            f"checksum mismatch) | {src_path.name}")
-                        continue
-                    if decode and not _jxl_binds_to_archived_jpeg(src_path, final_file, stored):
-                        # The JPEG on disk matches the stored hash — but that
-                        # hash was filed under this JXL's NAME. Only the
-                        # content-binding check sees the JXL's own bytes, and
-                        # it just failed: photo.jxl was swapped for a different
-                        # same-named file that was never archived. Fail closed.
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (archived JPEG matches, but this JXL is NOT the "
-                            f"file it was recovered from — swapped or replaced "
-                            f"same-named JXL) | {src_path.name}")
-                        continue
-                    logger.debug(f" provenance OK (MD5) | {src_path.name}")
-            elif STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
-                if src_md5 is None or read_md5_db(final_file) is None:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
-                    continue
-            if not decode:
-                # Encode direction: structural validity is not enough — the
-                # JXL must also carry jbrd, otherwise the original JPEG can
-                # never be recovered bit-exactly (README's promise). This
-                # check is INDEPENDENT of MD5 storage (--no-md5 must not
-                # weaken it).
-                if final_file.suffix.lower() == '.jxl':
-                    if not has_jbrd_box(final_file):
-                        _delete_stats["kept"] += 1
-                        logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
-                        continue
-                    # THE real gate: a jbrd JXL can pass every check above and
-                    # still fail djxl --reconstruct_jpeg — e.g. v2.0.0-v2.0.3
-                    # wrote XMP markers into jbrd containers, breaking
-                    # reconstruction for sources that had XMP. The source may
-                    # only be deleted when the reconstruction ACTUALLY
-                    # reproduces its bytes. With djxl < 0.12 the test cannot
-                    # run, and an unverifiable output must block deletion.
-                    if _tool_at_least("djxl", 0, 12):
-                        if not _jxl_reconstructs_to(final_file, src_path):
-                            _delete_stats["kept"] += 1
-                            logger.warning(
-                                f" KEEP (djxl --reconstruct_jpeg does not reproduce "
-                                f"this JPEG; run --repair-jbrd to fix markers written "
-                                f"by v2.0.0+) | {src_path.name}")
-                            continue
-                    else:
-                        _delete_stats["kept"] += 1
-                        logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
-                        continue
-            if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
-                # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
-                # is NOT guaranteed by the tool. The source may only be
-                # deleted when the MD5 comparison ran AND passed THIS run
-                # (result[3]). --no-verify skips that comparison entirely —
-                # without it, deletion would rest on the structural SOI/EOI
-                # check alone: too weak for an irreversible gate.
-                #
-                # Not applied to a SKIP: no djxl ran at all there, and the
-                # provenance block above already compared the JPEG on disk
-                # against the original's stored md5 — which is the very
-                # bit-exactness this check is a proxy for.
-                if not result[3]:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
-                    continue
-            if decode and not was_skipped and str(src_path) in _auto_repaired:
-                # The JPEG came from a repaired COPY, not from this JXL: the
-                # archive is still broken (v2.0.0-v2.0.3 marker damage) and
-                # this run never proved THIS file can recover the original
-                # JPEG — the recovered JPEG's metadata bytes differ by design.
-                # Fail closed.
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (decoded from an auto-repaired copy; heal the "
-                               f"archive with --repair-jbrd before --delete-source) | {src_path.name}")
-                continue
-            if not _verify_file_integrity(final_file):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
-                continue
-            if not _flush_to_disk(final_file):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
-                continue
-            if _source_changed_since_read(src_path):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
-                continue
-            try:
-                src_path.unlink()
-                deleted += 1
-                _delete_stats["deleted"] += 1
-                if was_skipped:
-                    _delete_stats["deleted_archived"] += 1
-                if was_skipped:
-                    deleted_skipped += 1
-                    logger.info(f" DELETED source (already archived) | {src_path.name}")
-                else:
-                    logger.info(f" DELETED source | {src_path.name}")
-            except OSError as e:
-                # PermissionError is common on Windows (AV, Explorer preview,
-                # open viewer) — warn and continue instead of killing the batch.
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
-        if deleted:
-            _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
-            logger.info(f" -> Deleted {deleted} source file(s){_sk}")
+        _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode)
 
     return results
+
+
+def _delete_transcoded_sources(results, tasks, moved_finals, use_staging, decode):
+    """The delete gate of process_group_transcode, moved here unchanged (refactor plan 261113, A2)."""
+    deleted = 0
+    deleted_skipped = 0
+    src_map = {str(s): (s, f) for s, _, f in tasks}
+    for result in results:
+        status = result[1]
+        src_md5 = result[3] if len(result) > 3 else None
+        # A skip is admitted only with DELETE_SKIPPED, and only so the
+        # checks below can judge it on the FILE — never on the timestamp
+        # that produced the skip.
+        was_skipped = status == "skipped"
+        if status not in ("ok", "reconvert") and not (DELETE_SKIPPED and was_skipped):
+            continue
+        src_path, final_file = src_map.get(result[0], (None, None))
+        if src_path is None or not final_file.exists():
+            # Every other refusal in this gate logs KEEP(reason) and counts;
+            # a bare continue made an unverifiable output vanish from the
+            # report entirely — a silent bypass of the fail-closed rule.
+            _delete_stats["kept"] += 1
+            logger.warning(
+                f" KEEP (final output missing) | "
+                f"{src_path.name if src_path is not None else result[0]}")
+            continue
+        if not src_path.exists():
+            # #619: nothing left to delete. Said as such — it used to
+            # reach the reconstruction check and blame the jbrd box.
+            logger.warning(f" {_SOURCE_GONE} | {src_path.name}")
+            continue
+        # A staged output whose move FAILED leaves a stale pre-existing
+        # file at the final path: it passes exists()+integrity below, but
+        # it is not the file this run wrote and verified. Fail closed.
+        #
+        # A SKIPPED file is the one legitimate exception: nothing was
+        # written, so nothing was staged, so it can never be in
+        # moved_finals. Without this the flag would look like it worked and
+        # silently delete nothing whenever staging is configured.
+        if (use_staging and not was_skipped
+                and os.path.normcase(str(final_file)) not in moved_finals):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output never left staging) | {src_path.name}")
+            continue
+        if was_skipped:
+            # This run wrote nothing, so there is no src_md5 from it — but
+            # checksums.md5 can PROVE provenance, which is stronger than
+            # anything the encoder's pixel comparison offers: it holds the
+            # SOURCE's md5 keyed by the OUTPUT's name.
+            #   encode (JPEG -> JXL): hash the source JPEG, compare.
+            #   decode (JXL -> JPEG): the stored md5 IS the original JPEG's,
+            #     so compare it against the recovered JPEG on disk.
+            stored = read_md5_db(final_file if not decode else src_path)
+            if (stored is None and not decode
+                    and _adopt_reconstructed_archive(src_path, final_file)):
+                stored = read_md5_db(final_file)      # #556
+            if stored is None:
+                if DELETE_SOURCE_REQUIRE_MD5:
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (already archived, but no checksum to prove it came "
+                        f"from this file) | {src_path.name}")
+                    continue
+                if decode:
+                    # #581: deleting the JXL on the strength of ANY
+                    # same-named JPEG needs a real proof without the
+                    # checksum — the reconstruction (the encode side has
+                    # its own reconstruction gate below).
+                    if not (_tool_at_least("djxl", 0, 12)
+                            and _jxl_reconstructs_to(src_path, final_file)):
+                        _delete_stats["kept"] += 1
+                        logger.warning(
+                            f" KEEP (already archived, no checksum, and the JXL "
+                            f"does not reconstruct this JPEG) | {src_path.name}")
+                        continue
+                    logger.debug(f" provenance OK (reconstruction) | {src_path.name}")
+                else:
+                    logger.warning(
+                        f" DELETING an already-archived source with NO provenance check "
+                        f"(no checksum stored) | {src_path.name}")
+            else:
+                try:
+                    actual = md5_of_file(src_path if not decode else final_file)
+                except OSError as e:
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (checksum could not be verified: {e}) | "
+                        f"{src_path.name}")
+                    continue
+                if actual != stored:
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (already-archived output does NOT match this source: "
+                        f"checksum mismatch) | {src_path.name}")
+                    continue
+                if decode and not _jxl_binds_to_archived_jpeg(src_path, final_file, stored):
+                    # The JPEG on disk matches the stored hash — but that
+                    # hash was filed under this JXL's NAME. Only the
+                    # content-binding check sees the JXL's own bytes, and
+                    # it just failed: photo.jxl was swapped for a different
+                    # same-named file that was never archived. Fail closed.
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (archived JPEG matches, but this JXL is NOT the "
+                        f"file it was recovered from — swapped or replaced "
+                        f"same-named JXL) | {src_path.name}")
+                    continue
+                logger.debug(f" provenance OK (MD5) | {src_path.name}")
+        elif STORE_MD5 and DELETE_SOURCE_REQUIRE_MD5 and not decode:
+            if src_md5 is None or read_md5_db(final_file) is None:
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (MD5 not confirmed) | {src_path.name}")
+                continue
+        if not decode:
+            # Encode direction: structural validity is not enough — the
+            # JXL must also carry jbrd, otherwise the original JPEG can
+            # never be recovered bit-exactly (README's promise). This
+            # check is INDEPENDENT of MD5 storage (--no-md5 must not
+            # weaken it).
+            if final_file.suffix.lower() == '.jxl':
+                if not has_jbrd_box(final_file):
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (output has no jbrd box; JPEG not recoverable) | {src_path.name}")
+                    continue
+                # THE real gate: a jbrd JXL can pass every check above and
+                # still fail djxl --reconstruct_jpeg — e.g. v2.0.0-v2.0.3
+                # wrote XMP markers into jbrd containers, breaking
+                # reconstruction for sources that had XMP. The source may
+                # only be deleted when the reconstruction ACTUALLY
+                # reproduces its bytes. With djxl < 0.12 the test cannot
+                # run, and an unverifiable output must block deletion.
+                if _tool_at_least("djxl", 0, 12):
+                    if not _jxl_reconstructs_to(final_file, src_path):
+                        _delete_stats["kept"] += 1
+                        logger.warning(
+                            f" KEEP (djxl --reconstruct_jpeg does not reproduce "
+                            f"this JPEG; run --repair-jbrd to fix markers written "
+                            f"by v2.0.0+) | {src_path.name}")
+                        continue
+                else:
+                    _delete_stats["kept"] += 1
+                    logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
+                    continue
+        if decode and not was_skipped and not _tool_at_least("djxl", 0, 12):
+            # djxl < 0.12 has no --reconstruct_jpeg, so bit-exact recovery
+            # is NOT guaranteed by the tool. The source may only be
+            # deleted when the MD5 comparison ran AND passed THIS run
+            # (result[3]). --no-verify skips that comparison entirely —
+            # without it, deletion would rest on the structural SOI/EOI
+            # check alone: too weak for an irreversible gate.
+            #
+            # Not applied to a SKIP: no djxl ran at all there, and the
+            # provenance block above already compared the JPEG on disk
+            # against the original's stored md5 — which is the very
+            # bit-exactness this check is a proxy for.
+            if not result[3]:
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (djxl<0.12 and recovery not MD5-verified) | {src_path.name}")
+                continue
+        if decode and not was_skipped and str(src_path) in _auto_repaired:
+            # The JPEG came from a repaired COPY, not from this JXL: the
+            # archive is still broken (v2.0.0-v2.0.3 marker damage) and
+            # this run never proved THIS file can recover the original
+            # JPEG — the recovered JPEG's metadata bytes differ by design.
+            # Fail closed.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (decoded from an auto-repaired copy; heal the "
+                           f"archive with --repair-jbrd before --delete-source) | {src_path.name}")
+            continue
+        if not _verify_file_integrity(final_file):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+            continue
+        if not _flush_to_disk(final_file):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
+            continue
+        if _source_changed_since_read(src_path):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
+            continue
+        try:
+            src_path.unlink()
+            deleted += 1
+            _delete_stats["deleted"] += 1
+            if was_skipped:
+                _delete_stats["deleted_archived"] += 1
+            if was_skipped:
+                deleted_skipped += 1
+                logger.info(f" DELETED source (already archived) | {src_path.name}")
+            else:
+                logger.info(f" DELETED source | {src_path.name}")
+        except OSError as e:
+            # PermissionError is common on Windows (AV, Explorer preview,
+            # open viewer) — warn and continue instead of killing the batch.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
+    if deleted:
+        _sk = f" ({deleted_skipped} already archived)" if deleted_skipped else ""
+        logger.info(f" -> Deleted {deleted} source file(s){_sk}")
+
 
 def _prov_src_root(args):
     """The folder this run's sources live in (see _run_collapses_structure)."""
