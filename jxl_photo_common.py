@@ -2076,3 +2076,74 @@ def _explorer_thumbnail_wanted(g, lossless: bool) -> bool:
     if g.EXPLORER_THUMBNAIL == "on":
         return True
     return g.EXPLORER_THUMBNAIL == "auto" and (lossless or g._jxl_thumb_installed())
+
+
+# === Provenance ===
+
+
+def _file_content_id(g, paths) -> str:
+    """Stable id for a source's BYTES (one path, or a group of them in order).
+
+    Hashing the file rather than the decoded image on purpose: recomputing this
+    at check time must not cost a full decode. Read in 1 MB blocks so a 700 MB
+    source is never held in memory.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    outer = hashlib.sha256()
+    for p in paths:
+        outer.update(g._file_digest_cached(p))
+    return outer.hexdigest()[:16]
+
+
+def _provenance_ok(g, info: dict, src_paths, mode_check: str) -> bool:
+    """Did `src_paths` make the output these markers came from?
+
+    `path` compares the recorded LOCATION: free, and it survives re-converting a
+    file in place. `content` also accepts a matching set of source BYTES, so it
+    survives a MOVED folder — deliberately a superset, because content alone
+    would refuse a legitimately re-exported file and break the sync workflow.
+    """
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    if info.get("src") and info["src"] == g._source_path_id(first):
+        return True
+    if mode_check == "content" and info.get("srcsum"):
+        try:
+            return info["srcsum"] == g._file_content_id(src_paths)
+        except OSError:
+            return False
+    return False
+
+
+def _provenance_proves_archive(g, info: dict, src_paths, mode_check: str) -> bool:
+    """The DELETE-side proof for a source whose conversion was SKIPPED: the
+    existing output must be an archive of the source's CURRENT bytes.
+
+    `_provenance_ok` answers "may this run overwrite that output?", where the
+    recorded location is enough. Deleting a source on the strength of an output
+    this run never wrote needs more: a source replaced in place by a different
+    file with an older date (a restored backup, a copy that kept its
+    timestamps) still matches the recorded path, smart sync skips it, and the
+    gate deleted the only copy of the new version. So the recorded `srcsum`
+    must also match the source as it is now; an output without one proves
+    nothing. Fail closed: an unreadable source keeps it.
+    """
+    if not g._provenance_ok(info, src_paths, mode_check):
+        return False
+    if not info.get("srcsum"):
+        return False
+    try:
+        return info["srcsum"] == g._file_content_id(src_paths)
+    except OSError:
+        return False
+
+
+def _provenance_marker_args(g, src_paths):
+    """exiftool argfile lines recording WHICH source made an output."""
+    first = src_paths[0] if isinstance(src_paths, (list, tuple)) else src_paths
+    lines = ["-XMP-dc:Relation+=" + g.SRC_PREFIX + g._source_path_id(first)]
+    try:
+        lines.append("-XMP-dc:Relation+=" + g.SRCSUM_PREFIX + g._file_content_id(src_paths))
+    except OSError:
+        pass        # never fail a conversion over a marker
+    return lines
