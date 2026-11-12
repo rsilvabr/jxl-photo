@@ -88,7 +88,12 @@ def _import_common():
 # The helpers the scripts share live in jxl_photo_common.py, next to this file
 # (AGENTS.md, "The common module"). _G is this script's namespace, which the
 # shared helpers that read a setting, the logger or the run state are given.
-_common = _import_common()
+try:
+    _common = _import_common()
+except ImportError as _e:
+    if __name__ != "__main__":
+        raise      # imported by the wrapper or a test: theirs to handle
+    sys.exit(f"{Path(__file__).name}: {_e}")
 _G = _common.Script(globals())
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -351,8 +356,8 @@ _replace_suffix_token = _common._replace_suffix_token
 
 
 # --- Disk-full abort ------------------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # A staging drive is usually a small, cheap SSD nobody watches, and it holds a
 # whole destination folder's output until that folder's last file lands -- for
@@ -425,8 +430,8 @@ def _promote_from_staging(*a, **k): return _common._promote_from_staging(_G, *a,
 
 
 # --- Directory-scan progress ----------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # Walking a large tree on a slow or network drive costs real time -- measured
 # at 25s for 3312 files on an external drive with a cold OS cache -- and the
@@ -470,8 +475,8 @@ def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 
 
 # --- Staging leftovers ------------------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # A file whose conversion failed is deliberately KEPT in staging for manual
 # recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
@@ -915,8 +920,8 @@ _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
 
 
 # --- Provenance: which source made this output -----------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md); enforced by
-# tests/test_helper_parity.py. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # The modes that COLLAPSE folder structure (2/4/5/6/7) drop the source's folder
 # from the output path, so two sources in different folders resolve to the same
@@ -5249,8 +5254,8 @@ def _output_icc_label(output_icc):
 
 
 def _current_derived_label(output_icc) -> str:
-    """The recipe this run writes: _derived_label (parity-pinned with the
-    recompressor) plus, for a JPEG, its quality (`/q70`, v2.25.0)."""
+    """The recipe this run writes: _derived_label (the one the recompressor
+    uses too) plus, for a JPEG, its quality (`/q70`, v2.25.0)."""
     label = _derived_label(_output_icc_label(output_icc), RESIZE_MODE,
                            RESIZE_VALUE, ALLOW_UPSCALE, SHARPEN)
     return label + (f"/q{LABEL_QUALITY}" if LABEL_QUALITY else "")

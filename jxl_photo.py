@@ -68,7 +68,12 @@ def _import_common():
 # The helpers the scripts share live in jxl_photo_common.py, next to this file
 # (AGENTS.md, "The common module"). _G is this script's namespace, which the
 # shared helpers that read a setting, the logger or the run state are given.
-_common = _import_common()
+try:
+    _common = _import_common()
+except ImportError as _e:
+    if __name__ != "__main__":
+        raise      # imported by the wrapper or a test: theirs to handle
+    sys.exit(f"{Path(__file__).name}: {_e}")
 _G = _common.Script(globals())
 # Named in the menu's tip when Windows Explorer has no JXL thumbnail handler.
 JXL_THUMB_URL = "https://github.com/rsilvabr/jxl-thumb"

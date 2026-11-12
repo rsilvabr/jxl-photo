@@ -165,8 +165,10 @@
   `sys.path`: a test or a pre-fix proof loads scripts from another folder,
   and the exe also carries a frozen copy. A missing one or one of another
   `TOOLKIT_VERSION` is an `ImportError` with the way out ("copy every file
-  of the release together"); the wrapper's version warning lists it with
-  the children (`_VERSIONED_CHILDREN`).
+  of the release together") — a script run on its own prints that line and
+  exits, without a traceback; an in-process import still gets the
+  `ImportError`. The wrapper's version warning lists it with the children
+  (`_VERSIONED_CHILDREN`).
 - **Two kinds of function.** A pure helper (reads nothing from the script)
   is bound by name: `X = _common.X`. A helper that reads a setting, the
   logger, `__file__`, the run state or calls another toolkit helper takes
@@ -191,10 +193,12 @@
 - **Test doubles.** A test patches the SCRIPT (`monkeypatch.setattr(enc,
   "_run_captured", fake)`, or `enc.time` / `enc.subprocess`), as before. A
   `g`-function sees it through `g`. For the names the common module reads
-  DIRECTLY (a pure helper, a standard module), conftest's `monkeypatch`
-  mirrors the double into the common module for the test, when the common
-  code that script uses reads that name — the moved code sees what it saw
-  when it lived in the script. The `mock.patch.object` forms cannot be
+  DIRECTLY (a pure helper, a standard module), conftest mirrors the double
+  into the common module for the test, when the common code that script
+  uses reads that name — the moved code sees what it saw when it lived in
+  the script. The mirror sits on `pytest.MonkeyPatch.setattr` itself, so a
+  `MonkeyPatch.context()` is covered like the fixture. The `mock.patch`
+  forms (`patch.object(enc, "X")`, `patch("jxl_tiff_encoder.X")`) cannot be
   mirrored and are refused statically (`tests/test_common_module.py`).
 - Moving a function there: every copy byte-identical first; a function that
   reads nothing from the script is bound by name, any other one takes `g`

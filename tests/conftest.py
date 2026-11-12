@@ -202,8 +202,8 @@ def _no_worker_memory_cap():
 # or shims, and what they call) reads that name directly and the script's
 # binding was the common module's own object. The functions that read the
 # script through `g.` need nothing: they see the script's binding.
-# tests/test_common_module.py checks the mirror; the `mock.patch.object`
-# forms, which this cannot see, are checked there statically.
+# tests/test_common_module.py checks the mirror; the `mock.patch` forms,
+# which this cannot see, are checked there statically.
 # ---------------------------------------------------------------------------
 
 _COMMON_READS = {}
@@ -268,24 +268,36 @@ def _mirror_target(target, name):
     return common if name in _names_read_for(target, common) else None
 
 
-@pytest.fixture
-def monkeypatch(monkeypatch):
-    original = monkeypatch.setattr
+def _setattr_target(args, kwargs):
+    """(object, name) a MonkeyPatch.setattr call replaces, or (None, None)."""
+    target = name = None
+    if args and isinstance(args[0], str) and "." in args[0]:
+        modpath, _, name = args[0].rpartition(".")
+        target = sys.modules.get(modpath)
+    elif len(args) >= 2:
+        target, name = args[0], args[1]
+    elif args and "name" in kwargs:
+        target, name = args[0], kwargs["name"]
+    return target, name
 
-    def setattr(*args, **kwargs):
-        target = name = None
-        if args and isinstance(args[0], str) and "." in args[0]:
-            modpath, _, name = args[0].rpartition(".")
-            target = sys.modules.get(modpath)
-        elif len(args) >= 2:
-            target, name = args[0], args[1]
-        elif args and "name" in kwargs:
-            target, name = args[0], kwargs["name"]
-        common = _mirror_target(target, name) if target is not None else None
-        result = original(*args, **kwargs)
-        if common is not None:
-            original(common, name, getattr(target, name))
-        return result
 
-    monkeypatch.setattr = setattr
-    return monkeypatch
+# On the CLASS, not on the `monkeypatch` fixture: `pytest.MonkeyPatch.context()`
+# and a hand-made `MonkeyPatch()` hand out objects the fixture never sees.
+# tests/test_audit_round39_transcoder.py's positive control replaced
+# `tr._tool_version` that way, and `_tool_at_least` (moved to the common
+# module) kept asking the djxl installed on the machine: the test passed with
+# djxl 0.12 and would have failed with an older one.
+_plain_setattr = pytest.MonkeyPatch.setattr
+
+
+def _mirroring_setattr(self, *args, **kwargs):
+    target, name = _setattr_target(args, kwargs)
+    common = _mirror_target(target, name) if target is not None else None
+    result = _plain_setattr(self, *args, **kwargs)
+    if common is not None:
+        _plain_setattr(self, common, name, getattr(target, name))
+    return result
+
+
+if getattr(pytest.MonkeyPatch.setattr, "__name__", "") != "_mirroring_setattr":
+    pytest.MonkeyPatch.setattr = _mirroring_setattr

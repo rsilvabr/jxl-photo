@@ -21,8 +21,9 @@ AGENTS.md "The common module"):
 5. A test double reaches the code that moved there. conftest's `monkeypatch`
    mirrors a setattr of a script's binding into the common module for the
    test, when the common code that script uses reads the name directly (as it
-   did when that code lived in the script); the `mock.patch.object` forms,
-   which it cannot see, are refused statically here.
+   did when that code lived in the script) — on the MonkeyPatch class, so a
+   `MonkeyPatch.context()` is mirrored too; the `mock.patch` forms, which
+   it cannot see, are refused statically here.
 6. Each script loads the common module of ITS OWN folder, and refuses to start
    without one or with one of another version.
 """
@@ -239,17 +240,65 @@ def test_c5_a_double_on_the_script_reaches_the_common_code(tmp_path, monkeypatch
     assert common.inner() == "real" and script.outer() == "real"
 
 
-def test_c5_no_mock_patch_object_on_a_name_the_common_module_reads():
+def test_c5_a_monkeypatch_context_is_mirrored_too(tmp_path):
+    """`pytest.MonkeyPatch.context()` and a hand-made MonkeyPatch() are not
+    the `monkeypatch` fixture, so the mirror sits on the class."""
+    folder = tmp_path / HOSTILE
+    folder.mkdir()
+    (folder / "fake_common_c5b.py").write_text(
+        "def inner():\n    return 'real'\n\n"
+        "def outer():\n    return inner()\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("fake_common_c5b",
+                                                  folder / "fake_common_c5b.py")
+    common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(common)
+    script = types.ModuleType("fake_script_c5b")
+    script._common = common
+    script.inner = common.inner
+    script.outer = common.outer
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(script, "inner", lambda: "fake")
+        assert script.outer() == "fake"
+    assert common.inner() == "real" and script.outer() == "real"
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(script, "inner", lambda: "fake")
+        assert script.outer() == "fake"
+    finally:
+        mp.undo()
+    assert common.inner() == "real" and script.outer() == "real"
+
+
+def test_c5_a_tool_version_double_reaches_the_moved_version_check():
+    """The case that showed it: `_tool_at_least` lives in the common module
+    and reads `_tool_version` directly. A double put on the script through a
+    MonkeyPatch context must decide its answer, whatever djxl is installed."""
+    import jxl_jpeg_transcoder as tr
+    for fake, expected in (((0, 11, 1), False), ((0, 12, 0), True)):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(tr, "_tool_version", lambda exe, v=fake: v)
+            assert tr._tool_at_least("djxl", 0, 12) is expected
+
+
+def test_c5_no_mock_patch_on_a_name_the_common_module_reads():
     direct = _direct_names() - set(dir(builtins))
-    pattern = re.compile(r"""patch\.object\(\s*(\w+)\s*,\s*["'](\w+)["']""")
+    scripts = "|".join(s[:-3] for s in SCRIPTS)
+    patterns = [
+        # patch.object(module, "NAME")
+        re.compile(r"""patch\.object\(\s*(\w+)\s*,\s*["'](\w+)["']"""),
+        # patch("jxl_tiff_encoder.NAME")
+        re.compile(r"""patch\(\s*["'](%s)\.(\w+)["']""" % scripts),
+    ]
     problems = []
     for path in sorted((REPO / "tests").glob("*.py")):
         for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            for m in pattern.finditer(line):
-                if m.group(2) in direct:
-                    problems.append(f"{path.name}:{i}: patch.object({m.group(1)}, "
-                                    f"{m.group(2)!r}) — jxl_photo_common reads "
-                                    f"{m.group(2)} directly and would not see it")
+            for pattern in patterns:
+                for m in pattern.finditer(line):
+                    if m.group(2) in direct:
+                        problems.append(f"{path.name}:{i}: mock.patch of {m.group(1)}."
+                                        f"{m.group(2)} — jxl_photo_common reads "
+                                        f"{m.group(2)} directly and would not see it "
+                                        "(use monkeypatch.setattr, which is mirrored)")
     assert not problems, "\n".join(problems)
 
 
@@ -296,8 +345,10 @@ def test_c6_a_script_runs_with_its_common_and_refuses_without(tmp_path, script):
     r = run()
     assert r.returncode != 0
     assert "copy every file of the release together" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr
 
     (folder / "jxl_photo_common.py").unlink()
     r = run()
     assert r.returncode != 0
     assert "jxl_photo_common.py is missing" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr

@@ -82,7 +82,12 @@ def _import_common():
 # The helpers the scripts share live in jxl_photo_common.py, next to this file
 # (AGENTS.md, "The common module"). _G is this script's namespace, which the
 # shared helpers that read a setting, the logger or the run state are given.
-_common = _import_common()
+try:
+    _common = _import_common()
+except ImportError as _e:
+    if __name__ != "__main__":
+        raise      # imported by the wrapper or a test: theirs to handle
+    sys.exit(f"{Path(__file__).name}: {_e}")
 _G = _common.Script(globals())
 
 # Where a provenance refusal sends the user (docs/behavior_and_limitations.md).
@@ -117,8 +122,8 @@ def _apply_rename(name: str, rename_from: str, rename_to: str) -> str:
 
 
 # --- Disk-full abort ------------------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # A staging drive is usually a small, cheap SSD nobody watches, and it holds a
 # whole destination folder's output until that folder's last file lands -- for
@@ -243,8 +248,8 @@ def _promote_from_staging(*a, **k): return _common._promote_from_staging(_G, *a,
 
 
 # --- Directory-scan progress ----------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # Walking a large tree on a slow or network drive costs real time -- measured
 # at 25s for 3312 files on an external drive with a cold OS cache -- and the
@@ -288,8 +293,8 @@ def _scan_done(*a, **k): return _common._scan_done(_G, *a, **k)
 
 
 # --- Staging leftovers ------------------------------------------------------
-# Duplicated across the backend scripts on purpose (see AGENTS.md): each stays
-# standalone. Fix bugs in ALL copies.
+# The code of this section has ONE copy, in jxl_photo_common.py (AGENTS.md,
+# "The common module"); the names below bind it here. Fix it there.
 #
 # A file whose conversion failed is deliberately KEPT in staging for manual
 # recovery ("KEEP in staging" below), and nothing ever swept it. Over weeks of
@@ -2534,7 +2539,7 @@ _icc_a2b_only = _common._icc_a2b_only
 # 64 of its first 64 KiB>\n", then the JPEG. jxl-thumb shows it only while
 # that fingerprint still names the file's codestream: a program that
 # re-encodes the pixels and keeps the box would leave a stale one, ignored.
-# Parity-pinned with the recompressor.
+# One copy, in jxl_photo_common.py.
 THUMB_BOX_UUID = _common.THUMB_BOX_UUID
 THUMB_BOX_MARKER = _common.THUMB_BOX_MARKER
 _THUMB_HEAD = _common._THUMB_HEAD
@@ -2554,7 +2559,7 @@ def _thumbnail_box_misplaced(jxl_path):
     where a reader that stops at the image data never finds it — what
     reorder_jxl_boxes did to it before E-G (2026-11-03 audit) on every
     --restamp-moved / adopt stamp; False otherwise; None when the file cannot
-    be read. Only the recompressor's refresh needs it (not parity-pinned)."""
+    be read. Only the recompressor's refresh needs it (not a shared helper)."""
     try:
         with open(jxl_path, "rb") as f:
             end = f.seek(0, 2)
@@ -2944,8 +2949,8 @@ _derived_label = _common._derived_label
 
 # The derived label's encode record: "sRGB@long2048+screen/d4e9", "/d2e7s"
 # when cjxl streamed the encode. A suffix, appended in main() — never inside
-# _derived_label, which is parity-pinned with the transcoder (its derivatives
-# carry no distance/effort).
+# _derived_label, which the transcoder uses too (its derivatives carry no
+# distance/effort).
 _ENCODE_SUFFIX_RE = re.compile(r"/d([0-9.]+)e(\d+)(s?)$")
 
 # A streamed lossy encode above this effort is this effort's file (cjxl 0.12,
