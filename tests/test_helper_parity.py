@@ -86,8 +86,6 @@ SHARED_HELPERS = [
     # same file, refuse the same values and keep the same safety settings out
     # (each script's own _OVERLAY_SETTINGS table differs, the rules must not).
     "_settings_overlay_path",
-    "_settings_overlay_section",
-    "_overlay_value",
     "_apply_settings_overlay",
     "_log_settings_overlay",
     # W-A: progress between planning-time batches. A copy drifting is one
