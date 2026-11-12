@@ -142,33 +142,10 @@ _abort_reason = None
 _source_identity = {}
 
 
-def _record_source_identity(path) -> None:
-    """Remember a source's (size, mtime_ns) before this run reads it. The
-    first record wins: a multi-page file is read page by page."""
-    key = os.path.normcase(os.path.abspath(str(path)))
-    if key in _source_identity:
-        return
-    try:
-        st = os.stat(path)
-    except OSError:
-        return
-    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+def _record_source_identity(*a, **k): return _common._record_source_identity(_G, *a, **k)
 
 
-def _source_changed_since_read(path) -> bool:
-    """Is the file at `path` no longer the one this run recorded before
-    reading it (rewritten, re-exported or replaced since)? A vanished file
-    counts as changed. A source this run never recorded (an already-archived
-    one admitted by --delete-skipped, which was never read) returns False:
-    its own proof lives elsewhere in the gate."""
-    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
-    if rec is None:
-        return False
-    try:
-        st = os.stat(path)
-    except OSError:
-        return True
-    return (st.st_size, st.st_mtime_ns) != rec
+def _source_changed_since_read(*a, **k): return _common._source_changed_since_read(_G, *a, **k)
 
 
 # The existing TIFF each conversion judged safe to replace (this decoder's
@@ -510,25 +487,7 @@ _source_path_id = _common._source_path_id
 _content_id_cache = {}
 
 
-def _file_digest_cached(path) -> bytes:
-    """sha256 of one file's bytes, remembered for this run."""
-    try:
-        st = os.stat(path)
-        key = (os.path.normcase(str(path)), st.st_size, st.st_mtime_ns)
-    except OSError:
-        key = None
-    if key is not None:
-        hit = _content_id_cache.get(key)
-        if hit is not None:
-            return hit
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    digest = h.digest()
-    if key is not None:
-        _content_id_cache[key] = digest
-    return digest
+def _file_digest_cached(*a, **k): return _common._file_digest_cached(_G, *a, **k)
 
 
 def _file_content_id(*a, **k): return _common._file_content_id(_G, *a, **k)

@@ -40,7 +40,6 @@ SHARED_HELPERS = [
     # Provenance: which source made an output. A copy drifting would make an
     # archive written by one script unverifiable by another, and the delete
     # gates fail closed on that — silently keeping every source forever.
-    "_file_digest_cached",
     # The delete-side proof for a SKIPPED source (path AND current srcsum).
     # A copy drifting back to the path alone is one backend deleting a source
     # replaced in place since its archive was written.
@@ -143,8 +142,6 @@ SHARED_HELPERS = [
     # Source identity between the read and the unlink (X2 of the 2026-10-08
     # audit): a copy drifting would let one backend delete a source that was
     # re-exported mid-run while the others keep it.
-    "_record_source_identity",
-    "_source_changed_since_read",
     # The distance dead-zone warning: the user must hear the SAME sentence from
     # every script that takes --distance.
     # The lossy distance floor of the installed cjxl (0.05 from libjxl 0.12,

@@ -139,33 +139,10 @@ _abort_reason = None
 _source_identity = {}
 
 
-def _record_source_identity(path) -> None:
-    """Remember a source's (size, mtime_ns) before this run reads it. The
-    first record wins: a multi-page file is read page by page."""
-    key = os.path.normcase(os.path.abspath(str(path)))
-    if key in _source_identity:
-        return
-    try:
-        st = os.stat(path)
-    except OSError:
-        return
-    _source_identity[key] = (st.st_size, st.st_mtime_ns)
+def _record_source_identity(*a, **k): return _common._record_source_identity(_G, *a, **k)
 
 
-def _source_changed_since_read(path) -> bool:
-    """Is the file at `path` no longer the one this run recorded before
-    reading it (rewritten, re-exported or replaced since)? A vanished file
-    counts as changed. A source this run never recorded (an already-archived
-    one admitted by --delete-skipped, which was never read) returns False:
-    its own proof lives elsewhere in the gate."""
-    rec = _source_identity.get(os.path.normcase(os.path.abspath(str(path))))
-    if rec is None:
-        return False
-    try:
-        st = os.stat(path)
-    except OSError:
-        return True
-    return (st.st_size, st.st_mtime_ns) != rec
+def _source_changed_since_read(*a, **k): return _common._source_changed_since_read(_G, *a, **k)
 
 
 _changed_since = _common._changed_since
@@ -182,72 +159,13 @@ _changed_since = _common._changed_since
 _planned_outputs = {}
 
 
-def _record_planned_outputs(pairs) -> None:
-    """Remember the state of every output of `pairs` ((source, output)).
-    The first record of a path wins."""
-    for _src, out in pairs:
-        key = os.path.normcase(os.path.abspath(str(out)))
-        if key in _planned_outputs:
-            continue
-        try:
-            st = os.stat(out)
-        except FileNotFoundError:
-            _planned_outputs[key] = None
-        except OSError:
-            _planned_outputs[key] = False
-        else:
-            _planned_outputs[key] = (st.st_size, st.st_mtime_ns)
+def _record_planned_outputs(*a, **k): return _common._record_planned_outputs(_G, *a, **k)
 
 
-def _output_changed_since_planned(final_path):
-    """Why `final_path` must not be written now, or None. Not None when a
-    file is there that is not the one this run planned over: one that
-    appeared, one that changed, or one whose state could not be read at
-    planning or cannot be read now (fail closed)."""
-    key = os.path.normcase(os.path.abspath(str(final_path)))
-    if key not in _planned_outputs:
-        return None
-    rec = _planned_outputs[key]
-    try:
-        st = os.stat(final_path)
-    except FileNotFoundError:
-        return None
-    except OSError as e:
-        return f"the output path could not be checked before the swap ({e})"
-    if rec is None:
-        return ("a file appeared at the output path after this run planned it "
-                "(another run writing the same folder?)")
-    if rec is False:
-        return "the output path could not be read when this run planned it"
-    if (st.st_size, st.st_mtime_ns) != rec:
-        return ("the existing output changed after this run judged it "
-                "(another run rewrote it?)")
-    return None
+def _output_changed_since_planned(*a, **k): return _common._output_changed_since_planned(_G, *a, **k)
 
 
-def _swap_into_place(tmp_path, final_path) -> None:
-    """Rename a verified temp over its final name — unless the final path is
-    no longer what this run planned (#615). Raises RuntimeError on a refusal;
-    the caller's handler removes the temp and reports the file as an error.
-    An output planned as ABSENT is renamed without replacing on Windows
-    (os.rename refuses an existing target there), so a file that appears
-    between the check and the rename is not replaced either."""
-    why = _output_changed_since_planned(final_path)
-    if why:
-        raise RuntimeError(f"REFUSED to write {Path(final_path).name}: {why} — "
-                           f"nothing was overwritten and the source is kept")
-    key = os.path.normcase(os.path.abspath(str(final_path)))
-    if os.name == "nt" and key in _planned_outputs and _planned_outputs[key] is None:
-        try:
-            os.rename(str(tmp_path), str(final_path))
-        except FileExistsError:
-            raise RuntimeError(
-                f"REFUSED to write {Path(final_path).name}: a file appeared at the "
-                f"output path after this run planned it (another run writing the "
-                f"same folder?) — nothing was overwritten and the source is kept"
-            ) from None
-        return
-    os.replace(str(tmp_path), str(final_path))
+def _swap_into_place(*a, **k): return _common._swap_into_place(_G, *a, **k)
 
 
 # Final paths whose move out of staging was refused this run (#615): the run
@@ -4087,25 +4005,7 @@ def _prove_same_bytes(tiff_path, final_path) -> bool:
     return True
 
 
-def _file_digest_cached(path) -> bytes:
-    """sha256 of one file's bytes, remembered for this run."""
-    try:
-        st = os.stat(path)
-        key = (os.path.normcase(str(path)), st.st_size, st.st_mtime_ns)
-    except OSError:
-        key = None
-    if key is not None:
-        hit = _content_id_cache.get(key)
-        if hit is not None:
-            return hit
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    digest = h.digest()
-    if key is not None:
-        _content_id_cache[key] = digest
-    return digest
+def _file_digest_cached(*a, **k): return _common._file_digest_cached(_G, *a, **k)
 
 
 def _file_content_id(*a, **k): return _common._file_content_id(_G, *a, **k)
