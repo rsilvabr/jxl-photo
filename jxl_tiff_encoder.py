@@ -1622,7 +1622,7 @@ MULTIPAGE_XMP_MARKER = "jxlphoto-mpg:"
 # are never silently merged. Files without the marker decode as standalone TIFFs.
 # dc:Relation is a list, so appending preserves any Relation the user already had.
 
-ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+ICC_PROFILE_PREFIX = _common.ICC_PROFILE_PREFIX
 # "jxlphoto-iccprofile:<base64>" in dc:Relation: the ORIGINAL ICC profile,
 # byte for byte (EMBED_ICC_IN_JXL). Must match the other scripts'. Up to
 # v2.18.x it lived in XMP CreatorTool as "ICC:<base64>", where every viewer
@@ -3268,33 +3268,10 @@ def _synthetic_image_for_icc(depth: int) -> np.ndarray:
     return img
 
 
-def _djxl_icc_args(tmp_dir: Path) -> tuple:
-    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
-    also report which colour space it decoded to and what the file's own is."""
-    out_icc = Path(tmp_dir) / "djxl_out.icc"
-    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
-    for p in (out_icc, orig_icc):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+_djxl_icc_args = _common._djxl_icc_args
 
 
-def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
-    """True when djxl returned the pixels in the file's own colour space
-    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
-    that profile is correct. False for a LOSSY file carrying an ICC blob:
-    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
-    float decode. None when djxl did not write the profiles: nothing then
-    proves the pixels kept the file's own colour space, and pasting the
-    original ICC on a lossy ICC-blob decode is exactly the linear-sRGB trap
-    (round 43, D-5) — the decoder fails CLOSED on it."""
-    try:
-        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
-    except OSError:
-        return None
-    return a == b
+_decoded_in_original_space = _common._decoded_in_original_space
 
 
 # ─── Explorer thumbnail (EXPLORER_THUMBNAIL) ─────────────────────────────
@@ -4371,10 +4348,7 @@ def read_existing_relation(xmp_path):
         return []
 
 
-def _icc_profile_token(icc_bytes: bytes) -> str:
-    """The dc:Relation token that carries an ICC profile byte for byte.
-    Parity-pinned (encoder + recompressor)."""
-    return ICC_PROFILE_PREFIX + base64.b64encode(icc_bytes).decode("ascii")
+_icc_profile_token = _common._icc_profile_token
 
 
 def read_existing_creator_tool(xmp_path):

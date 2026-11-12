@@ -1538,7 +1538,7 @@ DEPTH_POLICY = "preserve_thumbnails"
 MULTIPAGE_MARKER_PREFIX = "jxlphoto-mpg:"
 # Must match the encoder's MULTIPAGE_XMP_MARKER. Stored in XMP-dc:Relation (a bag/list).
 
-ICC_PROFILE_PREFIX = "jxlphoto-iccprofile:"
+ICC_PROFILE_PREFIX = _common.ICC_PROFILE_PREFIX
 # Must match the encoder's: "jxlphoto-iccprofile:<base64>" in dc:Relation is
 # the ORIGINAL ICC profile, byte for byte. JXLs written up to v2.18.x carry it
 # in XMP CreatorTool as "ICC:<base64>" instead; both are read (_carried_icc).
@@ -2255,40 +2255,10 @@ def extract_icc_from_xmp(jxl_path):
     return None
 
 
-def _xmp_icc_from_creator_tool(text: str):
-    """The encoder's ICC:<base64> segment of CreatorTool, validated — the same
-    rules as jxl_tiff_decoder.extract_icc_from_xmp (split on '|', 'ICC:'
-    prefix, strict base64, >= 128 bytes, 'acsp' at 36)."""
-    for segment in (text or "").split("|"):
-        segment = segment.strip()
-        if not segment.startswith("ICC:"):
-            continue
-        try:
-            data = base64.b64decode(segment[4:].strip(), validate=True)
-        except Exception:
-            continue
-        if len(data) >= 128 and data[36:40] == b"acsp":
-            return data
-    return None
+_xmp_icc_from_creator_tool = _common._xmp_icc_from_creator_tool
 
 
-def _carried_icc(creator, tokens):
-    """The original ICC profile a toolkit JXL carries in XMP, or None: the
-    jxlphoto-iccprofile token in dc:Relation first, else the ICC:<base64>
-    segment of CreatorTool (where JXLs written up to v2.18.x keep it). Same
-    validation for both: strict base64, >= 128 bytes, 'acsp' at offset 36.
-    Parity-pinned (decoder + transcoder + recompressor)."""
-    for token in tokens or ():
-        token = str(token).strip()
-        if not token.startswith(ICC_PROFILE_PREFIX):
-            continue
-        try:
-            data = base64.b64decode(token[len(ICC_PROFILE_PREFIX):], validate=True)
-        except Exception:
-            continue
-        if len(data) >= 128 and data[36:40] == b"acsp":
-            return data
-    return _xmp_icc_from_creator_tool(creator)
+_carried_icc = _common._carried_icc
 
 
 def _read_creator_and_relation(jxl_path: Path):
@@ -2584,70 +2554,16 @@ def _reduced_by_integer_decode(info_text, frames_kept: bool):
     return None
 
 
-def _djxl_icc_args(tmp_dir: Path) -> tuple:
-    """(extra djxl args, out_icc_path, orig_icc_path) that make ONE djxl call
-    also report which colour space it decoded to and what the file's own is."""
-    out_icc = Path(tmp_dir) / "djxl_out.icc"
-    orig_icc = Path(tmp_dir) / "djxl_orig.icc"
-    for p in (out_icc, orig_icc):
-        try:
-            p.unlink()
-        except OSError:
-            pass
-    return ([f"--icc_out={out_icc}", f"--orig_icc_out={orig_icc}"], out_icc, orig_icc)
+_djxl_icc_args = _common._djxl_icc_args
 
 
-def _icc_a2b_only(icc) -> bool:
-    """Can this ICC profile NOT be a faithful conversion TARGET?
-
-    True for a profile with A2B tables and no B2A — an input (scanner)
-    profile such as the film scanner's SFprofT. It is a fine SOURCE (A2B0
-    takes its pixels to the PCS), but converting INTO it makes LittleCMS fall
-    back to the matrix/TRC, which is not the inverse of A2B0: a real scan came
-    back at 27 dB instead of ~49. A profile with B2A tables, or a plain
-    matrix/TRC one, is invertible. Unparsable -> False (no claim made).
-    """
-    try:
-        if not icc or len(icc) < 132:
-            return False
-        n = struct.unpack(">I", bytes(icc[128:132]))[0]
-        if n > 1000 or len(icc) < 132 + 12 * n:
-            return False
-        sigs = {bytes(icc[132 + 12 * i:136 + 12 * i]) for i in range(n)}
-    except Exception:
-        return False
-    has_a2b = bool(sigs & {b"A2B0", b"A2B1", b"A2B2"})
-    has_b2a = bool(sigs & {b"B2A0", b"B2A1", b"B2A2"})
-    return has_a2b and not has_b2a
+_icc_a2b_only = _common._icc_a2b_only
 
 
-def _decoded_in_original_space(out_icc: Path, orig_icc: Path):
-    """True when djxl returned the pixels in the file's own colour space
-    (native colour, lossless, or an encoder 'skip' file): pasting/assigning
-    that profile is correct. False for a LOSSY file carrying an ICC blob:
-    djxl then returns LINEAR sRGB and the pixels must be CONVERTED, from a
-    float decode. None when djxl did not write the profiles: nothing then
-    proves the pixels kept the file's own colour space, and pasting the
-    original ICC on a lossy ICC-blob decode is exactly the linear-sRGB trap
-    (round 43, D-5) — the decoder fails CLOSED on it."""
-    try:
-        a, b = out_icc.read_bytes(), orig_icc.read_bytes()
-    except OSError:
-        return None
-    return a == b
+_decoded_in_original_space = _common._decoded_in_original_space
 
 
-def _png_has_alpha(png_path: Path) -> bool:
-    """True when the PNG djxl just wrote has an alpha channel (colour type 4
-    or 6). Only the 26-byte signature + IHDR is read."""
-    try:
-        with open(png_path, "rb") as f:
-            head = f.read(26)
-    except OSError:
-        return False
-    if len(head) < 26 or head[:8] != b"\x89PNG\r\n\x1a\n":
-        return False
-    return head[25] in (4, 6)          # 4 = grey + alpha, 6 = RGBA
+_png_has_alpha = _common._png_has_alpha
 
 
 def decode_auto_png(jxl_path, output_png, extra_args=None):

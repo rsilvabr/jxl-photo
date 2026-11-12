@@ -143,7 +143,6 @@ SHARED_HELPERS = [
     # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
     # recompressor). A copy drifting is one backend failing again on every
     # source whose profile is a standard sRGB one.
-    "_png_iccp",
     # Explorer thumbnail box (encoder + recompressor). jxl-thumb trusts a
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write
@@ -212,7 +211,6 @@ SHARED_HELPERS = [
     # scanner profiles). The recompressor refuses such derivatives, the
     # decoder keeps the source of such a decode, the transcoder refuses the
     # "keep" conversion: a copy drifting would let one backend do it anyway.
-    "_icc_a2b_only",
     # Source identity between the read and the unlink (X2 of the 2026-10-08
     # audit): a copy drifting would let one backend delete a source that was
     # re-exported mid-run while the others keep it.
@@ -258,21 +256,13 @@ SHARED_HELPERS = [
     # the recompressor, the transcoder and the encoder's cautious probe must
     # all recognise the "djxl returned linear sRGB" case the same way — one
     # copy drifting is one backend pasting the original ICC on linear pixels.
-    "_djxl_icc_args",
-    "_decoded_in_original_space",
-    "_png_has_alpha",
     # Source-profile detection for colour conversion (B1): the transcoder and
     # the recompressor must read XMP ICC / iCCP / sRGB chunk the same way.
-    "_png_chunk_types",
-    "_xmp_icc_from_creator_tool",
     "_read_creator_and_relation",
     # Where the original ICC is carried (v2.19.0): the jxlphoto-iccprofile
     # token first, the v2.18.x CreatorTool copy second. The decoder, the
     # transcoder and the recompressor must find the SAME profile in the same
     # file, and the encoder and the recompressor write the same token.
-    "_carried_icc",
-    "_icc_profile_token",
-    "_png_is_grayscale",
     # Resize/sharpening geometry and the derivative label: a copy drifting
     # would derive a DIFFERENT label for the same recipe, so one backend would
     # re-derive in a loop what the other considers up to date.
@@ -282,7 +272,6 @@ SHARED_HELPERS = [
     # Every path ImageMagick writes: one backend forgetting the escape fails
     # in a folder named "100%off" (#647).
     "_magick_out_path",
-    "_png_size",
     "_resize_geometry",
     "_sharpen_args",
     "_resize_label",
