@@ -126,9 +126,6 @@ SHARED_HELPERS = [
     "_get_exiftool_cmd",
     # Disk-full abort. These decide whether a run stops or grinds on, so a copy
     # drifting would make one backend keep failing file after file.
-    "_reset_abort",
-    "_aborted",
-    "_signal_abort",
     # Promotion out of staging. It DELETES a partial destination file and can
     # latch the disk-full abort, so a copy drifting is one backend leaving
     # truncated outputs behind where another cleans them up.

@@ -2764,3 +2764,46 @@ def _verify_jxl_integrity(g, jxl_path: Path) -> bool:
         return has_codestream and i == file_size
     except (OSError, IOError):
         return False
+
+
+# === Disk-full abort ===
+
+
+def _signal_abort(g, reason):
+    """Latch the FIRST reason and announce it once.
+
+    Racing workers all fail within milliseconds of each other, so the latch has
+    to be first-wins: the earliest failure is the one that explains the run.
+    """
+    with g._abort_lock:
+        if g._abort_reason is not None:
+            return
+        g._abort_reason = reason
+    g.logger.error(f"ABORTING RUN: {reason}")
+    # NOT "nothing was deleted": the delete gate runs after the pool drains,
+    # so sources whose output was already written and verified BEFORE this
+    # latched are still removed. That is safe — each one passed every gate —
+    # but the old wording contradicted the very next line of the log.
+    g.logger.error("  Queued files were NOT attempted. Sources already converted and "
+                 "verified in this run may still be deleted below; nothing that was "
+                 "not attempted is touched.")
+    g.logger.error("  Free space, then re-run: sync mode resumes where this stopped.")
+
+
+def _reset_abort(g):
+    """Clear the latch. Called when a run starts (and by the tests).
+
+    Also clears the per-run delete counters: they are run state exactly like the
+    latch, and a second run in the SAME process (the test suite, or anything
+    importing this module) inherited the first one's totals — so the summary
+    reported deletions that this run never made.
+    """
+    with g._abort_lock:
+        g._abort_reason = None
+    for _k in g._delete_stats:
+        g._delete_stats[_k] = 0
+
+
+def _aborted(g):
+    """The reason the run gave up, or None while it is healthy."""
+    return g._abort_reason

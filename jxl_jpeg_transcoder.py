@@ -493,46 +493,13 @@ def _swap_into_place(tmp_path, final_path) -> None:
 def _flush_to_disk(*a, **k): return _common._flush_to_disk(_G, *a, **k)
 
 
-def _reset_abort():
-    """Clear the latch. Called when a run starts (and by the tests).
-
-    Also clears the per-run delete counters: they are run state exactly like the
-    latch, and a second run in the SAME process (the test suite, or anything
-    importing this module) inherited the first one's totals — so the summary
-    reported deletions that this run never made.
-    """
-    global _abort_reason
-    with _abort_lock:
-        _abort_reason = None
-    for _k in _delete_stats:
-        _delete_stats[_k] = 0
+def _reset_abort(*a, **k): return _common._reset_abort(_G, *a, **k)
 
 
-def _aborted():
-    """The reason the run gave up, or None while it is healthy."""
-    return _abort_reason
+def _aborted(*a, **k): return _common._aborted(_G, *a, **k)
 
 
-def _signal_abort(reason):
-    """Latch the FIRST reason and announce it once.
-
-    Racing workers all fail within milliseconds of each other, so the latch has
-    to be first-wins: the earliest failure is the one that explains the run.
-    """
-    global _abort_reason
-    with _abort_lock:
-        if _abort_reason is not None:
-            return
-        _abort_reason = reason
-    logger.error(f"ABORTING RUN: {reason}")
-    # NOT "nothing was deleted": the delete gate runs after the pool drains,
-    # so sources whose output was already written and verified BEFORE this
-    # latched are still removed. That is safe — each one passed every gate —
-    # but the old wording contradicted the very next line of the log.
-    logger.error("  Queued files were NOT attempted. Sources already converted and "
-                 "verified in this run may still be deleted below; nothing that was "
-                 "not attempted is touched.")
-    logger.error("  Free space, then re-run: sync mode resumes where this stopped.")
+def _signal_abort(*a, **k): return _common._signal_abort(_G, *a, **k)
 
 
 def _abort_if_disk_full(*a, **k): return _common._abort_if_disk_full(_G, *a, **k)
