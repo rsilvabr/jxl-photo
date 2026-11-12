@@ -3492,6 +3492,28 @@ def _plain_prompt(text: str) -> str:
     return text.lstrip("\n")
 
 
+# One reading of a yes/no answer for both renderers (#649): yes or no in
+# English or Portuguese, Enter for the question's default, anything else asks
+# again. The plain renderer read any answer not starting with "n" as YES on a
+# [Y/n] question ("sair" ran the job) and "sim" as NO in confirm(); the Rich
+# one asked again on "yes" and "sim".
+_YES_ANSWERS = frozenset({"y", "yes", "s", "sim"})
+_NO_ANSWERS = frozenset({"n", "no", "nao", "não"})
+
+
+def _yes_no(answer: str, default: Optional[bool]) -> Optional[bool]:
+    """True/False for a yes/no answer, `default` for an empty one, None for
+    anything else (the caller asks again)."""
+    text = answer.strip().lower()
+    if not text:
+        return default
+    if text in _YES_ANSWERS:
+        return True
+    if text in _NO_ANSWERS:
+        return False
+    return None
+
+
 def _plain_table_lines(columns, rows, show_header=True):
     widths = [max([len(c)] + [len(str(r[i])) for r in rows]) if show_header
               else max([0] + [len(str(r[i])) for r in rows])
@@ -3538,9 +3560,13 @@ class PlainUI(UI):
         return answer if answer else default
 
     def confirm(self, qid, prompt, default=False):
-        print()
-        answer = input(f"{_plain_prompt(prompt)} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
-        return default if not answer else answer.startswith('y')
+        while True:
+            print()
+            answer = _yes_no(input(f"{_plain_prompt(prompt)} [{'Y/n' if default else 'y/N'}]: "),
+                             default)
+            if answer is not None:
+                return answer
+            print("Answer y or n.")
 
     def choose(self, qid, prompt, options, default=None, note=None, title=None,
                columns=None, columns_title=None):
@@ -3575,11 +3601,12 @@ class PlainUI(UI):
         return answer if answer or default is None else default
 
     def ask_yes(self, qid, rich, plain, default=False):
-        print()
-        answer = input(_plain_prompt(plain)).strip().lower()
-        if not answer:
-            return default
-        return not answer.startswith('n') if default else answer.startswith('y')
+        while True:
+            print()
+            answer = _yes_no(input(_plain_prompt(plain)), default)
+            if answer is not None:
+                return answer
+            print("Answer y or n.")
 
     def markup(self, rich, plain=None):
         if plain is _SILENT or (plain is None and rich is None):
@@ -3613,6 +3640,21 @@ class PlainUI(UI):
             print(line)
 
 
+if RICH_AVAILABLE:
+    from rich.prompt import InvalidResponse
+
+    class _YesNoConfirm(Confirm):
+        """Rich's Confirm reading the answer with _yes_no (#649): the same
+        "[y/n] (y)" on screen and the same "Please enter Y or N" for anything
+        it does not take."""
+
+        def process_response(self, value: str) -> bool:
+            answer = _yes_no(value, None)
+            if answer is None:
+                raise InvalidResponse(self.validate_error_message)
+            return answer
+
+
 class RichUI(UI):
     def section(self, title):
         console.print(f"\n[bold cyan]{_rich_safe(title)}[/bold cyan]")
@@ -3642,7 +3684,7 @@ class RichUI(UI):
 
     def confirm(self, qid, prompt, default=False):
         console.print()
-        return Confirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
+        return _YesNoConfirm.ask(_rich_safe(_plain_prompt(prompt)), default=default)
 
     def choose(self, qid, prompt, options, default=None, note=None, title=None,
                columns=None, columns_title=None):
@@ -3680,7 +3722,7 @@ class RichUI(UI):
 
     def ask_yes(self, qid, rich, plain, default=False):
         console.print()
-        return Confirm.ask(_plain_prompt(rich), default=default)
+        return _YesNoConfirm.ask(_plain_prompt(rich), default=default)
 
     def table(self, title, columns, rows, head=None, notes=None, show_header=True,
               markup=False):

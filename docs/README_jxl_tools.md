@@ -70,6 +70,8 @@ The tool shows a status bar with all detected dependencies (`cjxl/djxl` turns in
 ```
 
 > **Tip:** Values shown in **blue/cyan** (Rich) or between `[brackets]`/`(parentheses)` are defaults. Just press `Enter` to accept!
+>
+> A yes/no question takes `y`, `yes`, `s` or `sim` for yes and `n`, `no`, `nao` or `não` for no, in either screen; `Enter` is its default, and any other answer asks again (until v2.29.0 the plain screen read any answer not starting with `n` as yes on a `[Y/n]` question).
 
 * * *
 
