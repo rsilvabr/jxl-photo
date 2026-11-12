@@ -405,7 +405,7 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
     after_all = {f: _every_function(t) for f, t in after_trees.items()}
 
     results: List[Result] = []
-    moved_bodies: Dict[str, List[ast.stmt]] = {}
+    moved_bodies: Dict[Tuple[str, str], List[ast.stmt]] = {}
     origins: Dict[Tuple[str, str], List[Tuple[str, Result]]] = {}
 
     for f, q, fn in new_funcs:
@@ -458,12 +458,14 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
         unused = [p for p in params if p not in reads and p not in block_stores]
         if unused:
             res.notes.append("parameters the block never reads: " + ", ".join(unused))
-        moved_bodies[fn.name] = body
+        moved_bodies[(f, fn.name)] = body
 
         # Every function that calls it: the chosen origin, and any other one
         # (two identical copies replaced by one function have two).
         sites = []
         for afile, funcs in after_all.items():
+            if afile != f:
+                continue        # a bare-name call reaches its own module's function only
             for aqual, anode in funcs.items():
                 for lst in _stmt_lists(anode):
                     stmt = next((x for x in lst if _call_of(x, fn.name) is not None), None)
@@ -554,7 +556,7 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
         a_fn = after_all.get(afile, {}).get(aqual)
         if b_fn is None or a_fn is None:
             continue
-        bodies = {name: moved_bodies[name] for name, _ in moved}
+        bodies = {name: moved_bodies[(afile, name)] for name, _ in moved}
         expanded = _expand_calls(a_fn.body, bodies)
         if [d for _, d in _norm(expanded)] != [d for _, d in _norm(b_fn.body)]:
             moved[0][1].errors.append(

@@ -214,5 +214,30 @@ def test_two_identical_copies_into_one_function_check_both_callers():
     assert "b changed beyond the call" in _errors(res)
 
 
+def test_the_same_new_name_in_two_files_is_checked_per_file():
+    """Each script gets its own _configure_run: a call in one file never
+    stands for the other file's function."""
+    other_before = textwrap.dedent('''
+        def main(xs):
+            n = len(xs)
+            print(n)
+    ''')
+    other_after = textwrap.dedent('''
+        def _sum_sizes(xs):
+            n = len(xs)
+            return n
+
+
+        def main(xs):
+            n = _sum_sizes(xs)
+            print(n)
+    ''')
+    before = {"m.py": BEFORE, "o.py": other_before}
+    after = {"m.py": HEAD + MOVED + "\n" + MAIN_AFTER, "o.py": other_after}
+    results = mc.check_moves(before, after)
+    assert len(results) == 2
+    assert all(r.ok for r in results), [r.errors for r in results]
+
+
 def test_no_new_function_means_nothing_to_check():
     assert mc.check_moves({"m.py": BEFORE}, {"m.py": BEFORE}) == []
