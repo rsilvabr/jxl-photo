@@ -690,6 +690,29 @@
   menus) in a throw-away home and a hostile library folder, and saves each
   screen to `FOLDER/screens/`. Read them after any change to what the wizard
   shows (rc 130 = that session ran out of answers: see where in its file).
+- **Refactor proofs: old against new** (none of them touches the repo's
+  files; each was proven against a planted change before it was trusted):
+  - `python tools/side_by_side.py --ref <rev> [--new WORKTREE|<rev>|<folder>]
+    [--quick] [--lane w1|default|both] [--expect FILE]` runs 27 scenarios of
+    the four backends on small real fixtures (`--fixtures`/`JXLPHOTO_FIXTURES`)
+    with both versions, in the SAME hostile folder restored in between, and
+    compares exit codes, `##JXLSUM##`, console and log lines, and the whole
+    folder after every step (JXL codestream, boxes and order, every exiftool
+    tag, decoded pixels, `checksums.md5`). Only what varies between two runs
+    of the same code is masked. `--quick` is 8 scenarios, ~3 min; the full set
+    runs at the end of a phase. A scenario meant to write that left the folder
+    unchanged is reported (a layout mistake cannot pass as "same": a run
+    folder whose name ENDS in `_export` is a marker match).
+  - `python tools/wizard_transcripts.py --ref <rev> [--new ...]` types the
+    `ui_tour` sessions in both screens (Rich and plain) with both versions and
+    compares what was printed, every child command line (the child is not
+    run) and the config file.
+  - `python tools/move_check.py <rev-before> <rev-after|WORKTREE>` proves a
+    commit only MOVED code into new functions: same AST, every origin
+    variable the block reads is a parameter, every value the origin reads
+    after the call comes back, no `global` lost, no `return` inside the block.
+  - `python tools/mutate.py <spec.json>` breaks one thing in a COPY of the
+    repo and checks the named tests fail (tiff-workflow's spec format).
 - **Run the tool twice and feed it its own output** when testing a sync,
   skip or delete path: the second run over files the toolkit wrote itself is
   where the delete-skipped, provenance and in-place bugs live (the sibling
