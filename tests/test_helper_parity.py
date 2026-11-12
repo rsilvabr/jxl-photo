@@ -59,7 +59,6 @@ SHARED_HELPERS = [
     # The jxlphoto-origin read/decision pair: a copy diverging would make one
     # script inherit the origin while another guesses it (or drops it).
     "_read_origin_inputs",
-    "_origin_for_output",
     # Derived (non-archive) marker reads and the partial-output cleanup that
     # guards a derivative write. Duplicated transcoder/recompressor; a drift
     # either mislabels a derivative or leaves a truncated output behind.
@@ -154,7 +153,6 @@ SHARED_HELPERS = [
     "_history_args",
     # dc:Relation replacement on top of a preloaded XMP block: a copy drifting
     # leaves stale jxlphoto-src/srcsum on one script's derivatives.
-    "_collapse_list_reset",
     # Exif box before the XMP box in every output (#561): IrfanView shows no
     # EXIF otherwise.
     # The box reorder itself (encoder, recompressor, transcoder). Not pinned
@@ -225,18 +223,13 @@ SHARED_HELPERS = [
     # EXACTLY the same way: a drift here means one script writes a field the
     # other miscounts, and the recompressor's --on-regeneration guard reads a
     # generation count that is wrong in the damaging direction.
-    "_strip_encode_params",
-    "_reconcile_gen",
-    "_append_encode_entry",
     "_log_gen_notes_once",
     # Union of the dc:Description and Software machine blocks: the record can
     # be split across the two fields, and both scripts must merge entries and
     # stored gen= identically or one of them undercounts generations when the
     # field changes.
-    "_merge_lineage_blocks",
     # The record's home since v2.24.0 (xmpMM:History parameters): both scripts
     # must find the same record, and stop at the same "no encode record".
-    "_history_record",
     # Where the record's VISIBLE copy goes (history/comment/title/software/off)
     # and the "xmp" = "history" alias: both writers must agree.
     "_encode_tag_mode",

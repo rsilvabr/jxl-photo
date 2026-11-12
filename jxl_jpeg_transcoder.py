@@ -1679,7 +1679,7 @@ TIFFTAG_PREFIX = "jxlphoto-tifftag:"
 _GAIN_MAP_XMP_REMOVAL = ["-XMP-hdrgm:all=", "-XMP-GContainer:all="]
 # The XMP that announces an HDR gain map (Android's Ultra HDR): removed from
 # every output of the convert path, which never holds the gain map itself.
-ORIGIN_PREFIX = "jxlphoto-origin:"
+ORIGIN_PREFIX = _common.ORIGIN_PREFIX
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
 # re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
@@ -1693,7 +1693,7 @@ ORIENTATION_PREFIX = "jxlphoto-orientation:"
 # from, written by the recompressor when its re-encode turns the pixels
 # upright (the codestream then says 1). Read here to give a JPEG its original
 # orientation back (JPEG_ORIENTATION); never left in a delivered JPEG/PNG.
-_TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
+_TOOLKIT_MARKER_NAMESPACE = _common._TOOLKIT_MARKER_NAMESPACE
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
 _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
@@ -2050,22 +2050,7 @@ def _read_origin_inputs(path):
     return tokens, bool(_ORIGIN_RECORD_RE.search(text))
 
 
-def _origin_for_output(tokens, has_record, fresh):
-    """(value, inherited) for the jxlphoto-origin token of a new output.
-
-    tokens: the INPUT's dc:Relation items, or None when unreadable.
-    has_record: the input carries a gen=/cjxl lineage record.
-    fresh: the origin this script assigns to a clean input.
-    An inherited origin wins; an input this toolkit already touched without
-    one (an older version) stays unknown; only a clean input gets `fresh`."""
-    if tokens is None:
-        return None, False
-    for t in tokens:
-        if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
-            return t[len(ORIGIN_PREFIX):], True
-    if has_record or any(t.startswith(_TOOLKIT_MARKER_NAMESPACE) for t in tokens):
-        return None, False
-    return fresh, False
+_origin_for_output = _common._origin_for_output
 
 
 def _copy_metadata(src_path: Path, dst_path: Path) -> None:

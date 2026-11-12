@@ -1706,7 +1706,7 @@ THUMB_XMP_FLAG = "jxlphoto-thumb"
 
 SRC_PREFIX = "jxlphoto-src:"
 SRCSUM_PREFIX = "jxlphoto-srcsum:"
-ORIGIN_PREFIX = "jxlphoto-origin:"
+ORIGIN_PREFIX = _common.ORIGIN_PREFIX
 # dc:Relation token naming what the FIRST master of this photo was made from:
 # tiff8 / tiff16 (encoder), jpeg / png8 / png16 / png (transcoder, pixel
 # re-encode), jpeg (recompressor re-encoding a jbrd JXL), jxl-lossy /
@@ -1715,7 +1715,7 @@ ORIGIN_PREFIX = "jxlphoto-origin:"
 # v2.10.0). Written once by the script that first touches a clean input, then
 # carried forward unchanged — absent means unknown, never guessed. The only
 # reader is the recompressor's --on-regeneration guard (_hidden_generations).
-_TOOLKIT_MARKER_NAMESPACE = "jxlphoto-"
+_TOOLKIT_MARKER_NAMESPACE = _common._TOOLKIT_MARKER_NAMESPACE
 # An encode record anywhere in Description/Software: the input came from this
 # toolkit (an older version, before the origin marker existed).
 _ORIGIN_RECORD_RE = re.compile(r"(?:^|\|)\s*cjxl d=", re.MULTILINE)
@@ -3768,33 +3768,7 @@ def _fill_xmp_from_iptc(tiff_path, write_path, tmp_dir) -> None:
             f"exiftool IPTC copy failed: {(r.stderr or r.stdout or 'no output')[:200].strip()}")
 
 
-def _collapse_list_reset(lines, tag="-XMP-dc:Relation"):
-    """exiftool lines with `tag=` + `tag+=v...` turned into `tag=v...`.
-
-    In ONE exiftool call, any `+=` on a list tag puts every assignment to it in
-    add mode: `-X=` then `-X+=v` keeps the values the FILE already holds and
-    appends v. Only all-`=` assignments replace the list. While the XMP came
-    in through -tagsfromfile in that same call, the reset worked (a later
-    assignment overrides a copied tag); now that the source's XMP is written
-    into the file as a block first, the old list would survive — stale
-    jxlphoto-src/srcsum on a derivative, doubled markers. Lines without the
-    bare reset are returned unchanged (add mode is what they ask for).
-    Parity-pinned (encoder + recompressor).
-    """
-    reset, add = tag + "=", tag + "+="
-    if reset not in lines:
-        return list(lines)
-    out, values, slot = [], [], None
-    for ln in lines:
-        if ln == reset or ln.startswith(add):
-            if slot is None:
-                slot = len(out)
-                out.append(None)
-            if ln.startswith(add):
-                values.append(ln[len(add):])
-            continue
-        out.append(ln)
-    return out[:slot] + ([reset + v for v in values] or [reset]) + out[slot + 1:]
+_collapse_list_reset = _common._collapse_list_reset
 
 
 def _preload_xmp_block(xmp_file, write_path) -> bool:
@@ -3854,12 +3828,12 @@ def extract_xmp_original(tiff_path, tmp_dir):
 
 # The encoding-parameters tag: "cjxl d=0.1 e=7", possibly several in a
 # " | "-separated chain (the LAST one is the current file's).
-_ENCODE_TAG_RE = re.compile(r"cjxl\s+d=([0-9.]+)\s+e=(\d+)")
+_ENCODE_TAG_RE = _common._ENCODE_TAG_RE
 
 # The stored generation token, read ONLY as a complete " | "-delimited segment
 # (or bounded by the field's start/end): "Project gen=3 phase 2" is running
 # text, not a token, and must never be read as one.
-_GEN_TAG_RE = re.compile(r"(?:^|\|)\s*gen=(\d+)\s*(?=\||$)")
+_GEN_TAG_RE = _common._GEN_TAG_RE
 
 # The whole machine block as ONE unit: an optional gen= lead segment followed
 # by the contiguous cjxl d=/e= chain. The block only starts at a segment
@@ -3867,12 +3841,7 @@ _GEN_TAG_RE = re.compile(r"(?:^|\|)\s*gen=(\d+)\s*(?=\||$)")
 # matching only the first cjxl entry would leave an orphaned gen= and a
 # partial chain behind. Legacy fields (a chain with no gen=) are the normal
 # case and match in full.
-_MACHINE_BLOCK_RE = re.compile(
-    r"(?:^|\|)\s*"
-    r"(?:gen=\d+\s*\|\s*)?"
-    r"cjxl\s+d=[0-9.]+\s+e=\d+"
-    r"(?:\s*\|\s*cjxl\s+d=[0-9.]+\s+e=\d+)*"
-)
+_MACHINE_BLOCK_RE = _common._MACHINE_BLOCK_RE
 
 # Divergence between a stored gen= and the chain length is logged once per
 # run, not per file. Reset in main().
@@ -3882,178 +3851,22 @@ _gen_divergence_logged = False
 # The History entry a deliberate "--encode-tag off" writes: a reader that meets
 # it before any record stops there (the lineage was discarded on purpose, an
 # older entry's record must not come back).
-_NO_RECORD_SEGMENT = "no encode record"
+_NO_RECORD_SEGMENT = _common._NO_RECORD_SEGMENT
 
 
-def _history_record(values) -> str:
-    """The encode record carried by xmpMM:History, or "" — pure.
-
-    `values` is exiftool's HistoryParameters: a str (one entry), a list, or
-    None. Since v2.24.0 every write appends one History entry whose
-    parameters END with the whole record ("jxl_tiff_encoder: from image/tiff
-    to image/jxl | gen=1 | cjxl d=0.05 e=9"). The newest entry that carries
-    one wins; an entry with a "no encode record" segment (--encode-tag off)
-    stops the walk first; entries with neither (a decode, another program's
-    entry, a version before v2.24.0) are skipped.
-    """
-    if values is None:
-        return ""
-    items = values if isinstance(values, list) else [values]
-    for text in reversed([str(v) for v in items]):
-        if any(seg.strip() == _NO_RECORD_SEGMENT for seg in text.split("|")):
-            return ""
-        blocks = _MACHINE_BLOCK_RE.findall(text)
-        if blocks:
-            return " | ".join(b.strip().lstrip("|").strip() for b in blocks)
-    return ""
+_history_record = _common._history_record
 
 
-def _strip_encode_params(text: str):
-    """(cleaned_text, orphans) with the machine block removed.
-
-    Removes the gen= token and the WHOLE cjxl d=/e= chain (one unit) from a
-    " | "-joined metadata string, keeping any unrelated text (an original
-    caption, a real CreatorTool). Orphaned gen= segments — left behind by a
-    corrupted or hand-edited field — are removed ONLY as whole segments and
-    ONLY at the tail (the machine-block region): "Project gen=3 phase 2" and
-    "gen=2 | My caption" are user text and stay. `orphans` counts how many
-    were stripped so the caller can log it: an orphan means something wrote
-    the field badly earlier.
-    """
-    cleaned = _MACHINE_BLOCK_RE.sub("", str(text))
-    parts = [p.strip() for p in cleaned.split("|")]
-    parts = [p for p in parts if p]
-    orphans = 0
-    while parts and re.fullmatch(r"gen=\d+", parts[-1]):
-        parts.pop()
-        orphans += 1
-    return " | ".join(parts), orphans
+_strip_encode_params = _common._strip_encode_params
 
 
-def _reconcile_gen(text: str):
-    """(gen, stored, counted) for the field — gen is DERIVED, never incremented.
-
-    counted = number of "cjxl d=X" chain entries with X > 0 (a d=0 lossless
-    entry is appended to the chain but costs no quality, so it is not a
-    generation). stored = the LARGEST gen= token, 0 when absent or unparseable
-    (a corrupt field carrying several self-corrects upward — undercounting is
-    the damaging direction).
-    gen = max(stored, counted): if chain entries were removed the stored gen
-    is the better number, if entries were added without updating gen the
-    count is better — undercounting generations is the error that causes
-    damage, so the larger value wins in both directions. A malformed chain
-    entry never stops the rest from being counted. Legacy fields (chain, no
-    gen=) need no special case: max(0, counted) == counted.
-
-    Only MACHINE-BLOCK segments count: a caption merely containing
-    "cjxl d=1 e=7" is user text, not an encode record, and must not raise the
-    generation count.
-    """
-    s = str(text)
-    stored = max((int(v) for v in _GEN_TAG_RE.findall(s)), default=0)
-    counted = 0
-    for block in _MACHINE_BLOCK_RE.findall(s):
-        for d, _e in _ENCODE_TAG_RE.findall(block):
-            try:
-                if float(d) > 0:
-                    counted += 1
-            except ValueError:
-                continue  # malformed entry (e.g. d=1.2.3): skip, keep counting
-    return max(stored, counted), stored, counted
+_reconcile_gen = _common._reconcile_gen
 
 
-def _append_encode_entry(text: str, new_d, new_e):
-    """(new_text, stored, counted_before, orphans): append "cjxl d=new_d
-    e=new_e" to the field's chain and rewrite the gen= token at the head of
-    the machine block.
-
-    Append-only is the design: the chain is the lineage history, and
-    replacing it would erase the generation count that --on-regeneration
-    guards. The user's own text (a caption) stays FIRST — dc:Description is
-    visible in Windows Properties and machine output must not push a caption
-    behind it. gen is reconciled over the final chain (never incremented):
-    a wrong value self-corrects on the next pass. `stored`/`counted_before`
-    are returned so the caller can log a divergence (once per run); `orphans`
-    comes from _strip_encode_params.
-
-    Chain entries are read back from the MACHINE BLOCKS only: a caption that
-    merely contains "cjxl d=1 e=7" is user text and is not absorbed into the
-    chain (and not counted as a generation).
-    """
-    s = str(text)
-    _gen_old, stored, counted = _reconcile_gen(s)
-    user, orphans = _strip_encode_params(s)
-    entries = []
-    for block in _MACHINE_BLOCK_RE.findall(s):
-        entries.extend(f"cjxl d={d} e={e}"
-                       for d, e in _ENCODE_TAG_RE.findall(block))
-    entries.append(f"cjxl d={new_d} e={new_e}")
-    counted_new = counted
-    try:
-        if float(new_d) > 0:
-            counted_new += 1
-    except (TypeError, ValueError):
-        pass
-    gen = max(stored, counted_new)
-    block = " | ".join([f"gen={gen}"] + entries)
-    return (f"{user} | {block}" if user else block), stored, counted, orphans
+_append_encode_entry = _common._append_encode_entry
 
 
-def _merge_lineage_blocks(desc: str, software: str, history: str = ""):
-    """Merge the fields' machine blocks: (entries, stored_gen).
-
-    `history` (v2.24.0) is the record xmpMM:History carries
-    (_history_record): the newest home of the record. The three are folded
-    in age order, desc -> software -> history, with the rule below applied
-    pairwise; with history="" the result is the two-field merge's.
-
-    The record can be SPLIT across dc:Description and Software (the user
-    switched --encode-tag, a file came through a tool that keeps only one
-    field, or an older version left a shadow copy behind). Whichever side
-    holds it, the chain must survive the restamp.
-
-    Entries are NEVER deduplicated inside one field: "cjxl d=0.1 e=7 | cjxl
-    d=0.1 e=7" is two real generations (decode, then re-encode at the same
-    settings — exactly what the append-only chain exists to record), and
-    collapsing them undercounts gen in the damaging direction. Across the two
-    fields:
-      * the same chain in both (a mirror), or one a prefix of the other (a
-        copy that was later extended), is ONE history -> the longer one;
-      * anything else is split history -> both, dc:Description first (the
-        older side in every case this toolkit produces: a decoder-made TIFF
-        carries the JXL's chain there, and the new encode lands in Software).
-    stored gen = max of ALL gen= tokens in both fields (_GEN_TAG_RE.findall,
-    like _reconcile_gen — a repeated gen= token is a real generation, never
-    deduped, and reading only the first one made a restamp rewrite a gen=5
-    file back down to gen=1). Entries inside a caption's running
-    text never match: the block regex only matches whole " | "-delimited
-    segments.
-    """
-    def _chain(text):
-        chain = []
-        for block in _MACHINE_BLOCK_RE.findall(str(text)):
-            chain.extend(_ENCODE_TAG_RE.findall(block))
-        return chain
-
-    def _union(a, b):
-        if not a or b[:len(a)] == a:
-            return list(b) if len(b) >= len(a) else list(a)
-        if not b or a[:len(b)] == b:
-            return list(a)
-        return a + b
-
-    entries = _union(_union(_chain(desc), _chain(software)), _chain(history))
-    stored = 0
-    for text in (desc, software, history):
-        # findall + max per field: a field can carry SEVERAL gen= tokens (a
-        # badly merged/written field) and search() reads only the FIRST —
-        # "gen=1 | cjxl d=0.1 e=7 | gen=5 | cjxl d=1.0 e=7" would store 1 and
-        # the restamp would erase gen=5, undercounting gen in the damaging
-        # direction. Same fix _reconcile_gen got (round 38).
-        gen_tokens = _GEN_TAG_RE.findall(str(text))
-        if gen_tokens:
-            stored = max(stored, max(int(v) for v in gen_tokens))
-    return entries, stored
+_merge_lineage_blocks = _common._merge_lineage_blocks
 
 
 def _log_gen_notes_once(stored: int, counted: int) -> None:
@@ -5689,22 +5502,7 @@ def _read_origin_inputs(path):
     return tokens, bool(_ORIGIN_RECORD_RE.search(text))
 
 
-def _origin_for_output(tokens, has_record, fresh):
-    """(value, inherited) for the jxlphoto-origin token of a new output.
-
-    tokens: the INPUT's dc:Relation items, or None when unreadable.
-    has_record: the input carries a gen=/cjxl lineage record.
-    fresh: the origin this script assigns to a clean input.
-    An inherited origin wins; an input this toolkit already touched without
-    one (an older version) stays unknown; only a clean input gets `fresh`."""
-    if tokens is None:
-        return None, False
-    for t in tokens:
-        if t.startswith(ORIGIN_PREFIX) and len(t) > len(ORIGIN_PREFIX):
-            return t[len(ORIGIN_PREFIX):], True
-    if has_record or any(t.startswith(_TOOLKIT_MARKER_NAMESPACE) for t in tokens):
-        return None, False
-    return fresh, False
+_origin_for_output = _common._origin_for_output
 
 
 has_jbrd_box = _common.has_jbrd_box
