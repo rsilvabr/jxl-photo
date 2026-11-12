@@ -440,8 +440,6 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
         if len(hits) > 1:
             res.notes.append(f"{len(hits)} identical blocks on the before side; "
                              "checked against the one whose function calls it")
-        moved_bodies[fn.name] = body
-        origins.setdefault((bfile, bqual), []).append((fn.name, res))
 
         # 1. no return/yield/await of the block's own
         for node in _walk_scope(block):
@@ -453,80 +451,92 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
 
         params = _params(fn)
         new_globals = _globals_declared(fn)
-        origin_globals = _globals_declared(bfn)
-        origin_locals = (_stores(bfn.body) | set(_params(bfn))) - origin_globals
         block_stores = _stores(block)
         nested = _bound_inside_nested(block)
-
-        # 2. what the block reads from the origin comes in as a parameter
         reads = (_loads(block) - block_stores - nested) | _read_before_write(block)
-        from_origin = sorted((reads & origin_locals) - set(params) - new_globals)
-        if from_origin:
-            res.errors.append("reads variables of the origin that are not parameters: "
-                              + ", ".join(from_origin))
         known = _module_names(after_trees[f]) | set(dir(builtins))
-        unknown = sorted(reads - origin_locals - known - set(params) - new_globals)
-        if unknown:
-            res.errors.append("reads names defined nowhere for the new function: "
-                              + ", ".join(unknown))
-
-        # 3. a global of the origin assigned in the block stays global
-        lost = sorted((block_stores & origin_globals) - new_globals)
-        if lost:
-            res.errors.append("assigns names that are `global` in the origin without "
-                              "declaring them `global` here: " + ", ".join(lost))
-
-        # 4. the call: same-named arguments, every parameter passed, targets
-        a_origin = after_all.get(bfile, {}).get(bqual)
-        call_stmt = None
-        if a_origin is not None:
-            for lst in _stmt_lists(a_origin):
-                call_stmt = next((s for s in lst if _call_of(s, fn.name) is not None), None)
-                if call_stmt is not None:
-                    break
-        if call_stmt is None:
-            res.errors.append(f"{bqual} (after) has no statement `[x = ]{fn.name}(...)`")
-            continue
-        targets, call = _call_of(call_stmt, fn.name)
-        passed = []
-        bad = []
-        for p, a in zip(params, call.args):
-            if isinstance(a, ast.Name) and a.id == p:
-                passed.append(p)
-            else:
-                bad.append(p)
-        if len(call.args) > len(params):
-            bad.append("extra positional arguments")
-        for kw in call.keywords:
-            if kw.arg is not None and isinstance(kw.value, ast.Name) and kw.value.id == kw.arg:
-                passed.append(kw.arg)
-            else:
-                bad.append(kw.arg or "**kwargs")
-        if bad:
-            res.errors.append("arguments that are not the variable of the same name: "
-                              + ", ".join(bad))
-        missing = [p for p in params if p not in passed and p not in bad]
-        if missing:
-            res.errors.append("parameters the call does not pass (their defaults would "
-                              "replace the origin's variables): " + ", ".join(missing))
-        undefined = sorted(p for p in passed if p not in origin_locals and p not in known)
-        if undefined:
-            res.errors.append("passes names the origin does not define: "
-                              + ", ".join(undefined))
         unused = [p for p in params if p not in reads and p not in block_stores]
         if unused:
             res.notes.append("parameters the block never reads: " + ", ".join(unused))
-        if targets != returned:
-            res.errors.append(f"the call assigns {targets or 'nothing'} but the new "
-                              f"function returns {returned or 'nothing'}")
+        moved_bodies[fn.name] = body
 
-        # 5. what the block assigns and the origin reads after it comes back
-        stale = sorted((((block_stores - new_globals) & origin_locals)
-                        & _reads_after(a_origin, call_stmt))
-                       - set(targets) - set(allow_unreturned))
-        if stale:
-            res.errors.append("assigned in the block and read by the origin after it, "
-                              "but not returned: " + ", ".join(stale))
+        # Every function that calls it: the chosen origin, and any other one
+        # (two identical copies replaced by one function have two).
+        sites = []
+        for afile, funcs in after_all.items():
+            for aqual, anode in funcs.items():
+                for lst in _stmt_lists(anode):
+                    stmt = next((x for x in lst if _call_of(x, fn.name) is not None), None)
+                    if stmt is not None:
+                        sites.append((afile, aqual, anode, stmt))
+                        break
+        if not any((sf, sq) == (bfile, bqual) for sf, sq, _n, _s in sites):
+            res.errors.append(f"{bqual} (after) has no statement `[x = ]{fn.name}(...)`")
+        for afile, aqual, anode, call_stmt in sites:
+            b_site = _every_function(before_trees[afile]).get(aqual) if afile in before_trees else None
+            if b_site is None:
+                res.errors.append(f"{aqual} calls {fn.name} but did not exist before: not a move")
+                continue
+            where = "" if (afile, aqual) == (bfile, bqual) else f" (in {aqual})"
+            site_globals = _globals_declared(b_site)
+            site_locals = (_stores(b_site.body) | set(_params(b_site))) - site_globals
+
+            # 2. what the block reads from the origin comes in as a parameter
+            from_origin = sorted((reads & site_locals) - set(params) - new_globals)
+            if from_origin:
+                res.errors.append("reads variables of the origin that are not parameters"
+                                  f"{where}: " + ", ".join(from_origin))
+            site_known = _module_names(after_trees[afile]) | set(dir(builtins))
+            unknown = sorted(reads - site_locals - known - site_known - set(params) - new_globals)
+            if unknown:
+                res.errors.append(f"reads names defined nowhere for the new function{where}: "
+                                  + ", ".join(unknown))
+
+            # 3. a global of the origin assigned in the block stays global
+            lost = sorted((block_stores & site_globals) - new_globals)
+            if lost:
+                res.errors.append("assigns names that are `global` in the origin without "
+                                  f"declaring them `global` here{where}: " + ", ".join(lost))
+
+            # 4. the call: same-named arguments, every parameter passed, targets
+            targets, call = _call_of(call_stmt, fn.name)
+            passed, bad = [], []
+            for p_name, a in zip(params, call.args):
+                if isinstance(a, ast.Name) and a.id == p_name:
+                    passed.append(p_name)
+                else:
+                    bad.append(p_name)
+            if len(call.args) > len(params):
+                bad.append("extra positional arguments")
+            for kw in call.keywords:
+                if kw.arg is not None and isinstance(kw.value, ast.Name) and kw.value.id == kw.arg:
+                    passed.append(kw.arg)
+                else:
+                    bad.append(kw.arg or "**kwargs")
+            if bad:
+                res.errors.append(f"arguments that are not the variable of the same name{where}: "
+                                  + ", ".join(bad))
+            missing = [p_name for p_name in params if p_name not in passed and p_name not in bad]
+            if missing:
+                res.errors.append("parameters the call does not pass (their defaults would "
+                                  f"replace the origin's variables){where}: " + ", ".join(missing))
+            undefined = sorted(p_name for p_name in passed
+                               if p_name not in site_locals and p_name not in site_known)
+            if undefined:
+                res.errors.append(f"passes names the origin does not define{where}: "
+                                  + ", ".join(undefined))
+            if targets != returned:
+                res.errors.append(f"the call assigns {targets or 'nothing'} but the new "
+                                  f"function returns {returned or 'nothing'}{where}")
+
+            # 5. what the block assigns and the origin reads after it comes back
+            stale = sorted((((block_stores - new_globals) & site_locals)
+                            & _reads_after(anode, call_stmt))
+                           - set(targets) - set(allow_unreturned))
+            if stale:
+                res.errors.append("assigned in the block and read by the origin after it, "
+                                  f"but not returned{where}: " + ", ".join(stale))
+            origins.setdefault((afile, aqual), []).append((fn.name, res))
 
         # 6. comments and layout: a note, never an error
         old_text = _text_lines(before[bfile], block[0], block[-1])
@@ -537,18 +547,19 @@ def check_moves(before: Dict[str, str], after: Dict[str, str],
             res.notes.append(f"the moved text differs from line {first + 1} of the block "
                              "(comments or layout; the code is the same)")
 
-    # 7. each origin, with every call expanded back, is the old function
-    for (bfile, bqual), moved in origins.items():
-        b_fn = _every_function(before_trees[bfile]).get(bqual)
-        a_fn = after_all.get(bfile, {}).get(bqual)
+    # 7. every function that calls a moved block, with the calls expanded back,
+    #    is the old function
+    for (afile, aqual), moved in origins.items():
+        b_fn = _every_function(before_trees[afile]).get(aqual)
+        a_fn = after_all.get(afile, {}).get(aqual)
         if b_fn is None or a_fn is None:
             continue
         bodies = {name: moved_bodies[name] for name, _ in moved}
         expanded = _expand_calls(a_fn.body, bodies)
         if [d for _, d in _norm(expanded)] != [d for _, d in _norm(b_fn.body)]:
             moved[0][1].errors.append(
-                f"{bqual} changed beyond the call(s) to "
-                + ", ".join(name for name, _ in moved))
+                f"{aqual} changed beyond the call(s) to "
+                + ", ".join(sorted({name for name, _ in moved})))
     return results
 
 

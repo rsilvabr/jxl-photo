@@ -174,5 +174,45 @@ def test_passing_a_name_the_origin_does_not_define_is_caught():
     assert "does not define: ghost" in _errors(res)
 
 
+def test_two_identical_copies_into_one_function_check_both_callers():
+    before = textwrap.dedent('''
+        def a(xs):
+            total = 0
+            for x in xs:
+                total += x
+            print(total)
+
+
+        def b(xs):
+            total = 0
+            for x in xs:
+                total += x
+            print(total, "b")
+    ''')
+    moved = textwrap.dedent('''
+        def _sum(xs):
+            total = 0
+            for x in xs:
+                total += x
+            return total
+    ''')
+    callers = textwrap.dedent('''
+        def a(xs):
+            total = _sum(xs)
+            print(total)
+
+
+        def b(xs):
+            total = _sum(xs)
+            print(total, "b")
+    ''')
+    res = mc.check_moves({"m.py": before}, {"m.py": moved + callers})[0]
+    assert res.ok, res.errors
+    # a change in the SECOND caller (not the origin the tool picked) is caught
+    bad = callers.replace('print(total, "b")', 'print(total, "B")')
+    res = mc.check_moves({"m.py": before}, {"m.py": moved + bad})[0]
+    assert "b changed beyond the call" in _errors(res)
+
+
 def test_no_new_function_means_nothing_to_check():
     assert mc.check_moves({"m.py": BEFORE}, {"m.py": BEFORE}) == []
