@@ -9,7 +9,7 @@ New features and behaviour changes are in
 
 **Numbering.** One sequence for the whole project, shared with the archive: a
 new bug takes the next free number, and a number is never reused.
-**Next free number: #648.** `tests/test_bug_tracker_numbers.py` fails
+**Next free number: #649.** `tests/test_bug_tracker_numbers.py` fails
 on a repeated number, a stale "next free" line, or sections out of date order.
 #14 (an improvement, not a bug) and #78 have no row. #481–#495 are the fifteen entries that had been
 numbered #195–#209 a second time (Post-v1.8.1, v1.8.3 and the first
@@ -30,6 +30,7 @@ were never tagged and never shipped.
 
 | Round / release | Date | Shipped in | Bugs |
 |---|---|---|---|
+| [Round-81 — the Python refactor](#round-81--the-python-refactor-2026-11-13) | 2026-11-13 | v2.30.0 (not released yet) | #648 (1) |
 | [Round-80 — what the sweep left to decide](#round-80--what-the-sweep-left-to-decide-2026-11-11) | 2026-11-11 | v2.28.0 | #642–#647 (6) |
 | [Round-79 — real files the fixtures did not have](#round-79--real-files-the-fixtures-did-not-have-2026-11-11) | 2026-11-11 | v2.27.1 | #641 (1) |
 | [Round-78 — the 261111 plan](#round-78--the-261111-plan-2026-11-11) | 2026-11-11 | v2.27.0 | #638–#640 (3) |
@@ -96,6 +97,16 @@ were never tagged and never shipped.
 | [Archive: v1.0 → v1.8.1, original format](bug_tracking_archive.md) | 2026-04 – 2026-07 | v1.0 – v1.8.1 | #1–#171 |
 
 ---
+
+## Round-81 — the Python refactor (2026-11-13)
+
+Found while restructuring the code of the four backends and the wizard for
+v2.30.0: each is fixed with its own regression test before the restructuring
+moves the code around.
+
+| # | Bug | Script | Status |
+|---|-----|--------|--------|
+| 648 | **The recompressor kept a previous run's export marker and folders when it ran twice in one process**: `--export-marker`, `--export-subfolder` and `--export-jxl-folder` are assigned only when given, and the three were missing from the per-run reset (`_RUN_DEFAULTS`), so a second `main()` in the same process (the test suite, a script driving another one in-process) kept the first run's values. The wizard, the presets and the Windows program run every backend as a process of its own, so no real run was affected | `jxl_recompressor.py` | ✅ Fixed — the three are in `_RUN_DEFAULTS`; `tests/test_run_reset_coverage.py` reads every `main()`/`cmd_*` of the four backends and fails on a global a flag sets without a reset |
 
 ## Round-80 — what the sweep left to decide (2026-11-11)
 

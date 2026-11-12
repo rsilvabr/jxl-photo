@@ -866,6 +866,11 @@ _RUN_DEFAULTS = {
     # and wrote a colour-converted DERIVATIVE (#529).
     "OUTPUT_ICC": OUTPUT_ICC,
     "EXPLORER_THUMBNAIL": EXPLORER_THUMBNAIL,
+    # Assigned only when their flag is given: a second in-process run without
+    # them kept the first one's marker and folders (refactor plan 261113, B-1).
+    "EXPORT_MARKER": EXPORT_MARKER,
+    "EXPORT_JXL_SUBFOLDER": EXPORT_JXL_SUBFOLDER,
+    "EXPORT_JXL_FOLDER": EXPORT_JXL_FOLDER,
 }
 
 # XMP dc:Relation provenance markers — the same strings the encoder writes, so
