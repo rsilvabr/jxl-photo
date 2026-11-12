@@ -1033,7 +1033,7 @@ def test_stream_child_silent_hang_killed():
     assert rc == -1
 
 
-@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches wp.Confirm which requires rich")
+@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches the Rich yes/no prompt (wp._YesNoConfirm)")
 def test_manifest_mode_excel_float_format(tmp_path, monkeypatch):
     """Excel writes integers as '7.0' — that must parse as mode 7, not 0."""
     import csv
@@ -1048,8 +1048,8 @@ def test_manifest_mode_excel_float_format(tmp_path, monkeypatch):
     workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
     monkeypatch.setattr(menu, "_print_error",
                         lambda m: (_ for _ in ()).throw(AssertionError(m)))
-    # Patch Confirm.ask to auto-proceed
-    monkeypatch.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    # Patch the Rich yes/no prompt to auto-proceed
+    monkeypatch.setattr(wp, "_YesNoConfirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
     assert menu._wizard_run_from_manifest(workflow) is True
     assert workflow["manifest_entries"][0][2] == 7
 
@@ -1750,7 +1750,7 @@ def test_encoder_single_file_modes_3_4_5(monkeypatch, tmp_path, caplog):
         caplog.clear()
 
 
-@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches wp.Confirm which requires rich")
+@pytest.mark.skipif(not wp.RICH_AVAILABLE, reason="test patches the Rich yes/no prompt (wp._YesNoConfirm)")
 def test_manifest_empty_destination_falls_back_to_source(tmp_path, monkeypatch):
     import csv
     manifest = tmp_path / "m.csv"
@@ -1762,7 +1762,7 @@ def test_manifest_empty_destination_falls_back_to_source(tmp_path, monkeypatch):
     menu = wp.InteractiveMenu(cfg, wp.DependencyChecker(cfg))
     menu._pick_manifest = lambda: str(manifest)
     workflow = {"origin_format": "tiff", "dest_format": "jxl", "mode_config": {}}
-    monkeypatch.setattr(wp, "Confirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
+    monkeypatch.setattr(wp, "_YesNoConfirm", type("C", (), {"ask": staticmethod(lambda *a, **k: True)}))
     assert menu._wizard_run_from_manifest(workflow) is True
     assert workflow["manifest_entries"][0][1] == str(tmp_path), \
         "empty Destination must fall back to Source, never Path('.')"
