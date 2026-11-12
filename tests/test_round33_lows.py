@@ -385,8 +385,9 @@ def test_ctrlc_exits_main_with_130(tmp_path, monkeypatch):
 
     monkeypatch.setattr(wp.InteractiveMenu, "execute_workflow", _boom)
     monkeypatch.setattr(sys, "argv", ["jxl_photo.py"])
-    # Menu "2" (repeat), then the repeat's prompts up to execution.
-    monkeypatch.setattr("builtins.input", mock.Mock(side_effect=["2", "", "", "", "0"]))
+    # Menu "2" (repeat), then the repeat's prompts up to execution, and "y" at
+    # "Run this job? [Y/n]" (this used to be "0", read as yes before #649).
+    monkeypatch.setattr("builtins.input", mock.Mock(side_effect=["2", "", "", "", "y"]))
 
     with pytest.raises(SystemExit) as exit_info:
         wp.main()
