@@ -6259,97 +6259,7 @@ def cmd_convert(args, from_jxl: bool = True):
 
     # Handle DELETE_SOURCE for convert mode (lossy), in every mode
     if DELETE_SOURCE:
-        deleted = 0
-        src_map = {str(s): (s, out) for s, out in pairs}
-        _skip_marks = _lossy_skip_marks(results, src_map)
-        for result in results:
-            status = result[1]
-            # LOSSY direction: see the note in _process_file_group — an
-            # already-archived source needs its output's provenance marker.
-            was_skipped = status == "skipped"
-            if (status not in ("ok", "reconvert")
-                    and not (DELETE_SKIPPED and was_skipped)):
-                continue
-            src_path, final_file = src_map.get(result[0], (None, None))
-            if src_path is None:
-                # Logged and counted like every other refusal of this gate, as
-                # process_group_transcode does (#650): a bare continue made the
-                # result vanish from the report.
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (final output missing) | {result[0]}")
-                continue
-            if not src_path.exists():
-                logger.warning(f" {_SOURCE_GONE} | {src_path.name}")      # #619
-                continue
-            # Fail closed on a failed staging move: the file at the final
-            # path would be a stale pre-existing one, not this run's output.
-            if (TEMP2_DIR is not None and not was_skipped
-                    and os.path.normcase(str(final_file)) not in moved_finals):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output never left staging) | {src_path.name}")
-                continue
-            _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
-                         or _gain_map_keep_reason(src_path, final_file))
-            if _why_keep:
-                _delete_stats["kept"] += 1
-                logger.warning(f" {_why_keep} | {src_path.name}")
-                continue
-            # THE real recovery gate, ported from the transcode path (process_
-            # group_transcode): structural integrity is not enough when the
-            # JXL carries a jbrd box. --force-convert --distance 0 on a JPEG
-            # yields EXACTLY that (cjxl keeps jbrd at d=0), and a jbrd JXL can
-            # pass every structural check while still failing
-            # djxl --reconstruct_jpeg — e.g. v2.0.0-v2.0.3 wrote XMP markers
-            # into jbrd containers, and exiftool's -tagsfromfile re-serialized
-            # the XMP of any source that already had some. The source may only
-            # be deleted when the reconstruction ACTUALLY reproduces its
-            # bytes. With djxl < 0.12 the test cannot run, and an unverifiable
-            # output must block deletion (fail closed).
-            if (final_file.suffix.lower() == '.jxl'
-                    and src_path.suffix.lower() in JPEG_EXTS
-                    and has_jbrd_box(final_file)):
-                if _tool_at_least("djxl", 0, 12):
-                    if not _jxl_reconstructs_to(final_file, src_path):
-                        _delete_stats["kept"] += 1
-                        logger.warning(
-                            f" KEEP (djxl --reconstruct_jpeg does not reproduce "
-                            f"this JPEG; run --repair-jbrd to fix markers written "
-                            f"by v2.0.0+) | {src_path.name}")
-                        continue
-                else:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
-                    continue
-            if final_file is None or not _verify_file_integrity(final_file):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
-                continue
-            if not _flush_to_disk(final_file):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
-                continue
-            if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
-                _delete_stats["kept"] += 1
-                logger.warning(f" {_LOSSY_SKIP_KEEP} | {src_path.name}")
-                continue
-            if _source_changed_since_read(src_path):
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
-                continue
-            try:
-                src_path.unlink()
-                deleted += 1
-                _delete_stats["deleted"] += 1
-                if was_skipped:
-                    _delete_stats["deleted_archived"] += 1
-                logger.info(f" DELETED source"
-                            f"{' (already archived)' if was_skipped else ''}"
-                            f" | {src_path.name}")
-            except OSError as e:
-                _delete_stats["kept"] += 1
-                logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
-        if deleted:
-            logger.info(f" -> Deleted {deleted} source file(s)")
+        _delete_converted_sources(results, pairs, moved_finals)
 
     # Indexed, never unpacked at a fixed arity: encode_to_jxl's ok-result also
     # carries the source md5 and the JXL self-hash (round 43, #444) — a
@@ -6384,6 +6294,104 @@ def cmd_convert(args, from_jxl: bool = True):
                    log_file=log_file, failures=failed_files,
                    extras={"Not attempted (run aborted)": aborted, **_delete_extras()})
     return (err, False)
+
+
+def _delete_converted_sources(results, pairs, moved_finals):
+    """The lossy delete gate shared by cmd_convert and the auto mode's convert (_process_file_group), moved here unchanged (refactor plan 261113, A2): the two copies were identical."""
+    deleted = 0
+    src_map = {str(s): (s, out) for s, out in pairs}
+    _skip_marks = _lossy_skip_marks(results, src_map)
+    for result in results:
+        status = result[1]
+        # LOSSY direction: nothing can be re-derived, but every lossy
+        # output this script writes carries its source's provenance
+        # marker — an already-archived source is deleted only when
+        # that marker MATCHES (plus the structural check).
+        was_skipped = status == "skipped"
+        if (status not in ("ok", "reconvert")
+                and not (DELETE_SKIPPED and was_skipped)):
+            continue
+        src_path, final_file = src_map.get(result[0], (None, None))
+        if src_path is None:
+            # Logged and counted like every other refusal of this gate, as
+            # process_group_transcode does (#650): a bare continue made the
+            # result vanish from the report.
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (final output missing) | {result[0]}")
+            continue
+        if not src_path.exists():
+            logger.warning(f" {_SOURCE_GONE} | {src_path.name}")      # #619
+            continue
+        # Fail closed on a failed staging move: the file at the final
+        # path would be a stale pre-existing one, not this run's output.
+        if (TEMP2_DIR is not None and not was_skipped
+                and os.path.normcase(str(final_file)) not in moved_finals):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output never left staging) | {src_path.name}")
+            continue
+        _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
+                     or _gain_map_keep_reason(src_path, final_file))
+        if _why_keep:
+            _delete_stats["kept"] += 1
+            logger.warning(f" {_why_keep} | {src_path.name}")
+            continue
+        # THE real recovery gate, ported from the transcode path (process_
+        # group_transcode): structural integrity is not enough when the
+        # JXL carries a jbrd box. --force-convert --distance 0 on a JPEG
+        # yields EXACTLY that (cjxl keeps jbrd at d=0), and a jbrd JXL can
+        # pass every structural check while still failing
+        # djxl --reconstruct_jpeg — e.g. v2.0.0-v2.0.3 wrote XMP markers
+        # into jbrd containers, and exiftool's -tagsfromfile re-serialized
+        # the XMP of any source that already had some. The source may only
+        # be deleted when the reconstruction ACTUALLY reproduces its
+        # bytes. With djxl < 0.12 the test cannot run, and an unverifiable
+        # output must block deletion (fail closed).
+        if (final_file.suffix.lower() == '.jxl'
+                and src_path.suffix.lower() in JPEG_EXTS
+                and has_jbrd_box(final_file)):
+            if _tool_at_least("djxl", 0, 12):
+                if not _jxl_reconstructs_to(final_file, src_path):
+                    _delete_stats["kept"] += 1
+                    logger.warning(
+                        f" KEEP (djxl --reconstruct_jpeg does not reproduce "
+                        f"this JPEG; run --repair-jbrd to fix markers written "
+                        f"by v2.0.0+) | {src_path.name}")
+                    continue
+            else:
+                _delete_stats["kept"] += 1
+                logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
+                continue
+        if final_file is None or not _verify_file_integrity(final_file):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
+            continue
+        if not _flush_to_disk(final_file):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
+            continue
+        if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
+            _delete_stats["kept"] += 1
+            logger.warning(f" {_LOSSY_SKIP_KEEP} | {src_path.name}")
+            continue
+        if _source_changed_since_read(src_path):
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
+            continue
+        try:
+            src_path.unlink()
+            deleted += 1
+            _delete_stats["deleted"] += 1
+            if was_skipped:
+                _delete_stats["deleted_archived"] += 1
+            logger.info(f" DELETED source"
+                        f"{' (already archived)' if was_skipped else ''}"
+                        f" | {src_path.name}")
+        except OSError as e:
+            _delete_stats["kept"] += 1
+            logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
+    if deleted:
+        logger.info(f" -> Deleted {deleted} source file(s)")
+
 
 # --------------------------------------------─
 # AUTO MODE (Per-file detection for directories)
@@ -6904,92 +6912,7 @@ def _process_file_group(files, args, use_transcode=True, direction="from_jxl", c
         _accumulate(results)
         # Handle DELETE_SOURCE for lossy convert (auto mode), in every mode
         if DELETE_SOURCE:
-            deleted = 0
-            src_map = {str(s): (s, out) for s, out in pairs}
-            _skip_marks = _lossy_skip_marks(results, src_map)
-            for result in results:
-                status = result[1]
-                # LOSSY direction: nothing can be re-derived, but every lossy
-                # output this script writes carries its source's provenance
-                # marker — an already-archived source is deleted only when
-                # that marker MATCHES (plus the structural check).
-                was_skipped = status == "skipped"
-                if (status not in ("ok", "reconvert")
-                        and not (DELETE_SKIPPED and was_skipped)):
-                    continue
-                src_path, final_file = src_map.get(result[0], (None, None))
-                if src_path is None:
-                    # Logged and counted like the transcode gate (#650).
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (final output missing) | {result[0]}")
-                    continue
-                if not src_path.exists():
-                    logger.warning(f" {_SOURCE_GONE} | {src_path.name}")  # #619
-                    continue
-                # Fail closed on a failed staging move: the file at the
-                # final path would be a stale pre-existing one.
-                if (TEMP2_DIR is not None and not was_skipped
-                        and os.path.normcase(str(final_file)) not in moved_finals):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (output never left staging) | {src_path.name}")
-                    continue
-                _why_keep = (_lossy_decode_keep_reason(src_path, final_file)
-                             or _gain_map_keep_reason(src_path, final_file))
-                if _why_keep:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" {_why_keep} | {src_path.name}")
-                    continue
-                # THE real recovery gate, ported from the transcode path (same
-                # as cmd_convert's gate): a jbrd-carrying JXL output (PNG->JXL
-                # never has one, but a JPEG routed through a lossy convert at
-                # d=0 does) must PROVE it still reconstructs the original JPEG
-                # bit-exactly before the unlink. djxl < 0.12 cannot run the
-                # test, so it fails closed.
-                if (final_file.suffix.lower() == '.jxl'
-                        and src_path.suffix.lower() in JPEG_EXTS
-                        and has_jbrd_box(final_file)):
-                    if _tool_at_least("djxl", 0, 12):
-                        if not _jxl_reconstructs_to(final_file, src_path):
-                            _delete_stats["kept"] += 1
-                            logger.warning(
-                                f" KEEP (djxl --reconstruct_jpeg does not reproduce "
-                                f"this JPEG; run --repair-jbrd to fix markers written "
-                                f"by v2.0.0+) | {src_path.name}")
-                            continue
-                    else:
-                        _delete_stats["kept"] += 1
-                        logger.warning(f" KEEP (djxl<0.12: bit-exact recovery cannot be verified) | {src_path.name}")
-                        continue
-                if final_file is None or not _verify_file_integrity(final_file):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (output failed integrity check) | {src_path.name}")
-                    continue
-                if not _flush_to_disk(final_file):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (output could not be flushed to disk) | {src_path.name}")
-                    continue
-                if was_skipped and _lossy_skip_unproven(src_path, final_file, _skip_marks):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" {_LOSSY_SKIP_KEEP} | {src_path.name}")
-                    continue
-                if _source_changed_since_read(src_path):
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (source changed since this run read it (re-exported or rewritten during the run?) — its current version was never archived) | {src_path.name}")
-                    continue
-                try:
-                    src_path.unlink()
-                    deleted += 1
-                    _delete_stats["deleted"] += 1
-                    if was_skipped:
-                        _delete_stats["deleted_archived"] += 1
-                    logger.info(f" DELETED source"
-                                f"{' (already archived)' if was_skipped else ''}"
-                                f" | {src_path.name}")
-                except OSError as e:
-                    _delete_stats["kept"] += 1
-                    logger.warning(f" KEEP (could not delete source) | {src_path.name}: {e}")
-            if deleted:
-                logger.info(f" -> Deleted {deleted} source file(s)")
+            _delete_converted_sources(results, pairs, moved_finals)
 
     return tally
 
