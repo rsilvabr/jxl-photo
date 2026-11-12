@@ -45,9 +45,11 @@ def _sessions(lib: Path):
         "12_dependencies": "D\n0\n",
         "13_job_archive_review": f"1\n1\n{lib}\n\n6\n\n\n\nc\nx\n\nq\n0\n",
         "14_job_all_options": f"1\n1\n{lib}\n\n6\n\n\n\na\n\nq\n0\n",
-        "15_job_mode_details": f"1\n1\n{lib}\n\n?\n1\n\n3\nq\n0\n",
-        "16_job_delete_gateway": f"1\n1\n{lib}\n\nD\ny\n6\n\n\nn\n1\n\n3\nq\n0\n",
-        "17_job_auto": f"1\n1\n{lib}\n\nA\nN\n1\n\n3\nq\n0\n",
+        # 15-17 reach the review earlier than their first scripts assumed: the
+        # final q (cancel the review) and 0 (leave) make them end cleanly.
+        "15_job_mode_details": f"1\n1\n{lib}\n\n?\n1\n\n3\nq\n0\nq\n0\n",
+        "16_job_delete_gateway": f"1\n1\n{lib}\n\nD\ny\n6\n\n\nn\n1\n\n3\nq\n0\nq\n0\n",
+        "17_job_auto": f"1\n1\n{lib}\n\nA\nN\n1\n\n3\nq\n0\nq\n0\n",
         "18_job_export_jpeg": f"1\n4\n{lib}\n\n6\n\n\n\n\nq\n0\n",
         "19_job_derive": f"1\n3\n{lib}\n\n6\n\n\n\n\nq\n0\n",
         "20_job_restore": f"1\n2\n{lib}\n\n6\n\n\nq\n0\n",
