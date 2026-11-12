@@ -6712,6 +6712,170 @@ def _find_sources(args):
     return tiffs, output_root
 
 
+def _guard_existing_outputs(args, all_items, _restamped, failed_files):
+    """The guard over outputs that already exist (provenance, overwrite, the
+    strict guard of a run that collapses folders), moved out of main()
+    unchanged (refactor plan 261113, A3). It may drop items from all_items."""
+    provenance_blocked = []
+    provenance_failures = []
+    # Outputs adopt has decided to stamp. Filled here, WRITTEN much later — see
+    # the stamping block after the delete confirmation.
+    provenance_to_stamp = []
+    _src_root = args.input.parent if args.input.is_file() else args.input
+    _strict_guard = DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root)
+    if _strict_guard:
+        _existing = sorted({item[1] for item in all_items if item[1].exists()})
+    else:
+        # Only what will really be overwritten: an up-to-date output is a
+        # SKIP and writes nothing, so it has nothing to refuse.
+        _existing = sorted({item[1] for item in all_items
+                            if item[1].exists() and not _would_skip(item[0], item[1])})
+    if _existing:
+        _existing_set = set(_existing)
+        logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
+                    f"(--provenance {PROVENANCE_CHECK})...")
+        _marks = _read_source_markers_batch(_existing)
+        _bad_sources = {}
+        _adopted, _adopted_blind, _would_adopt = [], [], []
+        for t, j, page_idx, *_rest in all_items:
+            if j not in _existing_set:
+                continue
+            info = _marks.get(str(j)) or {"src": None, "srcsum": None}
+            if j in _restamped:
+                # Rewritten (or, in a dry run, about to be) by --restamp-then-sync:
+                # the preview must judge the record the real run will see.
+                info = dict(info, src=_restamped[j])
+                info.pop("unread", None)    # the restamp itself read and wrote it
+            if not _strict_guard:
+                _why_x = _foreign_overwrite_reason(info, t, j)
+                if _why_x:
+                    _bad_sources.setdefault(str(t), (j, _why_x))
+                continue
+            if _provenance_ok(info, t, PROVENANCE_CHECK):
+                continue
+            if info.get("unread"):
+                # X-A: "cannot tell" is not "no marker" — adopt must not stamp
+                # (or the strict guard wave through) an output whose markers
+                # were never read; OVERWRITE_GUARD never relaxes this guard.
+                _bad_sources.setdefault(
+                    str(t), (j, "its provenance markers could not be read (the "
+                                "exiftool batch failed or stalled) — re-run once "
+                                "exiftool reads the folder again"))
+                continue
+            _unmarked = not (info.get("src") or info.get("srcsum"))
+            # An archive built before these markers existed carries none.
+            # That is a gap in what we KNOW, not evidence of a conflict, so
+            # `adopt` resolves it by PROVING the pairing rather than
+            # assuming it — and only for that case. A marker that MISMATCHES
+            # is still refused: adopt relaxes "I cannot tell", never "I can
+            # tell it is wrong".
+            if PROVENANCE_CHECK == "adopt" and _unmarked:
+                # A dry run neither scans nor stamps. The scan decodes every
+                # unmarked output (hours on a real library) and the stamp
+                # WRITES to the file — both are things a simulation must not
+                # do, and reporting the count is what the user came for.
+                if args.dry_run:
+                    _would_adopt.append((t, j))
+                    continue
+                if not ADOPT_SCAN:
+                    _adopted_blind.append((t, j))
+                    continue
+                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, _distance_for(t))
+                if _ok_v:
+                    _adopted.append((t, j))
+                    continue
+                # The scan verifies against the CURRENT --distance, so the
+                # likeliest mass refusal is not a foreign archive at all:
+                # an archive written at d=0.1 can never survive THIS run's
+                # d=0 pixel comparison. Name that cause and its remedies —
+                # mirror of the delete-gate hint in _delete_sources.
+                _bad_sources.setdefault(
+                    str(t), (j, f"the adopt scan says this output is not this "
+                                f"source ({_detail}) — if the archive was written "
+                                f"at a different --distance than this run "
+                                f"(d={_distance_for(t)}), re-run with the archive's "
+                                f"distance, or pass --no-adopt-scan to adopt "
+                                f"without the scan" + _scan_distance_hint(t)))
+                continue
+            _why = ("no provenance marker — this archive predates them; re-run with "
+                    "--provenance adopt to verify and stamp it"
+                    if _unmarked else "it was made from a different source")
+            _bad_sources.setdefault(str(t), (j, _why))
+        for _t, _j in _adopted_blind:
+            logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
+        if _would_adopt:
+            logger.info(
+                f"Dry run: {len(_would_adopt)} existing output(s) carry no provenance "
+                f"record. A real run would decode and compare each one against its "
+                f"source before adopting and stamping it"
+                + ("" if ADOPT_SCAN else " — except that --no-adopt-scan is set, so "
+                                          "they would be adopted WITHOUT that proof")
+                + ". Any that failed the check would be REFUSED, so this count is an "
+                  "upper bound, and nothing has been written or verified yet.")
+        if _adopted or _adopted_blind:
+            # WHAT to stamp is decided here; the stamping itself happens
+            # after the delete confirmation (see provenance_to_stamp). It
+            # rewrites the user's existing archive, so it must not run on a
+            # dry run, and it must not run when the user then answers "no"
+            # to the deletion this whole check exists to gate.
+            provenance_to_stamp = list(_adopted) + list(_adopted_blind)
+            logger.info(
+                f"Provenance: adopting {len(provenance_to_stamp)} existing output(s)"
+                + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
+                + " — they will be stamped once the run is confirmed.")
+
+        if _bad_sources:
+            provenance_blocked = sorted(_bad_sources)
+            if _strict_guard:
+                logger.error(
+                    f"REFUSING {len(provenance_blocked)} file(s): their output already "
+                    f"exists and did not come from them. Converting would overwrite "
+                    f"someone else's archive, and --delete-source would then destroy "
+                    f"the photo that archive held.")
+            else:
+                logger.error(
+                    f"REFUSING {len(provenance_blocked)} file(s): their output already "
+                    f"exists and belongs to a DIFFERENT file. Converting would "
+                    f"overwrite that archive — and if an earlier run deleted its "
+                    f"source, the photo it holds exists nowhere else.")
+            for _sp in provenance_blocked[:10]:
+                _out, _why = _bad_sources[_sp]
+                logger.error(f"    {_sp}")
+                logger.error(f"      -> {_out} ({_why})")
+            if len(provenance_blocked) > 10:
+                logger.error(f"    ... and {len(provenance_blocked) - 10} more")
+            if _strict_guard:
+                logger.error(
+                    "  These files were NOT converted and NOTHING was deleted. Rename "
+                    "them, pick a mode that keeps folder structure (0/1/3/8), or drop "
+                    "--delete-source." +
+                    ("" if PROVENANCE_CHECK == "content" else
+                     " If you MOVED the sources, re-run with --provenance content."))
+                logger.error(f"  Details: {GUARD_DOC_URL}")
+            else:
+                logger.error(
+                    "  These files were NOT converted and NOTHING was deleted. Rename "
+                    "the source (or the existing output, if it is really a different "
+                    "photo you want to keep apart); delete the existing output only "
+                    "if you are sure it is obsolete." +
+                    ("" if PROVENANCE_CHECK == "content" else
+                     " If you MOVED the sources, re-run with --provenance content."))
+                for _l in _guard_refusal_hint(True):
+                    logger.error(_l)
+            _blocked = set(provenance_blocked)
+            all_items = [it for it in all_items if str(it[0]) not in _blocked]
+            # A refusal is a FAILURE, not a quiet skip: the file was not
+            # converted and needs a human. Counted into err (exit 1) and
+            # listed in the summary's failures so a scheduled run and the
+            # wrapper's manifest recap both surface it.
+            for _sp in provenance_blocked:
+                _o, _w = _bad_sources[_sp]
+                provenance_failures.append(
+                    (_sp, f"refused: output {_o} already exists and {_w}"))
+            failed_files.extend(provenance_failures)
+    return all_items, provenance_blocked, provenance_failures, provenance_to_stamp
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -6953,163 +7117,7 @@ def main():
     # step, not this run's deletion — a plain sync (every scheduled preset is
     # one) destroyed the archive of a photo deleted by an earlier run, and
     # foto.tif / foto.tiff collide in mode 8 as well.
-    provenance_blocked = []
-    provenance_failures = []
-    # Outputs adopt has decided to stamp. Filled here, WRITTEN much later — see
-    # the stamping block after the delete confirmation.
-    provenance_to_stamp = []
-    _src_root = args.input.parent if args.input.is_file() else args.input
-    _strict_guard = DELETE_SOURCE and _run_collapses_structure(args.mode, args.output, _src_root)
-    if _strict_guard:
-        _existing = sorted({item[1] for item in all_items if item[1].exists()})
-    else:
-        # Only what will really be overwritten: an up-to-date output is a
-        # SKIP and writes nothing, so it has nothing to refuse.
-        _existing = sorted({item[1] for item in all_items
-                            if item[1].exists() and not _would_skip(item[0], item[1])})
-    if _existing:
-        _existing_set = set(_existing)
-        logger.info(f"Provenance: checking {len(_existing)} existing output(s) "
-                    f"(--provenance {PROVENANCE_CHECK})...")
-        _marks = _read_source_markers_batch(_existing)
-        _bad_sources = {}
-        _adopted, _adopted_blind, _would_adopt = [], [], []
-        for t, j, page_idx, *_rest in all_items:
-            if j not in _existing_set:
-                continue
-            info = _marks.get(str(j)) or {"src": None, "srcsum": None}
-            if j in _restamped:
-                # Rewritten (or, in a dry run, about to be) by --restamp-then-sync:
-                # the preview must judge the record the real run will see.
-                info = dict(info, src=_restamped[j])
-                info.pop("unread", None)    # the restamp itself read and wrote it
-            if not _strict_guard:
-                _why_x = _foreign_overwrite_reason(info, t, j)
-                if _why_x:
-                    _bad_sources.setdefault(str(t), (j, _why_x))
-                continue
-            if _provenance_ok(info, t, PROVENANCE_CHECK):
-                continue
-            if info.get("unread"):
-                # X-A: "cannot tell" is not "no marker" — adopt must not stamp
-                # (or the strict guard wave through) an output whose markers
-                # were never read; OVERWRITE_GUARD never relaxes this guard.
-                _bad_sources.setdefault(
-                    str(t), (j, "its provenance markers could not be read (the "
-                                "exiftool batch failed or stalled) — re-run once "
-                                "exiftool reads the folder again"))
-                continue
-            _unmarked = not (info.get("src") or info.get("srcsum"))
-            # An archive built before these markers existed carries none.
-            # That is a gap in what we KNOW, not evidence of a conflict, so
-            # `adopt` resolves it by PROVING the pairing rather than
-            # assuming it — and only for that case. A marker that MISMATCHES
-            # is still refused: adopt relaxes "I cannot tell", never "I can
-            # tell it is wrong".
-            if PROVENANCE_CHECK == "adopt" and _unmarked:
-                # A dry run neither scans nor stamps. The scan decodes every
-                # unmarked output (hours on a real library) and the stamp
-                # WRITES to the file — both are things a simulation must not
-                # do, and reporting the count is what the user came for.
-                if args.dry_run:
-                    _would_adopt.append((t, j))
-                    continue
-                if not ADOPT_SCAN:
-                    _adopted_blind.append((t, j))
-                    continue
-                _ok_v, _detail = _verify_roundtrip_page(t, page_idx, j, _distance_for(t))
-                if _ok_v:
-                    _adopted.append((t, j))
-                    continue
-                # The scan verifies against the CURRENT --distance, so the
-                # likeliest mass refusal is not a foreign archive at all:
-                # an archive written at d=0.1 can never survive THIS run's
-                # d=0 pixel comparison. Name that cause and its remedies —
-                # mirror of the delete-gate hint in _delete_sources.
-                _bad_sources.setdefault(
-                    str(t), (j, f"the adopt scan says this output is not this "
-                                f"source ({_detail}) — if the archive was written "
-                                f"at a different --distance than this run "
-                                f"(d={_distance_for(t)}), re-run with the archive's "
-                                f"distance, or pass --no-adopt-scan to adopt "
-                                f"without the scan" + _scan_distance_hint(t)))
-                continue
-            _why = ("no provenance marker — this archive predates them; re-run with "
-                    "--provenance adopt to verify and stamp it"
-                    if _unmarked else "it was made from a different source")
-            _bad_sources.setdefault(str(t), (j, _why))
-        for _t, _j in _adopted_blind:
-            logger.warning(f"  ADOPTED without proof (--no-adopt-scan) | {_j.name}")
-        if _would_adopt:
-            logger.info(
-                f"Dry run: {len(_would_adopt)} existing output(s) carry no provenance "
-                f"record. A real run would decode and compare each one against its "
-                f"source before adopting and stamping it"
-                + ("" if ADOPT_SCAN else " — except that --no-adopt-scan is set, so "
-                                          "they would be adopted WITHOUT that proof")
-                + ". Any that failed the check would be REFUSED, so this count is an "
-                  "upper bound, and nothing has been written or verified yet.")
-        if _adopted or _adopted_blind:
-            # WHAT to stamp is decided here; the stamping itself happens
-            # after the delete confirmation (see provenance_to_stamp). It
-            # rewrites the user's existing archive, so it must not run on a
-            # dry run, and it must not run when the user then answers "no"
-            # to the deletion this whole check exists to gate.
-            provenance_to_stamp = list(_adopted) + list(_adopted_blind)
-            logger.info(
-                f"Provenance: adopting {len(provenance_to_stamp)} existing output(s)"
-                + (f", {len(_adopted)} verified by the adopt scan" if _adopted else "")
-                + " — they will be stamped once the run is confirmed.")
-
-        if _bad_sources:
-            provenance_blocked = sorted(_bad_sources)
-            if _strict_guard:
-                logger.error(
-                    f"REFUSING {len(provenance_blocked)} file(s): their output already "
-                    f"exists and did not come from them. Converting would overwrite "
-                    f"someone else's archive, and --delete-source would then destroy "
-                    f"the photo that archive held.")
-            else:
-                logger.error(
-                    f"REFUSING {len(provenance_blocked)} file(s): their output already "
-                    f"exists and belongs to a DIFFERENT file. Converting would "
-                    f"overwrite that archive — and if an earlier run deleted its "
-                    f"source, the photo it holds exists nowhere else.")
-            for _sp in provenance_blocked[:10]:
-                _out, _why = _bad_sources[_sp]
-                logger.error(f"    {_sp}")
-                logger.error(f"      -> {_out} ({_why})")
-            if len(provenance_blocked) > 10:
-                logger.error(f"    ... and {len(provenance_blocked) - 10} more")
-            if _strict_guard:
-                logger.error(
-                    "  These files were NOT converted and NOTHING was deleted. Rename "
-                    "them, pick a mode that keeps folder structure (0/1/3/8), or drop "
-                    "--delete-source." +
-                    ("" if PROVENANCE_CHECK == "content" else
-                     " If you MOVED the sources, re-run with --provenance content."))
-                logger.error(f"  Details: {GUARD_DOC_URL}")
-            else:
-                logger.error(
-                    "  These files were NOT converted and NOTHING was deleted. Rename "
-                    "the source (or the existing output, if it is really a different "
-                    "photo you want to keep apart); delete the existing output only "
-                    "if you are sure it is obsolete." +
-                    ("" if PROVENANCE_CHECK == "content" else
-                     " If you MOVED the sources, re-run with --provenance content."))
-                for _l in _guard_refusal_hint(True):
-                    logger.error(_l)
-            _blocked = set(provenance_blocked)
-            all_items = [it for it in all_items if str(it[0]) not in _blocked]
-            # A refusal is a FAILURE, not a quiet skip: the file was not
-            # converted and needs a human. Counted into err (exit 1) and
-            # listed in the summary's failures so a scheduled run and the
-            # wrapper's manifest recap both surface it.
-            for _sp in provenance_blocked:
-                _o, _w = _bad_sources[_sp]
-                provenance_failures.append(
-                    (_sp, f"refused: output {_o} already exists and {_w}"))
-            failed_files.extend(provenance_failures)
+    all_items, provenance_blocked, provenance_failures, provenance_to_stamp = _guard_existing_outputs(args, all_items, _restamped, failed_files)
 
     _counter["total"] = len(all_items)
 
