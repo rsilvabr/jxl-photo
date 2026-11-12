@@ -19,8 +19,10 @@ must see it during the test.
 
 The global lists come from each module's OWN mechanism — the decoder's
 `_RUN_ASSIGNABLE`, the other three's `_RUN_DEFAULTS` keys — so the fixture
-cannot drift from the modules. The transcoder's resize/sharpen state is reset
-inline at the top of its `main()`, so those names are spelled out here.
+cannot drift from the modules. Run state that a `main()`/`cmd_*` resets with a
+plain assignment at its top (the transcoder's and the recompressor's
+resize/sharpen/derivative state) is read from the script's own source, for the
+same reason: no list here to keep in step by hand.
 
 Modules are looked up in `sys.modules` lazily, never imported here: test files
 that point `JXL_ENCODER_UNDER_TEST` at an extracted copy must be the first to
@@ -30,6 +32,8 @@ import-time values are captured instead (`_RUN_DEFAULTS` / the decoder's
 pre-run record), so even that test cannot leak its flags.
 """
 
+import ast
+import functools
 import logging
 import os
 import shutil
@@ -77,24 +81,35 @@ def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_TEST_LOG_DIR, ignore_errors=True)
 
 
-# Reset inline at the top of the transcoder's main(), outside _RUN_DEFAULTS.
-_TRANSCODER_EXTRA_GLOBALS = (
-    "RESIZE_MODE", "RESIZE_VALUE", "ALLOW_UPSCALE",
-    "SHARPEN", "SHARPEN_SIGMA", "SHARPEN_GAIN", "SHARPEN_THRESHOLD",
-)
-
-# Reset inline at the top of the recompressor's main(), outside _RUN_DEFAULTS.
-# Without them, a test that ran its main() with --resize-long or --output-icc
-# in-process left DERIVATIVE on, and a later convert_one() test in the same
-# worker took the derivative route (test_uptodate_prefilter.py or
-# test_subprocess_capture.py before test_recompressor.py::TestConvertOne: 6
-# failures, already on v2.28.0).
-_RECOMPRESSOR_EXTRA_GLOBALS = (
-    "RESIZE_MODE", "RESIZE_VALUE", "ALLOW_UPSCALE",
-    "SHARPEN", "SHARPEN_SIGMA", "SHARPEN_GAIN", "SHARPEN_THRESHOLD",
-    "DERIVATIVE", "_DERIVED_LABEL", "_FORCE_REDERIVE",
-    "_OUTPUT_ICC_LABEL", "_OUTPUT_ICC_BYTES", "_OUTPUT_ICC_PATH", "_SRGB_ICC_PATH",
-)
+@functools.lru_cache(maxsize=None)
+def _reset_at_entry(path: str) -> tuple:
+    """The globals a main()/cmd_* of this script assigns with a plain statement
+    at its top level: run state reset at every entry, outside _RUN_DEFAULTS
+    (the recompressor's and the transcoder's resize/sharpen/derivative state).
+    Without them restored between tests, a test that ran main() with
+    --resize-long or --output-icc in-process left DERIVATIVE on, and a later
+    convert_one() test in the same worker took the derivative route
+    (test_uptodate_prefilter.py or test_subprocess_capture.py before
+    test_recompressor.py::TestConvertOne: 6 failures, already on v2.28.0).
+    Read from the source so a new one needs no list here."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError, ValueError):
+        return ()
+    names = []
+    for fn in tree.body:
+        if not (isinstance(fn, ast.FunctionDef)
+                and (fn.name == "main" or fn.name.startswith("cmd_"))):
+            continue
+        declared = {n for node in ast.walk(fn) if isinstance(node, ast.Global)
+                    for n in node.names}
+        for stmt in fn.body:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    names += [n.id for n in ast.walk(target)
+                              if isinstance(n, ast.Name) and n.id in declared]
+    return tuple(dict.fromkeys(names))
 
 _CHILD_MODULES = (
     "jxl_tiff_encoder",
@@ -112,10 +127,9 @@ def _run_global_names(mod) -> tuple:
     assignable = getattr(mod, "_RUN_ASSIGNABLE", None)
     if assignable:
         names.extend(assignable)
-    if mod.__name__ == "jxl_jpeg_transcoder":
-        names.extend(_TRANSCODER_EXTRA_GLOBALS)
-    if mod.__name__ == "jxl_recompressor":
-        names.extend(_RECOMPRESSOR_EXTRA_GLOBALS)
+    source = getattr(mod, "__file__", None)
+    if source:
+        names.extend(_reset_at_entry(source))
     return tuple(dict.fromkeys(names))
 
 
