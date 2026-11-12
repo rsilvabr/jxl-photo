@@ -685,55 +685,16 @@ _cjxl_whole_image = _common._cjxl_whole_image
 _cjxl_bytes_per_pixel = _common._cjxl_bytes_per_pixel
 
 
-def _windows_memory_status():
-    """GlobalMemoryStatusEx as (ullAvailPhys, ullAvailPageFile), or None."""
-    import ctypes
-
-    class _MemoryStatusEx(ctypes.Structure):
-        _fields_ = [("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-    st = _MemoryStatusEx()
-    st.dwLength = ctypes.sizeof(_MemoryStatusEx)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-        return None
-    return int(st.ullAvailPhys), int(st.ullAvailPageFile)
+_windows_memory_status = _common._windows_memory_status
 
 
 _linux_mem_available = _common._linux_mem_available
 
 
-def _available_commit_bytes():
-    """Memory the system can still commit, in bytes, or None if unknown.
-    Windows: ullAvailPageFile (RAM + pagefile not yet committed — the limit
-    WinError 1455 reports). Linux: MemAvailable."""
-    try:
-        if sys.platform == "win32":
-            st = _windows_memory_status()
-            return st[1] if st else None
-        return _linux_mem_available()
-    except Exception:
-        return None
+_available_commit_bytes = _common._available_commit_bytes
 
 
-def _available_physical_bytes():
-    """Physical RAM still available (free + standby cache), in bytes, or None
-    if unknown. Windows: ullAvailPhys. Linux: MemAvailable (no commit limit by
-    default there, so both readings are the same)."""
-    try:
-        if sys.platform == "win32":
-            st = _windows_memory_status()
-            return st[0] if st else None
-        return _linux_mem_available()
-    except Exception:
-        return None
+_available_physical_bytes = _common._available_physical_bytes
 
 
 _MEMORY_LIMITS = ("both", "commit", "physical")
@@ -742,21 +703,7 @@ _MEMORY_BUDGET_TEXT = {"commit": "the system can still commit (RAM + pagefile)",
                        "physical": "of physical RAM still available"}
 
 
-def _available_memory_bytes():
-    """(bytes, "commit"|"physical") the worker cap budgets from, per
-    WORKER_MEMORY_LIMIT: the smaller of the two ("both"), or just one. A reading
-    that fails is left out; (None, None) when nothing could be read. An unknown
-    setting counts as "both", the stricter budget."""
-    limit = WORKER_MEMORY_LIMIT if WORKER_MEMORY_LIMIT in _MEMORY_LIMITS else "both"
-    readings = []
-    if limit in ("both", "commit"):
-        readings.append((_available_commit_bytes(), "commit"))
-    if limit in ("both", "physical"):
-        readings.append((_available_physical_bytes(), "physical"))
-    readings = [r for r in readings if r[0] is not None]
-    if not readings:
-        return None, None
-    return min(readings, key=lambda r: r[0])
+def _available_memory_bytes(*a, **k): return _common._available_memory_bytes(_G, *a, **k)
 
 
 def _memory_capped_workers(requested, max_pixels, distance, effort,

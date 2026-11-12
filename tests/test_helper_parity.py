@@ -225,11 +225,7 @@ SHARED_HELPERS = [
     "_sharpen_args",
     # worker cap: the encoder and the recompressor must estimate the same
     # memory for the same settings
-    "_available_commit_bytes",
     "_memory_capped_workers",
-    "_windows_memory_status",
-    "_available_physical_bytes",
-    "_available_memory_bytes",
 ]
 
 # DELIBERATE divergences — do NOT add these to SHARED_HELPERS:
