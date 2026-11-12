@@ -14,7 +14,8 @@ For the complete list of individual fixes see
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v2.28.0](#v2280)** | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
+| **[v2.29.0_beta1](#v2290_beta1)** | 2026-11-12 | Pre-release. The code the scripts share lives in one file, `jxl_photo_common.py`, which ships next to them: a release is six files that go together. No change in behaviour |
+| [v2.28.0](#v2280) | 2026-11-11 | A small Photoshop resource block of a TIFF comes back in the decoded TIFF; JPEG/PNG copies no longer carry the TIFF-tag markers; no copy is made of a camera TIFF's own thumbnail page; resized copies work in a folder named like `100%off` (round 80, 6 fixes) |
 | [v2.27.1](#v2271) | 2026-11-11 | A lossy JPEG → JXL never deletes a JPEG whose HDR gain map (Ultra HDR phone photos) the JXL does not hold, and says which files have one; the way out of unparseable maker notes named for more exiftool wordings (round 79, 1 fix) |
 | [v2.27.0](#v2270) | 2026-11-11 | A TIFF's IPTC data reaches the master (copied into the XMP where it is missing) and comes back byte for byte in the decoded TIFF; the encoder's sync skips a TIFF with a newer date and the same content; a lossy JPEG → JXL of a JPEG with a broken thumbnail IFD converts (round 78, 3 fixes) |
 | [v2.26.1](#v2261) | 2026-11-10 | A JXL made from a rotated JPEG is shown the right way up even without `jxlinfo`; PNGs and turned-back JPEGs keep the camera's `InteropIndex`; one exiftool run less per JXL → JPEG (round 77, 2 fixes) |
@@ -99,6 +100,40 @@ GitHub release notes before v1.8.2:
 Internal cleanups up to v1.8.1: [code_quality_refactoring.md](code_quality_refactoring.md).
 
 ---
+
+## v2.29.0_beta1
+
+**Pre-release, 2026-11-12.** The last stable release is v2.28.0. An internal
+change with one thing to know: the scripts now need `jxl_photo_common.py`
+next to them. What to check: [upgrading.md](upgrading.md).
+
+- **Changed — the helpers the scripts share have one copy, in
+  `jxl_photo_common.py`.** 135 functions and 22 constants that were repeated
+  in two to five scripts (the box and codestream readers, the ICC and PNG
+  helpers, staging, the disk-full abort, the provenance proofs, the
+  xmpMM:History entry, the subprocess and exiftool runners, the pixel
+  verification) moved there unchanged; each script binds them by name. The
+  settings stay at the top of each script, and so does everything a script
+  does on its own (`main`, the parsers, the conversion itself). The five
+  scripts went from 46 104 lines to 37 828, plus 3 378 in the new file.
+- **A script loads the copy in its own folder** and refuses to start without
+  it, or with one of another version: run directly, it prints one line
+  (`jxl_photo_common.py is missing next to jxl_tiff_encoder.py: copy every
+  file of the release into the same folder`) and exits. The wizard's version
+  check lists the file with the scripts.
+- **No change in behaviour is intended.** Every moved function was compared
+  with every copy it replaced in v2.28.0 (413 copies, no difference in logic),
+  and apart from the move each script is statement for statement the v2.28.0
+  one. Same command lines, settings, output and metadata; the History entry
+  still names the script that wrote the file.
+- Tests: `tests/test_common_module.py` (one copy of each helper, no setting
+  and no script-owned name read in the common module, a script loads the
+  common module of its own folder — in a folder named with Japanese, `[ ]`,
+  a space and `%`). 3700 tests and the real-photo battery pass (174 checks),
+  the battery also through the Windows program with the six files.
+- A test-isolation fix on the way: a recompressor run with `--resize-long`
+  inside the test process no longer leaves its derivative state to the next
+  test.
 
 ## v2.28.0
 

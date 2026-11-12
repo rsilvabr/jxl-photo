@@ -11,6 +11,19 @@ Per-release notes: [version_history.md](version_history.md) and the
 
 ---
 
+## v2.29.0: the scripts need `jxl_photo_common.py` next to them
+
+- **A release is six files that go together**: `jxl_photo.py`, the four
+  `jxl_*` scripts and `jxl_photo_common.py`, the code they share. When you
+  update by copying files, copy all six into the same folder.
+- A script that does not find it, or finds one of another release, stops
+  before doing anything and says so: `jxl_photo_common.py is missing next to
+  ...: copy every file of the release into the same folder`. Nothing is
+  converted or deleted in that case.
+- Nothing else changes: same command lines, settings, presets and manifests;
+  archives written by earlier versions are read as before.
+- The Windows program (jxl-photo-exe) carries all six; nothing to do there.
+
 ## v2.28.0: a small Photoshop block is carried; JPEG/PNG copies drop the TIFF-tag markers
 
 - **New masters of TIFFs with a small Photoshop resource block** (tag 34377,
