@@ -6667,6 +6667,51 @@ def _configure_run(parser, args):
     return log_file, _needs_decode
 
 
+def _find_sources(args):
+    """Which TIFFs this run takes and the output root, per mode: moved out of
+    main() unchanged (refactor plan 261113, A3). One place that answers
+    "which files", so the wrapper can ask it instead of guessing (C1)."""
+    if args.mode in (0, 1) and args.input.is_file():
+        tiffs = [args.input]
+        output_root = args.output or args.input.parent
+    elif args.mode in (0, 1):
+        # Directory input: flat (non-recursive)
+        # Mode 0: output_root = output_dir if given, else same folder as each TIFF
+        tiffs = find_files_mode0(args.input)
+        output_root = args.output or args.input
+    elif args.mode == 2:
+        # Mode 2: recursive, all files to output_root (single file also accepted)
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
+        output_root = args.output or args.input
+        # mkdir deferred until after the dry-run check — a simulation must
+        # not create folders on disk.
+    elif args.mode == 6:
+        tiffs = find_tiffs_mode6(args.input)
+        output_root = args.input
+    elif args.mode == 7:
+        tiffs = find_tiffs_mode7(args.input)
+        output_root = args.input
+    elif args.mode == 8:
+        # Mode 8: in-place recursive + delete source (single file also accepted)
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
+        output_root = args.input
+    else:
+        # Modes 3/4/5: a single FILE input is valid too (find_tiffs_recursive
+        # only works on directories and would silently find nothing).
+        if args.input.is_file():
+            tiffs = [args.input]
+        else:
+            tiffs = find_tiffs_recursive(args.input)
+        output_root = args.input
+    return tiffs, output_root
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -6737,44 +6782,7 @@ def main():
 
     # Collect input files
     # Modes 0 and 1 accept a single file OR a directory
-    if args.mode in (0, 1) and args.input.is_file():
-        tiffs = [args.input]
-        output_root = args.output or args.input.parent
-    elif args.mode in (0, 1):
-        # Directory input: flat (non-recursive)
-        # Mode 0: output_root = output_dir if given, else same folder as each TIFF
-        tiffs = find_files_mode0(args.input)
-        output_root = args.output or args.input
-    elif args.mode == 2:
-        # Mode 2: recursive, all files to output_root (single file also accepted)
-        if args.input.is_file():
-            tiffs = [args.input]
-        else:
-            tiffs = find_tiffs_recursive(args.input)
-        output_root = args.output or args.input
-        # mkdir deferred until after the dry-run check — a simulation must
-        # not create folders on disk.
-    elif args.mode == 6:
-        tiffs = find_tiffs_mode6(args.input)
-        output_root = args.input
-    elif args.mode == 7:
-        tiffs = find_tiffs_mode7(args.input)
-        output_root = args.input
-    elif args.mode == 8:
-        # Mode 8: in-place recursive + delete source (single file also accepted)
-        if args.input.is_file():
-            tiffs = [args.input]
-        else:
-            tiffs = find_tiffs_recursive(args.input)
-        output_root = args.input
-    else:
-        # Modes 3/4/5: a single FILE input is valid too (find_tiffs_recursive
-        # only works on directories and would silently find nothing).
-        if args.input.is_file():
-            tiffs = [args.input]
-        else:
-            tiffs = find_tiffs_recursive(args.input)
-        output_root = args.input
+    tiffs, output_root = _find_sources(args)
 
     # Mode 1 always writes to <source folder>/converted_jxl/, so an output
     # positional is silently discarded. Accepting it without a word looked like
