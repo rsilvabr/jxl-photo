@@ -344,6 +344,12 @@ def test_non_blob_derivatives_are_byte_identical_to_before(tmp_path, monkeypatch
                              check=True).stdout
     old_path = tmp_path / "jxl_recompressor_head.py"
     old_path.write_text(old_src, encoding="utf-8")
+    # The HEAD script loads the jxl_photo_common.py next to it: the one of
+    # the same commit (absent before the common module existed).
+    common = subprocess.run(["git", "show", "HEAD:jxl_photo_common.py"],
+                            capture_output=True, text=True, cwd=REPO)
+    if common.returncode == 0:
+        (tmp_path / "jxl_photo_common.py").write_text(common.stdout, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("jxl_recompressor_head",
                                                   old_path)
     old = importlib.util.module_from_spec(spec)

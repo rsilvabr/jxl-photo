@@ -134,14 +134,11 @@ SHARED_HELPERS = [
     # backend turning a rotated JPEG's pixels twice, or deleting a float or
     # animated JXL after a 16-bit / first-frame decode, that the others keep.
     "_jxlinfo_text",
-    "_codestream_orientation",
     "_orientation_reset_args",
     "_reduced_by_integer_decode",     # decoder + transcoder only
     # #636: the codestream orientation read in Python when jxlinfo cannot
     # answer (decoder, transcoder, recompressor). A copy drifting is one
     # backend turning a rotated JPEG's picture twice again without jxlinfo.
-    "_codestream_head",
-    "_header_orientation",
     "_jxl_orientation",
     # #635: the iCCP of a decoded PNG, read without ImageMagick (transcoder +
     # recompressor). A copy drifting is one backend failing again on every
@@ -151,8 +148,6 @@ SHARED_HELPERS = [
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write
     # thumbnails it then never shows.
-    "_jxl_boxes",
-    "_codestream_fingerprint",
     "_thumbnail_box_fingerprint",
     "_write_thumbnail_box",
     "_explorer_thumbnail_wanted",
@@ -174,11 +169,9 @@ SHARED_HELPERS = [
     "_collapse_list_reset",
     # Exif box before the XMP box in every output (#561): IrfanView shows no
     # EXIF otherwise.
-    "_exif_box_rank",
     # The box reorder itself (encoder, recompressor, transcoder). Not pinned
     # until the 261103 review (S3): the copies differed only cosmetically, and
     # the E-G fix had to be applied three times by hand.
-    "reorder_jxl_boxes",
     # A '%' in a source name (#550): a copy drifting is one script writing an
     # output with none of its source's metadata.
     "_exiftool_source",
@@ -214,7 +207,6 @@ SHARED_HELPERS = [
     # jbrd detection and file hashing, born in the transcoder. The recompressor
     # keys its JPEG-recovery preservation policy off the first and its
     # copy-then-delete MD5 proof off the second.
-    "has_jbrd_box",
     "md5_of_file",
     # Which ICC profiles cannot be a conversion TARGET (A2B tables, no B2A —
     # scanner profiles). The recompressor refuses such derivatives, the
@@ -297,8 +289,6 @@ SHARED_HELPERS = [
     "_derived_label",
     # worker cap: the encoder and the recompressor must estimate the same
     # memory for the same settings
-    "_cjxl_whole_image",
-    "_cjxl_bytes_per_pixel",
     "_available_commit_bytes",
     "_memory_capped_workers",
     "_windows_memory_status",

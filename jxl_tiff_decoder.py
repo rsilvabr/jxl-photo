@@ -2537,93 +2537,13 @@ def _jxlinfo_text(jxl_path):
     return text
 
 
-def _codestream_orientation(info_text):
-    """The orientation (1-8) the JXL codestream carries, or None."""
-    m = re.search(r"^Orientation:\s*([1-8])\b", info_text or "", re.M)
-    return int(m.group(1)) if m else None
+_codestream_orientation = _common._codestream_orientation
 
 
-def _codestream_head(jxl_path, n=64):
-    """The first `n` bytes of a JXL's codestream - a bare codestream, or the
-    jxlc / jxlp boxes of a container (a jxlp payload without its 4-byte
-    index) - or None when the file is not a JXL or cannot be read."""
-    try:
-        with open(jxl_path, "rb") as f:
-            first = f.read(12)
-            if first[:2] == b"\xff\x0a":
-                return (first + f.read(max(0, n - len(first))))[:n]
-            if first != b"\x00\x00\x00\x0cJXL \r\n\x87\n":
-                return None
-            out = b""
-            while len(out) < n:
-                hdr = f.read(8)
-                if len(hdr) < 8:
-                    break
-                size, kind = struct.unpack(">I", hdr[:4])[0], hdr[4:8]
-                head_len = 8
-                if size == 1:
-                    ext = f.read(8)
-                    if len(ext) < 8:
-                        break
-                    size, head_len = struct.unpack(">Q", ext)[0], 16
-                left = None if size == 0 else size - head_len
-                if left is not None and left < 0:
-                    return None
-                if kind in (b"jxlc", b"jxlp"):
-                    if kind == b"jxlp":
-                        if left is not None and left < 4:
-                            return None
-                        f.seek(4, 1)
-                        left = None if left is None else left - 4
-                    want = n - len(out) if left is None else min(left, n - len(out))
-                    data = f.read(want)
-                    out += data
-                    if kind == b"jxlc" or left is None:
-                        break
-                    f.seek(left - len(data), 1)
-                    continue
-                if left is None:
-                    break
-                f.seek(left, 1)
-            return out or None
-    except OSError:
-        return None
+_codestream_head = _common._codestream_head
 
 
-def _header_orientation(jxl_path):
-    """The orientation (1-8) in a JXL codestream's ImageMetadata, read in
-    Python from its first bytes (ISO/IEC 18181-1: the signature, SizeHeader,
-    then all_default, extra_fields and the 3-bit orientation), or None when
-    the file cannot be parsed. Needs no jxlinfo (#636)."""
-    data = _codestream_head(jxl_path)
-    if not data or data[:2] != b"\xff\x0a":
-        return None
-    bits, total, pos = int.from_bytes(data, "little"), len(data) * 8, 16
-
-    def take(k):
-        nonlocal pos
-        if pos + k > total:
-            raise ValueError("JXL header cut short")
-        v = (bits >> pos) & ((1 << k) - 1)
-        pos += k
-        return v
-
-    try:
-        small = take(1)
-        if small:
-            take(5)                                  # height / 8 - 1
-        else:
-            take((9, 13, 18, 30)[take(2)])           # height - 1 (U32)
-        if take(3) == 0:                             # no fixed aspect ratio
-            if small:
-                take(5)
-            else:
-                take((9, 13, 18, 30)[take(2)])
-        if take(1) or not take(1):                   # all_default / no extra_fields
-            return 1
-        return take(3) + 1
-    except ValueError:
-        return None
+_header_orientation = _common._header_orientation
 
 
 def _jxl_orientation(jxl_path):
