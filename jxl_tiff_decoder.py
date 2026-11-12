@@ -5044,6 +5044,32 @@ def _configure_run(parser, args, _pre_run_globals):
     return log_file
 
 
+def _find_sources(args):
+    """Which JXLs this run takes and the output root, per mode: moved out of
+    main() unchanged (refactor plan 261113, A3). One place that answers
+    "which files", for the wrapper to ask later (C1)."""
+    single_file = args.input.is_file()
+    if single_file:
+        jxls = [args.input]
+        output_root = args.output or args.input.parent
+    else:
+        if args.mode in (0, 1):
+            jxls = find_jxls_flat(args.input)      # flat — subfolders not touched
+        elif args.mode == 6:
+            jxls = find_jxls_mode6(args.input)
+        elif args.mode == 7:
+            jxls = find_jxls_mode7(args.input)
+        else:
+            jxls = find_jxls_recursive(args.input)
+        if args.mode == 2:
+            output_root = args.output or args.input
+            # mkdir deferred until after the dry-run check — a simulation must
+            # not create folders on disk.
+        else:
+            output_root = args.output or args.input
+    return single_file, jxls, output_root
+
+
 def main():
     # Every module global this function assigns (D-1). Declared as one block at
     # the top so no assignment can ever textually precede its declaration when
@@ -5084,25 +5110,7 @@ def main():
                        "source path is overwritten (and logged) instead of refused.")
 
     # Collect files
-    single_file = args.input.is_file()
-    if single_file:
-        jxls = [args.input]
-        output_root = args.output or args.input.parent
-    else:
-        if args.mode in (0, 1):
-            jxls = find_jxls_flat(args.input)      # flat — subfolders not touched
-        elif args.mode == 6:
-            jxls = find_jxls_mode6(args.input)
-        elif args.mode == 7:
-            jxls = find_jxls_mode7(args.input)
-        else:
-            jxls = find_jxls_recursive(args.input)
-        if args.mode == 2:
-            output_root = args.output or args.input
-            # mkdir deferred until after the dry-run check — a simulation must
-            # not create folders on disk.
-        else:
-            output_root = args.output or args.input
+    single_file, jxls, output_root = _find_sources(args)
 
     # Mode 1 always writes to <source folder>/converted_tiff/, so an output
     # positional is silently discarded (same rule as the encoder).
