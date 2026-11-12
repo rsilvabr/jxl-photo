@@ -5231,6 +5231,34 @@ def _configure_run(parser, args):
     return log_file, _floor, _der_what
 
 
+def _find_sources(args):
+    """Which JXLs this run takes and their input root, per mode: moved out of
+    main() unchanged (refactor plan 261113, A3). One place that answers
+    "which files", for the wrapper to ask later (C1)."""
+    single_file = args.input.is_file()
+    if single_file:
+        if args.input.suffix.lower() not in JXL_EXTS:
+            logger.error(f"Not a JXL file: {args.input}")
+            sys.exit(1)
+        files = [args.input]
+        input_root = args.input.parent
+    elif args.mode in (0, 1):
+        files = find_files_mode0(args.input)
+        input_root = args.input
+    elif args.mode == 6:
+        files = _drop_derivative_inputs(find_jxls_mode6(args.input))
+        input_root = args.input
+    elif args.mode == 7:
+        files = find_jxls_mode7(args.input)
+        if not EXPORT_JXL_SUBFOLDER:
+            files = _drop_derivative_inputs(files)
+        input_root = args.input
+    else:
+        files = find_jxls_recursive(args.input)
+        input_root = args.input
+    return single_file, files, input_root
+
+
 def main():
     global OVERWRITE, DELETE_SOURCE, DELETE_CONFIRM, VERIFY_ROUNDTRIP, DELETE_SKIPPED
     global CJXL_DISTANCE, CJXL_EFFORT, CJXL_BUFFERING, TEMP2_DIR, ENCODE_TAG_MODE
@@ -5317,27 +5345,7 @@ def main():
         _clean_staging(TEMP2_DIR)
 
     # --- Collect files -----------------------------------------------------
-    single_file = args.input.is_file()
-    if single_file:
-        if args.input.suffix.lower() not in JXL_EXTS:
-            logger.error(f"Not a JXL file: {args.input}")
-            sys.exit(1)
-        files = [args.input]
-        input_root = args.input.parent
-    elif args.mode in (0, 1):
-        files = find_files_mode0(args.input)
-        input_root = args.input
-    elif args.mode == 6:
-        files = _drop_derivative_inputs(find_jxls_mode6(args.input))
-        input_root = args.input
-    elif args.mode == 7:
-        files = find_jxls_mode7(args.input)
-        if not EXPORT_JXL_SUBFOLDER:
-            files = _drop_derivative_inputs(files)
-        input_root = args.input
-    else:
-        files = find_jxls_recursive(args.input)
-        input_root = args.input
+    single_file, files, input_root = _find_sources(args)
 
     if not files:
         logger.warning("No JXL files found.")
