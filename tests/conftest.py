@@ -185,45 +185,65 @@ def _no_worker_memory_cap():
 # that read the script call through `g.` and are never affected.
 # ---------------------------------------------------------------------------
 
-_COMMON_DIRECT = {}
+_COMMON_READS = {}
 _MISSING = object()
 
 
-def _common_direct_names(common) -> frozenset:
-    """Globals the functions of a common module read directly (not via g)."""
+def _common_reads(common) -> dict:
+    """{function of the common module: the globals it reads directly (not
+    via g), its nested functions included}."""
     path = getattr(common, "__file__", None)
     if not path:
-        return frozenset()
+        return {}
     try:
         key = (path, os.path.getmtime(path))
     except OSError:
-        return frozenset()
-    if key not in _COMMON_DIRECT:
+        return {}
+    if key not in _COMMON_READS:
         import symtable
         with open(path, encoding="utf-8") as f:
             table = symtable.symtable(f.read(), path, "exec")
-        names = set()
+        reads = {}
 
-        def walk(t):
+        def walk(t, names):
             for s in t.get_symbols():
                 if s.is_global() and s.is_referenced():
                     names.add(s.get_name())
             for c in t.get_children():
-                walk(c)
+                walk(c, names)
 
         for child in table.get_children():
-            walk(child)
-        _COMMON_DIRECT[key] = frozenset(names)
-    return _COMMON_DIRECT[key]
+            names = set()
+            walk(child, names)
+            reads[child.get_name()] = frozenset(names)
+        _COMMON_READS[key] = reads
+    return _COMMON_READS[key]
+
+
+def _names_read_for(target, common) -> set:
+    """What the common code the script `target` uses reads directly: every
+    common function the script binds or shims (an attribute of the same
+    name), and every common function those call directly, transitively."""
+    reads = _common_reads(common)
+    stack = [fn for fn in reads if hasattr(target, fn)]
+    seen, names = set(), set()
+    while stack:
+        fn = stack.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        names |= reads.get(fn, frozenset())
+        stack.extend(n for n in reads.get(fn, ()) if n in reads)
+    return names
 
 
 def _refuse_silent_double(target, name) -> None:
     common = getattr(target, "_common", None)
     if not isinstance(common, types.ModuleType) or not isinstance(name, str):
         return
-    if name not in _common_direct_names(common):
+    if getattr(target, name, _MISSING) is not getattr(common, name, _MISSING):
         return
-    if getattr(target, name, _MISSING) is getattr(common, name, _MISSING):
+    if name in _names_read_for(target, common):
         raise AssertionError(
             f"monkeypatch.setattr({getattr(target, '__name__', target)!s}, {name!r}, ...): "
             f"jxl_photo_common reads {name} directly, so the code there would keep "

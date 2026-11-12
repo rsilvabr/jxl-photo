@@ -376,12 +376,7 @@ _SCAN_REPORT_MAX = 60.0
 _SCAN_CHECK_INTERVAL = 512   # entries between clock reads
 
 
-def _scan_state(root):
-    """Bookkeeping for a directory walk. See _scan_tick."""
-    now = time.monotonic()
-    return {"root": str(root) if root is not None else "", "scanned": 0,
-            "t0": now, "next": now + _SCAN_QUIET_SECONDS,
-            "gap": _SCAN_REPORT_EVERY, "announced": False}
+def _scan_state(*a, **k): return _common._scan_state(_G, *a, **k)
 
 
 def _scan_tick(st, found):
@@ -406,12 +401,7 @@ def _scan_tick(st, found):
     st["next"] = now + st["gap"]
 
 
-def _batch_read_state(label: str, total: int) -> dict:
-    """Bookkeeping for a planning-time exiftool batch reader. See
-    _batch_read_tick."""
-    now = time.monotonic()
-    return {"label": label, "total": total, "t0": now,
-            "next": now + _SCAN_QUIET_SECONDS, "gap": _SCAN_REPORT_EVERY}
+def _batch_read_state(*a, **k): return _common._batch_read_state(_G, *a, **k)
 
 
 def _batch_read_tick(st, done: int) -> None:
@@ -455,42 +445,16 @@ def _scan_done(st, found):
 # is what makes a sweep safe: a staging directory is frequently a shared scratch
 # folder, so nothing that did not come from here may be touched. The scan is
 # non-recursive for the same reason.
-_STAGING_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
+_STAGING_PREFIX_RE = _common._STAGING_PREFIX_RE
 # A file still being written belongs to a run in flight, possibly a CONCURRENT
 # one sharing this directory. Only sweep what has been sitting still a while.
 _STAGING_MIN_AGE_SECONDS = 3600
 
 
-def _fmt_size(n):
-    """Human size that stays informative below a gigabyte.
-
-    A fixed GB format printed "0.0 GB" for everything under ~50 MB, which is
-    exactly the reading someone with a nearly-full staging drive needs to see.
-    """
-    for unit, step in (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2)):
-        if n >= step:
-            return f"{n / step:.1f} {unit}"
-    return f"{n / 1024:.0f} KB"
+_fmt_size = _common._fmt_size
 
 
-def _staging_leftovers(staging_dir):
-    """(paths, total_bytes) for files this tool left behind in staging."""
-    found, total = [], 0
-    try:
-        entries = list(Path(staging_dir).iterdir())
-    except OSError:
-        return [], 0
-    for f in entries:
-        if not _STAGING_PREFIX_RE.match(f.name):
-            continue
-        try:
-            if not f.is_file():
-                continue
-            total += f.stat().st_size
-        except OSError:
-            continue
-        found.append(f)
-    return found, total
+_staging_leftovers = _common._staging_leftovers
 
 
 def _report_staging_leftovers(staging_dir):
@@ -523,33 +487,10 @@ _STAGING_HOLDS = {}
 _STAGING_LIVE_GRACE_SECONDS = 60
 
 
-def _try_lock_nb(fh) -> bool:
-    """Lock an open file without waiting. False when another holder has it."""
-    try:
-        if os.name == "nt":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
+_try_lock_nb = _common._try_lock_nb
 
 
-def _unlock_nb(fh) -> None:
-    """Release a lock _try_lock_nb took (closing the file releases it too)."""
-    try:
-        if os.name == "nt":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        pass
+_unlock_nb = _common._unlock_nb
 
 
 @contextlib.contextmanager
@@ -767,26 +708,7 @@ def _history_args(action: str, src_path, dst_path, record: str = "") -> list:
     return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
 
 
-def _guard_refusal_hint(restamp: bool) -> list:
-    """The lines every non-delete provenance refusal ends with: the two likely
-    causes, what to do about each, and where the details are. `restamp` names
-    --restamp-moved, which only the encoder has."""
-    lines = [
-        "  Why: every output records the full PATH of the file that made it. This "
-        "output names a different path, so it is either (a) the same photo after "
-        "its folder was renamed or moved, or (b) a different photo with the same "
-        "name.",
-        "  (a) Renamed/moved folder:"
-        + (" if the source was not edited since, run once with --restamp-moved "
-           "(rewrites the record, no re-encode), or" if restamp else "")
-        + " re-run with --overwrite --provenance content (accepts an unchanged "
-        "source). If you never delete sources and rename folders often, turn the "
-        "guard off: --no-overwrite-guard, or OVERWRITE_GUARD = False at the top "
-        "of the script, or 'Overwrite guard: off' in the wizard.",
-        "  (b) Different photo: rename one of them, or write into another folder.",
-        f"  Details: {GUARD_DOC_URL}",
-    ]
-    return lines
+def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k)
 
 
 # Charset directives for exiftool argfiles:
@@ -1426,7 +1348,7 @@ DEPTH_FLAG = "jxlphoto-depth:"
 # Must match the encoder's DEPTH_XMP_PREFIX. Carries the original BitsPerSample
 # value (8 or 16) for the page so the decoder can honor --depth-policy.
 
-PAGE_PREFIX = "jxlphoto-page:"
+PAGE_PREFIX = _common.PAGE_PREFIX
 # Must match the encoder's PAGE_XMP_PREFIX. Carries the TIFF page index of the
 # split page so reconstruction does not depend on the filename (which breaks
 # for sources named *_page<N> or *_thumbnail).
@@ -2320,21 +2242,7 @@ def _orientation_reset_args(jxl_path) -> list:
             if o not in (None, 1) else [])
 
 
-def _reduced_by_integer_decode(info_text, frames_kept: bool):
-    """Why a 16-bit integer decode of this JXL is not a full copy of it (#622),
-    or None. Positive evidence only: no jxlinfo answer means None."""
-    m = re.search(r"^JPEG XL (image|animation),[^\n]*", info_text or "", re.M)
-    if not m:
-        return None
-    line = m.group(0)
-    if m.group(1) == "animation" and not frames_kept:
-        return "an animation (only its first frame is decoded)"
-    if "float" in line:
-        return "floating-point samples (16-bit integers clip and round them)"
-    b = re.search(r"\b(\d+)-bit\b", line)
-    if b and int(b.group(1)) > 16:
-        return f"{b.group(1)}-bit samples"
-    return None
+_reduced_by_integer_decode = _common._reduced_by_integer_decode
 
 
 _djxl_icc_args = _common._djxl_icc_args

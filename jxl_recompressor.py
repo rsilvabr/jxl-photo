@@ -272,16 +272,7 @@ def _source_changed_since_read(path) -> bool:
     return (st.st_size, st.st_mtime_ns) != rec
 
 
-def _changed_since(path, st) -> bool:
-    """Is `path` no longer the file `st` (its os.stat before an in-place edit
-    began) describes? A file that cannot be read counts as changed. Checked
-    right before the edited copy replaces it (#559): one rewritten meanwhile
-    by another run would otherwise be put back to its old version."""
-    try:
-        now = os.stat(path)
-    except OSError:
-        return True
-    return (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+_changed_since = _common._changed_since
 
 
 # Why an in-place replacement was refused (process_group). Logged and kept as
@@ -588,12 +579,7 @@ _SCAN_REPORT_MAX = 60.0
 _SCAN_CHECK_INTERVAL = 512   # entries between clock reads
 
 
-def _scan_state(root):
-    """Bookkeeping for a directory walk. See _scan_tick."""
-    now = time.monotonic()
-    return {"root": str(root) if root is not None else "", "scanned": 0,
-            "t0": now, "next": now + _SCAN_QUIET_SECONDS,
-            "gap": _SCAN_REPORT_EVERY, "announced": False}
+def _scan_state(*a, **k): return _common._scan_state(_G, *a, **k)
 
 
 def _scan_tick(st, found):
@@ -618,12 +604,7 @@ def _scan_tick(st, found):
     st["next"] = now + st["gap"]
 
 
-def _batch_read_state(label: str, total: int) -> dict:
-    """Bookkeeping for a planning-time exiftool batch reader. See
-    _batch_read_tick."""
-    now = time.monotonic()
-    return {"label": label, "total": total, "t0": now,
-            "next": now + _SCAN_QUIET_SECONDS, "gap": _SCAN_REPORT_EVERY}
+def _batch_read_state(*a, **k): return _common._batch_read_state(_G, *a, **k)
 
 
 def _batch_read_tick(st, done: int) -> None:
@@ -667,7 +648,7 @@ def _scan_done(st, found):
 # is what makes a sweep safe: a staging directory is frequently a shared scratch
 # folder, so nothing that did not come from here may be touched. The scan is
 # non-recursive for the same reason.
-_STAGING_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
+_STAGING_PREFIX_RE = _common._STAGING_PREFIX_RE
 # A file still being written belongs to a run in flight, possibly a CONCURRENT
 # one sharing this directory. Only sweep what has been sitting still a while.
 _STAGING_MIN_AGE_SECONDS = 3600
@@ -686,36 +667,10 @@ def _fmt_eta(s):
     return f"{int(round(s))}s" if s < 60 else f"{int(round(s / 60))}m"
 
 
-def _fmt_size(n):
-    """Human size that stays informative below a gigabyte.
-
-    A fixed GB format printed "0.0 GB" for everything under ~50 MB, which is
-    exactly the reading someone with a nearly-full staging drive needs to see.
-    """
-    for unit, step in (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2)):
-        if n >= step:
-            return f"{n / step:.1f} {unit}"
-    return f"{n / 1024:.0f} KB"
+_fmt_size = _common._fmt_size
 
 
-def _staging_leftovers(staging_dir):
-    """(paths, total_bytes) for files this tool left behind in staging."""
-    found, total = [], 0
-    try:
-        entries = list(Path(staging_dir).iterdir())
-    except OSError:
-        return [], 0
-    for f in entries:
-        if not _STAGING_PREFIX_RE.match(f.name):
-            continue
-        try:
-            if not f.is_file():
-                continue
-            total += f.stat().st_size
-        except OSError:
-            continue
-        found.append(f)
-    return found, total
+_staging_leftovers = _common._staging_leftovers
 
 
 def _report_staging_leftovers(staging_dir):
@@ -748,33 +703,10 @@ _STAGING_HOLDS = {}
 _STAGING_LIVE_GRACE_SECONDS = 60
 
 
-def _try_lock_nb(fh) -> bool:
-    """Lock an open file without waiting. False when another holder has it."""
-    try:
-        if os.name == "nt":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
+_try_lock_nb = _common._try_lock_nb
 
 
-def _unlock_nb(fh) -> None:
-    """Release a lock _try_lock_nb took (closing the file releases it too)."""
-    try:
-        if os.name == "nt":
-            import msvcrt
-            fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        pass
+_unlock_nb = _common._unlock_nb
 
 
 @contextlib.contextmanager
@@ -997,19 +929,7 @@ def _get_cjxl_cmd():
                 break
     return _cjxl_cmd
 
-# libjxl version detection - used to gate flags that only exist in newer
-# cjxl/djxl builds. Unknown versions are treated as "old" (safe fallback:
-# no new flags are ever appended).
-@functools.lru_cache(maxsize=None)
-def _tool_version(exe: str):
-    """Return (major, minor, patch) of a cjxl/djxl-like tool, or None if unknown."""
-    try:
-        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
-        out = (r.stdout or "") + " " + (r.stderr or "")
-    except Exception:
-        return None
-    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", out)
-    return tuple(int(x) for x in m.groups()) if m else None
+_tool_version = _common._tool_version
 
 def _tool_at_least(exe: str, major: int, minor: int) -> bool:
     v = _tool_version(exe)
@@ -1586,37 +1506,15 @@ SUBFILETYPE_PREFIX = "jxlphoto-subfiletype:"
 # The encoder's THUMB_XMP_FLAG: this JXL is the THUMBNAIL page of a split TIFF
 # (a reduced-resolution preview). A derivative run makes none of it.
 THUMB_FLAG = "jxlphoto-thumb"
-PAGE_PREFIX = "jxlphoto-page:"
+PAGE_PREFIX = _common.PAGE_PREFIX
 # The encoder's PAGE_XMP_PREFIX: which page of its TIFF this JXL holds.
-_CAMERA_THUMB_MAX_SIDE = 160
+_CAMERA_THUMB_MAX_SIDE = _common._CAMERA_THUMB_MAX_SIDE
 
 
 _magick_out_path = _common._magick_out_path
 
 
-def _is_camera_thumbnail_page(tokens, width, height) -> bool:
-    """True for a page other than the first of a split TIFF that is at most
-    160 px on its long side: the thumbnail a camera or its software writes
-    into its own TIFF WITHOUT the reduced-image flag (NX Studio: 160x107 or
-    107x160; Fuji Hyper Utility: 160x120). The encoder archives it as a page
-    like any other, so the TIFF comes back whole; a derivative run makes no
-    copy of it, like the flagged thumbnail pages. Pure: `tokens` are the
-    JXL's dc:Relation values, width/height its pixel size (0 or None when
-    unknown: then it is not one)."""
-    try:
-        side = max(int(width or 0), int(height or 0))
-    except (TypeError, ValueError):
-        return False
-    if not 0 < side <= _CAMERA_THUMB_MAX_SIDE:
-        return False
-    for t in tokens or ():
-        t = str(t).strip()
-        if t.startswith(PAGE_PREFIX):
-            try:
-                return int(t[len(PAGE_PREFIX):]) > 0
-            except ValueError:
-                return False
-    return False
+_is_camera_thumbnail_page = _common._is_camera_thumbnail_page
 
 
 # dc:Relation token naming what the FIRST master of this photo was made from:
@@ -1803,13 +1701,7 @@ def _windows_memory_status():
     return int(st.ullAvailPhys), int(st.ullAvailPageFile)
 
 
-def _linux_mem_available():
-    """/proc/meminfo MemAvailable in bytes, or None."""
-    with open("/proc/meminfo", encoding="ascii") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    return None
+_linux_mem_available = _common._linux_mem_available
 
 
 def _available_commit_bytes():
@@ -2263,12 +2155,7 @@ def confirm_deletion_jxl(is_lossy: bool) -> bool:
 has_jbrd_box = _common.has_jbrd_box
 
 
-def md5_of_file(path: Path) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+md5_of_file = _common.md5_of_file
 
 
 # ---------------------------------------------------------------------------
@@ -2592,26 +2479,7 @@ def _history_args(action: str, src_path, dst_path, record: str = "") -> list:
     return ["-XMP-xmpMM:History+={" + ",".join(fields) + "}"]
 
 
-def _guard_refusal_hint(restamp: bool) -> list:
-    """The lines every non-delete provenance refusal ends with: the two likely
-    causes, what to do about each, and where the details are. `restamp` names
-    --restamp-moved, which only the encoder has."""
-    lines = [
-        "  Why: every output records the full PATH of the file that made it. This "
-        "output names a different path, so it is either (a) the same photo after "
-        "its folder was renamed or moved, or (b) a different photo with the same "
-        "name.",
-        "  (a) Renamed/moved folder:"
-        + (" if the source was not edited since, run once with --restamp-moved "
-           "(rewrites the record, no re-encode), or" if restamp else "")
-        + " re-run with --overwrite --provenance content (accepts an unchanged "
-        "source). If you never delete sources and rename folders often, turn the "
-        "guard off: --no-overwrite-guard, or OVERWRITE_GUARD = False at the top "
-        "of the script, or 'Overwrite guard: off' in the wizard.",
-        "  (b) Different photo: rename one of them, or write into another folder.",
-        f"  Details: {GUARD_DOC_URL}",
-    ]
-    return lines
+def _guard_refusal_hint(*a, **k): return _common._guard_refusal_hint(_G, *a, **k)
 
 
 # Charset directives for exiftool argfiles:
@@ -3844,37 +3712,10 @@ _exif_box_rank = _common._exif_box_rank
 reorder_jxl_boxes = _common.reorder_jxl_boxes
 
 
-def _capture_output_identity(write_path: Path, final_path: Path):
-    """Capture (mtime_ns, size) of a pre-existing output (non-staging only).
-    Returns None for staging paths or nonexistent outputs."""
-    if write_path != final_path or not final_path.exists():
-        return None
-    try:
-        st = final_path.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
+_capture_output_identity = _common._capture_output_identity
 
 
-def _delete_partial_if_written(write_path: Path, final_path: Path, pre_identity) -> None:
-    """Delete write_path ONLY if this run actually wrote to it.
-
-    - Staging (write != final): always this run's file -> delete.
-    - No pre-existing identity: anything there is this run's partial -> delete.
-    - Identity changed: this run truncated/rewrote it -> delete.
-    - Identity UNCHANGED: this run never touched it (e.g. the codec failed at
-      startup with rc!=0) -> the good pre-existing file is KEPT.
-    """
-    try:
-        if write_path != final_path or pre_identity is None:
-            if write_path.exists():
-                write_path.unlink()
-            return
-        st = write_path.stat()
-        if (st.st_mtime_ns, st.st_size) != pre_identity:
-            write_path.unlink()
-    except OSError:
-        pass
+_delete_partial_if_written = _common._delete_partial_if_written
 
 
 def _disk_full_need(jxl_path: Path) -> int:
@@ -4653,28 +4494,7 @@ SHARPEN_PRESETS = {
 _png_size = _common._png_size
 
 
-def _resize_geometry(w: int, h: int, mode, value, allow_upscale: bool = False):
-    """(new_w, new_h) for --resize-long/--resize-short/--resize-percent, or None
-    when the image keeps its size (no resize requested, same size, or a
-    would-be upscale without --allow-upscale). Aspect ratio always kept."""
-    if not mode:
-        return None
-    if mode == "long":
-        scale = float(value) / max(w, h)
-    elif mode == "short":
-        scale = float(value) / min(w, h)
-    elif mode == "percent":
-        scale = float(value) / 100.0
-    else:
-        raise ValueError(f"unknown resize mode: {mode}")
-    if scale <= 0:
-        raise ValueError("resize value must be positive")
-    if scale > 1.0 and not allow_upscale:
-        return None
-    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-    if (nw, nh) == (w, h):
-        return None
-    return nw, nh
+_resize_geometry = _common._resize_geometry
 
 
 def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
@@ -4699,20 +4519,10 @@ def _sharpen_args(preset, sigma=None, gain=None, threshold=None, grey=False):
             "-colorspace", "sRGB"]
 
 
-def _resize_label(mode, value, allow_upscale=False):
-    if not mode:
-        return ""
-    tag = {"long": "long", "short": "short", "percent": "pct"}[mode]
-    v = int(value) if float(value).is_integer() else value
-    return f"@{tag}{v}" + ("+up" if allow_upscale else "")
+_resize_label = _common._resize_label
 
 
-def _derived_label(icc_label, resize_mode=None, resize_value=None,
-                   allow_upscale=False, sharpen=None):
-    """jxlphoto-derived:<label>. Changing any part re-derives on the next sync."""
-    return ((icc_label or "keep")
-            + _resize_label(resize_mode, resize_value, allow_upscale)
-            + (f"+{sharpen}" if sharpen and sharpen != "none" else ""))
+_derived_label = _common._derived_label
 
 
 # The derived label's encode record: "sRGB@long2048+screen/d4e9", "/d2e7s"

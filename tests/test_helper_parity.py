@@ -55,7 +55,6 @@ SHARED_HELPERS = [
     "_provenance_marker_args",
     # Every refusal gives the same way out (the two likely causes and the
     # options), so the sentence must not drift between the four backends.
-    "_guard_refusal_hint",
     # The jxlphoto-origin read/decision pair: a copy diverging would make one
     # script inherit the origin while another guesses it (or drops it).
     "_read_origin_inputs",
@@ -63,8 +62,6 @@ SHARED_HELPERS = [
     # guards a derivative write. Duplicated transcoder/recompressor; a drift
     # either mislabels a derivative or leaves a truncated output behind.
     "_read_derived_markers_batch",
-    "_capture_output_identity",
-    "_delete_partial_if_written",
     # Which runs need that check at all. A copy drifting would leave one backend
     # deleting sources in a layout another one guards.
     # E-H: which folder anchors modes 6/7 (the first marker at or below the
@@ -90,7 +87,6 @@ SHARED_HELPERS = [
     "_log_settings_overlay",
     # W-A: progress between planning-time batches. A copy drifting is one
     # backend silent for an hour again, and the wrapper stopping it as hung.
-    "_batch_read_state",
     "_batch_read_tick",
     # --export-jxl-folder: the same name rules must reject the same values in
     # the encoder and the recompressor.
@@ -105,14 +101,11 @@ SHARED_HELPERS = [
     # #578: a run writing into staging marks it as in use, and --clean-staging
     # of another run sweeps nothing meanwhile. A copy drifting is one backend
     # sweeping the outputs another one has waiting there.
-    "_try_lock_nb",
-    "_unlock_nb",
     "_staging_hold",
     "_holds_staging",
     "_staging_used_by_another_run",
     # The "still the file that was copied?" check before an in-place edit
     # replaces it (#559): restamp, thumbnail refresh, jbrd repair.
-    "_changed_since",
     # TEMP_DIR / staging checked before the run (2026-11-08): the transcoder
     # had no check, and a dry run with a missing TEMP_DIR failed every marker
     # read in all four. One copy drifting brings either back.
@@ -123,7 +116,6 @@ SHARED_HELPERS = [
     # animated JXL after a 16-bit / first-frame decode, that the others keep.
     "_jxlinfo_text",
     "_orientation_reset_args",
-    "_reduced_by_integer_decode",     # decoder + transcoder only
     # #636: the codestream orientation read in Python when jxlinfo cannot
     # answer (decoder, transcoder, recompressor). A copy drifting is one
     # backend turning a rotated JPEG's picture twice again without jxlinfo.
@@ -161,7 +153,6 @@ SHARED_HELPERS = [
     "_exiftool_source",
     "_xmp_block_args",
     "_get_exiftool_cmd",
-    "_tool_version",
     "_tool_at_least",
     # Disk-full abort. These decide whether a run stops or grinds on, so a copy
     # drifting would make one backend keep failing file after file.
@@ -175,14 +166,11 @@ SHARED_HELPERS = [
     "_promote_from_staging",
     # Directory-scan progress. A copy drifting would leave one backend silent
     # through the exact 25-second pause that looks like a freeze.
-    "_scan_state",
     "_scan_tick",
     "_scan_done",
     # Staging sweep. These DELETE files, so a copy drifting is the worst kind:
     # one backend could start sweeping what another still needs.
-    "_fmt_size",
     "_sweep_orphan_temps",
-    "_staging_leftovers",
     "_report_staging_leftovers",
     "_clean_staging",
     # JXL structural integrity — the delete gate itself. A copy drifting is one
@@ -191,7 +179,6 @@ SHARED_HELPERS = [
     # jbrd detection and file hashing, born in the transcoder. The recompressor
     # keys its JPEG-recovery preservation policy off the first and its
     # copy-then-delete MD5 proof off the second.
-    "md5_of_file",
     # Which ICC profiles cannot be a conversion TARGET (A2B tables, no B2A —
     # scanner profiles). The recompressor refuses such derivatives, the
     # decoder keeps the source of such a decode, the transcoder refuses the
@@ -248,19 +235,14 @@ SHARED_HELPERS = [
     # re-derive in a loop what the other considers up to date.
     # A camera's unflagged thumbnail page: the two derivative makers must
     # leave out the same pages.
-    "_is_camera_thumbnail_page",
     # Every path ImageMagick writes: one backend forgetting the escape fails
     # in a folder named "100%off" (#647).
-    "_resize_geometry",
     "_sharpen_args",
-    "_resize_label",
-    "_derived_label",
     # worker cap: the encoder and the recompressor must estimate the same
     # memory for the same settings
     "_available_commit_bytes",
     "_memory_capped_workers",
     "_windows_memory_status",
-    "_linux_mem_available",
     "_available_physical_bytes",
     "_available_memory_bytes",
 ]
