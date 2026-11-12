@@ -146,11 +146,20 @@
 
 ## The common module (`jxl_photo_common.py`)
 - The helpers the scripts share live there, ONE copy each (plan
-  `AI_tools/261112_Claude_plan_common-module.md`; being moved family by
-  family on the `common-module` branch — what is not there yet is still
-  duplicated and parity-pinned, see "Helper functions are deliberately
-  duplicated" below). It sits next to the five scripts and ships with them:
-  the exe's `scripts\`, `jxl-photo_LOCAL`, `tools/ui_tour.py`'s app folder.
+  `AI_tools/261112_Claude_plan_common-module.md`, branch `common-module`).
+  **Where this file calls a helper "parity-pinned" in two to five scripts,
+  it is now that one copy in `jxl_photo_common.py`**: fix it there, once.
+  It sits next to the five scripts and ships with them: the exe's
+  `scripts\`, `jxl-photo_LOCAL`, `tools/ui_tour.py`'s app folder.
+- What stays per script ON PURPOSE: each script's own logic (`main`,
+  `build_parser`, `process_group`, `convert_one`, `resolve_output`,
+  `setup_logger`, the finders, ...); `_derivative_metadata_args` (only the
+  recompressor rewrites the CreatorTool ICC for `--output-icc`),
+  `_cjxl_buffering_flag` (the transcoder's differs), `_would_skip`
+  (encoder-only since #638); `_abort_on_duplicate_outputs` (the transcoder's
+  copy differs in shape: `tests/test_helper_parity.py` pins the variants);
+  and `_import_common`, which loads the module. A helper that becomes
+  identical in two scripts goes to the common module, never into both.
 - Each script loads the copy in ITS OWN folder (`_import_common`, the one
   helper every script keeps, parity-pinned) — never another copy found on
   `sys.path`: a test or a pre-fix proof loads scripts from another folder,
@@ -178,10 +187,22 @@
   there. `tests/test_common_module.py` enforces it, plus: every global read
   there is defined there (a moved helper with a bare `TEMP_DIR` would raise
   NameError only on its rare path), one copy only (a script binds or shims
-  a common name, never defines it again). conftest's `monkeypatch` refuses
-  a setattr on a script's binding of a name the common module reads
-  DIRECTLY (that code would keep the real one and the test would pass
-  without testing): when it fires, make the reader a `g`-function.
+  a common name, never defines it again).
+- **Test doubles.** A test patches the SCRIPT (`monkeypatch.setattr(enc,
+  "_run_captured", fake)`, or `enc.time` / `enc.subprocess`), as before. A
+  `g`-function sees it through `g`. For the names the common module reads
+  DIRECTLY (a pure helper, a standard module), conftest's `monkeypatch`
+  mirrors the double into the common module for the test, when the common
+  code that script uses reads that name — the moved code sees what it saw
+  when it lived in the script. The `mock.patch.object` forms cannot be
+  mirrored and are refused statically (`tests/test_common_module.py`).
+- Moving a function there: every copy byte-identical first; a function that
+  reads nothing from the script is bound by name, any other one takes `g`
+  and reads every script global through it; run state stays in the script
+  (an UPPERCASE name can be state too: `_STAGING_HOLDS`); a constant moves
+  only when it is identical, internal (never a setting, never run-scoped)
+  and not built from a constant that stays (`GUARD_DOC_URL` reads
+  `TOOLKIT_URL`).
 - A pre-fix proof extracts `jxl_photo_common.py` from the same commit as
   the scripts (see Verification).
 
@@ -370,35 +391,10 @@
   non-Latin IPTC text into `?` (measured 2026-11-11): never copy IPTC from
   its result — a `%` path goes through `_iptc_only_source`. The two routes
   differ, so a test of the IPTC copy runs in a `%` folder AND in one without.
-- Helper functions are deliberately duplicated across the scripts (until
-  they move to `jxl_photo_common.py`: a helper already there has one copy
-  and is not in `SHARED_HELPERS` any more)
-  (`_marker_matches`, `_validate_export_folder_name`, `_replace_suffix_token`,
-  `_is_relative_to`,
-  `_abort_on_duplicate_outputs`, `_run_exiftool_argfile`, `_tool_version`,
-  plus `_path_excluded_below_root` (the discovery filter of the
-  encoder/decoder and the filter behind the wrapper's manifest collision
-  walk — three parity-pinned copies),
-  plus the verify/integrity family shared by the backends:
-  `_verify_jxl_integrity` (encoder + recompressor; `_verify_file_integrity`
+- Shared helpers have ONE copy, in `jxl_photo_common.py` (see "The common
+  module" for what stays per script on purpose). `_verify_file_integrity`
   exists ONLY in the transcoder — a JXL/JPEG/PNG/TIFF superset, not a
-  shared copy),
-  `has_jbrd_box`,
-  `md5_of_file`, `_warn_distance_clamp`, `_decode_jxl_for_verify`,
-  `_canon_for_compare`, `_compare_stats`, `_provenance_marker_args`
-  (encoder/decoder/transcoder), `_read_derived_markers_batch`,
-  `_capture_output_identity`, `_delete_partial_if_written` (transcoder/
-  recompressor), `_jxlinfo_text`, `_codestream_orientation`,
-  `_codestream_head`, `_header_orientation`, `_jxl_orientation`,
-  `_orientation_reset_args` (decoder/transcoder/recompressor),
-  `_reduced_by_integer_decode` (decoder/transcoder), plus the encode-record lineage
-  family shared by the encoder and the recompressor: `_strip_encode_params`,
-  `_reconcile_gen`, `_append_encode_entry`, `_log_gen_notes_once`) so each
-  stays standalone. One pair diverges ON PURPOSE: `_derivative_metadata_args` —
-  only the recompressor rewrites the CreatorTool ICC for `--output-icc`, a flag
-  that never reaches the transcoder. Fix bugs in ALL copies —
-  `tests/test_helper_parity.py`
-  pins the variants and fails the moment one copy drifts.
+  shared copy of `_verify_jxl_integrity`.
 - The recompressor's recursive finders skip its OWN output folder names
   (`recompressed_jxl`, `JXL_recompressed`, `16B_JXL_small`, `JXL_small`) — plus
   the configured `EXPORT_JXL_FOLDER` (a custom `--export-jxl-folder` must not
