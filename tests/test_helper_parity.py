@@ -120,12 +120,7 @@ SHARED_HELPERS = [
     # thumbnail only while the recorded fingerprint names the file's
     # codestream: a copy computing or storing it differently would write
     # thumbnails it then never shows.
-    "_thumbnail_box_fingerprint",
-    "_write_thumbnail_box",
-    "_explorer_thumbnail_wanted",
     "_jxl_thumb_installed",
-    "_make_explorer_thumbnail",
-    "_add_explorer_thumbnail",
     # An argfile is one argument per LINE, so a value carrying a newline has to
     # be flattened by every writer. The transcoder was the copy that did not
     # have this at all, and its CreatorTool write went out raw.

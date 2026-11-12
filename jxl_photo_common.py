@@ -1920,3 +1920,159 @@ def _windows_memory_status():
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
         return None
     return int(st.ullAvailPhys), int(st.ullAvailPageFile)
+
+
+# === Explorer thumbnail box ===
+
+THUMB_BOX_MARKER = b"jxlphoto-thumbnail:v1:"
+
+THUMB_BOX_UUID = bytes.fromhex("4e0b4016f51c473d9669bc35aebe3c16")
+
+
+def _write_thumbnail_box(jxl_path, jpeg, fingerprint) -> None:
+    """Rewrite `jxl_path` with its thumbnail box replaced: `jpeg` (bytes)
+    goes in a fresh box right before the codestream, where a reader finds it
+    without crossing the image data; None removes it. Every other box keeps
+    its bytes and order. Through a temp file beside it and os.replace."""
+    jxl_path = Path(jxl_path)
+    tmp = jxl_path.parent / f"{uuid.uuid4().hex}_{jxl_path.name}.tmp"
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            if end >= 2:
+                f.seek(0)
+                if f.read(2) == b"\xff\x0a":
+                    raise ValueError("a bare codestream has no container for the box")
+            boxes = _jxl_boxes(f, end)
+            if not boxes or boxes[-1][1] + boxes[-1][3] != end:
+                raise ValueError("unreadable container")
+            new_box = b""
+            if jpeg is not None:
+                payload = (THUMB_BOX_UUID + THUMB_BOX_MARKER
+                           + fingerprint.encode("ascii") + b"\n" + jpeg)
+                new_box = struct.pack(">I4s", 8 + len(payload), b"uuid") + payload
+            with open(tmp, "wb") as out:
+                placed = False
+                for typ, pos, hdr, size in boxes:
+                    if typ == b"uuid":
+                        f.seek(pos + hdr)
+                        if f.read(16) == THUMB_BOX_UUID:
+                            continue              # the old thumbnail
+                    if not placed and typ in (b"jxlc", b"jxlp"):
+                        out.write(new_box)
+                        placed = True
+                    f.seek(pos)
+                    left = size
+                    while left:
+                        chunk = f.read(min(left, 1 << 22))
+                        if not chunk:
+                            raise OSError("short read")
+                        out.write(chunk)
+                        left -= len(chunk)
+                if not placed:
+                    out.write(new_box)
+        os.replace(str(tmp), str(jxl_path))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _thumbnail_box_fingerprint(jxl_path):
+    """The fingerprint recorded in the file's thumbnail box, '' when it has
+    none, None when the file cannot be read."""
+    try:
+        with open(jxl_path, "rb") as f:
+            end = f.seek(0, 2)
+            for typ, pos, hdr, size in _jxl_boxes(f, end):
+                if typ == b"uuid" and size - hdr >= 16 + len(THUMB_BOX_MARKER):
+                    f.seek(pos + hdr)
+                    head = f.read(min(size - hdr, 16 + len(THUMB_BOX_MARKER) + 64))
+                    if (head[:16] == THUMB_BOX_UUID
+                            and head[16:16 + len(THUMB_BOX_MARKER)] == THUMB_BOX_MARKER):
+                        rest = head[16 + len(THUMB_BOX_MARKER):]
+                        return rest.split(b"\n", 1)[0].decode("ascii", "replace")
+    except (OSError, struct.error):
+        return None
+    return ""
+
+
+def _make_explorer_thumbnail(g, jxl_path, tmp_dir):
+    """An EXPLORER_THUMBNAIL_SIZE px sRGB JPEG of the file (bytes), or None
+    with a warning: a thumbnail is never worth failing an archive file.
+    djxl decodes WITHOUT a target colour space — asked for one it converts a
+    lossless file too while --icc_out still names the original profile (a
+    double conversion). Left alone, --icc_out names exactly what the pixels
+    are in (the file's own profile, or linear sRGB for a lossy ICC blob) and
+    ImageMagick converts from it to sRGB, after the resize."""
+    tmp_dir = Path(tmp_dir)
+    pam, icc, jpg = tmp_dir / "thumb.pam", tmp_dir / "thumb_src.icc", tmp_dir / "thumb.jpg"
+    srgb = tmp_dir / "thumb_srgb.icc"
+    try:
+        if shutil.which("djxl") is None or shutil.which("magick") is None:
+            raise RuntimeError("needs djxl and ImageMagick (magick) on PATH")
+        from PIL import ImageCms
+        srgb.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+        r = g._run_captured(["djxl", str(jxl_path), str(pam), f"--icc_out={icc}"],
+                          g.CJXL_TIMEOUT)
+        if r.returncode != 0 or not pam.exists():
+            raise RuntimeError(f"djxl: {g._stderr_tail(r.stderr)}")
+        size = int(g.EXPLORER_THUMBNAIL_SIZE)
+        cmd = ["magick", str(pam), "-resize", f"{size}x{size}>"]
+        if icc.exists() and icc.stat().st_size:
+            cmd += ["-profile", str(icc)]
+        cmd += ["-profile", str(srgb), "-background", "white", "-flatten", "-strip",
+                "-quality", "85", "-sampling-factor", "2x2", "-interlace", "none",
+                "jpeg:" + g._magick_out_path(jpg)]
+        r = g._run_captured(cmd, g.CJXL_TIMEOUT)
+        if r.returncode != 0 or not jpg.exists():
+            raise RuntimeError(f"magick: {g._stderr_tail(r.stderr)}")
+        return jpg.read_bytes()
+    except Exception as e:
+        g.logger.warning(f"  >Explorer thumbnail skipped ({e}) | {Path(jxl_path).name}")
+        return None
+    finally:
+        for p in (pam, jpg):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _add_explorer_thumbnail(g, jxl_path, tmp_dir) -> str:
+    """Make the thumbnail of a finished output and put it in its box.
+    Returns "written", "small" (not worth it: the image is no larger than the
+    thumbnail, or the thumbnail would be more than EXPLORER_THUMBNAIL_MAX_SHARE
+    of the file — such a file decodes fast anyway) or "failed" (warned).
+    The fingerprint is re-read afterwards: the box rewrite copies the
+    codestream byte for byte, and a thumbnail must never name the wrong
+    pixels."""
+    fp = g._codestream_fingerprint(jxl_path)
+    if fp is None:
+        g.logger.warning(f"  >Explorer thumbnail skipped (not a JPEG XL container) "
+                       f"| {Path(jxl_path).name}")
+        return "failed"
+    jpeg = g._make_explorer_thumbnail(jxl_path, tmp_dir)
+    if jpeg is None:
+        return "failed"
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(jpeg)) as im:
+        long_side = max(im.size)
+    if (long_side < int(g.EXPLORER_THUMBNAIL_SIZE)
+            or len(jpeg) > float(g.EXPLORER_THUMBNAIL_MAX_SHARE) * Path(jxl_path).stat().st_size):
+        return "small"
+    g._write_thumbnail_box(jxl_path, jpeg, fp)
+    if g._codestream_fingerprint(jxl_path) != fp or g._thumbnail_box_fingerprint(jxl_path) != fp:
+        raise RuntimeError("the codestream changed while the Explorer thumbnail was written")
+    return "written"
+
+
+def _explorer_thumbnail_wanted(g, lossless: bool) -> bool:
+    """auto: every output when jxl-thumb is installed (it shows them), else
+    lossless outputs only (they have no preview of their own)."""
+    if g.EXPLORER_THUMBNAIL == "on":
+        return True
+    return g.EXPLORER_THUMBNAIL == "auto" and (lossless or g._jxl_thumb_installed())
